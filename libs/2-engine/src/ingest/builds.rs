@@ -141,16 +141,25 @@ impl PerDocument {
     }
 }
 
-/// When each kind was first held back by the budget since its last grant;
-/// `None` while it isn't waiting.
+/// Each kind's wait for the budget, kept by the engine across its runs.
 #[derive(Debug, Default)]
 pub(super) struct Waits {
-    live: Option<Instant>,
-    backfill: Option<Instant>,
+    live: Wait,
+    backfill: Wait,
+}
+
+/// One kind's hold: since when this engine run has waited (`None` while it
+/// isn't), and whether the hold's refusal was counted already.
+#[derive(Debug, Default)]
+struct Wait {
+    since: Option<Instant>,
+    /// Kept across engine runs until a grant ends the hold, so a refusal of
+    /// the same hold in the next run isn't counted again.
+    counted: bool,
 }
 
 impl Waits {
-    fn of(&mut self, work: Work) -> &mut Option<Instant> {
+    fn of(&mut self, work: Work) -> &mut Wait {
         match work {
             Work::Live => &mut self.live,
             Work::Backfill => &mut self.backfill,
@@ -224,8 +233,8 @@ pub(super) struct Builds {
     /// The release generation of that refusal: a release past it may let
     /// the batch go.
     refused_generation: u64,
-    /// When each kind was first held back by the budget since its last
-    /// grant: the engine's, so a wait outlives the run it started in.
+    /// Each kind's wait for the budget: the engine's, so whether a hold was
+    /// counted outlives the run it started in.
     waits: Arc<std::sync::Mutex<Waits>>,
     /// What woke the loop before this grant, for [`Observer::on_budget_wait`].
     wake: Wake,
@@ -239,7 +248,17 @@ pub(super) struct Builds {
 }
 
 impl Drop for Builds {
+    /// The engine run ends (an error, an abort, a clean end with a hold
+    /// still open): a wait still open is reported up to now, so an outage
+    /// before the next run doesn't stretch it; the hold stays counted.
     fn drop(&mut self) {
+        for work in [Work::Live, Work::Backfill] {
+            let since = lock(&self.waits).of(work).since.take();
+            if let Some(since) = since {
+                self.observer
+                    .on_budget_wait(work, Wake::Settle, since.elapsed());
+            }
+        }
         for (_, build) in self.spawned.drain(..) {
             build.abort();
         }
@@ -285,8 +304,9 @@ impl Builds {
     }
 
     /// Keep the budget waits in `waits`, which outlives this engine run: a
-    /// wait still open when the run ends (an error, an abort) goes on in the
-    /// next, so one hold is one refusal and one wait across a restart.
+    /// wait still open when the run ends is reported up to then, and a
+    /// refusal of the same hold in the next run starts a new wait without
+    /// counting the hold again.
     pub(super) fn with_waits(mut self, waits: Arc<std::sync::Mutex<Waits>>) -> Self {
         self.waits = waits;
         self
@@ -368,14 +388,13 @@ impl Builds {
             self.refused_generation = generation;
         }
         self.refused.get_or_insert(work);
-        let started = {
+        let first = {
             let mut waits = lock(&self.waits);
-            let since = waits.of(work);
-            let started = since.is_none();
-            since.get_or_insert_with(Instant::now);
-            started
+            let wait = waits.of(work);
+            wait.since.get_or_insert_with(Instant::now);
+            !std::mem::replace(&mut wait.counted, true)
         };
-        if started && let Some(budget) = &self.budget {
+        if first && let Some(budget) = &self.budget {
             budget.note_refused(work);
         }
     }
@@ -568,7 +587,12 @@ impl Builds {
         // wait, from its first refusal to the grant that takes it.
         let still_waiting = matches!(&job, Job::Live { deferred, .. } if !deferred.is_empty());
         if !still_waiting {
-            let since = lock(&self.waits).of(work).take();
+            let since = {
+                let mut waits = lock(&self.waits);
+                let wait = waits.of(work);
+                wait.counted = false;
+                wait.since.take()
+            };
             if let Some(since) = since {
                 self.observer
                     .on_budget_wait(work, self.wake, since.elapsed());
@@ -807,5 +831,107 @@ mod tests {
             Some(vec![users]),
             "and the batch is granted"
         );
+    }
+
+    #[derive(Debug, Default)]
+    struct Waited(std::sync::Mutex<Vec<(Work, Wake, Duration)>>);
+
+    impl Observer for Waited {
+        fn on_budget_wait(&self, work: Work, wake: Wake, waited: Duration) {
+            self.0.lock().unwrap().push((work, wake, waited));
+        }
+    }
+
+    /// One hold over two engine runs (two `Builds` sharing the engine's
+    /// waits), refused in both: counted once; the first run's wait is
+    /// reported when it ends, up to then, and the second run's refusal starts
+    /// a new wait, reported at the grant.
+    #[tokio::test(start_paused = true)]
+    async fn a_hold_refused_again_in_the_next_run_is_counted_once_and_timed_per_run() {
+        let users = IndexName::try_new("users").unwrap();
+        let budget = Arc::new(Budget::new(64 * 1024));
+        let charge: Vec<Charge> = budget
+            .reserve(Work::Live, &[(users.clone(), 60 * 1024)])
+            .unwrap()
+            .into_iter()
+            .map(|part| part.settle(60 * 1024))
+            .collect();
+        let waits = Arc::default();
+        let observer = Arc::new(Waited::default());
+        let one = [(users.clone(), 1)];
+        {
+            let mut run = Builds::new(4, Some(Arc::clone(&budget)))
+                .with_observer(Arc::clone(&observer) as Arc<dyn Observer>)
+                .with_waits(Arc::clone(&waits));
+            assert!(run.affordable(Work::Live, &one).is_none());
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        let mut run = Builds::new(4, Some(Arc::clone(&budget)))
+            .with_observer(Arc::clone(&observer) as Arc<dyn Observer>)
+            .with_waits(Arc::clone(&waits));
+        assert!(run.affordable(Work::Live, &one).is_none());
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        drop(charge);
+        let documents: Arc<dyn DocumentBuilder> = Arc::new(Nothing);
+        let job = Job::Live {
+            taken: Vec::new(),
+            position: Position::new(0),
+            changes: 0,
+            step: crate::Progress::new(std::iter::empty()).close_step(),
+            deferred: Vec::new(),
+        };
+        run.start(&documents, Vec::new(), job, &|_| false).await;
+        assert_eq!(budget.refused(Work::Live), 1, "one hold, counted once");
+        let waited: Vec<Duration> = observer
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, _, w)| *w)
+            .collect();
+        assert_eq!(
+            waited,
+            [Duration::from_secs(2), Duration::from_secs(5)],
+            "each run's wait, not the hour between them"
+        );
+    }
+
+    #[derive(Debug)]
+    struct Nothing;
+
+    #[async_trait::async_trait]
+    impl DocumentBuilder for Nothing {
+        async fn resolve(
+            &self,
+            _: &kernel::TableName,
+            _: &source::RowKey,
+            _: Option<&source::RowImage>,
+            _: Option<&source::RowImage>,
+        ) -> source::Result<Vec<DocumentId>> {
+            Ok(Vec::new())
+        }
+
+        async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+            Ok(Document::Delete { id: id.clone() })
+        }
+
+        fn backfill_indexes(&self) -> Vec<IndexName> {
+            Vec::new()
+        }
+
+        async fn last_key(&self, _: &IndexName) -> source::Result<Option<source::RowKey>> {
+            Ok(None)
+        }
+
+        async fn keys(
+            &self,
+            _: &IndexName,
+            _: Option<&source::RowKey>,
+            _: &source::RowKey,
+            _: usize,
+        ) -> source::Result<Vec<source::RowKey>> {
+            Ok(Vec::new())
+        }
     }
 }

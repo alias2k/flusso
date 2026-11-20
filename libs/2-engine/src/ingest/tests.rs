@@ -183,6 +183,8 @@ struct Feed {
     gaps: Option<Arc<Mutex<Rng>>>,
     /// A fixed wait before each change, when set.
     delay: Option<Duration>,
+    /// A wait before every `n`th change only: bursts of `n` back to back.
+    bursts: Option<(usize, Duration)>,
     open: bool,
     confirmed: Mutex<Vec<Position>>,
 }
@@ -194,6 +196,7 @@ impl Feed {
             from: AtomicUsize::new(0),
             gaps: None,
             delay: None,
+            bursts: None,
             open: false,
             confirmed: Mutex::default(),
         }
@@ -201,6 +204,11 @@ impl Feed {
 
     fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = Some(delay);
+        self
+    }
+
+    fn with_bursts(mut self, every: usize, pause: Duration) -> Self {
+        self.bursts = Some((every.max(1), pause));
         self
     }
 
@@ -235,6 +243,7 @@ impl ChangeCapture for Feed {
         let db = Arc::clone(&self.db);
         let gaps = self.gaps.clone();
         let delay = self.delay;
+        let bursts = self.bursts;
         let open = self.open;
         let from = self.from.load(Ordering::SeqCst);
         Ok(Box::pin(futures::stream::unfold(from, move |next| {
@@ -249,6 +258,11 @@ impl ChangeCapture for Feed {
                 };
                 if let Some(delay) = delay {
                     tokio::time::sleep(delay).await;
+                }
+                if let Some((every, pause)) = bursts
+                    && next % every == 0
+                {
+                    tokio::time::sleep(pause).await;
                 }
                 if let Some(gaps) = gaps {
                     let gap = gaps.lock().unwrap().below(4);
@@ -585,6 +599,9 @@ struct Recorder {
     write_delay: Mutex<Option<Duration>>,
     /// Indexes seeded on their own, beside `seeded`.
     seeded_indexes: Mutex<HashSet<String>>,
+    /// Indexes whose every document is rejected: under `on_error = "stop"`
+    /// their lane parks.
+    refused_indexes: Mutex<HashSet<String>>,
     /// When each index was marked seeded.
     marked_at: Mutex<BTreeMap<String, tokio::time::Instant>>,
     /// When each document was first written.
@@ -592,6 +609,20 @@ struct Recorder {
 }
 
 impl Recorder {
+    /// The documents of a refused index in `envelopes`, rejected.
+    fn rejected(&self, envelopes: &[Envelope]) -> Vec<sink::RejectedDocument> {
+        let refused = self.refused_indexes.lock().unwrap();
+        envelopes
+            .iter()
+            .filter(|envelope| refused.contains(envelope.index.as_ref()))
+            .map(|envelope| sink::RejectedDocument {
+                index: envelope.index.as_ref().to_owned(),
+                id: envelope.id.clone(),
+                reason: "refused".to_owned(),
+            })
+            .collect()
+    }
+
     fn stall(&self) {
         self.stalled.store(true, Ordering::SeqCst);
     }
@@ -655,6 +686,17 @@ impl Sink for Recorder {
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
+        let rejected = self.rejected(envelopes);
+        let accepted: Vec<Envelope> = envelopes
+            .iter()
+            .filter(|envelope| {
+                !rejected.iter().any(|refused| {
+                    refused.id == envelope.id && refused.index == envelope.index.as_ref()
+                })
+            })
+            .cloned()
+            .collect();
+        let envelopes = accepted.as_slice();
         if let Some((budget, most)) = &*self.watch.lock().unwrap() {
             let held = budget.held().total;
             if held > *most {
@@ -705,7 +747,7 @@ impl Sink for Recorder {
         drop(last);
         let position = envelopes.first().and_then(|envelope| envelope.position);
         self.items.lock().unwrap().push((position, documents));
-        Ok(WriteReport::clean())
+        Ok(WriteReport::clean().rejecting(rejected))
     }
 
     async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {
@@ -802,13 +844,30 @@ struct Deployment {
     budget: Option<Arc<Budget>>,
     /// How many indexes it runs: a budget is shared over them.
     indexes: usize,
+    /// How long a failed engine run waits before the next (an outage).
+    restart_delay: Duration,
 }
 
 impl Deployment {
     fn new(feed: Feed, builder: Arc<Builder>, recorder: Arc<Recorder>) -> Self {
+        Self::with_lanes(feed, builder, recorder, 64)
+    }
+
+    /// [`new`](Self::new) with lanes of `capacity` items: a deployment's
+    /// lanes hold over a million, so its budget binds before a lane fills.
+    fn with_lanes(
+        feed: Feed,
+        builder: Arc<Builder>,
+        recorder: Arc<Recorder>,
+        capacity: usize,
+    ) -> Self {
         let indexes = builder.indexes();
         let count = indexes.len();
-        let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [sink_name()]));
+        let stream = Arc::new(ChannelStream::over(
+            capacity,
+            indexes.clone(),
+            [sink_name()],
+        ));
         let feed = Arc::new(feed);
         let published: Published = Arc::default();
         let spy = Arc::new(Spy {
@@ -841,6 +900,7 @@ impl Deployment {
             sink: Some(sink),
             budget: None,
             indexes: count,
+            restart_delay: Duration::ZERO,
         }
         .counting()
     }
@@ -997,6 +1057,7 @@ impl Deployment {
                         "the ingest engine failed {failed} times; the last: {error}"
                     );
                     self.drained().await;
+                    tokio::time::sleep(self.restart_delay).await;
                     let landed = self.ingest.progress().landed();
                     self.feed
                         .resume_after(landed.covered_seq().map(Position::new));
@@ -2481,28 +2542,24 @@ async fn bursting_schedule(seed: u64, builds: usize) {
 /// One index's reindex behind a slow sink beside two steady live streams:
 /// `orders` (odd ids) backfills 2000 rows of about 8 KiB through a sink
 /// writing one item per 200 ms, while `users` and `orders` change every
-/// 2 ms, 200 distinct `orders` documents among them. The sink sets the pace,
-/// so the reading pauses on any rules; the requirement is "no worse than
-/// `main`", where live had everything the backfill's half left. Run twice, on
-/// the shared budget and on an unshared one (`main`'s rules): `orders`' live
-/// documents are built and the reading finishes no later than there, and
-/// every `orders` live document is built before its backfill completes.
+/// 2 ms, 200 distinct `orders` documents among them. Run twice on paused
+/// time: on the shared budget, and on this branch's budget with the share
+/// off (`main`'s budget rules, not `main`'s code). The requirement is that an
+/// index being reindexed keeps building its live documents no worse than
+/// there; the check that tells it: `orders`' last live document is built no
+/// later than with the share off, and before its backfill completes. With the
+/// share counting `orders`' backfill bytes, as before review round 2, it was
+/// built about a quarter later and fails. The test sink costs a fixed time
+/// per item whatever its size, so the two arms' other timings (the reading's
+/// end above all) are not a performance comparison and are not asserted.
 #[tokio::test(start_paused = true)]
 async fn an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building() {
-    // Paused time on one thread: the figures are the same on every run.
-    // Measured: shared (57.5 s, 59.2 s, 82.8 s); unshared (315.2 s,
-    // 66.8 s, 137.2 s); with the share counting backfill bytes, `orders`'
-    // live documents were built by 85.4 s.
-    let (read, orders_live, seeded) = reindex_beside_live(Some(2), 8 * KIB).await;
-    let (main_read, main_orders_live, _) = reindex_beside_live(None, 8 * KIB).await;
-    let no_later = |ours: Duration, main: Duration| ours <= main + main / 10;
+    let (orders_live, seeded) = reindex_beside_live(Some(2), 8 * KIB).await;
+    let (unshared_orders_live, _) = reindex_beside_live(None, 8 * KIB).await;
     assert!(
-        no_later(orders_live, main_orders_live),
-        "orders' live documents were built by {orders_live:?}, {main_orders_live:?} on main's rules"
-    );
-    assert!(
-        no_later(read, main_read),
-        "the reading finished at {read:?}, {main_read:?} on main's rules"
+        orders_live <= unshared_orders_live,
+        "orders' live documents were built by {orders_live:?}, by {unshared_orders_live:?} \
+         with the share off"
     );
     assert!(
         orders_live < seeded,
@@ -2511,12 +2568,9 @@ async fn an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_buildin
     );
 }
 
-/// When every change was read, when the last of `orders`' live documents
-/// was built, and when `orders`' backfill completed, from the start.
-async fn reindex_beside_live(
-    indexes: Option<usize>,
-    padding: usize,
-) -> (Duration, Duration, Duration) {
+/// When the last of `orders`' live documents was built, and when `orders`'
+/// backfill completed, from the start.
+async fn reindex_beside_live(indexes: Option<usize>, padding: usize) -> (Duration, Duration) {
     let log: Vec<Change> = (0..1500)
         .map(|n| {
             if n % 2 == 1 && n / 2 < 200 {
@@ -2550,15 +2604,7 @@ async fn reindex_beside_live(
     .ingest(|ingest| ingest.with_batch(batch(16)).with_builds(4))
     .with_shared_budget(1024 * KIB, usize::MAX, indexes);
     let started = tokio::time::Instant::now();
-    let progress = deployment.ingest.progress();
-    let reader = tokio::spawn(async move {
-        while progress.changes_read() < 1500 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        tokio::time::Instant::now()
-    });
     deployment.run_to_end(0).await;
-    let read = reader.await.unwrap() - started;
     let built = builder.built_at.lock().unwrap().clone();
     let seeded = recorder.marked_at.lock().unwrap()["orders"] - started;
     let orders_live = (0..200)
@@ -2566,7 +2612,7 @@ async fn reindex_beside_live(
         .max()
         .unwrap();
     assert_eq!(recorder.state().get(&4001), Some(&2));
-    (read, orders_live, seeded)
+    (orders_live, seeded)
 }
 
 /// One index held at its share while another builds in several runs is one
@@ -2636,9 +2682,10 @@ async fn an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it() {
 }
 
 /// The same hold across an engine restart: the build of `orders` 9 fails,
-/// the engine run ends while `users` is still held, and the next run goes
-/// on with the same wait. One hold is one refusal and one wait, measured
-/// from the first refusal, not lost with the run nor counted again.
+/// the engine run ends while `users` is still held, and the next run's
+/// replay is granted at once. One hold is one refusal and one wait: the wait
+/// is reported when the run ends, up to then (not lost with the run), and
+/// the next run neither counts the hold again nor reports a second wait.
 #[tokio::test(start_paused = true)]
 async fn a_hold_across_an_engine_restart_is_one_wait() {
     // `users` (even ids) builds ten documents of about 8 KiB, one per run,
@@ -2700,7 +2747,190 @@ async fn a_hold_across_an_engine_restart_is_one_wait() {
         .collect();
     assert_eq!(live.len(), 1, "one wait: {live:?}");
     assert!(
-        live[0] > Duration::from_millis(1_500),
+        live[0] > Duration::from_millis(500) && live[0] < Duration::from_secs(3),
+        "from the first refusal to the end of the failed run, before the release: {live:?}"
+    );
+}
+
+/// The same hold, then an outage of an hour before the next engine run (a
+/// source that won't prepare, say): the wait is reported up to the end of
+/// the run it began in, not stretched over the outage, and the replay
+/// granted at once counts no second refusal nor reports a second wait.
+#[tokio::test(start_paused = true)]
+async fn a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment() {
+    // `users` (even ids) builds ten documents of about 8 KiB, one per run,
+    // past its 64 KiB share while the sink is stalled; then `users` 0 again
+    // waits, and `orders` 1..9 build beside it, one per run.
+    let mut log: Vec<Change> = (0..10).map(|n| Change::upsert(2 * n)).collect();
+    log.push(Change::upsert(0));
+    log.extend([1, 3, 5, 7, 9].map(Change::upsert));
+    let db = Database::new(0, log);
+    let builder = Builder::over(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            fail_once: Mutex::new(HashSet::from([9])),
+            ..Behaviour::default()
+        },
+        2,
+    );
+    let recorder = Recorder::seeded(true);
+    recorder.stall();
+    let waits = Arc::new(BudgetWaits::default());
+    let observer = Arc::clone(&waits);
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_millis(100)),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(16))
+            .with_builds(4)
+            .with_observer(observer)
+    })
+    .with_budget(128 * KIB, usize::MAX);
+    deployment.restart_delay = Duration::from_secs(3600);
+    let budget = deployment.budget.clone().unwrap();
+    let resumer = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(3_000)).await;
+            recorder.resume();
+        })
+    };
+    assert_eq!(
+        deployment.run_to_end(1).await,
+        1,
+        "the build of orders 9 failed once"
+    );
+    resumer.await.unwrap();
+    assert_eq!(deployment.recorder.state(), db.expected());
+
+    assert_eq!(budget.refused(crate::Work::Live), 1, "{:?}", waits.0);
+    let live: Vec<Duration> = waits
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(work, _, _)| *work == crate::Work::Live)
+        .map(|(_, _, waited)| *waited)
+        .collect();
+    assert_eq!(live.len(), 1, "one wait: {live:?}");
+    assert!(
+        live[0] < Duration::from_secs(60),
+        "up to the end of the run, not over the outage: {live:?}"
+    );
+    assert!(
+        live[0] > Duration::from_millis(500),
         "from the first refusal to the release: {live:?}"
     );
+}
+
+/// Review round 3, case A in the engine: `orders` (odd ids) is reindexed and
+/// its lane parks (every document refused under `on_error = "stop"`) for ten
+/// simulated minutes, so its backfill climbs to half the budget and its live
+/// documents to its share, and neither comes back. Healthy `users` (even
+/// ids) changes every 100 ms the whole time: each change is read and lands,
+/// and the whole never passes the stated bound (the limit, plus one live
+/// batch per index, plus one backfill batch). Then `orders` is let through
+/// and everything converges.
+#[tokio::test(start_paused = true)]
+async fn a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minutes() {
+    // A burst of 16 changes a second for ten minutes: in the first minute
+    // one `orders` change (three documents rewritten) and 15 `users` ones,
+    // then 16 `users` ones, sixteen distinct documents a burst, so a `users`
+    // batch is larger than what `orders` leaves below the limit.
+    let log: Vec<Change> = (0..9600)
+        .map(|n| {
+            if n < 960 && n % 16 == 0 {
+                Change::upsert(1001 + 2 * ((n / 16) % 3))
+            } else {
+                Change::upsert(2 * (n % 20))
+            }
+        })
+        .collect();
+    let users_changes = log.iter().filter(|change| change.id < 1000).count() as u64;
+    let db = Database::new(400, log);
+    let builder = Builder::over(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            ..Behaviour::default()
+        },
+        2,
+    );
+    let recorder = Recorder::seeded(false);
+    recorder
+        .seeded_indexes
+        .lock()
+        .unwrap()
+        .insert("users".to_owned());
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let limit = 512 * KIB;
+    // A batch is at most sixteen documents at the first estimate (16 KiB
+    // each): one live batch per index and one backfill batch past the limit.
+    let batch_bytes = 16 * 16 * KIB;
+    // Lanes as large as a deployment's: the budget binds, not a lane.
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_bursts(16, Duration::from_secs(1)),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        1 << 20,
+    )
+    .ingest(|ingest| ingest.with_batch(batch(16)).with_builds(4))
+    .with_budget(limit, limit + 2 * batch_bytes + batch_bytes);
+    let progress = deployment.ingest.progress();
+    let budget = deployment.budget.clone().unwrap();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(605)).await;
+            let read = progress.changes_read();
+            let orders_held = budget.held_by(&orders());
+            let users_landed: HashSet<i64> = recorder
+                .written_at
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .filter(|id| *id < 40 && id % 2 == 0)
+                .collect();
+            let users_state: BTreeMap<i64, u64> = recorder
+                .state()
+                .into_iter()
+                .filter(|(id, _)| *id < 40 && id % 2 == 0)
+                .collect();
+            recorder.refused_indexes.lock().unwrap().clear();
+            (read, orders_held, users_landed.len(), users_state)
+        })
+    };
+    deployment.run_to_end(0).await;
+    let (read, orders_held, users_landed, users_state) = watcher.await.unwrap();
+    assert!(
+        orders_held >= limit / 2,
+        "orders was held at its share and backfill: {orders_held}"
+    );
+    assert!(
+        read >= users_changes,
+        "the reading went on for users: {read} of {users_changes} users changes read"
+    );
+    assert_eq!(users_landed, 20, "every users document landed");
+    let expected: BTreeMap<i64, u64> = db
+        .expected()
+        .into_iter()
+        .filter(|(id, _)| *id < 40 && id % 2 == 0)
+        .collect();
+    assert_eq!(
+        users_state, expected,
+        "users as written, while orders was parked"
+    );
+    let state = deployment.recorder.state();
+    for (id, version) in db.expected().iter().filter(|(id, _)| *id % 2 == 1) {
+        assert_eq!(state.get(id), Some(version), "orders {id} once let through");
+    }
 }

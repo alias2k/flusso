@@ -16,35 +16,47 @@
 //! build, a stop, a dropped future) gives its estimate back the same way.
 //!
 //! **The rules.** A build is granted when rules 1–3 allow it, or rule 4
-//! does.
+//! or 5 does.
 //!
 //! | Rule | Bound |
 //! | --- | --- |
 //! | 1 | everything held, live and backfill, ≤ the limit |
 //! | 2 | backfill, over every index, ≤ half the limit, so live always has room |
-//! | 3 | with two or more indexes ([`Budget::with_index_share`]), one index's **live** bytes ≤ its share of the limit; an index holding no live bytes is granted a batch larger than the share, alone, within rule 1 |
-//! | 4 | a kind (live or backfill) holding nothing gets one batch, whatever 1–3 say: live then takes every index waiting |
+//! | 3 | with two or more indexes ([`Budget::with_index_share`]), one index's **live** bytes ≤ its share of the limit |
+//! | 4 | backfill holding nothing gets one batch, whatever 1 and 2 say |
+//! | 5 | an index holding no live bytes gets one live batch, whatever 1 and 3 say (so live holding nothing takes every index waiting) |
 //!
-//! Rules 1, 2 and 4 are the budget before it was shared; rule 3 is the share.
-//! It counts an index's live bytes only: its backfill is capped with every
-//! other index's by rule 2, so an index whose backfill or reindex runs keeps,
-//! for its live changes, everything `main` gave live (within the limit), up
-//! to its share, and one index bursting live holds at most its share while
-//! the others build. With one index rule 3 applies to nothing: the budget
-//! answers as before it was shared. A live build takes the indexes that fit
-//! and leaves the rest waiting ([`Budget::admit`]); a backfill batch fits
-//! whole or not at all. Indexes are offered oldest waiting first, and the
-//! first one refused by the limit stops every younger one from taking room
-//! by it, so a stream of small batches never starves a large one; an index
-//! refused by its own share doesn't hold the others back.
+//! Rules 1, 2 and 4 (with 5 for live holding nothing) are the budget before it
+//! was shared; rule 3 is the share. It counts an index's live bytes only: its
+//! backfill is capped with every other index's by rule 2, so an index whose
+//! backfill or reindex runs keeps, for its live changes, the room live had
+//! before the share, up to its share. Rule 5 is what keeps the promise while
+//! one index is stuck (a parked lane holding its share and its backfill for
+//! hours): every other index still gets a batch whenever it holds no live
+//! bytes, past the limit if need be. With one index rule 3 applies to
+//! nothing and rule 5 is "live holding nothing": the budget answers as before
+//! it was shared. A live build takes the indexes that fit and leaves the rest
+//! waiting ([`Budget::admit`]); a backfill batch fits whole or not at all.
+//! Indexes are offered oldest waiting first, and the first one refused by the
+//! limit stops every younger one **that holds live bytes** from taking room by
+//! it, so a stream of small batches never starves a large one (a younger
+//! index gets at most its one rule-5 batch past it); an index refused by its
+//! own share doesn't hold the others back.
 //!
-//! **Bounds**, from the rules: only rule 4 passes the limit, once per kind,
-//! and a settled batch may come out larger than its estimate, so the whole
-//! stays within the limit plus one batch per kind plus what each build in
-//! flight settles past its estimate (as before it was shared). Backfill
-//! stays within half plus one batch (rule 4) and the same. One index's live
-//! bytes stay within its share, or one batch when that batch alone is larger,
-//! and the same.
+//! **One index's batch** is what a live grant takes of it: all its waiting
+//! documents. An index the budget leaves waiting keeps fewer than
+//! `2 × max_changes` documents, and the grant that takes them also takes
+//! what the run being granted marked, so with two or more indexes one
+//! index's batch holds the documents of up to about three live runs (with
+//! one index, nothing waits: one run's, as before the share).
+//!
+//! **Bounds**, from the rules: rules 4 and 5 pass the limit, one backfill
+//! batch and one live batch per index, and a settled batch may come out
+//! larger than its estimate, so the whole stays within the limit plus one
+//! live batch per index plus one backfill batch plus what each build in
+//! flight settles past its estimate. Backfill stays within half plus one
+//! batch and the same. One index's live bytes stay within its share, or one
+//! batch when that batch alone is larger, and the same.
 //!
 //! **Many reservers.** Every count lives under one lock, so a check and its
 //! reservation are one step and two reservers never pass the limit together.
@@ -352,31 +364,32 @@ impl Budget {
         }
         match work {
             Work::Live => {
-                // Rule 4: live holding nothing takes every index waiting.
-                if state.total - state.backfill.min(state.total) == 0 {
-                    return Admission {
-                        admitted: all(),
-                        refused: false,
-                        generation,
-                    };
-                }
                 let mut running = state.total;
                 let mut blocked = false;
                 let mut admitted = Vec::with_capacity(parts.len());
                 for (index, estimate) in parts {
-                    // Rule 3: the index's live bytes within its share, or
-                    // none yet (a batch larger than the share builds alone).
-                    // Its backfill bytes don't count: backfill has rule 2.
                     let live = state.live_by(index);
-                    let within_share = live == 0
-                        || self
-                            .index_share
-                            .is_none_or(|share| live.saturating_add(*estimate) <= share);
-                    let fits = if !within_share {
+                    let fits = if live == 0 {
+                        // Rule 5: an index holding no live bytes gets one
+                        // live batch, past the limit and its share, never
+                        // held back by an older index: one stuck index can't
+                        // stop the others. (Live holding nothing is every
+                        // index holding none: rule 4 for live.)
+                        true
+                    } else if self
+                        .index_share
+                        .is_some_and(|share| live.saturating_add(*estimate) > share)
+                    {
+                        // Rule 3: its live bytes within its share (its
+                        // backfill counts toward rule 2, not here). A refusal
+                        // here holds no other index back.
                         false
                     } else if !blocked && running.saturating_add(*estimate) <= self.limit {
+                        // Rule 1.
                         true
                     } else {
+                        // The oldest refused by the limit keeps younger
+                        // indexes that hold live bytes from taking room by it.
                         blocked = true;
                         false
                     };
@@ -872,11 +885,10 @@ mod tests {
         );
     }
 
-    /// A live batch larger than the share builds when its index holds no
-    /// live bytes, within the limit: the share never shuts an index out, and
-    /// nothing per index passes the limit (only rule 4, per kind, does).
+    /// An index holding no live bytes gets one live batch whatever the limit
+    /// and its share say (rule 5): no index is shut out by another's bytes.
     #[test]
-    fn a_live_batch_larger_than_the_share_builds_alone_within_the_limit() {
+    fn an_index_holding_no_live_bytes_gets_one_live_batch_past_the_limit() {
         let budget = Arc::new(Budget::new(64 * KIB).with_index_share(3, 0.5));
         let _users = held(&budget, "users", 8 * KIB);
         let _items = budget
@@ -888,13 +900,36 @@ mod tests {
                 .is_err(),
             "once it holds live bytes past its share, the share applies"
         );
-        assert!(
-            budget
-                .admit(Work::Live, &[(index("orders"), 20 * KIB)])
-                .admitted
-                .is_empty(),
-            "orders holds nothing, and still waits for the limit"
-        );
+        let _orders = budget
+            .reserve(Work::Live, &[(index("orders"), 20 * KIB)])
+            .unwrap();
+        assert_eq!(budget.held().total, 68 * KIB, "past the limit by one batch");
+    }
+
+    /// Review round 3, case A: `a`'s reindex is parked, its backfill at half
+    /// and its live documents at its share, and neither comes back; healthy
+    /// `b`, holding no live bytes, still gets its batch.
+    #[test]
+    fn a_parked_index_at_its_share_beside_its_backfill_leaves_a_healthy_index_its_batch() {
+        let budget = Arc::new(Budget::new(128 * KIB).with_index_share(2, 0.5));
+        let _backfill = budget
+            .reserve(Work::Backfill, &[(index("a"), 64 * KIB)])
+            .unwrap();
+        let _a = held(&budget, "a", 64 * KIB);
+        let admission = budget.admit(Work::Live, &[(index("b"), 16 * KIB)]);
+        assert_eq!(admission.admitted, vec![index("b")]);
+    }
+
+    /// Review round 3, case B: `a` parked at its share; `x`, oldest waiting
+    /// and holding no live bytes, has a batch larger than the room left;
+    /// younger `b` is small. Both get their batch: an index rule 5 admits is
+    /// never held back by an older one the limit refused.
+    #[test]
+    fn a_large_batch_and_a_small_one_both_build_beside_a_parked_index() {
+        let budget = Arc::new(Budget::new(64 * KIB).with_index_share(3, 0.5));
+        let _a = held(&budget, "a", 32 * KIB);
+        let admission = budget.admit(Work::Live, &[(index("x"), 48 * KIB), (index("b"), 4 * KIB)]);
+        assert_eq!(admission.admitted, vec![index("x"), index("b")]);
     }
 
     /// Live holding nothing takes every index waiting, at its share or not:
@@ -969,10 +1004,11 @@ mod tests {
         );
     }
 
-    /// The reviewer's sequence over four indexes: no per-index rule passes
-    /// the limit, so the whole stays within it plus one batch per kind.
+    /// The reviewer's sequence over four indexes: past the limit only by
+    /// one live batch per index holding none (rule 5) and one backfill batch
+    /// (rule 4).
     #[test]
-    fn four_indexes_pass_the_limit_by_at_most_one_batch_per_kind() {
+    fn four_indexes_pass_the_limit_by_at_most_a_live_batch_each_and_a_backfill_batch() {
         let budget = Arc::new(Budget::new(128 * KIB).with_index_share(4, 0.5));
         let mut held = Vec::new();
         for (work, name, kib) in [
@@ -989,21 +1025,25 @@ mod tests {
             }
         }
         assert!(
-            budget.held().total <= 128 * KIB + 2 * 64 * KIB,
+            budget.held().total <= 128 * KIB + 4 * 64 * KIB + 64 * KIB,
             "{:?}",
             budget.held()
         );
         assert_eq!(
-            budget.held().total,
-            128 * KIB,
-            "a's backfill and b's live fill it"
+            budget.held(),
+            Held {
+                total: 224 * KIB,
+                backfill: 64 * KIB
+            },
+            "each index's first live batch, and no backfill past half"
         );
     }
 
     /// Random reservations and releases over four indexes, both kinds, each
     /// call at most `B`: after every step the whole is within the limit plus
-    /// one batch per kind, backfill within half plus one batch, and each
-    /// index's live bytes within its share, or one batch when it held none.
+    /// one live batch per index and one backfill batch, backfill within half
+    /// plus one batch, and each index's live bytes within its share, or one
+    /// batch when it held none.
     #[test]
     fn random_reservations_stay_within_the_stated_bounds() {
         const B: usize = 24 * KIB;
@@ -1055,7 +1095,7 @@ mod tests {
                     held.extend(parts);
                 }
                 let now = budget.held();
-                assert!(now.total <= limit + 2 * B, "seed {seed}: {now:?}");
+                assert!(now.total <= limit + 4 * B + B, "seed {seed}: {now:?}");
                 assert!(now.backfill <= limit / 2 + B, "seed {seed}: {now:?}");
                 for name in &names {
                     let live = budget.state().live_by(name);
