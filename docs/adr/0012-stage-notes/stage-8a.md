@@ -101,6 +101,10 @@ a notify each `take` sends. A run may overshoot by its own ids once.
   Its waiting ids count toward `max_pending_documents` instead (decision (b)3). So the other indexes
   go on, as ADR §5 decided. A stop with such an index can't build its backlog; it runs to the
   deadline and exits 1, as `main` does with a stalled sink.
+  **Acceptance test** (recorded in slice 4): `a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap`
+  with the reading **not** stopping: `orders` parked at its share and changing one of fifty documents a
+  second for ten minutes, `users` read and landing the whole time. In slice 4 the reading stops at second 61,
+  when `orders` has `2 × max_changes` documents waiting.
 
 **The end.** The reader is the first task to end, on a stop or the stream's end. It marks its last
 run, raises `routed`, then **signals that it ended** and returns the `LiveStream` through its join
@@ -283,7 +287,8 @@ its own batch. Until 6b one task builds one live batch across every index (slice
 does). The requirement: with two or more indexes, an index whose backfill or reindex runs keeps building its
 steady live stream beside it no worse than `main` (where live had everything the backfill's half left:
 `total + estimate ≤ limit`, backfill ≤ half); one index bursting **live** holds at most its share; one index
-**stuck** (a parked lane holding its share and its backfill for hours) never stops the others; and the total
+**stuck** (a parked lane holding its share and its backfill for hours) leaves the others building for as long
+as this slice can (below: until its own backlog reaches the deferral cap); and the total
 stays within a bound the manual states truthfully. The owner's standing rule settles the trade: memory in
 the hundreds of MiB is cheap, latency is never traded for it, so the promise wins over a tighter bound.
 
@@ -297,7 +302,7 @@ the hundreds of MiB is cheap, latency is never traded for it, so the promise win
 
 Rules 1, 2, 4 and 5-with-one-index are `main`'s budget; rule 3 is the share. **An index's backfill bytes
 don't count against its share**: backfill is capped as a whole by rule 2, as on `main`. **Rule 5 is what
-keeps the promise while one index is stuck**: a healthy index acknowledges its live batches, so it holds no
+keeps the others building while one index is stuck**: a healthy index acknowledges its live batches, so it holds no
 live bytes again and again, and each time gets a batch whatever the stuck index holds. **`blocked`**
 (oldest waiting first: the first index refused by the limit stops younger ones from taking room by it, so a
 large batch isn't starved by small ones) applies only to indexes that hold live bytes; rule 5 is never held
@@ -336,7 +341,18 @@ its share, `x` oldest with a batch larger than the room left refused and `blocke
 too): rule 5 now gives every index holding no live bytes its batch, past the limit, and `blocked` never
 holds it back.
 
-- **One stuck index never stops the others.** Budget guards: `a_parked_index_at_its_share_beside_its_backfill_leaves_a_healthy_index_its_batch`
+- **One stuck index leaves the others building, until its backlog reaches the cap.** A parked lane never
+  gives its live bytes back, so the stuck index is never granted again (rule 5 never applies to it) and its
+  waiting set grows by one per distinct document changed. At `2 × max_changes` waiting the live batch waits
+  whole and the reading stops for every index (the slice-2 deferral cap). The full promise needs 6b's
+  exemption of an index held by the budget from the lead (counted against `max_pending_documents`), which
+  needs takes that are not all or nothing. Pinned by
+  `a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap` (`orders` parked and changing
+  one of fifty documents a second: the reading goes on until second 61, when 32 = `2 × 16` are waiting, then
+  stops for `users` too). Against `main`, with no backfill of the stuck index: `main` stops every index once
+  the stuck index fills the whole budget; this slice once it fills its share and has the cap waiting, so
+  sooner for a stuck index changing many distinct rows, later (never, by the budget) for one rewriting a few
+  documents. Budget guards: `a_parked_index_at_its_share_beside_its_backfill_leaves_a_healthy_index_its_batch`
   (A), `a_large_batch_and_a_small_one_both_build_beside_a_parked_index` (B),
   `an_index_holding_no_live_bytes_gets_one_live_batch_past_the_limit` (the case round 2 left untested), all
   red on round 2's rules. Engine guard: `a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minutes`:
@@ -411,7 +427,7 @@ holds it back.
 | Tickets and cut backfills (#435) | per-lane greatest ticket per walk; a mid-walk request waits for the walk | `one_walk_answers_a_lanes_two_requests_under_the_later_ticket`, `a_completion_answering_an_older_request_seeds_nothing`, `a_resumed_request_and_a_fresh_one_of_a_lane_are_walked_once_from_the_first_key` | `a_cut_request_mid_walk_gets_its_own_walk_after_it` |
 | A live stream that ends drains queued requests | tasks return after the reader's signal, with nothing pending or queued | `an_unseeded_sink_requests_a_snapshot_then_marks_seeded` | `a_request_queued_for_one_index_after_live_ends_is_served` |
 | Graceful stop (#371) | the barrier; the reader returns the stream; pending built, bounded by the lead | `tests::stop`, daemon `tests::stop`, `shutdown` e2e incl. `…a_restart_rewrites_none_of_it` and `random_stops_under_writes_converge_after_a_restart` | `a_stop_mid_run_builds_what_the_reader_marked_last`, `a_stop_with_many_pending_ids_finishes_within_the_deadline`, `a_stop_with_one_index_stalled_lands_the_others` |
-| Pacing | the lead bound (6a); the held-index exemption and `max_pending_documents` (6b) | `a_stalled_sink_paces_builds_and_they_resume_when_it_does` | `the_reader_waits_at_the_lead_and_resumes`, `a_parked_lane_bounds_pending_memory`, `an_index_held_by_the_budget_does_not_stop_the_reader` (6b) |
+| Pacing | the lead bound (6a); the held-index exemption and `max_pending_documents` (6b) | `a_stalled_sink_paces_builds_and_they_resume_when_it_does` | `the_reader_waits_at_the_lead_and_resumes`, `a_parked_lane_bounds_pending_memory`, `an_index_held_by_the_budget_does_not_stop_the_reader` (6b; its acceptance case is `a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap` with the reading going on) |
 | #120 staging order | unchanged | `fresh_source_*`, daemon `fresh_source_rebuilds_seeded_sinks_before_preparing`, `every_index_of_every_sink_is_staged_before_the_source_prepares` | — |
 | A lone change commits at once (#135) | `main`'s run cut; a waiting id is taken once a slot is free | `a_lone_change_on_a_quiet_stream_commits_without_waiting`, `max_delay_caps_a_batch_while_changes_keep_arriving` | — (rerun on the reader) |
 | Script failures on the ingest side (#198) | in the index task | `skip_policy_leaves_a_failed_document_out_and_keeps_going`, `stop_policy_fails_the_ingest_engine_on_a_failed_document` | slice 8: `a_stop_failure_on_one_index_lets_the_others_land` |

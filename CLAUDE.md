@@ -1190,8 +1190,9 @@ is the one concrete piece.
   index. Rules (`budget.rs`'s module doc): 1 total ≤ limit, 2 backfill ≤ half, 3 an index's **live** bytes
   ≤ its share (its backfill bytes don't count, so an index's backfill or reindex leaves its live stream
   `main`'s room), 4 backfill holding nothing gets one batch, 5 an index holding no live bytes gets one live
-  batch whatever 1 and 3 say (so one stuck index, a parked lane at its share for hours, never stops the
-  others; live holding nothing takes every index). Total ≤ limit + one live batch per index + one backfill
+  batch whatever 1 and 3 say (so one stuck index, a parked lane at its share for hours, leaves the others
+  building until it has `2 × max_changes` documents waiting, then reading stops for all as before; 6b
+  lifts that; live holding nothing takes every index). Total ≤ limit + one live batch per index + one backfill
   batch + settle slack; one index's live batch is take-all, up to about `3 × max_changes` changes'
   documents with two or more indexes (a per-index cap would register a step while documents of it still
   wait). Indexes are offered oldest waiting first and the first refused by the limit stops younger ones

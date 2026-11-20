@@ -156,7 +156,7 @@ It applies to `/status` (`changes_in_flight`, and `sinks.<sink>.changes_committe
 | --- | --- | --- |
 | One index in a burst, its sink behind | fills the whole budget; the others wait | its live documents stop at its share; the others keep building |
 | The share | none | `[concurrency] index_budget_share`, default `0.5` (256 MiB of the default 512) |
-| A burst over many distinct documents of one index | reading pauses for every index | the same, once that index has more than `2 × [batch] max_changes` documents waiting to be built |
+| A burst over many distinct documents of one index, or one index stuck behind a parked lane | reading pauses for every index once the budget is full | the others keep building until that index has `2 × [batch] max_changes` documents waiting to be built (512 by default), then reading pauses for every index |
 | One index | the whole budget | unchanged |
 
 The share has a flag and a variable, like the table's other keys:
@@ -171,7 +171,7 @@ The share has a flag and a variable, like the table's other keys:
 
 1. **Nothing, usually.** Bursts of one index stop holding up the others.
 2. **Raise `index_budget_share` towards `1`** if one index does nearly all the work and should keep using the whole budget, as in 0.18. `1` is the old behaviour.
-3. **Check the memory headroom.** An index holding no live documents always gets one live batch, even with the budget full, so one index stuck at its share never stops the others. Plan for one live batch per index, plus one backfill batch, above `max_built_mib` ([sizing](../reference/config-toml.md#concurrency)); 0.18 needed one live batch in all.
+3. **Check the memory headroom.** An index holding no live documents always gets one live batch, even with the budget full, so one index stuck at its share leaves the others building until it has `2 × [batch] max_changes` distinct documents waiting (512 by default). Plan for one live batch per index, plus one backfill batch, above `max_built_mib` ([sizing](../reference/config-toml.md#concurrency)); 0.18 needed one live batch in all.
 
 **What to know.**
 
