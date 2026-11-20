@@ -1637,6 +1637,7 @@ mod keys;
 mod lanes;
 mod merge;
 mod parking;
+mod pending;
 mod refresh;
 mod resume;
 mod seeding;

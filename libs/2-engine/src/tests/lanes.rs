@@ -1221,7 +1221,8 @@ async fn changes_are_resolved_by_the_resolver() {
 
 /// A lane whose live item is still waiting for room is not answered past
 /// it: only a lane the batch has nothing for is told it was skipped, and a
-/// lane with an item registers as its own send returns. (Calling `skipped`
+/// lane with an item registers as its own send returns; until then its
+/// index's pending build holds it before the batch's change. (Calling `skipped`
 /// for every lane would let a fence on this lane pass, and the source
 /// confirm, past a batch not written.)
 #[tokio::test]
@@ -1269,10 +1270,12 @@ async fn a_lane_whose_live_item_is_blocked_answers_no_further_than_before() {
     .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!run.is_finished(), "the users lane's send waits for room");
+    assert_eq!(before, Some(Landed::Idle));
     assert_eq!(
         progress.lane(&users_lane, Level::Applied),
-        before,
-        "the blocked lane answers what it did before the batch"
+        Some(Landed::Before(Position::new(0))),
+        "the blocked lane is held before the batch's change: its index's build isn't \
+         registered on it"
     );
     assert!(
         !matches!(progress.landed(), Landed::Through(_)),

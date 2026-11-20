@@ -10,7 +10,7 @@ pub mod status;
 mod supervise;
 
 pub use backends::{Backends, SinkParts, SourceParts};
-pub use engine::{Backoff, Budget, Held, Progress};
+pub use engine::{Backoff, Budget, Held, Pin, Progress};
 pub use fence::{
     Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
     LanePositions, SinkPositions, Unserved,
@@ -18,7 +18,7 @@ pub use fence::{
 pub use observer::StatusObserver;
 pub use stall::{LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};
 pub use status::{
-    IndexState, LaneHealthState, LaneHealthView, LaneSnapshot, LastScriptFailure, Phase,
+    IndexState, LaneHealthState, LaneHealthView, LaneSnapshot, LastScriptFailure, Phase, PinnedBy,
     ScriptFailures, SinkPhase, SinkSnapshot, Status, StatusSnapshot,
 };
 pub use supervise::{ControlError, DaemonControl};

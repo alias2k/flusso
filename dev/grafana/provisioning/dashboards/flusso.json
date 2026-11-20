@@ -437,7 +437,7 @@
     {
       "id": 17,
       "title": "WAL held per lane (bytes; the pinning lane holds the slot's whole lag)",
-      "description": "Bytes of WAL the replication slot keeps because of each lane, while it has a change outstanding. The lane marked pinned holds the slot back the most.",
+      "description": "Bytes of WAL the replication slot keeps because of each lane, while it has a change outstanding. The lane marked pinned holds the slot back the most. When an index's backlog (documents waiting or building, on no lane yet) holds it instead, that index is marked with the slot's whole lag.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 60 },
@@ -454,6 +454,12 @@
           "expr": "max by (index, sink) (flusso_lane_wal_behind_bytes * on (index, sink) flusso_slot_pinned_by)",
           "legendFormat": "pinned by {{index}} → {{sink}}",
           "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (index) (flusso_slot_pinned_by{sink=\"\"} * on () group_left max(flusso_replication_slot_lag_bytes))",
+          "legendFormat": "pinned by {{index}}'s backlog (no lane yet)",
+          "refId": "C"
         }
       ]
     }

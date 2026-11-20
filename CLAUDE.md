@@ -689,7 +689,31 @@ is the one concrete piece.
   before it in lane order (`Fences`' in-order answers, by item key; the observer still hears the item's
   position); lane order is registration order and key order, so a mark
   covers every registered item up to it, and one that runs ahead covers an item registered later.
-  Each lane answers `Before(oldest unlanded)` / `Through(the newest position routed to it)` / `Idle`
+  **Pending documents (ADR 0012 stage 8a slice 2):** `Progress` keeps per index the documents marked
+  for a build and not yet published (`progress/pending.rs`: waiting ids at their oldest change, and
+  each build taken under a `Token` with its oldest). The one ingest task marks its live run
+  (`Progress::mark`, dropping ids of an index with no lane) and offers it to the gate only while no
+  waiting id is in a running build (`main`'s admission, checked before a permit; a build's ids leave
+  admission when it **lands**, `build_landed`, as `main`'s `Builds::holding` did); a grant takes every
+  index's waiting ids into one build, an empty one when the run touched no document a lane receives
+  (as `main`, so those changes settle in slot order). Publishing marks the build **sending**
+  (`build_sending`), then each lane's `published_build(lane, key, oldest, last, token)` (or
+  `skipped_build` for a lane the batch has nothing for) registers the item and settles the build for
+  that lane **before one notification**, so a fence waiter woken by it sees the new answer; `release`
+  after every lane's. A lane's answer counts its own items, a sending build it hasn't taken (both its
+  own: stall age, `Pin::Lane`), and its index's **backlog** (waiting ids, builds not sending and not
+  registered on it: `Pin::Backlog`), so a full sibling lane still holds back only itself. What a run
+  left behind unpublished is forgotten when the next run starts (`forget_all`): confirmation stayed
+  before it, so the replay marks it again. A live batch carries its own live run's newest change
+  (`Job::Live.position` is a `Position`, carried out of the gate by `Grant::Live`), as on `main`:
+  every document it takes was marked by that live run. Positions grow along a lane in grant order;
+  across engine runs the position contract above is what holds. A batch never borrows another change's
+  position, so a lane that lands it answers through its own changes only (guard:
+  `a_replayed_batch_claims_no_change_another_lane_landed`, with a source that replays a change under
+  the position it had). A live item whose index has no pending build is refused
+  (`EngineError::UnregisteredLiveItem`), never published unregistered.
+  Each lane answers `Before(oldest of its unlanded items and its index's pending documents)` /
+  `Through(the newest position routed to it)` / `Idle`
   (`source::cdc::Landed`), and several lanes (`landed()`, `over`) answer as the lane that covers least,
   so a lane that hasn't taken a batch yet holds the others back and a fence on a healthy lane isn't
   held back by a full sibling. Both engines take the one `Arc<Progress>` in their constructors
@@ -714,11 +738,28 @@ is the one concrete piece.
   is called, which only the stream loop can do (`recv` takes `&mut`), so the wake-up stays. Idle WAL
   is released by the tick's confirmation (keepalives move the horizon only; `read_through` confirms
   nothing). A sink engine that dies before its write returns leaves the item unacked; the lane
-  redelivers it to the restarted engine (idempotent rebuild, deterministic id). Positions are
-  monotonic for the life of the source across reopened streams (`Positions::new(start_lsn,
-  first_seq)` continues `next_seq`), so the `next_seq` test stays exact across an ingest restart.
+  redelivers it to the restarted engine (idempotent rebuild, deterministic id). **The position
+  contract** (the `ChangeCapture` port, `cdc/capture.rs`): positions strictly increase within one
+  stream, and over the capture's life a position never names a different change than it named
+  before, because `Progress` keeps each lane's newest position for its whole life. Two numberings
+  keep it: keep numbering across reopened streams (Postgres: `Positions::new(start_lsn, first_seq)`
+  continues `next_seq`, so the `next_seq` test stays exact across an ingest restart), or give a
+  replayed change the position it had (the engine tests' sources). Renumbering with new meanings is
+  unsafe, on `main` too.
   Guards: `progress::tests` (`every_interleaving_answers_as_the_model_does`, 300 seeded interleavings
-  against a model; `a_stalled_lane_pins_confirmation_and_its_own_fence_only`,
+  against a model; `a_marked_id_pins_confirmation_until_its_build_lands`,
+  `a_build_holds_a_lane_only_until_its_item_is_registered_there`,
+  `an_id_of_an_index_without_lanes_pins_nothing`, `a_run_forgets_what_an_earlier_run_left_behind`,
+  `a_registration_that_moves_a_lanes_answer_notifies_after_it`, `progress::pending::tests`, `engine`
+  `tests::pending` (`a_document_being_built_holds_confirmation_in_the_progress`,
+  `a_skipped_lane_is_not_held_by_a_full_lane_of_another_index`,
+  `a_change_that_builds_nothing_settles_after_the_batch_before_it`,
+  `a_replayed_batch_claims_no_change_another_lane_landed`), `ingest::tests`'
+  `a_document_whose_build_landed_is_built_again_while_an_earlier_slot_waits` (passes on `main`'s
+  engine too) and `what_a_failed_run_left_behind_is_rebuilt_from_the_replay_in_batches`, the daemon's
+  `a_fence_on_a_healthy_sink_passes_while_its_index_build_waits_on_a_full_sibling` and
+  `a_build_left_behind_holds_both_levels_so_settled_cuts_off_no_answerable_wait`;
+  `a_stalled_lane_pins_confirmation_and_its_own_fence_only`,
   `a_skipped_lane_pins_nothing`, `a_landing_reported_before_its_registration_still_counts`,
   `a_mark_never_moves_back`, `a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full`,
   `several_lanes_answer_their_least_and_an_unknown_lane_none` (successor of the channel's
@@ -1566,13 +1607,22 @@ as independent tasks → restart a failed one with backoff while the others keep
 ingest engine ending cleanly ends the deployment after the lanes drain), exposes the reindex
 *operation* through `DaemonControl`, and polls source capture lag out-of-band (`lag.rs` over
 `ChangeCapture::lag`). It also samples every `(index, sink)` lane once a second (`stall.rs`, ADR
-0012 stage 8c): a lane's **stall age** is how long its oldest outstanding position (`Progress::lane`,
-`Applied`) has stayed its oldest, reset when it changes or clears (nothing per item; a backfill-only
+0012 stage 8c): a lane's **stall age** is how long its own oldest unlanded item
+(`Progress::own_oldest`: its unlanded items and a batch being published it hasn't taken; its index's
+backlog, on no lane yet, stalls no lane; stage 8a slice 2) has stayed its oldest, reset when it changes or clears (nothing per item; a backfill-only
 lane has none, backfill items carry no position); its **WAL behind** is the slot lag less how far its
-`ChangeCapture::reached` is ahead of `Progress::landed`'s; the least outstanding lane is
-`pinned_by`. `/status` lanes carry `stall_seconds`/`wal_behind_bytes` (absent without tracking) and
-the document `pinned_by`; the CLI exports `flusso.lane.stall_age`, `flusso.lane.wal_behind`,
-`flusso.slot.pinned_by`; `warn!` past `STALL_WARN` (10 min) and every 10 min after, `info!` on
+`ChangeCapture::reached` is ahead of `Progress::landed`'s; what `landed` is decided by is
+`pinned_by` (`engine::Pin`: a lane, or `Backlog(index)` while that index's backlog is older than
+what every lane holds itself; a tie, within a lane or across lanes, names the lane; non-null during
+every live build). `/status` lanes carry
+`stall_seconds`/`wal_behind_bytes` (absent without tracking) and the document `pinned_by` (`{index,
+sink}`, `sink` null for a backlog); the CLI exports `flusso.lane.stall_age`, `flusso.lane.wal_behind`,
+`flusso.slot.pinned_by` (`{index}` alone for a backlog); guards: `stall::tests`'
+`a_healthy_lane_is_not_stalled_by_its_index_backlog`, `progress::tests`'
+`a_backlog_pinning_confirmation_is_named_by_its_index`,
+`a_build_sent_to_some_lanes_and_blocked_on_one_pins_that_lane`,
+`a_lane_wins_a_tie_with_another_indexs_backlog`, the CLI's
+`an_index_backlog_pinning_the_slot_is_exported_by_its_index`; `warn!` past `STALL_WARN` (10 min) and every 10 min after, `info!` on
 recovery. `FlussoLaneStalled` (`dev/prometheus/rules/flusso.rules.yml`, tested by
 `dev/prometheus/tests/flusso.rules.test.yml` with `promtool test rules`, outside `rules/` which the
 dev server loads whole; the Helm chart's `prometheusRule`, kept equal by

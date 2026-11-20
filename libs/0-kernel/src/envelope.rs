@@ -1,9 +1,12 @@
 //! What flows through the stream: the position in the source's change feed
 //! and the envelope a lane carries for one document.
 //!
-//! A [`Position`] is assigned by the source, monotonic for the life of the
-//! source instance (across reopened streams, so a restarted ingest engine
-//! never reuses one). It carries its own stamps, meaningful only to the source
+//! A [`Position`] is assigned by the source: positions strictly increase
+//! within one stream, and over the source's life a position never names a
+//! different change than it named before (a reopened stream keeps numbering,
+//! as the Postgres capture does, or gives a replayed change the position it
+//! had), so a restarted ingest engine never reads one with a new meaning. It
+//! carries its own stamps, meaningful only to the source
 //! that issued it (the Postgres adapter's are WAL LSNs), so the source keeps
 //! no map of what it emitted: the engine tells it how far its lanes landed in
 //! terms of positions, and the source reads the answer off them.
@@ -41,7 +44,8 @@ use crate::common::{GenericValue, IndexName, SinkName};
 /// it emitted (see `ChangeCapture::confirm` in the source port).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Position {
-    /// The order the source emitted changes in, monotonic for its life.
+    /// The order the source emitted changes in: strictly increasing within
+    /// one stream, and never naming another change than it named before.
     pub seq: u64,
     /// How far a fence may claim while this change is the oldest outstanding.
     pub fence_before: u64,

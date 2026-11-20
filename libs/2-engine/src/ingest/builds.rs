@@ -15,8 +15,10 @@
 //! holds back at most `2 × builds − 1` built batches behind it.
 //!
 //! **Admission.** A batch is granted only when no running build holds any of
-//! its documents. A later build of a document therefore starts after the
-//! earlier one returned, reads newer state, and lands later (a larger slot).
+//! its documents: a live take leaves waiting what a running build holds (it
+//! takes all or none), and a backfill batch is checked here. A later build
+//! of a document therefore starts after the earlier one returned, reads newer
+//! state, and lands later (a larger slot).
 //! Documents are compared by a 64-bit hash of their id, kept sorted per build;
 //! a collision only holds a batch back. With `builds = 1` nothing is hashed:
 //! no grant happens while a build runs.
@@ -53,6 +55,7 @@ use super::snapshot::Snapshot;
 use crate::budget::{Budget, Charge, Reservation, document_bytes};
 use crate::error::{EngineError, Result};
 use crate::observer::{Observer, Wake, Work};
+use crate::progress::{Progress, Token};
 use crate::sink_engine::flights::Flights;
 
 /// The bytes per document a build is first estimated at, before any build
@@ -61,10 +64,12 @@ const FIRST_ESTIMATE: usize = 16 * 1024;
 
 /// What a granted slot publishes.
 pub(super) enum Job {
-    /// A live batch, to every lane, with the position of its last change.
+    /// A live batch, to every lane, with the position of its live run's last
+    /// change and, per index, the pending build it took (released once
+    /// published).
     Live {
-        oldest: Option<Position>,
-        position: Option<Position>,
+        taken: Vec<(IndexName, Token, Position)>,
+        position: Position,
         changes: usize,
     },
     /// A snapshot batch, to each lane the slice it asked for, each index's
@@ -128,10 +133,11 @@ impl PerDocument {
     }
 }
 
-/// Which kind of batch a free slot goes to.
+/// Which kind of batch a free slot goes to; a live grant carries back what
+/// the live candidate was offered with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Grant {
-    Live,
+pub(super) enum Grant<L> {
+    Live(L),
     Backfill,
 }
 
@@ -172,6 +178,9 @@ pub(super) struct Builds {
     /// The spawned builds, aborted when the run's future is dropped (a
     /// supervisor's abort, a shutdown deadline) so none outlives it.
     spawned: Vec<(u64, AbortHandle)>,
+    /// Told when a live build lands, so its documents leave admission there
+    /// too (the pending take reads it).
+    progress: Option<Arc<Progress>>,
 }
 
 impl Drop for Builds {
@@ -217,7 +226,14 @@ impl Builds {
             wake: Wake::Change,
             observer: Arc::new(crate::observer::NoopObserver),
             spawned: Vec::new(),
+            progress: None,
         }
+    }
+
+    /// Tell `progress` when a live build lands.
+    pub(super) fn with_progress(mut self, progress: Arc<Progress>) -> Self {
+        self.progress = Some(progress);
+        self
     }
 
     /// Report each wait for the budget to `observer`.
@@ -292,38 +308,59 @@ impl Builds {
             .any(|(_, held)| share_any(held, &hashes))
     }
 
+    /// Whether any running build holds a document.
+    pub(super) fn holds_some(&self) -> bool {
+        !self.holding.is_empty()
+    }
+
+    /// Whether a running build holds `index`'s document `key`: a live take
+    /// leaves it waiting, so a document is never built twice at once.
+    pub(super) fn holds(&self, index: &IndexName, key: &source::RowKey) -> bool {
+        if self.holding.is_empty() {
+            return false;
+        }
+        let hash = id_hash(index, key);
+        self.holding
+            .iter()
+            .any(|(_, held)| held.binary_search(&hash).is_ok())
+    }
+
     /// Which waiting batch the next free slot goes to, if any. `live` is the
-    /// live batch's ids and whether it is full; `backfill` the snapshot
-    /// batch's ids.
-    pub(super) fn choose(
+    /// live candidate (handed back in [`Grant::Live`]), how many documents it
+    /// would take and whether its run is full; the caller offers it only when
+    /// no running build holds one of them. `backfill` is the snapshot batch's
+    /// ids.
+    pub(super) fn choose<L>(
         &mut self,
-        live: Option<(&[DocumentId], bool)>,
+        live: Option<(L, usize, bool)>,
         backfill: Option<&[DocumentId]>,
-    ) -> Option<Grant> {
+    ) -> Option<Grant<L>> {
         self.refused = None;
         if !self.has_room() {
             return None;
         }
-        let live = live.is_some_and(|(ids, full)| {
-            (self.live_running.is_empty() || full)
-                && !self.holds_any(ids)
-                && self.affordable(Work::Live, ids.len())
+        let live = live.filter(|(_, documents, full)| {
+            (self.live_running.is_empty() || *full) && self.affordable(Work::Live, *documents)
         });
         let backfill = backfill
             .is_some_and(|ids| !self.holds_any(ids) && self.affordable(Work::Backfill, ids.len()));
-        let (work, permit) = self.gate.choose(live, backfill)?;
+        let (work, permit) = self.gate.choose(live.is_some(), backfill)?;
         self.granted = Some(permit);
-        Some(match work {
-            Work::Live => Grant::Live,
-            Work::Backfill => Grant::Backfill,
-        })
+        match (work, live) {
+            (Work::Live, Some((live, _, _))) => Some(Grant::Live(live)),
+            (Work::Backfill, _) => Some(Grant::Backfill),
+            (Work::Live, None) => {
+                self.granted = None;
+                None
+            }
+        }
     }
 
     /// Whether the live batch could be granted ignoring the rule that a
     /// second live build waits for a full batch: for the last batch of a run.
-    pub(super) fn can_take_last(&mut self, ids: &[DocumentId]) -> bool {
+    pub(super) fn can_take_last(&mut self, documents: usize) -> bool {
         self.refused = None;
-        if !(self.has_room() && !self.holds_any(ids) && self.affordable(Work::Live, ids.len())) {
+        if !(self.has_room() && self.affordable(Work::Live, documents)) {
             return false;
         }
         match self.gate.choose(true, false) {
@@ -462,6 +499,11 @@ impl Builds {
         else {
             return;
         };
+        if let (Job::Live { taken, .. }, Some(progress)) = (&slot.job, &self.progress) {
+            for (index, token, _) in taken {
+                progress.build_landed(index, *token);
+            }
+        }
         let built = match output {
             Some(Output {
                 mut ids,
@@ -515,16 +557,17 @@ impl Builds {
     }
 }
 
+/// The hash a document is compared by: its index, then its key.
+fn id_hash(index: &IndexName, key: &source::RowKey) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    index.hash(&mut hasher);
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// The sorted, distinct hashes of `ids`.
 fn hashes(ids: &[DocumentId]) -> Vec<u64> {
-    let mut hashes: Vec<u64> = ids
-        .iter()
-        .map(|id| {
-            let mut hasher = DefaultHasher::new();
-            id.hash(&mut hasher);
-            hasher.finish()
-        })
-        .collect();
+    let mut hashes: Vec<u64> = ids.iter().map(|id| id_hash(&id.index, &id.key)).collect();
     hashes.sort_unstable();
     hashes.dedup();
     hashes

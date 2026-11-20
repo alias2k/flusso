@@ -1,7 +1,7 @@
 # Stage 8a design: one reader, one task per index
 
 **Status:** design, against `main` at `a187cf91` (2026-11-20), revised after an independent review of
-`61323c20`. It replaces the note written before stages 3–7, stage 9's first half (#427), #434
+`61323c20`; the owner's decisions are in §6 (b). Slice 1 merged (#436). It replaces the note written before stages 3–7, stage 9's first half (#427), #434
 (`engine::Backoff`) and #435 (backfill tickets, cut backfills) landed. The earlier implementation
 branch is gone; 8a restarts from `main`.
 
@@ -123,7 +123,9 @@ struct Pending {
 ```
 
 **The minimum** (what holds confirmation back) is the least of `order`'s first key and each build's
-oldest: no multiset to keep in step.
+oldest: no multiset to keep in step. Per lane, a build counts only until its item is registered on
+that lane (each build keeps the sinks that registered it), so a full sibling lane still holds back
+only itself (stage 6's guard; found while building slice 2).
 
 | Operation | Who | Under the index lock |
 | --- | --- | --- |
@@ -137,7 +139,7 @@ oldest: no multiset to keep in step.
 
 | Lane state | Answer |
 | --- | --- |
-| an unlanded item, or its index's pending minimum | `Before(min(oldest unlanded, pending minimum))` |
+| an unlanded item, or its index's pending minimum for this lane | `Before(min(oldest unlanded, pending minimum))` |
 | neither, something routed | `Through(routed)` |
 | nothing routed | `Idle` |
 
@@ -347,16 +349,69 @@ lines; the manual is written by the documentation agent before its PR is ready.
 | 1 | **Item keys.** `Batch.key`, a key counter per index in `Progress`; `Progress` and the sink's `Fences` keyed by it. One task. | `progress::tests` on keys; `a_key_survives_an_ingest_restart` | nothing in behaviour; `live_drain_held` |
 | 2 | **Pending sets in `Progress`, one task**, and the stall/pin attribution. The one task marks a run, then takes **across every index's set into one build**, as `main`'s batch spans indexes, published per lane. `newest`/`skipped` go. | pending unit tests (dedup, mark in flight, give back, the minimum, `(seq, counter)` order); the model test; `a_healthy_lane_is_not_stalled_by_its_index_backlog` | confirmation or fences early: model test, `fence` e2e, `wal_release`; lock cost: `live_drain_held` |
 | 3 | **Changes committed from `Progress`.** | the `changes_committed` tests | `/status` and metric values |
-| 4 | **Budget for many reservers, per index.** Rule 2 and rule 4 per index. Changes what a multi-index deployment holds: one index of three bursting holds at most half. | budget tests of §4 | a burst on one index of three (§7); the tiny-budget schedule |
+| 4 | **Budget for many reservers, per index.** Rule 2 (`index_budget_share`) and rule 4 per index. Changes what a multi-index deployment holds: one index of three bursting holds at most half. | budget tests of §4 | a burst on one index of three (§7); the tiny-budget schedule |
 | 5 | **Gate with lines** (budget asked at grant), the key-page permit. After 4 (both touch `builds.rs`). One task. | gate tests of §4 | `snapshot/rows` at `builds = 1` and 4 |
-| 6a | **Reader task + one builder task** over every pending set, the **lead bound**, the stop barrier, the stream handed back. No independence yet; `main`'s pacing. | `the_reader_waits_at_the_lead_and_resumes`, `a_stop_mid_run_builds_what_the_reader_marked_last`, `a_stop_with_many_pending_ids_finishes_within_the_deadline`, `an_id_of_an_index_without_lanes_pins_nothing` | the hop and the locks: the full in-process suite, `shutdown` e2e, the end measurements |
+| 6a | **Reader task + one builder task** over every pending set, the **lead bound** (`max_waiting_per_index`, `max_waiting`), the stop barrier, the stream handed back. No independence yet; `main`'s pacing. | `the_reader_waits_at_the_lead_and_resumes`, `a_stop_mid_run_builds_what_the_reader_marked_last`, `a_stop_with_many_pending_ids_finishes_within_the_deadline`, `an_id_of_an_index_without_lanes_pins_nothing` | the hop and the locks: the full in-process suite, `shutdown` e2e, the end measurements |
 | 6b | **Per-index tasks, dispatcher, per-index walks and coalescing**, the held-index exemption and `max_pending_documents`. | the independence tests; `indexes_walk_at_once`; `a_task_blocked_on_a_full_lane_holds_no_permit`; the seeded schedule over three indexes | everything; the end measurements |
-| 7 | **Per-index ingest status and metrics**, the backlog, the Grafana panel. | status and metric tests | — |
+| 7 | **Per-index ingest status and metrics**, the backlog, `GET /indexes/<name>/status` (public), `POST /indexes/<name>/reindex` (private, replacing `POST /reindex`), `FlussoIndexBacklog`, the Grafana panel. | status and metric tests | — |
 | 8 | **Per-index restart** (8b's other half). | `a_stop_failure_on_one_index_lets_the_others_land`, `a_restarted_index_task_gives_back_its_builds_and_serves_its_request_again`, daemon backoff tests per index | a poison index looping: backoff tests |
 
 **Order and review.** 1 and 4 touch disjoint files and can be reviewed in either order; 2 and 3
 follow 1; 5 follows 4. 6a needs 1–5; 6b follows 6a. 7 and 8 follow 6b and are independent of each
-other. 1–5 change nothing a user sees except slice 4's per-index half.
+other. 1–5 change nothing a user sees except slice 4's per-index half and slice 2's `pinned_by`.
+
+**Slice 2 as built** (where it differs from the plan above):
+
+- **`newest` and `skipped` stay** until 6a. With one task they are still how a lane learns of a
+  batch it has nothing in, and the model test keeps its meaning; 6a replaces them with the reader's
+  `routed`.
+- **Marked as read, granted all or none, admission as on `main`.** The one task marks its run
+  (`mark_run`) and offers it to the gate only while no waiting id is in a running build, checked
+  before a permit is taken, so no grant is ever given back. A build's ids leave admission when it
+  **lands** (`build_landed`), as `main`'s `Builds::holding` did: a later build of one of them gets a
+  later slot and publishes after (guard: `a_document_whose_build_landed_is_built_again_while_an_earlier_slot_waits`,
+  which passes on `main`'s engine). The live estimate counts distinct documents. `take`'s skip of
+  building ids is for 6a.
+- **Three steps of a build** decide who answers for it: taken or landed, it is the index's
+  **backlog** (`Pin::Backlog`, no lane's stall); once its batch is **sending** (`build_sending`), a
+  lane that hasn't registered it owns it (`Pin::Lane`, its stall age); a lane's registration or skip
+  settles it for that lane (`published_build` / `skipped_build`, the registry and the build changed
+  before one notification, so a fence waiter never misses the move). On a tie, within a lane or across
+  lanes, the lane is named.
+- **What a failed run leaves behind is forgotten**, not given back (`forget_all` as a run starts).
+  Confirmation stayed before it, so the replay marks it again, in batches of `max_changes`, as `main`
+  rebuilt it. Giving it back built it all in one batch past `max_changes`, which the tiny-budget
+  schedule caught (the budget's bound assumes one batch per build). Guard:
+  `what_a_failed_run_left_behind_is_rebuilt_from_the_replay_in_batches` (three batches left behind
+  are rebuilt two at a time; under give-back it sees one batch of six). Slice 8's per-index restart,
+  which doesn't reopen the stream, needs give-back and brings it with its own bound.
+- **A live batch carries its own live run's newest change**, as on `main`: every document it takes
+  was marked by that live run (a document waits only between its live run's marking and grant, and
+  what a failed engine run left is forgotten), so no fallback is needed, and the type says so
+  (`Job::Live.position: Position`, carried out of the gate by `Grant::Live`; a live item whose index
+  has no pending build is `EngineError::UnregisteredLiveItem`). Across engine runs what holds is the
+  **position contract** (the `ChangeCapture` port): positions strictly increase within one stream, and
+  over the capture's life a position never names a different change than it named before, because
+  `Progress` keeps each lane's newest position for its whole life. The Postgres capture keeps
+  numbering across reopened streams; the engine tests' sources give a replayed change the position it
+  had. A floor at the newest position routed to any lane (review round 1) was removed in round 2. It
+  did nothing for Postgres, whose replays are numbered past every earlier position; with a source that
+  replays a change under the position it had, a replayed change's batch borrowed another lane's newer
+  change, and a lane that never got that change answered through it
+  (`a_replayed_batch_claims_no_change_another_lane_landed`, which models such a source).
+- **A run whose changes build nothing is an empty build**, as on `main`: its slot tells every lane
+  it was skipped and every sink its changes settled, in grant order (#204).
+- **`pinned_by`** is `engine::Pin`. `/status` gives `{index, sink: null}` for a backlog,
+  `flusso.slot.pinned_by` an `{index}` series, and the dev dashboard's WAL panel shows it with the
+  slot's whole lag. It is non-null during every live build (the build is the backlog's). Stall age
+  counts what a lane holds itself (`Progress::own_oldest`). `FlussoIndexBacklog` waits for slice 7.
+- **`Fence::settled` needs no change:** a build left behind (an ingest engine that failed while
+  stopping) holds both fence levels at its change, so the wait `settled` skips could never be
+  answered (`a_build_left_behind_holds_both_levels_so_settled_cuts_off_no_answerable_wait`).
+- **Existing tests changed:** `tests::lanes`' `a_lane_whose_live_item_is_blocked_answers_no_further_than_before`
+  now expects `Before(0)` (the pending build holds the blocked lane) where it expected the lane's old
+  `Idle`; `pinned_by` comparisons in
+  `tests::parking`, `tests/lane_parking.rs` and `stall::tests` wrap the lane in `Pin::Lane`.
 
 ## 6. Decisions
 
@@ -377,33 +432,43 @@ other. 1–5 change nothing a user sees except slice 4's per-index half.
 13. **The dispatcher never blocks** (unbounded per-index channels, `select!` on the stop).
 14. **The reader ends first and returns the stream;** tasks finish only after its signal.
 
-### (b) For the owner
+### (b) Taken by the owner
 
-1. **A stop builds what is pending** (reversing ADR question 7), capped by the lead: at most 2,048 ids
-   at defaults plus one run, against `main`'s one batch plus `2 × builds` slots. Cost: a stop does a
-   few batches more than `main`'s. **Recommended.** Alternative: leave them for replay; restarts then
-   rewrite landed documents and `shutdown`'s guard goes.
-2. **stdout.** `seq` is non-decreasing per index, may repeat, no order across indexes; resume per
-   index from the last `seq` inclusive; reword `sink-stdout.md`. (A) Wording only. **Recommended.**
-   (B) Also add `"key"` (the item key, increasing per index) to each line, so resume is exact: a
-   format addition.
-3. **Pacing, two numbers.** The lead (`2 × max_changes` per index, `2 × builds × max_changes` in all):
-   fixed, no setting. **Recommended.** The memory bound for indexes the budget holds (6b):
-   `[concurrency] max_pending_documents` / `--max-pending-documents` / `FLUSSO_MAX_PENDING_DOCUMENTS`,
-   default 1,000,000. (A) Both as said, 6b's exemption included. **Recommended.** (B) No exemption and
-   no setting: a stalled index stalls every index once its lead fills (as `main` once the budget does).
-4. **Names.** A new `/status` `ingest.indexes.<name>`: `{waiting, oldest_waiting_seconds, building,
-   builds, held_bytes}`, plus `ingest.waiting`; metrics `flusso.index.waiting{index}`,
-   `flusso.index.backlog_age{index}` (s), `flusso.index.building{index}`,
-   `flusso.index.held_bytes{index}`, `flusso.reader.waits{bound}` (`lead`, `memory`). **Recommended.**
-   Alternative: make `indexes.<name>` an object (breaks `/status` readers).
-5. **The per-index half with one index.** (A) Only with two or more indexes: a one-index deployment
-   keeps the whole budget. **Recommended.** (B) Always: it holds half.
-6. **Per-index restart** as slice 8, after 6a and 6b. **Recommended.**
-7. **Stall attribution.** A lane's stall age counts only its own items; an index's backlog has its own
-   count and age, and `pinned_by` names the index when the backlog pins. **Recommended.** An alert on
-   the backlog's age (`FlussoIndexBacklog`, 10 minutes, as the lane alert) beside it: **recommended**
-   too, else a stuck index task with healthy lanes pages nobody.
+All seven as recommended (2026-11-20, recorded on #386): a stop builds what is pending, capped by
+the lead; stdout's wording only; the lead and the memory bound with 6b's exemption; the `ingest`
+names; the per-index share only with two or more indexes; per-index restart as slice 8; stall age
+from a lane's own items, `pinned_by` naming the index when its backlog pins, and a
+`FlussoIndexBacklog` alert. Two additions:
+
+**Every limit is a setting.** A `[concurrency]` key, a flag and a `FLUSSO_*` variable each (flag >
+env > file), never baked into the lock. A key left unset takes its derived default. A value that makes
+no sense is refused at start, naming where it came from, as `[backoff]` is (`daemon::backoff`).
+
+| Key (flag / env) | Default | Refused at start | Lands in |
+| --- | --- | --- | --- |
+| `max_waiting_per_index` (`--max-waiting-per-index` / `FLUSSO_MAX_WAITING_PER_INDEX`) | `2 × [batch] max_changes` | 0 | 6a |
+| `max_waiting` (`--max-waiting` / `FLUSSO_MAX_WAITING`) | `2 × builds × max_changes` | 0, or below `max_waiting_per_index` (as set or derived) | 6a |
+| `max_pending_documents` (`--max-pending-documents` / `FLUSSO_MAX_PENDING_DOCUMENTS`) | 1,000,000 | 0, or below `max_waiting` | 6b |
+| `index_budget_share` (`--index-budget-share` / `FLUSSO_INDEX_BUDGET_SHARE`) | 0.5 | outside (0, 1], or not a number | 4 |
+
+- The two `max_waiting` keys are the reader's lead (§3.1); they also cap what a stop builds.
+- `index_budget_share` is rule 2's fraction of `max_built_mib`. Decision 5 stands: with one enabled
+  index it applies to nothing.
+- The designer's config form renders from the `[concurrency]` schema: `just schema-gen` in each slice.
+
+**Per-index HTTP paths** (slice 7, the owner's call; nothing before it):
+
+| Route | Surface | What |
+| --- | --- | --- |
+| `GET /indexes/<name>/status` | public, unauthenticated like `/status` | the same JSON as `/status`'s `ingest.indexes.<name>`; an unknown or disabled index is `404` naming the known indexes |
+| `POST /indexes/<name>/reindex?sink=…` | private, Basic auth | replaces `POST /reindex?index=…&sink=…`, which is removed (breaking); `flusso reindex` follows |
+| `GET /indexes` | private, Basic auth | unchanged: every sink's seeding states |
+
+So `/indexes/…` is served by both listeners: `…/status` only on the public one, `GET /indexes` and
+`…/reindex` only on the private one. Each listener answers `404` for the other's routes, as now.
+
+**`FlussoIndexBacklog`** needs the backlog's age (`flusso.index.backlog_age`), which exists from
+slice 7, so the alert lands there; slice 2 only stops blaming lanes for it.
 
 ## 7. What to measure at the end
 

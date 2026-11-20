@@ -93,7 +93,12 @@ pub enum Continuity {
 /// - [`live`](Self::live) streams ongoing changes, each with the
 ///   [`Position`] the mechanism assigned it, resuming from the mechanism's own
 ///   durable position (a replication slot's `confirmed_flush_lsn`, a poll
-///   cursor, …). Positions are monotonic within one run.
+///   cursor, …). Positions strictly increase within one stream, and over
+///   the capture's life a position never names a different change than it
+///   named before: a reopened stream either keeps numbering (as the
+///   Postgres capture does) or gives a replayed change the position it had.
+///   Numbering anew with new meanings is unsafe: an answer kept about an
+///   earlier position would cover a change it never named.
 /// - [`confirm`](Self::confirm) tells the mechanism how far every lane has
 ///   landed the changes it emitted ([`Landed`]), so it may advance its resume
 ///   point that far and no further. The mechanism reads the answer off the

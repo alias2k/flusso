@@ -52,6 +52,16 @@ pub enum EngineError {
     )]
     LaneNotInProgress(String),
 
+    /// A live lane item's index had no pending build to register it under:
+    /// published, it would land without the progress knowing, and the lane
+    /// would answer past it. Every live document comes from a take, so this
+    /// is a bug in the engine, never in the data.
+    #[error(
+        "a live item for lane `{0}` has no pending build to register under; refusing to publish \
+         it unregistered"
+    )]
+    UnregisteredLiveItem(String),
+
     /// A live lane item (it carries a position) arrived with no
     /// [`ItemKey`](stream::ItemKey): it could be neither marked landed nor
     /// fenced, so the sink engine refuses it. Every live item the ingest engine

@@ -1242,6 +1242,91 @@ async fn a_document_is_never_built_twice_at_once() {
     assert_eq!(deployment.recorder.state(), db.expected());
 }
 
+/// `main`'s admission point: a document leaves admission when its build
+/// lands, not when it is published. Changes 1, 2, 2 in batches of one, four
+/// builds: 1 is held, 2's first build lands and waits behind it to be
+/// published, and the second batch of 2 is granted meanwhile (its slot is
+/// later, so it still publishes after).
+#[tokio::test(start_paused = true)]
+async fn a_document_whose_build_landed_is_built_again_while_an_earlier_slot_waits() {
+    let db = Database::new(0, [1, 2, 2].into_iter().map(Change::upsert).collect());
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([1])),
+            ..Behaviour::default()
+        },
+    );
+    let mut deployment =
+        Deployment::new(Feed::new(&db), Arc::clone(&builder), Recorder::seeded(true))
+            .ingest(|ingest| ingest.with_batch(batch(1)).with_builds(4));
+    let releaser = {
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            while builder.grants().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let grants = builder.grants().len();
+            builder.release(1);
+            grants
+        })
+    };
+    deployment.run_to_end(0).await;
+    assert_eq!(
+        releaser.await.unwrap(),
+        3,
+        "the second batch of 2 is granted while 1 is held"
+    );
+    assert!(!builder.overlapped.load(Ordering::SeqCst));
+    assert_eq!(deployment.recorder.positions(), vec![0, 1, 2]);
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// A failed run leaves more than one batch behind unpublished: changes 1 to
+/// 6 in batches of two over four builds, 1's build held, then failing once
+/// the other two batches landed behind it. The next run forgets them, and
+/// its stream, resumed before the failed change, replays every one: they are
+/// rebuilt in batches of two, as read, never in one batch of all six, and
+/// every sink ends with them.
+#[tokio::test(start_paused = true)]
+async fn what_a_failed_run_left_behind_is_rebuilt_from_the_replay_in_batches() {
+    let db = Database::new(0, (1..=6).map(Change::upsert).collect());
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([1])),
+            fail_once: Mutex::new(HashSet::from([1])),
+            ..Behaviour::default()
+        },
+    );
+    let mut deployment =
+        Deployment::new(Feed::new(&db), Arc::clone(&builder), Recorder::seeded(true))
+            .ingest(|ingest| ingest.with_batch(batch(2)).with_builds(4));
+    let releaser = {
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            while builder.grants().len() < 3 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            builder.release(1);
+        })
+    };
+    assert_eq!(deployment.run_to_end(1).await, 1, "one run failed");
+    releaser.await.unwrap();
+    let grants = builder.grants();
+    assert!(
+        grants.len() > 3 && grants.iter().all(|ids| ids.len() <= 2),
+        "rebuilt as read, two at a time: {grants:?}"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+    let confirmed = deployment.feed.confirmed.lock().unwrap().clone();
+    assert!(
+        confirmed.windows(2).all(|pair| pair[0].seq <= pair[1].seq),
+        "confirmation never moves back: {confirmed:?}"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn every_fourth_contested_grant_goes_to_the_backfill() {
     // Live ids from 1000, backfill rows below 100; batches of one, one build

@@ -377,7 +377,10 @@ async fn a_refusal_parks_only_its_lane_and_the_sibling_keeps_landing() {
         Landed::Before(Position::new(0)),
         "and so holds the source's resume point"
     );
-    assert_eq!(rig.progress.pinned_by(), Some(lane(orders())));
+    assert_eq!(
+        rig.progress.pinned_by(),
+        Some(crate::Pin::Lane(lane(orders())))
+    );
     match engine.lane_health(&lane(orders())) {
         LaneHealth::Parked {
             reason: ParkReason::Refused { ids, .. },

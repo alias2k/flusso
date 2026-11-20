@@ -74,7 +74,7 @@ use crate::stop::{Stop, drain_lanes};
 
 use builds::Builds;
 use confirm::{CONFIRM_TICK, Furthest};
-use live::{Next, PendingBatch, next_live};
+use live::{LiveRun, Next, next_live};
 pub use snapshot::KEY_PAGE;
 use snapshot::{ClosedConsumer, Snapshot, Step, next_snapshot_step};
 
@@ -277,8 +277,9 @@ impl IngestEngine {
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
-        let mut builds =
-            Builds::new(self.builds, self.budget.clone()).with_observer(Arc::clone(&self.observer));
+        let mut builds = Builds::new(self.builds, self.budget.clone())
+            .with_observer(Arc::clone(&self.observer))
+            .with_progress(Arc::clone(&self.progress));
         let ended = self
             .follow(&lanes, requests, &scopes, live, &mut builds)
             .await;
@@ -297,7 +298,7 @@ impl IngestEngine {
         mut live: LiveStream,
         builds: &mut Builds,
     ) -> Result<Ended> {
-        let mut pending = PendingBatch::new(self.batch.max_changes);
+        let mut pending = LiveRun::new(self.batch.max_changes);
         let mut snapshot: Option<Snapshot> = None;
         let mut last_confirmed: Option<Landed> = None;
         let mut confirm_tick = tokio::time::interval(CONFIRM_TICK);
@@ -305,6 +306,10 @@ impl IngestEngine {
         // Where the last arm's work ended: every arm times its wait from here,
         // so the loop reads no clock of its own.
         let mut mark = Instant::now();
+        // What an earlier run marked and never published is forgotten:
+        // confirmation stayed before all of it, so this run's stream replays
+        // it and it is marked again, batched as it is read.
+        self.progress.forget_all();
 
         loop {
             // A live stream that ends while a snapshot runs or requests wait
@@ -455,7 +460,7 @@ impl IngestEngine {
     /// live stream so the final position reaches the source.
     async fn wind_down(
         &self,
-        pending: &mut PendingBatch,
+        pending: &mut LiveRun,
         builds: &mut Builds,
         lanes: &Lanes,
         mut live: LiveStream,

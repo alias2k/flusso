@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicBool;
 use std::thread;
 
 use super::*;
+use source::document::DocumentId;
 
 fn sink(name: &str) -> LaneKey {
     LaneKey::new(
@@ -512,4 +513,205 @@ fn concurrent_registration_and_landing_never_answer_past_a_lane() {
         handle.join().unwrap();
     }
     assert_eq!(progress.landed(), Landed::Through(p(BATCHES - 1)));
+}
+
+fn id(index: &str, n: i64) -> DocumentId {
+    DocumentId {
+        index: kernel::IndexName::try_new(index).unwrap(),
+        key: source::RowKey(vec![(
+            kernel::ColumnName::try_new("id").unwrap(),
+            kernel::GenericValue::BigInt(n),
+        )]),
+    }
+}
+
+fn nothing_held(_: &source::RowKey) -> bool {
+    false
+}
+
+/// A document marked pending holds its lanes before its change while it
+/// waits and while it builds; once its item is registered the item holds
+/// them, and once the item lands nothing does.
+#[test]
+fn a_marked_id_pins_confirmation_until_its_build_lands() {
+    let a = sink("a");
+    let progress = Progress::new([a.clone()]);
+    assert_eq!(progress.mark([(id("users", 1), p(3))]), 1);
+    assert_eq!(progress.waiting(), 1);
+    assert_eq!(progress.landed(), Landed::Before(p(3)));
+
+    let taken = progress.take(&a.index, usize::MAX, &nothing_held).unwrap();
+    assert_eq!(progress.waiting(), 0);
+    assert_eq!(progress.landed(), Landed::Before(p(3)), "building");
+
+    let key = progress.next_key(&a.index).unwrap();
+    progress.published_build(&a, key, taken.oldest, p(3), taken.token);
+    progress.release(&a.index, taken.token);
+    assert_eq!(progress.landed(), Landed::Before(p(3)), "on the lane");
+    progress.applied(&a, key);
+    assert_eq!(progress.landed(), Landed::Through(p(3)));
+}
+
+/// A build stops holding a lane back once its item is registered there: a
+/// full sibling lane of the same index holds back only itself.
+#[test]
+fn a_build_holds_a_lane_only_until_its_item_is_registered_there() {
+    let (healthy, full) = (sink("healthy"), sink("full"));
+    let progress = Progress::new([healthy.clone(), full.clone()]);
+    progress.mark([(id("users", 1), p(1))]);
+    let taken = progress
+        .take(&healthy.index, usize::MAX, &nothing_held)
+        .unwrap();
+    let key = progress.next_key(&healthy.index).unwrap();
+    progress.published_build(&healthy, key, taken.oldest, p(1), taken.token);
+    progress.applied(&healthy, key);
+
+    assert_eq!(
+        progress.lane(&healthy, Level::Applied),
+        Some(Landed::Through(p(1)))
+    );
+    assert_eq!(
+        progress.lane(&full, Level::Applied),
+        Some(Landed::Before(p(1))),
+        "the item isn't on it yet: the build still holds it"
+    );
+    assert_eq!(progress.landed(), Landed::Before(p(1)));
+}
+
+/// While an index's pending documents are older than every lane's own
+/// items, they are what pins the resume point, named by their index; a
+/// lane's own oldest item counts only what is on the lane.
+#[test]
+fn a_backlog_pinning_confirmation_is_named_by_its_index() {
+    let users = sink("a");
+    let orders = LaneKey::new(
+        kernel::IndexName::try_new("orders").unwrap(),
+        kernel::SinkName::try_new("a").unwrap(),
+    );
+    let progress = Progress::new([users.clone(), orders.clone()]);
+    progress.published(&orders, ItemKey::new(0), p(5), p(5));
+    progress.mark([(id("users", 1), p(2))]);
+
+    assert_eq!(progress.landed(), Landed::Before(p(2)));
+    assert_eq!(
+        progress.pinned_by(),
+        Some(Pin::Backlog(users.index.clone()))
+    );
+    assert_eq!(progress.own_oldest(&users), None, "nothing on the lane");
+    assert_eq!(progress.own_oldest(&orders), Some(p(5)));
+
+    progress.published(&users, ItemKey::new(0), p(2), p(2));
+    assert_eq!(
+        progress.pinned_by(),
+        Some(Pin::Lane(users.clone())),
+        "a tie names the lane"
+    );
+}
+
+/// An id of an index with no lane is dropped: no build would ever publish
+/// it, so it would hold confirmation back for good.
+#[test]
+fn an_id_of_an_index_without_lanes_pins_nothing() {
+    let a = sink("a");
+    let progress = Progress::new([a.clone()]);
+    assert_eq!(progress.mark([(id("ghost", 1), p(1))]), 0);
+    assert_eq!(progress.waiting(), 0);
+    assert_eq!(progress.landed(), Landed::Idle);
+}
+
+/// What a run left behind unpublished is forgotten when the next run
+/// starts, every time it is asked: the replay marks it again.
+#[test]
+fn a_run_forgets_what_an_earlier_run_left_behind() {
+    let a = sink("a");
+    let progress = Progress::new([a.clone()]);
+    progress.mark([(id("users", 1), p(1)), (id("users", 2), p(2))]);
+    progress.take(&a.index, usize::MAX, &nothing_held).unwrap();
+    progress.mark([(id("users", 3), p(3))]);
+    assert_eq!(progress.landed(), Landed::Before(p(1)));
+    progress.forget_all();
+    progress.forget_all();
+    assert_eq!(progress.waiting(), 0);
+    assert_eq!(progress.landed(), Landed::Idle);
+}
+
+/// Register `taken`'s item on `lane` under `key`: the call the ingest
+/// engine makes once that lane's send returned.
+fn register(progress: &Progress, lane: &LaneKey, key: ItemKey, taken: &Taken, last: Position) {
+    progress.published_build(lane, key, taken.oldest, last, taken.token);
+}
+
+/// Each answer a registration moves is followed by a notification, so a
+/// fence waiter on that lane wakes. Here the sink lands the item before its
+/// registration (the ingest task resumed late) and a sibling lane hasn't
+/// taken it: the last notification must see the lane's new answer.
+#[test]
+fn a_registration_that_moves_a_lanes_answer_notifies_after_it() {
+    let (a, b) = (sink("a"), sink("b"));
+    let progress = Arc::new(Progress::new([a.clone(), b.clone()]));
+    let seen: Arc<Mutex<Vec<Option<Landed>>>> = Arc::default();
+    let weak = Arc::downgrade(&progress);
+    let log = Arc::clone(&seen);
+    let lane = a.clone();
+    progress.on_registered(Arc::new(move || {
+        if let Some(progress) = weak.upgrade() {
+            log.lock()
+                .unwrap()
+                .push(progress.lane(&lane, Level::Applied));
+        }
+    }));
+    progress.mark([(id("users", 1), p(3))]);
+    let taken = progress.take(&a.index, usize::MAX, &nothing_held).unwrap();
+    let key = progress.next_key(&a.index).unwrap();
+    progress.applied(&a, key);
+    register(&progress, &a, key, &taken, p(3));
+
+    assert_eq!(
+        progress.lane(&a, Level::Applied),
+        Some(Landed::Through(p(3)))
+    );
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.last().copied().flatten(),
+        Some(Landed::Through(p(3))),
+        "a waiter on `a` was woken after its answer moved: {seen:?}"
+    );
+}
+
+/// A build whose item reached some lanes and waits on another is that
+/// lane's to answer for: it pins the slot by that lane and ages it.
+#[test]
+fn a_build_sent_to_some_lanes_and_blocked_on_one_pins_that_lane() {
+    let (a, b) = (sink("a"), sink("b"));
+    let progress = Progress::new([a.clone(), b.clone()]);
+    progress.mark([(id("users", 1), p(3))]);
+    let taken = progress.take(&a.index, usize::MAX, &nothing_held).unwrap();
+    assert_eq!(
+        progress.pinned_by(),
+        Some(Pin::Backlog(a.index.clone())),
+        "building: the backlog's"
+    );
+    progress.build_landed(&a.index, taken.token);
+    progress.build_sending(&a.index, taken.token);
+    let key = progress.next_key(&a.index).unwrap();
+    register(&progress, &a, key, &taken, p(3));
+    progress.applied(&a, key);
+
+    assert_eq!(progress.pinned_by(), Some(Pin::Lane(b.clone())));
+    assert_eq!(progress.own_oldest(&b), Some(p(3)));
+}
+
+/// On a tie across lanes, a lane's own item is named, not another index's
+/// backlog, whatever the lanes' order.
+#[test]
+fn a_lane_wins_a_tie_with_another_indexs_backlog() {
+    let users = sink("a");
+    let orders = LaneKey::new(
+        kernel::IndexName::try_new("orders").unwrap(),
+        kernel::SinkName::try_new("a").unwrap(),
+    );
+    let progress = Progress::new([users.clone(), orders.clone()]);
+    progress.published(&users, ItemKey::new(0), p(5), p(5));
+    progress.mark([(id("orders", 1), p(5))]);
+    assert_eq!(progress.pinned_by(), Some(Pin::Lane(users)));
 }

@@ -10,6 +10,7 @@ A **lane** is one index flowing into one sink. Open this page when any of these 
 - `FlussoLaneStalled` fired: a lane has landed nothing for 10 minutes.
 - The log says `the lane is parked`, `the index's target is gone`, or `a lane has landed nothing for …s`.
 - [`/status`](../reference/http.md#get-status) shows a lane whose `health` isn't `open`, or whose `stall_seconds` keeps climbing.
+- `pinned_by` names an index with `"sink": null` and keeps naming it: no lane is stuck, the index's backlog is. See [When an index's backlog holds the slot](#when-an-indexs-backlog-holds-the-slot).
 
 A lane that keeps writing is not stalled, however long its backlog. For a whole sink that is down or refusing requests, the lane is `open` and the sink's `phase` is `failed`: the cause is the sink, covered in [step 3](#the-sink-itself-health-open).
 
@@ -25,7 +26,7 @@ Dropping and rebuilding just the stuck index is not available yet ([#394](https:
 
 ### 1. Find the lane
 
-The alert's `index` and `sink` labels name it. Without alerting, read `/status`: `pinned_by` names the lane holding the slot, and each lane sits under `sinks.<sink>.lanes.<index>`:
+The alert's `index` and `sink` labels name it. Without alerting, read `/status`: `pinned_by` names the lane holding the slot (a `null` `sink` means [an index's backlog](#when-an-indexs-backlog-holds-the-slot) holds it, not a lane), and each lane sits under `sinks.<sink>.lanes.<index>`:
 
 ```sh
 curl -s localhost:9464/status | jq '.pinned_by, (.sinks[].lanes | with_entries(select(.value.health != "open")))'
@@ -117,6 +118,20 @@ The lane is written but nothing lands. The log has OpenSearch's reason and `sink
 - The log says `the parked lane's probe landed; the lane is open` (or `the index is staged again; the lane is open`), then `a stalled lane is landing again`.
 - `health` is back to `open`, `stall_seconds` drops to 0, the `flusso_lane_parked` series disappears.
 - `pinned_by` moves on and the slot releases the WAL it kept.
+
+## When an index's backlog holds the slot
+
+`pinned_by` reads `{ "index": "users", "sink": null }`, and `flusso_slot_pinned_by{index="users"}` has no `sink` label. No lane holds the slot: the index's **backlog** does. Those are documents of `users` whose changes flusso has read, waiting to be built or being built, and not yet handed to any sink.
+
+- **For a moment, it's normal.** Every live change passes through the backlog, so the form shows up during builds and moves on.
+- **When it stays, builds aren't keeping up.** The backlog is on no lane, so it ages no lane and `FlussoLaneStalled` doesn't fire for it. The slot lag grows instead (`flusso_replication_slot_lag_bytes`); the dev dashboard's WAL panel marks the index as `pinned by users's backlog`.
+
+Find which side is slow:
+
+| What shows | Cause | Fix |
+| --- | --- | --- |
+| The `build` stage busy ([Where the time goes](../reference/metrics.md#where-the-time-goes)), slow document queries in Postgres | Building that index's documents is slow | Read the slow queries (`pg_stat_statements`) and index the columns the schema joins on, or raise [`[concurrency] builds`](../reference/config-toml.md#concurrency) if Postgres has room |
+| `flusso_memory_built_bytes` flat at the limit, `flusso_memory_refused_total` climbing | The [memory budget](../reference/config-toml.md#concurrency) is full, so nothing more is built | Find the sink that isn't acknowledging (a parked lane, a lane whose `outstanding` stays high) and fix it as above; with every sink healthy, raise `max_built_mib` |
 
 ## Options and variations
 
