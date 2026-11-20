@@ -610,14 +610,21 @@ async fn a_change_whose_documents_were_all_skipped_still_counts() {
 /// A lane that isn't written (parked on a `stop` refusal, blocked, or
 /// staged again because its target is gone) holds its sink's count, while a
 /// sibling sink counts everything; the held sink's changes stay in flight.
+/// Many grants pass it with documents for `orders` only, and every lane's
+/// record stays within its bound. Once the lane is written again the sink
+/// has every read.
 async fn a_lane_not_written_holds_its_sinks_count(
     park: impl FnOnce(&Gate),
+    unpark: impl FnOnce(&Gate),
     health: LaneHealthState,
 ) {
+    const PASSING: i64 = 200;
     let parked = Arc::new(Gate::default());
     park(&parked);
     let healthy = Arc::new(Gate::default());
-    let (source, _end) = scripted(vec![change("users", 1), change("orders", 2)]);
+    let mut changes = vec![change("users", 0)];
+    changes.extend((1..=PASSING).map(|id| change("orders", id)));
+    let (source, _end) = scripted(changes);
     let backends = backends_over(
         Arc::new(source),
         vec![
@@ -627,9 +634,11 @@ async fn a_lane_not_written_holds_its_sinks_count(
     );
     let running = Daemon::new(two_indexes(), backends).start().await.unwrap();
     let status = running.status();
+    let progress = running.progress();
     let run = tokio::spawn(running.run(std::future::pending::<()>()));
-    wait_until("the healthy sink to count both", || {
-        committed(&status.snapshot(), "audit") == 2
+    let total = PASSING as u64 + 1;
+    wait_until("the healthy sink to count every change", || {
+        committed(&status.snapshot(), "audit") == total
     })
     .await;
     wait_until("the users lane on primary to be held", || {
@@ -644,8 +653,27 @@ async fn a_lane_not_written_holds_its_sinks_count(
         "held by the {} lane",
         health.name()
     );
-    assert_eq!(snapshot.sinks["primary"].changes_in_flight, 2);
-    assert_eq!(snapshot.changes_in_flight, 2, "the slowest sink");
+    assert_eq!(snapshot.sinks["primary"].changes_in_flight, total);
+    assert_eq!(snapshot.changes_in_flight, total, "the slowest sink");
+    for lane in [
+        LaneKey::new(users(), primary()),
+        LaneKey::new(orders(), primary()),
+        LaneKey::new(users(), audit()),
+        LaneKey::new(orders(), audit()),
+    ] {
+        let kept = progress.steps_kept(&lane).unwrap();
+        assert!(
+            kept <= 2 * progress.outstanding(&lane) + 2,
+            "{lane} keeps {kept} steps after {total} grants"
+        );
+    }
+
+    unpark(&parked);
+    wait_until("the held sink to count every change", || {
+        committed(&status.snapshot(), "primary") == total
+    })
+    .await;
+    assert_eq!(status.snapshot().changes_captured, total);
     run.abort();
 }
 
@@ -658,6 +686,7 @@ async fn a_refused_lane_holds_its_sinks_count_and_a_sibling_counts_on() {
                 .unwrap()
                 .insert(users().as_ref().to_owned());
         },
+        |gate| gate.refused.lock().unwrap().clear(),
         LaneHealthState::Refused,
     )
     .await;
@@ -672,6 +701,7 @@ async fn a_blocked_lane_holds_its_sinks_count_and_a_sibling_counts_on() {
                 .unwrap()
                 .insert(users().as_ref().to_owned());
         },
+        |gate| gate.blocked.lock().unwrap().clear(),
         LaneHealthState::Blocked,
     )
     .await;
@@ -686,6 +716,7 @@ async fn a_restaging_lane_holds_its_sinks_count_and_a_sibling_counts_on() {
                 .unwrap()
                 .insert(users().as_ref().to_owned());
         },
+        |gate| gate.missing.lock().unwrap().clear(),
         LaneHealthState::Restaging,
     )
     .await;

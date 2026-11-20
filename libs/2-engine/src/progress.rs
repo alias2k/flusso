@@ -135,7 +135,12 @@ pub enum Pin {
 /// count moves by ([`Progress::committed`]). Numbered in grant order for the
 /// life of the progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Step(u64);
+pub struct Step {
+    number: u64,
+    /// How many changes had been read when it closed: what a sink that has
+    /// committed it has committed.
+    read: u64,
+}
 
 /// Which of a lane's two levels to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,12 +192,9 @@ struct Registry {
     steps: Steps,
 }
 
-/// The closed steps some lane may still be at.
+/// Where the steps' numbering is.
 #[derive(Debug, Default)]
 struct Steps {
-    /// Each closed step from the oldest a lane is at, with how many changes
-    /// had been read when it closed.
-    closed: VecDeque<(Step, u64)>,
     /// The number of the next step.
     next: u64,
     /// How many changes had been read when the last step closed.
@@ -208,9 +210,12 @@ struct Registered {
     unsearchable: VecDeque<(ItemKey, Position)>,
     /// Every change through it that the lane needs is registered on it.
     newest: Option<Position>,
-    /// The steps routed to the lane, with an item or skipped, in order: the
-    /// front is the newest it has committed, once it has one. A step no
-    /// lane was routed (its engine run ended first) is in none.
+    /// The steps routed to the lane that can still answer what it has
+    /// committed, in order: the front is the newest it has committed, once
+    /// it has one; after it, each step holding an unlanded item and the
+    /// newest step after each of those, a later skip replacing an earlier
+    /// one. A step no lane was routed (its engine run ended first) is in
+    /// none. See [`Registered::record`] for the bound.
     steps: VecDeque<Step>,
 }
 
@@ -379,17 +384,18 @@ impl Progress {
         step: Option<Step>,
     ) {
         let mut registry = lock(&self.registry);
-        if let Some(registered) = registry.lanes.get_mut(lane) {
+        if let (Some(registered), Some(marks)) =
+            (registry.lanes.get_mut(lane), self.marks.get(lane))
+        {
+            if let Some(step) = step {
+                registered.committed(marks);
+                registered.record(step, item.is_some());
+            }
             if let Some((key, oldest)) = item {
                 registered.unlanded.push_back((key, oldest, step));
                 registered.unsearchable.push_back((key, oldest));
             }
             registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
-            if let Some(step) = step
-                && registered.steps.back().is_none_or(|newest| *newest < step)
-            {
-                registered.steps.push_back(step);
-            }
         }
     }
 
@@ -654,30 +660,13 @@ impl Progress {
     }
 
     fn close(&self, registry: &mut Registry) -> Step {
-        let step = Step(registry.steps.next);
-        registry.steps.next += 1;
         let read = self.read.load(Ordering::Relaxed);
+        let step = Step {
+            number: registry.steps.next,
+            read,
+        };
+        registry.steps.next += 1;
         registry.steps.read = read;
-        registry.steps.closed.push_back((step, read));
-        // No lane is behind the oldest step any lane is at: older ones
-        // answer nothing any more.
-        let mut least: Option<Option<Step>> = None;
-        for (lane, marks) in &self.marks {
-            if let Some(registered) = registry.lanes.get_mut(lane) {
-                let at = registered.committed(marks);
-                least = Some(least.map_or(at, |least| least.min(at)));
-            }
-        }
-        if let Some(Some(least)) = least {
-            while registry
-                .steps
-                .closed
-                .front()
-                .is_some_and(|(step, _)| *step < least)
-            {
-                registry.steps.closed.pop_front();
-            }
-        }
         step
     }
 
@@ -698,16 +687,18 @@ impl Progress {
         }
         match least {
             None => registry.steps.read,
-            Some(None) => 0,
-            Some(Some(step)) => {
-                let closed = &registry.steps.closed;
-                let through = closed.partition_point(|(closed, _)| *closed <= step);
-                through
-                    .checked_sub(1)
-                    .and_then(|at| closed.get(at))
-                    .map_or(0, |(_, read)| *read)
-            }
+            Some(at) => at.map_or(0, |step| step.read),
         }
+    }
+
+    /// How many steps `lane` keeps to answer [`committed`](Self::committed):
+    /// at most twice its unlanded items ([`outstanding`](Self::outstanding))
+    /// plus two, however many grants pass it. `None` for an unknown lane.
+    pub fn steps_kept(&self, lane: &LaneKey) -> Option<usize> {
+        lock(&self.registry)
+            .lanes
+            .get(lane)
+            .map(|registered| registered.steps.len())
     }
 
     /// Every index that can have pending documents: one with a lane here.
@@ -793,6 +784,35 @@ impl Registered {
             self.steps.pop_front();
         }
         self.steps.front().copied().filter(behind)
+    }
+
+    /// Record that `step` was routed to the lane, with an item or skipped.
+    /// Call it after [`committed`](Self::committed) pruned the front and
+    /// before the step's own item is registered.
+    ///
+    /// A skipped step replaces the newest entry when no unlanded item is at
+    /// or after that entry: the entry could only answer as the newest step,
+    /// which the skip now is. **The bound:** items land in key order, so
+    /// every item after the first unlanded one is unlanded too; past the
+    /// front, each entry is a step holding one of the `k` unlanded items or
+    /// the one skip entry after it. So a lane keeps at most `2k + 1` entries
+    /// after a registration, `2k + 2` with the step being recorded, however
+    /// many grants pass it.
+    fn record(&mut self, step: Step, item: bool) {
+        let Some(&newest) = self.steps.back() else {
+            self.steps.push_back(step);
+            return;
+        };
+        if newest >= step {
+            return;
+        }
+        let newest_unlanded = self.unlanded.iter().rev().find_map(|(_, _, step)| *step);
+        let replaceable = !item && newest_unlanded.is_none_or(|unlanded| unlanded < newest);
+        if replaceable && let Some(back) = self.steps.back_mut() {
+            *back = step;
+        } else {
+            self.steps.push_back(step);
+        }
     }
 }
 

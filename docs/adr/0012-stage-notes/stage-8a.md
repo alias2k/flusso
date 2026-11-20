@@ -317,9 +317,31 @@ committed"):
   holds every change read since the previous one and records the read total. Every lane of the grant's
   build is registered with the step, with an item (`published_build`) or without
   (`skipped_build`, which also takes the index with no pending build), an empty build included.
-- A lane remembers the steps routed to it; it has committed the newest one whose items it has all
-  landed. A sink's count is the read total at the oldest step its lanes have committed. Computed when
-  read, under the registry lock; closed steps behind every lane are dropped as new ones close.
+- A step carries its read total. A lane keeps the steps routed to it that can still answer: it has
+  committed the newest one whose items it has all landed, and a sink's count is the read total at the
+  oldest step its lanes have committed. There is no list shared by the lanes.
+- **The bound** (review round 1: a parked lane let steps pile up, about 24 bytes per grant, and one
+  parked lane stopped the pruning for every sink). A lane drops the steps before the one it has
+  committed whenever a step is registered on it, and a skipped step replaces the lane's newest entry
+  when no unlanded item is at or after it (that entry could only answer as the newest step, which the
+  skip now is). Items land in key order, so past the front every entry is a step holding one of the
+  lane's `k` unlanded items or the one skip after it: **a lane keeps at most `2k + 2` steps, however
+  many grants pass it**, and `k` is bounded by the lane's capacity. A lane parked on its first item
+  keeps at most 2. `Progress::steps_kept` reports it. Guards: `progress::tests::parked` (10,000 grants
+  past a lane parked on its first item, after landing, and with five unlanded items: the bound holds
+  after every grant and the count is the total read once the lane lands), the daemon's
+  `a_{refused,blocked,restaging}_lane_holds_its_sinks_count_and_a_sibling_counts_on` (200 grants
+  past the lane on a real daemon, the bound on every lane, every read counted once it is written
+  again), and `compaction_changes_no_count` (seeded random grants, skips, landings and ended runs over
+  two indexes on two sinks: every count equals a model that keeps every step). All seven fail with
+  the record appending every step.
+- **The cost of a read.** `Progress::committed(sink)` takes the registry lock (the one the ingest
+  engine takes per lane registration and confirmation and fences read under) and walks every lane of
+  the deployment, keeping the sink's: per lane it drops landed items (amortized, as `landed()` does),
+  finds its first unlanded item's step and pops the steps before it, constant work in the usual case.
+  `/status` reads it once per sink (`indexes × sinks` lane visits per sink); `/metrics` twice per
+  sink (`flusso.changes.committed`, and `flusso.changes.in_flight` through `in_flight_for`). The lock
+  is held for that walk alone.
 - **Per read, not per position.** A source that replays under the positions it had (the position
   contract, #439) reads a change twice; each read is counted once per sink, when the sink lands that
   read's own step. A sink that had landed the first read counted it then and counts the replay when

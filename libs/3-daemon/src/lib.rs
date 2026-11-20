@@ -409,6 +409,12 @@ impl RunningDaemon {
         Arc::clone(&self.budget)
     }
 
+    /// How far each lane has landed what was routed to it, and how many
+    /// changes each sink has committed (see [`Progress`]). Cheap to clone.
+    pub fn progress(&self) -> Arc<Progress> {
+        Arc::clone(&self.progress)
+    }
+
     /// The fence: what a transport waits on so a client can read its own
     /// write (see [`Fence`]). Cheap to clone.
     pub fn fence(&self) -> Fence {
