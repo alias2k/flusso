@@ -248,9 +248,9 @@ code; the bounds below follow from them.
 | G3 | a waiter is **eligible** unless the budget refused it and no release has come since |
 | G4 | a free permit is offered to the oldest eligible live waiter, except on every fourth **contested** grant (both lines have an eligible waiter), when it goes to the oldest eligible backfill waiter; a grant only one kind could take doesn't move the count (`main`'s rule, per waiter) |
 | G5 | **the budget is asked at grant**, under the gate's lock (gate lock, then the budget's; the budget never takes the gate's): the offered waiter reserves its batch; refused, it keeps its place, becomes ineligible (G3) and the offer moves on by G4 |
-| G6 | a waiter behind an older waiter of its kind that the budget refused **by the limit** reserves *behind a refusal*: it takes no room by the limit (for live only rule 5, for backfill only rule 4 can grant it), so small batches can't starve a large one (the budget's oldest-first, across waiters). A refusal by an index's **share** holds no one back: one stuck index never blocks another's line |
-| G7 | every change (a permit freed, a waiter leaving, a refusal, a release making a waiter eligible again) wakes every waiter, after the lock is let go; a waiter registers its wake-up before it reads the state, so no wake-up is lost |
-| G8 | cancel-safe: a waiter dropped before its grant leaves its line and wakes the others; a permit dropped gives itself back, once |
+| G6 | a waiter behind an older waiter of its kind that the budget refused **by the limit** reserves *behind a refusal*: it takes no room by the limit (for live only rule 5, for backfill only rule 4 can grant it), so small batches can't starve a large one (the budget's oldest-first, across waiters). A refusal by an index's **share** holds no one back: one stuck index never blocks another's line. A waiter refused **while behind** is eligible again as soon as any waiter of its line leaves (granted or dropped: the one ahead may be gone), not only at a release (review round 1) |
+| G7 | every change (a permit freed, a waiter leaving, a refusal, a grant, a release making a waiter eligible again) wakes every waiter, after the lock is let go; a waiter registers its wake-up before it reads the state, so no wake-up is lost. A permit given back wakes only when someone is in a line, decided under the lock (a waiter joins under it before reading the state, so it either sees the permit free or is woken): with no waiter, as today, a landed build costs no wake-up |
+| G8 | cancel-safe: a waiter dropped before its grant leaves its line and wakes the others; a permit dropped gives itself back, once. `acquire` takes the budget it reserves from (not an option), so a waiter is refused only with a budget whose release makes it eligible again |
 | G9 | **the one task of this slice** doesn't wait in a line: at each grant point it asks with its live and backfill candidates (`Builds::choose`, the budget asked just before as today) and gets a permit by G4 only while no eligible waiter is in a line, which with one task is always. So the order of grants, the every-fourth rule, a second live build only while the waiting batch is full, and `builds` as the cap are `main`'s |
 
 **Key pages** don't take build permits: `main` reads its one page beside the builds. **K1**: one key-page
@@ -276,13 +276,27 @@ grows by as much).
   bytes still gets its batch). A full lane or a sink down holds no permit: a permit is held by a running
   build only (G1), and from 6a a task joins a line only while it can use a permit now.
 - **A stop while waiting** drops the waiter (G8): it leaves its line at once.
+- **Refused while behind.** A waiter refused only because an older one the limit refused was ahead is
+  eligible again as soon as any waiter of its line leaves (G6): a dropped or granted waiter never leaves
+  the ones behind it refused with room free.
 - **Metrics** don't move: the gate records nothing of its own in this slice; budget waits stay
   `Builds`' (slice 4), and with one task (G9) every grant is decided where it was.
 
 **What waits for 6a/6b.** The lines (G2–G8) have no waiter in production until index tasks exist; this
 slice proves them with many waiters in `gate::tests` and keeps the one task on G9. "At most one waiter per
 task, only while it can use a permit now" (a batch ready, not publishing a full lane's item) is the
-caller's rule, built with the tasks.
+caller's rule, built with the tasks. Two requirements recorded in review round 1 (no code in slice 5):
+
+- **K1 with several walks (6b).** The key-read permit lives inside the walk's stored fetch future, which
+  runs only while its walk is stepped. With several walks, a walk that stops being stepped mid-read (its
+  batch full behind a parked lane) would keep the one permit and stop every other index's backfill. 6b
+  must run each read with its permit so that it finishes without its walk being stepped (a spawned read
+  handing its page to the walk), or give the permit back when stepping stops. Acceptance test:
+  `one_index_stuck_mid_walk_does_not_stop_another_indexs_key_reads`.
+- **The one task's direct path (6a).** `Gate::choose` yields only to eligible waiters and never reserves
+  behind, so beside real waiters it would pass a limit-refused waiter and take room by the limit, which G6
+  forbids. **6a removes the direct path**: every build, the one task's included while it exists, goes
+  through `acquire`, so G6 holds for all. Acceptance test: `no_build_takes_room_by_the_limit_ahead_of_a_waiter_the_limit_refused`.
 
 **Budget**, from one reserver to many. **Built in slice 4** (as built, below the plan it replaced):
 
@@ -481,7 +495,7 @@ lines; the manual is written by the documentation agent before its PR is ready.
 | 2 | **Pending sets in `Progress`, one task**, and the stall/pin attribution. The one task marks a run, then takes **across every index's set into one build**, as `main`'s batch spans indexes, published per lane. `newest`/`skipped` go. | pending unit tests (dedup, mark in flight, give back, the minimum, `(seq, counter)` order); the model test; `a_healthy_lane_is_not_stalled_by_its_index_backlog` | confirmation or fences early: model test, `fence` e2e, `wal_release`; lock cost: `live_drain_held` |
 | 3 | **Changes committed from `Progress`** (§3.6, owner's option 1): every lane of a sink landed it, or had nothing for it. Moves when a change counts. One task. | daemon `tests::committed` (red on `main`), `progress::tests::committed` | `/status` and metric values; `drain_changes_per_s` steps once (window restarted) |
 | 4 | **Budget for many reservers, per index** (§3.5, as built). Rule 3 (`index_budget_share`, one index's live bytes); a live build takes the indexes that fit and defers the rest, bounded at `2 × max_changes` waiting. Changes what a multi-index deployment holds: one index of three bursting live holds at most its share, the others keep building; an index's backfill or reindex leaves its live stream `main`'s room. One task. | budget tests of §4 | a burst on one index of three (§7); the tiny-budget schedule, and its three-index variant |
-| 5 | **Gate with lines** (budget asked at grant), the key-page permit (§3.5, G1–G9 and K1, as built). One task: the lines have no waiter in production until 6a; the task asks `Gate::choose`, which yields only to an eligible waiter, so grants are as before. The budget gains `reserve_behind` and the refusal's reason (G6). | gate tests of §4, each failing under its rule's mutation | `snapshot/rows` at `builds = 1` and 4 |
+| 5 | **Gate with lines** (budget asked at grant), the key-page permit (§3.5, G1–G9 and K1, as built). One task: the lines have no waiter in production until 6a; the task asks `Gate::choose`, which yields only to an eligible waiter, so grants are as before. The budget gains `reserve_behind` and the refusal's reason (G6). | gate tests of §4: sixteen mutations of the rules (G1–G9, K1), each failing at least one test (table in PR #443) | `snapshot/rows` at `builds = 1` and 4 |
 | 6a | **Reader task + one builder task** over every pending set, the **lead bound** (`max_waiting_per_index`, `max_waiting`), the stop barrier, the stream handed back. No independence yet; `main`'s pacing. | `the_reader_waits_at_the_lead_and_resumes`, `a_stop_mid_run_builds_what_the_reader_marked_last`, `a_stop_with_many_pending_ids_finishes_within_the_deadline`, `an_id_of_an_index_without_lanes_pins_nothing` | the hop and the locks: the full in-process suite, `shutdown` e2e, the end measurements |
 | 6b | **Per-index tasks, dispatcher, per-index walks and coalescing**, the held-index exemption and `max_pending_documents`. | the independence tests; `indexes_walk_at_once`; `a_task_blocked_on_a_full_lane_holds_no_permit`; the seeded schedule over three indexes | everything; the end measurements |
 | 7 | **Per-index ingest status and metrics**, the backlog, `GET /indexes/<name>/status` (public), `POST /indexes/<name>/reindex` (private, replacing `POST /reindex`), `FlussoIndexBacklog`, the Grafana panel. | status and metric tests | — |
