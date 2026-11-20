@@ -4,11 +4,12 @@
 //!
 //! ```
 //! use kernel::Position;
-//! use stream::{Batch, LaneItem, Ticket};
+//! use stream::{Batch, ItemKey, LaneItem, Ticket};
 //!
-//! let live = LaneItem::Batch(Batch { position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: None });
-//! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: Some(Ticket::new(1)) });
+//! let live = LaneItem::Batch(Batch { key: Some(ItemKey::new(0)), position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: None });
+//! let snapshot = LaneItem::Batch(Batch { key: None, position: None, changes: 0, envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: Some(Ticket::new(1)) });
 //! assert_eq!(live.position(), Some(Position::new(7)));
+//! assert_eq!(live.key(), Some(ItemKey::new(0)));
 //! assert_eq!(snapshot.position(), None, "snapshot rows carry no position");
 //! ```
 
@@ -59,15 +60,22 @@ impl std::fmt::Display for LaneKey {
 }
 
 /// One index's envelopes from one ingest commit, in build order, with the
-/// position of the last change the commit covers (its key on the lane: one
-/// commit puts at most one item on a lane). An index the commit built nothing
-/// for gets no item. A snapshot batch carries no position.
+/// position of the last change the commit covers. A live batch is known on
+/// its lane by its [`ItemKey`], numbered per index in publication order; an
+/// index the commit built nothing for gets no item. A snapshot batch carries
+/// neither a key nor a position.
 ///
 /// The envelopes are shared, not owned: one build is published to every lane
 /// and held for redelivery without copying the documents, so a batch is
 /// immutable once built — a sink stamps nothing into it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
+    /// The item's number on its index's lanes: increasing per index in the
+    /// order the items are published, the same on every lane of the index.
+    /// What a sink engine reports landed and searchable. `None` for snapshot
+    /// rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<ItemKey>,
     /// The position of the last change in the batch; `None` for snapshot rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<Position>,
@@ -90,6 +98,33 @@ pub struct Batch {
     /// [`LaneItem::SnapshotComplete`] names it). `None` on a live batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<Ticket>,
+}
+
+/// A live item's number on its index's lanes (see [`Batch::key`]): what
+/// orders the items of a lane, where several may end on the same change.
+/// Opaque to a sink.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct ItemKey(u64);
+
+impl ItemKey {
+    /// The key numbered `number`.
+    pub const fn new(number: u64) -> Self {
+        Self(number)
+    }
+
+    /// Its number.
+    pub const fn number(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ItemKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 /// Names one backfill request of a lane. A sink engine numbers its requests
@@ -176,6 +211,14 @@ impl LaneItem {
     pub fn position(&self) -> Option<Position> {
         match self {
             LaneItem::Batch(batch) => batch.position,
+            LaneItem::SnapshotComplete { .. } => None,
+        }
+    }
+
+    /// The item's key on its lane, if it is a live batch.
+    pub fn key(&self) -> Option<ItemKey> {
+        match self {
+            LaneItem::Batch(batch) => batch.key,
             LaneItem::SnapshotComplete { .. } => None,
         }
     }

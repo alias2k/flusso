@@ -51,6 +51,16 @@ pub enum EngineError {
          progress from the same lanes"
     )]
     LaneNotInProgress(String),
+
+    /// A live lane item (it carries a position) arrived with no
+    /// [`ItemKey`](stream::ItemKey): it could be neither marked landed nor
+    /// fenced, so the sink engine refuses it. Every live item the ingest engine
+    /// publishes carries its key.
+    #[error(
+        "a live item on lane `{0}` carries no item key; every live item must be numbered by \
+         the engine's progress"
+    )]
+    UnkeyedLiveItem(String),
 }
 
 /// The indexes a sink failed to stage, in the sink's index order, each with

@@ -241,6 +241,7 @@ impl Observer for Health {
 
 fn item(of: &IndexName, ids: std::ops::Range<i64>, position: Option<u64>) -> LaneItem {
     LaneItem::Batch(Batch {
+        key: position.map(stream::ItemKey::new),
         position: position.map(Position::new),
         changes: 1,
         envelopes: ids
@@ -289,6 +290,7 @@ impl Rig {
     async fn live(&self, of: &IndexName, ids: std::ops::Range<i64>, position: u64) {
         self.progress.published(
             &lane(of.clone()),
+            stream::ItemKey::new(position),
             Position::new(position),
             Position::new(position),
         );

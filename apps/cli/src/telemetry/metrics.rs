@@ -520,7 +520,12 @@ mod tests {
         );
         let progress = Progress::new([users.clone()]);
         let stalls = Arc::new(Stalls::new([users.clone()]));
-        progress.published(&users, Position::new(3), Position::new(3));
+        progress.published(
+            &users,
+            stream::ItemKey::new(3),
+            Position::new(3),
+            Position::new(3),
+        );
         let start = tokio::time::Instant::now();
         stalls.sample(start, &progress, &NoPositions, Some(2_048));
         stalls.sample(

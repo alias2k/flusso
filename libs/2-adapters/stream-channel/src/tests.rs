@@ -17,6 +17,7 @@ fn key(name: &str) -> LaneKey {
 
 fn batch(position: u64) -> LaneItem {
     LaneItem::Batch(Batch {
+        key: Some(stream::ItemKey::new(position)),
         position: Some(Position::new(position)),
         changes: 1,
         envelopes: Vec::new().into(),

@@ -14,7 +14,7 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use kernel::{Envelope, IndexName, Position, SinkName};
 use source::document::{BuildFailure, Document, DocumentId};
-use stream::{Batch, Hold, LaneItem, LaneKey, Producer};
+use stream::{Batch, Hold, ItemKey, LaneItem, LaneKey, Producer};
 use tokio::time::Instant;
 
 use super::builds::{Builds, Built, Grant, Job};
@@ -265,23 +265,38 @@ impl IngestEngine {
             build: built.took,
         };
         // One item per lane of an index the batch built something for: the
-        // envelopes of that index, in build order. A sink's first item carries
-        // the batch's changes; a sink with no item is told they settled.
+        // envelopes of that index, in build order, under the index's next key
+        // (the same on each of its lanes; lanes are ordered by index, so an
+        // index's lanes are adjacent). A sink's first item carries the batch's
+        // changes; a sink with no item is told they settled.
         let mut by_lane: Vec<(&LaneKey, &Box<dyn Producer<LaneItem>>, LaneItem)> = Vec::new();
         let mut skipped: Vec<&LaneKey> = Vec::new();
         let mut counted: Vec<&SinkName> = Vec::new();
+        let mut keyed: Option<(&IndexName, ItemKey)> = None;
         let groups = group_by_index(envelopes);
-        for (key, producer) in lanes {
-            match groups.get(&key.index) {
+        for (lane, producer) in lanes {
+            match groups.get(&lane.index) {
                 Some(envelopes) => {
-                    let first = !counted.contains(&&key.sink);
+                    let item_key = match keyed {
+                        Some((index, item_key)) if *index == lane.index => item_key,
+                        _ => {
+                            let item_key = self
+                                .progress
+                                .next_key(&lane.index)
+                                .ok_or_else(|| EngineError::LaneNotInProgress(lane.to_string()))?;
+                            keyed = Some((&lane.index, item_key));
+                            item_key
+                        }
+                    };
+                    let first = !counted.contains(&&lane.sink);
                     if first {
-                        counted.push(&key.sink);
+                        counted.push(&lane.sink);
                     }
                     by_lane.push((
-                        key,
+                        lane,
                         producer,
                         LaneItem::Batch(Batch {
+                            key: Some(item_key),
                             position,
                             changes: if first { changes } else { 0 },
                             envelopes: Arc::clone(envelopes),
@@ -291,7 +306,7 @@ impl IngestEngine {
                         }),
                     ));
                 }
-                None => skipped.push(key),
+                None => skipped.push(lane),
             }
         }
         // Each lane is registered as its own send succeeds, so a full lane
@@ -347,6 +362,7 @@ impl IngestEngine {
                     key,
                     producer,
                     LaneItem::Batch(Batch {
+                        key: None,
                         position: None,
                         changes: 0,
                         envelopes: Arc::clone(envelopes),
@@ -369,8 +385,9 @@ impl IngestEngine {
     }
 
     /// Publish each item to its lane, all at once, so a full lane delays only
-    /// its own copy, and register each live item (`routed`: its batch's
-    /// oldest and last position) in the progress as its own lane takes it.
+    /// its own copy, and register each live item (under its key, with
+    /// `routed`: its batch's oldest and last position) in the progress as its
+    /// own lane takes it.
     /// Times each lane ([`Stage::LaneWait`]) and the whole
     /// ([`Stage::Publish`]) from `started`, the moment publishing began, so
     /// cutting the items is publishing too.
@@ -382,9 +399,10 @@ impl IngestEngine {
         routed: Option<(Position, Position)>,
     ) -> Result<()> {
         try_join_all(items.into_iter().map(|(lane, producer, item)| async move {
+            let key = item.key();
             producer.publish(item).await?;
-            if let Some((oldest, last)) = routed {
-                self.progress.published(lane, oldest, last);
+            if let (Some((oldest, last)), Some(key)) = (routed, key) {
+                self.progress.published(lane, key, oldest, last);
             }
             self.observer.on_stage(
                 StageTiming::new(Stage::LaneWait, started.elapsed())

@@ -134,7 +134,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use kernel::{Envelope, IndexName, Position};
 use sink::{CaughtUp, Visibility, WriteReport};
-use stream::{AckHandle, Batch, Consumer, Delivery, LaneItem, LaneKey, Ticket};
+use stream::{AckHandle, Batch, Consumer, Delivery, ItemKey, LaneItem, LaneKey, Ticket};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -244,6 +244,7 @@ struct Flight {
 struct Part {
     handle: Box<dyn AckHandle>,
     lane: usize,
+    key: Option<ItemKey>,
     position: Option<Position>,
     changes: usize,
     documents: Documents,
@@ -507,7 +508,11 @@ impl<'a> Run<'a> {
                                 run.closed = true;
                             }
                         }
-                        Ok(Some(delivery)) => self.queue(lane, delivery),
+                        Ok(Some(delivery)) => {
+                            if let Err(error) = self.queue(lane, delivery) {
+                                self.fail(error, &[lane]);
+                            }
+                        }
                     }
                 }
                 message = control.recv(), if control_open && !self.engine.reindex_pending() && self.failure.is_none() => {
@@ -887,7 +892,7 @@ impl<'a> Run<'a> {
                         Err(error) => return Err(error.into()),
                         Ok(None) => run.closed = true,
                         Ok(Some(delivery)) => {
-                            self.queue(lane, delivery);
+                            self.queue(lane, delivery)?;
                             took = true;
                         }
                     },
@@ -897,16 +902,28 @@ impl<'a> Run<'a> {
         Ok(took)
     }
 
-    fn queue(&mut self, lane: usize, delivery: Delivery<LaneItem>) {
+    /// Take a delivered item into the window. A live item (it carries a
+    /// position) must carry its key: without one it could be neither marked
+    /// in the progress nor fenced, and a later item's mark would cover it, so
+    /// it fails the run, left unacknowledged.
+    fn queue(&mut self, lane: usize, delivery: Delivery<LaneItem>) -> Result<()> {
         self.close_idle();
         let (item, handle) = delivery.into_parts();
         let item = match item {
             LaneItem::Batch(batch) => {
-                if let Some(position) = batch.position
+                if batch.position.is_some() && batch.key.is_none() {
+                    let lane = self
+                        .lanes
+                        .get(lane)
+                        .map_or_else(String::new, |run| run.key.to_string());
+                    return Err(EngineError::UnkeyedLiveItem(lane));
+                }
+                if let Some(key) = batch.key
+                    && let Some(position) = batch.position
                     && let Some(run) = self.lanes.get(lane)
                 {
                     let mut fences = self.engine.lock_fences();
-                    fences.received(&run.key, position);
+                    fences.received(&run.key, key, position);
                     self.next_due = fences.next_due();
                 }
                 let documents = Documents::new(&batch.envelopes);
@@ -942,6 +959,7 @@ impl<'a> Run<'a> {
             seq,
             ready_at: Instant::now(),
         });
+        Ok(())
     }
 
     /// Once a stop is requested, backfill items still waiting are
@@ -1036,6 +1054,7 @@ impl<'a> Run<'a> {
                     parts.push(Part {
                         handle,
                         lane,
+                        key: batch.key,
                         position: batch.position,
                         changes: batch.changes,
                         documents,
@@ -1606,11 +1625,11 @@ impl<'a> Run<'a> {
                 CommitStats::new(envelopes, changes, landed.took, flight.work).sent(report.bytes),
             );
         }
-        let written: Vec<(LaneKey, Position)> = landed_parts
+        let written: Vec<(LaneKey, ItemKey)> = landed_parts
             .iter()
             .filter_map(|part| {
-                let key = self.lanes.get(part.lane)?.key.clone();
-                Some((key, part.position?))
+                let lane = self.lanes.get(part.lane)?.key.clone();
+                Some((lane, part.key?))
             })
             .collect();
         if report.refreshes > 0 {
@@ -1662,12 +1681,12 @@ impl<'a> Run<'a> {
             drop(part.documents);
             drop(part.batch);
             let oldest = self.is_oldest(part.lane, part.seq);
-            // `wanting` names only lanes this write gave a position: a
+            // `wanting` names only lanes this write gave a keyed item: a
             // backfill part landing last on its lane asks the fences, since an
             // earlier live write of the lane may still want a caught-up write.
             let wants = if !last {
                 Some(false)
-            } else if part.position.is_none() {
+            } else if part.key.is_none() {
                 None
             } else {
                 Some(
@@ -2195,7 +2214,7 @@ impl SinkEngine {
     /// that moved.
     fn write_returned(
         &self,
-        written: &[(LaneKey, Position)],
+        written: &[(LaneKey, ItemKey)],
         visibility: Visibility,
         caught_up: Option<(u64, &[LaneKey])>,
     ) -> Returned {
@@ -2203,13 +2222,13 @@ impl SinkEngine {
         let (applied, searchable, returned) = {
             let mut fences = self.lock_fences();
             fences.write_returned(written, visibility, caught_up, now);
-            let mut applied: Vec<(LaneKey, Position)> = Vec::new();
+            let mut applied: Vec<(LaneKey, ItemKey, Position)> = Vec::new();
             for (lane, _) in written {
-                if applied.iter().any(|(seen, _)| seen == lane) {
+                if applied.iter().any(|(seen, _, _)| seen == lane) {
                     continue;
                 }
-                if let Some(position) = fences.advance_applied(lane) {
-                    applied.push((lane.clone(), position));
+                if let Some((key, position)) = fences.advance_applied(lane) {
+                    applied.push((lane.clone(), key, position));
                 }
             }
             let searchable = fences.advance_searchable(now);
@@ -2224,8 +2243,8 @@ impl SinkEngine {
             };
             (applied, searchable, returned)
         };
-        for (lane, position) in &applied {
-            self.progress.applied(lane, *position);
+        for (lane, key, position) in &applied {
+            self.progress.applied(lane, *key);
             self.observer.on_position_applied(lane, *position);
         }
         self.report(&searchable);
@@ -2240,9 +2259,9 @@ impl SinkEngine {
 
     /// Tell the progress and observers which lanes became searchable how
     /// far.
-    fn report(&self, searchable: &[(LaneKey, Position)]) {
-        for (lane, position) in searchable {
-            self.progress.searchable(lane, *position);
+    fn report(&self, searchable: &[(LaneKey, ItemKey, Position)]) {
+        for (lane, key, position) in searchable {
+            self.progress.searchable(lane, *key);
             self.observer.on_position_searchable(lane, *position);
         }
     }

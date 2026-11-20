@@ -959,6 +959,7 @@ mod tests {
             let lane = stream.lane(&key).unwrap();
             for position in 0..4 {
                 let item = stream::LaneItem::Batch(stream::Batch {
+                    key: Some(stream::ItemKey::new(position)),
                     position: Some(kernel::Position::new(position)),
                     changes: 1,
                     envelopes: Vec::new().into(),

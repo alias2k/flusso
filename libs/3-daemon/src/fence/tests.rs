@@ -124,7 +124,8 @@ impl Rig {
     /// The ingest engine published a batch of `position` to every lane.
     fn route(&self, position: Position) {
         for lane in &self.lanes {
-            self.progress.published(lane, position, position);
+            self.progress
+                .published(lane, stream::ItemKey::new(position.seq), position, position);
         }
     }
 
@@ -135,7 +136,8 @@ impl Rig {
 
     /// `lane` landed the item of `position`.
     fn applied_on(&self, lane: &LaneKey, position: Position) {
-        self.progress.applied(lane, position);
+        self.progress
+            .applied(lane, stream::ItemKey::new(position.seq));
         self.observer.on_position_applied(lane, position);
     }
 
@@ -147,7 +149,8 @@ impl Rig {
 
     /// `lane` made everything through `position` searchable.
     fn searchable_on(&self, lane: &LaneKey, position: Position) {
-        self.progress.searchable(lane, position);
+        self.progress
+            .searchable(lane, stream::ItemKey::new(position.seq));
         self.observer.on_position_searchable(lane, position);
     }
 }
