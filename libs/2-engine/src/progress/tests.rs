@@ -47,6 +47,25 @@ fn a_routed_item_holds_everything_from_its_oldest_change() {
     assert_eq!(progress.landed(), Landed::Through(p(3)));
 }
 
+/// Two items of one lane that share their newest position (stage 8a's
+/// takes skip ids still building, so a later item can end on the same
+/// change) are landed one at a time: landing the first leaves the second
+/// outstanding.
+#[test]
+fn two_items_sharing_their_newest_position_land_one_at_a_time() {
+    let a = sink("a");
+    let progress = Progress::new([a.clone()]);
+    progress.published(&a, p(1), p(5));
+    progress.published(&a, p(3), p(5));
+
+    progress.applied(&a, p(5));
+    assert_eq!(
+        progress.landed(),
+        Landed::Before(p(3)),
+        "only the first item landed; the second still holds its oldest change"
+    );
+}
+
 #[test]
 fn a_mark_covers_every_item_through_it_and_the_oldest_uncovered_decides() {
     let a = sink("a");

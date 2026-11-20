@@ -257,6 +257,28 @@ mod tests {
         )
     }
 
+    /// Two items of one lane sharing a position are two entries: the
+    /// second, still being written, holds the lane's applied mark back.
+    #[test]
+    fn two_items_sharing_a_position_are_applied_one_at_a_time() {
+        let now = Instant::now();
+        let users = lane("users");
+        let mut fences = Fences::default();
+        fences.received(&users, Position::new(5));
+        fences.received(&users, Position::new(5));
+        fences.write_returned(
+            &[(users.clone(), Position::new(5))],
+            Visibility::Immediate,
+            None,
+            now,
+        );
+        assert_eq!(
+            fences.advance_applied(&users),
+            None,
+            "the second item is still being written"
+        );
+    }
+
     #[test]
     fn applied_waits_for_the_oldest_write_and_searchable_follows_it() {
         let now = Instant::now();
