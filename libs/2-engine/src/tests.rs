@@ -1444,6 +1444,7 @@ impl PositionRig {
                 envelopes: Vec::new().into(),
                 hold: Default::default(),
                 walked: None,
+                ticket: None,
             }))
             .await
             .unwrap();
@@ -1630,6 +1631,7 @@ async fn stop_policy_fails_the_ingest_engine_on_a_failed_document() {
 
 mod busy;
 mod concurrent;
+mod gone;
 mod lanes;
 mod merge;
 mod parking;

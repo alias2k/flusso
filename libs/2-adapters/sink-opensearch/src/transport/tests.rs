@@ -536,6 +536,7 @@ async fn a_caught_up_write_over_the_one_index_left_unrefreshed_sends_no_extra_re
             hash_alias: "users".to_owned(),
             seeded: false,
             single_shard: true,
+            uuid: None,
         },
     );
 
@@ -565,6 +566,7 @@ async fn every_chunk_of_a_caught_up_write_refreshes_what_it_wrote() {
                 hash_alias: logical.to_owned(),
                 seeded: false,
                 single_shard: true,
+                uuid: None,
             },
         );
     }
@@ -611,6 +613,7 @@ async fn a_caught_up_write_over_a_multi_shard_index_still_refreshes_it() {
             hash_alias: "users".to_owned(),
             seeded: false,
             single_shard: false,
+            uuid: None,
         },
     );
 

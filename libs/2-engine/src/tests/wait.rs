@@ -285,6 +285,7 @@ impl Rig {
                 .into(),
                 hold: Default::default(),
                 walked: None,
+                ticket: None,
             }))
             .await
             .unwrap();

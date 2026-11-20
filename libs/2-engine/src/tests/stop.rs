@@ -735,6 +735,7 @@ async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_th
             envelopes: Vec::new().into(),
             hold: Default::default(),
             walked: None,
+            ticket: None,
         })
     };
     let snapshot = stream::LaneItem::Batch(stream::Batch {
@@ -743,6 +744,7 @@ async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_th
         envelopes: Vec::new().into(),
         hold: Default::default(),
         walked: None,
+        ticket: None,
     });
     lane.publish(live(5)).await.unwrap();
     lane.publish(snapshot.clone()).await.unwrap();

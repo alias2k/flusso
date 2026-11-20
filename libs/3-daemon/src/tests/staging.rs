@@ -112,9 +112,9 @@ impl SlowStaging {
 
 #[async_trait]
 impl Sink for SlowStaging {
-    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<()> {
+    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
         self.call("ensure", &mapping.index).await;
-        Ok(())
+        Ok(sink::Ensured::default())
     }
 
     async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {

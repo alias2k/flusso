@@ -553,6 +553,7 @@ impl Rig {
                     envelopes,
                     hold: Default::default(),
                     walked: None,
+                    ticket: None,
                 }))
                 .await
                 .unwrap();
@@ -582,6 +583,7 @@ impl Rig {
                     envelopes,
                     hold: Default::default(),
                     walked: None,
+                    ticket: None,
                 }))
                 .await
                 .unwrap();
@@ -590,7 +592,10 @@ impl Rig {
 
     async fn complete(&self) {
         self.lane
-            .publish(LaneItem::SnapshotComplete { index: users() })
+            .publish(LaneItem::SnapshotComplete {
+                index: users(),
+                ticket: stream::Ticket::new(1),
+            })
             .await
             .unwrap();
     }
@@ -1223,6 +1228,7 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
             envelopes,
             hold: Default::default(),
             walked: None,
+            ticket: None,
         }))
         .await
         .unwrap();

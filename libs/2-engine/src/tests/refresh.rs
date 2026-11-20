@@ -332,6 +332,7 @@ impl Rig {
                 .into(),
                 hold: Default::default(),
                 walked: walked.map(WalkMark::new),
+                ticket: None,
             }))
             .await
             .unwrap();
@@ -341,6 +342,7 @@ impl Rig {
         self.producer(index)
             .publish(LaneItem::SnapshotComplete {
                 index: index.clone(),
+                ticket: stream::Ticket::new(1),
             })
             .await
             .unwrap();

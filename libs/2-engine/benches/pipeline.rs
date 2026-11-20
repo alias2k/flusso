@@ -123,7 +123,7 @@ struct AlwaysUnseeded {
 
 #[async_trait]
 impl Sink for AlwaysUnseeded {
-    async fn ensure_index(&self, mapping: &IndexMapping) -> SinkResult<()> {
+    async fn ensure_index(&self, mapping: &IndexMapping) -> SinkResult<sink::Ensured> {
         self.inner.ensure_index(mapping).await
     }
     async fn write(

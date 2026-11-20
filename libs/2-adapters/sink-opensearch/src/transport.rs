@@ -286,22 +286,51 @@ impl OpensearchSink {
         }
     }
 
-    /// Whether `index` already exists in the cluster.
-    pub(crate) async fn index_exists(&self, index: &str) -> Result<bool> {
-        let url = format!("{}/{index}", self.base_url);
+    /// The `index.uuid` of `index`, which OpenSearch gives each index it
+    /// creates (again after a deletion, an auto-create or a restore); `None`
+    /// when no index has that name.
+    pub(crate) async fn index_uuid(&self, index: &str) -> Result<Option<String>> {
+        let url = format!("{}/{index}/_settings/index.uuid", self.base_url);
         let resp = self
-            .maybe_auth(self.client.head(&url))
+            .maybe_auth(self.client.get(&url))
             .send()
             .await
-            .map_err(|e| request_error("index check failed", e))?;
-
-        if resp.status().is_success() {
-            return Ok(true);
-        }
+            .map_err(|e| request_error("index uuid lookup failed", e))?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(false);
+            return Ok(None);
         }
-        Err(Self::status_error(resp, "index check failed").await)
+        if !resp.status().is_success() {
+            return Err(Self::status_error(resp, "index uuid lookup failed").await);
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| request_error("failed to parse the index uuid", e))?;
+        let uuid = body
+            .get(index)
+            .and_then(|entry| entry.pointer("/settings/index/uuid"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        match uuid {
+            Some(uuid) => Ok(Some(uuid)),
+            None => Err(SinkError::Write(format!(
+                "index uuid lookup failed: no uuid for {index} in {body}"
+            ))),
+        }
+    }
+
+    /// `DELETE /{index}`; one already gone is not an error.
+    pub(crate) async fn delete_index(&self, index: &str) -> Result<()> {
+        let url = format!("{}/{index}", self.base_url);
+        let resp = self
+            .maybe_auth(self.client.delete(&url))
+            .send()
+            .await
+            .map_err(|e| request_error("index delete failed", e))?;
+        if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Err(Self::status_error(resp, "index delete failed").await)
     }
 
     /// `PUT /{index}` with the explicit mapping body and `aliases` attached in

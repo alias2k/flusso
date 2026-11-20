@@ -946,9 +946,11 @@ is the one concrete piece.
   first) and holds for stragglers only while some lane has not asked, for at most
   `BatchPolicy::max_delay` (a seeded sibling that never asks costs one `max_delay`; a straggler
   past it gets its own snapshot) — and acks a request only after its `SnapshotComplete` is
-  published (a crash mid-snapshot redelivers it); the sink engine keeps an `outstanding` set of requested,
-  not-yet-complete indexes so re-staging after its own restart (and a reindex control for the
-  same index) doesn't ask twice. A seeded sibling sees nothing. The channel adapter therefore keeps
+  published (a crash mid-snapshot redelivers it); the sink engine keeps an `outstanding` map of
+  requested, not-yet-seeded indexes (each with its request's ticket and target) so re-staging after
+  its own restart (and a reindex control for the same index) doesn't ask twice while the index's
+  target is the one its backfill was asked for; a backfill cut by a new target is asked for again
+  (next bullet). A seeded sibling sees nothing. The channel adapter therefore keeps
   a **ticketed in-flight ledger** per lane: several deliveries can be outstanding, each acked by
   ticket; a nacked or dropped-unacked delivery is marked due by its own ticket and redelivered alone,
   due ones in lane order, never the deliveries still in flight beside it, so a released delivery can
@@ -961,6 +963,57 @@ is the one concrete piece.
   `a_backfill_with_every_lane_asking_starts_without_waiting`,
   `a_straggling_reindex_request_within_max_delay_joins_the_snapshot`, the daemon's
   `unseeded_sink_is_backfilled_without_touching_its_sibling`.
+- **A backfill whose target changed can't seed it (issue #428).** Each `Request::Backfill`
+  carries a `stream::Ticket`, numbered up per sink engine (from one in each process: enough for an
+  in-process stream; one that outlives the process needs tickets unique across processes); the
+  ingest engine answers a lane's requests in one snapshot under the greatest ticket it serves, on
+  every snapshot `Batch.ticket` and the `SnapshotComplete { index, ticket }`. `Sink::ensure_index`
+  answers `Ensured { target: Option<TargetId>, created }`: the **identity** of the target the index
+  now writes to (OpenSearch: the generation's `index.uuid`), which a target created anew (deleted,
+  auto-created, restored) never shares. `outstanding` keeps, per index, `Asked { ticket, target, cut }`.
+  `step` compares right after `ensure_index`, before any other fallible step (`check_target`): another
+  identity, `created` when either side names none, or any `Step::Restage` (it only runs after a write
+  found the target missing) **cuts** the backfill. The cut is sticky until a fresh request is
+  published (`request_backfill` replaces the entry), so a staging that fails after finding it (a
+  failed `forget_walked` or publish, `ensure_index` failing after it created, another index failing
+  in the same `each_index`, a restage failing before a run failure) loses nothing; and identity
+  alone catches a target the failed attempt never reported. While cut, `answers` is false: no item
+  of the old request records a walk mark, its `SnapshotComplete` is acknowledged without seeding
+  (`superseded`), and every `stage`/`restage` asks again (`ask_again`: forget the checkpoint, request
+  from the first key for the current target). The old snapshot's remaining pages are still written
+  (each a build in lane order, so never a step back; the fresh walk repeats them). A seed the sink
+  refuses with `SinkError::TargetChanged` puts its `SnapshotComplete` back and stages the lane again
+  (`Held::Missing`), which cuts. A
+  restage resets the lane's `Walked`; a walk ends at its `SnapshotComplete`'s lane order
+  (`Walked::ended`, boundaries recorded at receive), keeping the next walk's items the run read ahead;
+  a held walk keeps none of its items and tracks none that arrive (binary search by lane order), and
+  a release of an item it never held (a live one) holds nothing. **The OpenSearch sink** records the
+  generation's `index.uuid` in its meta doc at creation (an older doc gains it on the next
+  `ensure_index`); `ensure_index` finding an **unseeded** generation under that name with another
+  uuid (deleted, then auto-created dynamically by a write under the default `action.auto_create_index`)
+  deletes it and creates it strict and empty, without a checkpoint, answered as created; a seeded one
+  with another uuid was replaced outside flusso (a restore, or a recreate by hand: seeded writes use
+  `require_alias`, and flusso's own staging can't leave one) and is adopted as it is, served as seeded
+  even if empty; before creating a generation the meta doc is written unseeded naming no uuid, and the
+  uuid recorded only after the create, so a failure in between never leaves "seeded" or an old uuid
+  beside the new, empty generation (the next staging adopts it unseeded); `mark_seeded`
+  answers `TargetChanged` for a generation missing or with another uuid. The fence stays
+  `Backfilling` (or `Rebuilding`) until the fresh seed; a reindex control is still ignored while
+  outstanding; a stop after the cut skips as before; other lanes of the snapshot answer their own
+  tickets. Guards: `tests::gone` (both engines over a sink keeping generations: deleted mid-backfill,
+  a second deletion during the fresh one, deleted while the sink engine restarts, (a) a failed forget
+  and (b) an `ensure_index` failing after it created, a restart with the target intact asking nothing
+  more, a reindex racing it, an auto-created impostor refused at its seed; by hand: the stale and
+  repeated completions, a stop after the cut, (c) a cut beside another index failing to stage, (d) a
+  restage failing before a run failure; ingest: one walk answering two requests under the later
+  ticket, also a resumed one with a fresh one), `walked::tests` (read-ahead, a held walk keeps
+  nothing, a release never received), and the sink's `reindex` e2e
+  `a_generation_deleted_mid_backfill_is_staged_as_created_without_its_checkpoint` and
+  `an_auto_created_generation_is_never_seeded_and_is_replaced_by_a_strict_one` (auto-create on),
+  `a_seeded_generation_recreated_by_a_staging_that_then_failed_is_never_served_seeded`. A lane's
+  `SnapshotComplete` waits while the lane is being staged again, not while it is parked (a stop that
+  skips a parked lane's refused page lets the completion behind it run: `parking`'s
+  `a_parked_lanes_completion_runs_once_a_stop_skipped_the_page_in_front`).
 - **A sink's indexes are staged concurrently (issue #398).** `SinkEngine::each_index` runs one
   `Step` per index, `STAGE_CONCURRENCY` (8) at once, each index's own steps in order; the `Sink`
   port allows `ensure_index`/`is_seeded`/`reindex` at once for different indexes, never for one,

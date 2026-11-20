@@ -76,9 +76,9 @@ A refused connection ends in `tcp connect error: Connection refused` instead. Cr
 | --- | --- |
 | OpenSearch 2.x | The query side also speaks Elasticsearch 7.x. |
 | A reachable HTTP(S) endpoint | The `url`. |
-| A user that can create, alias, write, and delete flusso's indexes | Plus the small `{prefix}flusso_meta` index. |
+| A user that can create, alias, write, and delete flusso's indexes, and read their settings | Plus the small `{prefix}flusso_meta` index. Staging and seeding read each generation's `index.uuid` (`GET /{generation}/_settings/index.uuid`). |
 | `analysis-icu` on every node | Only with `text_analysis = "icu"`. |
-| `action.auto_create_index` excluding flusso's generations | Recommended. Keep `{prefix}flusso_meta` allowed (it's created by its first write) and forbid `{prefix}{logical}_*` for each index, first match wins. With no `prefix`: `+flusso_meta,-users_*,-orders_*,+*`. With `prefix = "staging_"`, every entry carries it: `+staging_flusso_meta,-staging_users_*,-staging_orders_*,+*` (an unprefixed entry never matches, and the trailing `+*` lets auto-create through). See [Seeding](#seeding). |
+| `action.auto_create_index` excluding flusso's generations | Recommended. Keep `{prefix}flusso_meta` allowed (it's created by its first write) and forbid `{prefix}{logical}_*` for each index, first match wins; [why](#why-forbid-auto-create). With no `prefix`: `+flusso_meta,-users_*,-orders_*,+*`. With `prefix = "staging_"`, every entry carries it: `+staging_flusso_meta,-staging_users_*,-staging_orders_*,+*` (an unprefixed entry never matches, and the trailing `+*` lets auto-create through). |
 
 ## Index naming
 
@@ -87,7 +87,7 @@ A refused connection ends in `tcp connect error: Connection refused` instead. Cr
 | `{prefix}{logical}_{hash}` | alias | The **hash alias**. What flusso and `flusso-query` address. The hash derives from the schema. |
 | `{prefix}{logical}_{hash}_{n}` | index | A **generation**: the concrete index holding data. `n` increments on reindex. |
 | `{prefix}{logical}` | alias | The **convenience alias** for humans and dashboards. Best-effort: if a real index already owns the name, flusso warns and carries on. |
-| `{prefix}flusso_meta` | index | One doc per index recording its active generation and seeded state, and, while it is unseeded, how far its backfill got (`walked`: the source's own text and the generation it was recorded for), so a restart resumes after it. Written as a partial update, never creating a doc; read only while the doc is unseeded and names the same generation. |
+| `{prefix}flusso_meta` | index | One doc per index: its active generation, that generation's `uuid` (its `index.uuid`, see [Each generation's identity](#each-generations-identity)), its seeded state, and, while it is unseeded, how far its backfill got (`walked`: the source's own text and the generation it was recorded for), so a restart resumes after it. `walked` is written as a partial update, never creating a doc, and read only while the doc is unseeded and names the same generation. |
 
 A structural schema change moves the hash, so the new shape gets a fresh alias and generation, re-seeded from scratch, rather than colliding with the old mapping. An on-demand reindex builds generation `n+1` behind the same hash alias while `n` keeps serving, then the alias flips atomically and `n` is dropped, along with any other `{logical}_{hash}_{n}` nothing serves. A reindex while the index is still unseeded does nothing: a rebuild from scratch is already pending. See [Reindex without downtime](../operate/reindex.md).
 
@@ -179,15 +179,53 @@ A generation is created with the aliases it may carry. The first generation of a
 
 When a backfill completes, the sink seeds the index in this order:
 
-1. Refresh the generation, restore its `refresh_interval`, and read the alias holders and the other generations, all at once.
-2. Move both aliases onto the generation and drop every other generation of the hash alias, in one atomic `_aliases` call. On a rebuild, readers see the old generation or the new, refreshed one, never neither. On a first seed the aliases are already there, and nothing moves. If OpenSearch refuses that call, the hash alias is moved alone and the convenience alias stays best-effort.
-3. Write the marker in `flusso_meta`, last. If anything before it fails, the index stays unseeded, and the next start runs the backfill again. The backfill is idempotent.
+1. Check the generation is the one staging found: it exists and has the same `index.uuid` (see [Each generation's identity](#each-generations-identity)). If not, nothing is seeded: the index is staged again and backfilled in full.
+2. Refresh the generation, restore its `refresh_interval`, and read the alias holders and the other generations, all at once.
+3. Move both aliases onto the generation and drop every other generation of the hash alias, in one atomic `_aliases` call. On a rebuild, readers see the old generation or the new, refreshed one, never neither. On a first seed the aliases are already there, and nothing moves. If OpenSearch refuses that call, the hash alias is moved alone and the convenience alias stays best-effort.
+4. Write the marker in `flusso_meta`, last. If anything before it fails, the index stays unseeded, and the next start runs the backfill again. The backfill is idempotent.
 
-Seeded state is recorded in `flusso_meta`, so a restart skips a completed backfill. On every start the marker is checked against the generation it names: if that index is gone, the marker is retracted with a warning, the generation is recreated empty, and the backfill refills it. Deleting `{logical}_{hash}_{n}` between runs is the supported way to force a rebuild of one index. A missing replication slot overrides every marker; see [Recover from a dropped slot](../operate/dropped-slot.md).
+Seeded state is recorded in `flusso_meta`, so a restart skips a completed backfill. A missing replication slot overrides every marker; see [Recover from a dropped slot](../operate/dropped-slot.md).
 
-Deleting a seeded generation **while flusso runs** is caught on the next write to that index: the alias is gone with it, so the write answers `index_not_found_exception` instead of OpenSearch auto-creating a dynamically mapped index. The sink reports that index missing, and the sink engine stages that one index again while the sink's other indexes keep being written: the marker check rebuilds the generation as above, a backfill is requested for it, and the batch is written again into the fresh generation. Nothing restarts. Until that next write, reads through the alias return 404; then `/wait` answers `503 backfilling` for the index until it is seeded.
+### Each generation's identity
 
-Deleting an **unseeded** generation mid-backfill isn't covered by `require_alias`. With the default `action.auto_create_index: true` the next write recreates it with a dynamic mapping. With the recommended pattern from [Cluster requirements](#cluster-requirements) the write answers `index_not_found_exception` and the lane is staged again, but the part of the snapshot already written is lost. Neither staging again nor a restart fixes either case: the snapshot in flight is still outstanding, so no new one is requested, and when it completes the partial (or dynamically mapped) generation is marked seeded and kept. Once that backfill finishes, run `flusso reindex <index>` to rebuild it from scratch.
+OpenSearch gives every index it creates its own `index.uuid`, and a new one each time an index is created again under the same name: after a delete, by an auto-create, or by a snapshot restore. flusso records the uuid of each generation it creates in the index's `flusso_meta` doc, and compares it with the live one:
+
+| When | Request | Another uuid, or no index, means |
+| --- | --- | --- |
+| Staging (every start, every restage) | `GET /{generation}/_settings/index.uuid` | See the table below. |
+| Seeding | the same, once more | The generation isn't the one staged: nothing is seeded. |
+
+Creating a generation writes its meta doc twice: unseeded and naming no uuid **before** the create, then the new uuid after it. A staging that fails in between leaves an unseeded doc beside the new, empty generation, never a `seeded` marker or an older generation's uuid; the next start backfills it. A meta doc an older flusso wrote without a `uuid` gains it on the next start, and nothing is rebuilt.
+
+### A generation deleted or replaced
+
+A deleted or replaced generation never ends up seeded with rows missing. Each case, by what was done to it:
+
+| What happened | flusso notices | What it does |
+| --- | --- | --- |
+| A **seeded** generation deleted between runs | at the next start | Retracts the marker with a warning, recreates the generation empty, and backfills it. This is the supported way to force a rebuild of one index. |
+| A **seeded** generation deleted while flusso runs | at the next write: the alias went with it, and `require_alias` makes OpenSearch answer `index_not_found_exception` | Stages that one index again (its lane `restaging`), recreates the generation as above, and backfills it; the sink's other indexes keep being written. Reads through the alias return 404 until the generation exists, then see it filling. |
+| An **unseeded** generation (first backfill, or a rebuild) deleted mid-backfill, auto-create forbidden | at the next write: `index_not_found_exception` | Stages that index again and backfills it **from the first row**. The backfill that was cut seeds nothing. |
+| An **unseeded** generation deleted mid-backfill, auto-create allowed | at the seed, or at the next start, whichever comes first: the next write silently recreated it with a dynamic mapping, under another uuid | Never seeds it. Deletes it, creates it again with the strict mapping, and backfills it from the first row. |
+| A **seeded** generation under another uuid: restored from a snapshot, or recreated by hand | at the next start | Keeps it and serves it as found, even empty, with an info line. Run [`flusso reindex <index>`](../operate/reindex.md) to rebuild it. |
+
+A deletion while the sink engine restarts, or during a staging that fails part way, ends the same way: the next staging finds the new generation and asks for a full backfill. While the fresh backfill runs, the index stays `backfilling` in [`/status`](http.md#get-status) and `/wait` answers `503 backfilling` (`rebuilding` on a rebuild) for it until it is seeded.
+
+The log says which case it is:
+
+| Level | Message | Case |
+| --- | --- | --- |
+| warn | `staged into a new target while its backfill was running: the rows that backfill wrote are not there, so it can't seed this one; asking for a fresh backfill` | an unseeded generation was replaced mid-backfill |
+| info | `a backfill cut short by a new target completed; it seeds nothing, the fresh one does` | the cut backfill's last page was written |
+| warn | `this generation is not the one flusso created (deleted, then recreated by a write under action.auto_create_index); deleting it and creating it again` | an auto-created generation found at staging |
+| info | `the seeded generation has another index.uuid than when it was created (restored from a snapshot, or recreated by hand?); keeping it` | a restored or hand-made seeded generation |
+
+### Why forbid auto-create
+
+[Cluster requirements](#cluster-requirements) recommends an `action.auto_create_index` pattern that forbids flusso's generations. An unseeded generation is written by its concrete name, so nothing else stops a write from recreating one that was deleted. With the pattern, the next write reports the generation missing and flusso replaces it at once. Without it, until the seed or the next start:
+
+- **Writes land in the auto-created index.** Wasted work, never a partial seed: the fresh backfill rewrites everything.
+- **Its dynamic mapping may refuse a document.** Under `on_error = "stop"` the lane parks `refused` and stays parked: its probes go to the same index. A restart replaces the index and heals the lane.
 
 ## Analysis and subfields
 

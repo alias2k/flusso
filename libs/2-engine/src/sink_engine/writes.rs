@@ -33,8 +33,11 @@
 //! ([`mark_seeded`](sink::Sink::mark_seeded)) as a flight holding one write
 //! slot, and nothing after it on the lane starts until the seed returned;
 //! other lanes go on writing and seeding meanwhile, so the seeds at the end
-//! of a backfill run at once. A reindex waits for the writes and seeds in
-//! flight, then is staged.
+//! of a backfill run at once. A `SnapshotComplete` naming an older ticket
+//! than its index's latest request (the backfill was cut short by a new
+//! target) is acknowledged without seeding, and a snapshot batch naming one
+//! records no walk mark. A reindex waits for the writes and seeds in flight,
+//! then is staged.
 //!
 //! **Merging.** A write holds every admissible item of the chosen kind that
 //! is ready, live with live and backfill with backfill, the first item as
@@ -131,7 +134,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use kernel::{Envelope, IndexName, Position};
 use sink::{CaughtUp, Visibility, WriteReport};
-use stream::{AckHandle, Batch, Consumer, Delivery, LaneItem, LaneKey};
+use stream::{AckHandle, Batch, Consumer, Delivery, LaneItem, LaneKey, Ticket};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -191,7 +194,7 @@ impl LaneRun {
 
 enum Queue {
     Batch { batch: Batch, documents: Documents },
-    Complete { index: IndexName },
+    Complete { index: IndexName, ticket: Ticket },
 }
 
 /// An item's documents as admission keys, hashed on first use.
@@ -260,6 +263,8 @@ impl Flight {
 /// A seed in flight: a lane's `SnapshotComplete`, marking its index seeded.
 struct Seeding {
     index: IndexName,
+    /// The request the `SnapshotComplete` answers.
+    ticket: Ticket,
     handle: Box<dyn AckHandle>,
     lane: usize,
     seq: u64,
@@ -603,6 +608,13 @@ impl<'a> Run<'a> {
             .is_some_and(|lane| lane.barrier || !lane.health.is_open())
     }
 
+    /// Whether `lane` is waiting to be staged again, or being staged.
+    fn lane_restaging(&self, lane: usize) -> bool {
+        self.lanes
+            .get(lane)
+            .is_some_and(|run| matches!(run.health.health, LaneHealth::Restaging { .. }))
+    }
+
     /// Whether `lane` is written as usual (not parked, not being staged).
     fn lane_open(&self, lane: usize) -> bool {
         self.lanes.get(lane).is_some_and(|run| run.health.is_open())
@@ -695,7 +707,9 @@ impl<'a> Run<'a> {
     }
 
     /// A lane's staging returned: staged, the lane opens and its items are
-    /// written again; failed, it is tried again after its backoff.
+    /// written again; failed, it is tried again after its backoff. Either
+    /// way, how far the lane's walk got in the missing target means nothing
+    /// in the new one.
     fn restage_returned(&mut self, flight: u64, result: Result<()>) {
         let Some(at) = self.restaging.iter().position(|(id, _)| *id == flight) else {
             return;
@@ -705,6 +719,7 @@ impl<'a> Run<'a> {
         let Some(run) = self.lanes.get_mut(lane) else {
             return;
         };
+        run.walked.reset();
         match result {
             Ok(()) => {
                 if let Some(down) = run.health.reopen(now) {
@@ -897,16 +912,27 @@ impl<'a> Run<'a> {
                 let documents = Documents::new(&batch.envelopes);
                 Queue::Batch { batch, documents }
             }
-            LaneItem::SnapshotComplete { index } => Queue::Complete { index },
+            LaneItem::SnapshotComplete { index, ticket } => Queue::Complete { index, ticket },
         };
         let seq = self.next_seq;
         self.next_seq += 1;
+        if let Queue::Complete { .. } = &item
+            && let Some(run) = self.lanes.get_mut(lane)
+        {
+            run.walked.boundary(seq);
+        }
         if let Queue::Batch { batch, .. } = &item
             && batch.position.is_none()
             && let Some(run) = self.lanes.get_mut(lane)
         {
-            run.walked
-                .received(seq, batch.walked.clone(), Instant::now());
+            // A page of a backfill cut short counts in the walk's order but
+            // marks nothing: its walk is not the one filling this target.
+            let mark = if self.engine.answers(&run.key.index, batch.ticket) {
+                batch.walked.clone()
+            } else {
+                None
+            };
+            run.walked.received(seq, mark, Instant::now());
         }
         self.count(lane, &item, 1);
         self.window.push_back(Queued {
@@ -946,7 +972,7 @@ impl<'a> Run<'a> {
                 .lock_skipped()
                 .extend(batch.envelopes.iter().map(|e| e.index.clone()));
             if let Some(run) = self.lanes.get_mut(lane) {
-                run.walked.hold();
+                run.walked.hold(seq);
             }
             let oldest = self.is_oldest(lane, seq);
             self.acknowledge(handle, lane, seq, oldest, None).await?;
@@ -967,7 +993,7 @@ impl<'a> Run<'a> {
             }
             if let Some(at) = self.runnable_complete() {
                 if let Some(Queued {
-                    item: Queue::Complete { index },
+                    item: Queue::Complete { index, ticket },
                     handle,
                     lane,
                     seq,
@@ -975,11 +1001,11 @@ impl<'a> Run<'a> {
                 }) = self.take_from_window(at)
                 {
                     if let Some(run) = self.lanes.get_mut(lane) {
-                        run.walked.reset();
+                        run.walked.ended(seq, Instant::now());
                     }
-                    if self.engine.cut_short(&index) {
+                    if self.engine.cut_short(&index) || self.engine.superseded(&index, ticket) {
                         self.acknowledge(handle, lane, seq, true, None).await?;
-                    } else if let Some(landed) = self.seed(index, handle, lane, seq) {
+                    } else if let Some(landed) = self.seed(index, ticket, handle, lane, seq) {
                         self.landed(landed).await?;
                     }
                 }
@@ -1120,7 +1146,13 @@ impl<'a> Run<'a> {
                 continue;
             }
             seen.push(queued.lane);
-            if matches!(queued.item, Queue::Complete { .. }) && !self.lane_in_flight(queued.lane) {
+            // A lane being staged again holds its completion: the staging
+            // decides whether the backfill it ends was cut. A parked lane's
+            // runs once nothing is in front of it, as any other lane's.
+            if matches!(queued.item, Queue::Complete { .. })
+                && !self.lane_restaging(queued.lane)
+                && !self.lane_in_flight(queued.lane)
+            {
                 return Some(at);
             }
         }
@@ -1402,6 +1434,7 @@ impl<'a> Run<'a> {
     fn seed(
         &mut self,
         index: IndexName,
+        ticket: Ticket,
         handle: Box<dyn AckHandle>,
         lane: usize,
         seq: u64,
@@ -1414,6 +1447,7 @@ impl<'a> Run<'a> {
             flight,
             Seeding {
                 index,
+                ticket,
                 handle,
                 lane,
                 seq,
@@ -1444,11 +1478,23 @@ impl<'a> Run<'a> {
             return Ok(());
         };
         let (_, seeding) = self.seeding.swap_remove(at);
-        if let Err(error) = result {
-            self.fail(error.into(), &[seeding.lane]);
-            return Ok(());
+        match result {
+            Ok(()) => {}
+            // The target is not the one staged: the lane is staged again,
+            // which cuts the backfill, and the `SnapshotComplete` waits for
+            // it, seeding nothing.
+            Err(sink::SinkError::TargetChanged(reason)) => {
+                let lane = seeding.lane;
+                self.put_back_complete(seeding);
+                self.hold(lane, Held::Missing(reason), false);
+                return Ok(());
+            }
+            Err(error) => {
+                self.fail(error.into(), &[seeding.lane]);
+                return Ok(());
+            }
         }
-        self.engine.seeded(&seeding.index, took);
+        self.engine.seeded(&seeding.index, seeding.ticket, took);
         let oldest = self.is_oldest(seeding.lane, seeding.seq);
         self.acknowledge(seeding.handle, seeding.lane, seeding.seq, oldest, None)
             .await?;
@@ -1500,7 +1546,7 @@ impl<'a> Run<'a> {
                 if let Some(lane) = flight.probe {
                     self.probed(lane, ProbeOutcome::Failed);
                 }
-                self.hold_walks(&lanes);
+                self.hold_walks(&flight.parts);
                 self.fail(error.into(), &lanes);
                 return Ok(());
             }
@@ -1516,7 +1562,7 @@ impl<'a> Run<'a> {
             // A refusal naming an index no part holds can't be placed: every
             // part of the write is redelivered, as for a write that failed.
             let lanes: Vec<usize> = flight.lanes().collect();
-            self.hold_walks(&lanes);
+            self.hold_walks(&flight.parts);
             self.fail(
                 EngineError::Sink(sink::SinkError::Write(format!(
                     "the sink refused index {stray}, which no part of the write holds"
@@ -1653,6 +1699,28 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
+    /// Put a seed's `SnapshotComplete` back in the window, at its place in
+    /// receive order, still unacknowledged: it runs again once its lane is
+    /// staged again.
+    fn put_back_complete(&mut self, seeding: Seeding) {
+        let at = self
+            .window
+            .partition_point(|queued| queued.seq < seeding.seq);
+        self.window.insert(
+            at,
+            Queued {
+                item: Queue::Complete {
+                    index: seeding.index,
+                    ticket: seeding.ticket,
+                },
+                handle: seeding.handle,
+                lane: seeding.lane,
+                seq: seeding.seq,
+                ready_at: Instant::now(),
+            },
+        );
+    }
+
     /// Put a part of a returned write back in the window, at its place in
     /// receive order, still unacknowledged: its lane parked or is staged
     /// again, and writes it again later, before anything after it.
@@ -1749,11 +1817,11 @@ impl<'a> Run<'a> {
         }
     }
 
-    /// Items of `lanes` go back unlanded: their walks' marks move no further.
-    fn hold_walks(&mut self, lanes: &[usize]) {
-        for lane in lanes {
-            if let Some(run) = self.lanes.get_mut(*lane) {
-                run.walked.hold();
+    /// `parts` go back unlanded: their walks' marks move no further.
+    fn hold_walks(&mut self, parts: &[Part]) {
+        for part in parts {
+            if let Some(run) = self.lanes.get_mut(part.lane) {
+                run.walked.hold(part.seq);
             }
         }
     }
@@ -2189,9 +2257,20 @@ impl SinkEngine {
         cut
     }
 
-    /// Record that `index`'s seed returned: it is seeded, and no longer
-    /// waits for its backfill.
-    fn seeded(&self, index: &IndexName, took: Duration) {
+    /// Whether a `SnapshotComplete` of `index` naming `ticket` answers an
+    /// older request than the one its seed waits for: its backfill was cut
+    /// short by a new target, and seeds nothing.
+    fn superseded(&self, index: &IndexName, ticket: Ticket) -> bool {
+        let superseded = !self.answers(index, Some(ticket));
+        if superseded {
+            tracing::info!(%index, sink = %self.name, %ticket, "a backfill cut short by a new target completed; it seeds nothing, the fresh one does");
+        }
+        superseded
+    }
+
+    /// Record that `index`'s seed, answering `ticket`, returned: it is
+    /// seeded, and no longer waits for its backfill.
+    fn seeded(&self, index: &IndexName, ticket: Ticket, took: Duration) {
         self.observer.on_stage(
             StageTiming::new(Stage::Seed, took)
                 .work(Work::Backfill)
@@ -2199,7 +2278,7 @@ impl SinkEngine {
                 .index(index),
         );
         self.observer.on_index_seeded(&self.name, index);
-        self.lock_outstanding().remove(index);
+        self.settle(index, ticket);
         tracing::info!(%index, "backfill complete");
     }
 }

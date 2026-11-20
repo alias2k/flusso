@@ -1002,7 +1002,7 @@ struct SeedGated {
 
 #[async_trait]
 impl Sink for SeedGated {
-    async fn ensure_index(&self, mapping: &kernel::IndexMapping) -> sink::Result<()> {
+    async fn ensure_index(&self, mapping: &kernel::IndexMapping) -> sink::Result<sink::Ensured> {
         self.inner.ensure_index(mapping).await
     }
 

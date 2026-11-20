@@ -7,10 +7,11 @@
 - **An index that can't be written parks alone**; the sink's other indexes keep writing, and a write block no longer drops documents under `on_error = "skip"` (#404): [One index's failure parks its own lane](#one-indexs-failure-parks-its-own-lane).
 - **`on_error = "stop"` no longer stops the sink**, and `/readyz` stays `200` while an index is parked; alert on the new `FlussoLaneParked` instead: [Alerting on a parked index](#alerting-on-a-parked-index).
 - **The retry wait is configurable**: `[backoff]` sets the first and the longest wait of every restart and probe: [Retry timing is configurable](#retry-timing-is-configurable).
+- **A generation deleted mid-backfill is backfilled again in full**, never seeded with rows missing; a cut-down OpenSearch role needs to read index settings (#428): [A generation deleted mid-backfill](#a-generation-deleted-mid-backfill).
 
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`**: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`**: [For code embedding the crates](#for-code-embedding-the-crates).
 
 ## One index's failure parks its own lane
 
@@ -67,6 +68,36 @@ The OpenSearch sink's bulk retry (200 ms doubling, `max_retries`) is unchanged.
 
 **What to do.** Nothing. To tune it, see [backoff](../reference/config-toml.md#backoff): how the keys resolve, and what is refused (`0`, an unknown key, `max_ms` below `initial_ms`). Like `[concurrency]`, it is never written into `flusso.lock`.
 
+## A generation deleted mid-backfill
+
+**What changed.** In 0.18 an unseeded index (a first backfill, or a rebuild in progress) whose generation was deleted mid-backfill was marked seeded when that backfill ended, with the pages written before the delete missing. In 0.19 it is never seeded that way:
+
+| What happened | 0.18 | 0.19 |
+| --- | --- | --- |
+| Deleted mid-backfill, `action.auto_create_index` forbids flusso's indexes | seeded with the early pages missing | staged again and backfilled from the first row; seeded once that backfill lands |
+| Deleted mid-backfill, auto-create allowed (OpenSearch's default) | recreated with a dynamic mapping by the next write, then seeded | the auto-created index is never seeded: flusso replaces it with a strict one and backfills it in full, at the seed or at the next start |
+| Deleted while the sink engine restarts, or while a staging fails part way | as above | as above |
+| A staging fails right after recreating a deleted seeded generation | the empty generation could be served as seeded | the next start backfills it |
+| A seeded generation under another `index.uuid` (restored from a snapshot, recreated by hand) | served as found | served as found, logged at info; flusso doesn't rebuild it |
+
+To tell a generation apart from one recreated under its name, flusso records each generation's `index.uuid` in its `flusso_meta` doc. [Each generation's identity](../reference/sink-opensearch.md#each-generations-identity) has the details; every case is in [A generation deleted or replaced](../reference/sink-opensearch.md#a-generation-deleted-or-replaced).
+
+**Who is affected.**
+
+- Anyone who deletes generation indexes by hand, or whose cluster tooling does.
+- Deployments whose OpenSearch role is cut down to exactly the calls flusso made in 0.18: staging now reads `GET /{generation}/_settings/index.uuid` (it was a `HEAD`), and seeding reads it once more.
+
+**What to do.**
+
+1. **Let the role read index settings** of flusso's indexes (`{prefix}{logical}_*`), if it is a cut-down one. Without it, staging fails and the sink restarts with backoff.
+2. **Upgrade flusso.** Nothing is rebuilt: an older meta doc gains `uuid` on the first start, and no content hash moves.
+3. **Keep forbidding auto-create** for flusso's generations, as [Cluster requirements](../reference/sink-opensearch.md#cluster-requirements) recommends. Without it the replacement waits for the seed or the next start; [why](../reference/sink-opensearch.md#why-forbid-auto-create).
+
+**What to know.**
+
+- **One extra backfill.** A deletion mid-backfill costs a second full backfill of that index. It stays `backfilling` in `/status`, and `/wait` answers `503`, until the second one lands.
+- **Requests.** Creating a generation writes its meta doc twice. Nothing is added on the write path.
+
 ## For code embedding the crates
 
 - **Removed:** `EngineError::DocumentsRejected` (a refusal no longer ends the run).
@@ -83,3 +114,6 @@ The OpenSearch sink's bulk retry (200 ms doubling, `max_retries`) is unchanged.
 - [A lane is stalled](stalled-lane.md)
 - [Handle rejected documents](rejected-documents.md)
 - [Index entries and on_error](../reference/index-and-on-error.md#on_error)
+- **`Sink::ensure_index`** returns `sink::Ensured { target: Option<TargetId>, created }` instead of `()` (build one with `Ensured::existing(target)` or `Ensured::created(target)`; it is `#[non_exhaustive]`). New `sink::TargetId` names a target; a sink that can tell its targets apart gives one created anew a new id. The default implementation names none.
+- **New: `SinkError::TargetChanged`.** `mark_seeded` answers it for a target that isn't the one `ensure_index` named; the engine then stages the index again and backfills it in full.
+- **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.

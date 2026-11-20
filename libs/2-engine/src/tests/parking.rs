@@ -101,7 +101,7 @@ impl Gate {
 
 #[async_trait]
 impl Sink for Gate {
-    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<()> {
+    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
         let name = mapping.index.to_string();
         self.ensured.lock().unwrap().push(name.clone());
         self.ensured_at.lock().unwrap().push(Instant::now());
@@ -109,8 +109,9 @@ impl Sink for Gate {
         if answers.get(&name) == Some(&Answer::Missing) {
             answers.remove(&name);
             self.unseeded.lock().unwrap().insert(name);
+            return Ok(sink::Ensured::created(None));
         }
-        Ok(())
+        Ok(sink::Ensured::default())
     }
 
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
@@ -256,6 +257,7 @@ fn item(of: &IndexName, ids: std::ops::Range<i64>, position: Option<u64>) -> Lan
             .into(),
         hold: Default::default(),
         walked: None,
+        ticket: None,
     })
 }
 
@@ -825,6 +827,38 @@ async fn a_refused_backfill_item_parks_its_lane() {
         !rig.stream.is_idle(),
         "the refused page stays unacknowledged"
     );
+    task.abort();
+}
+
+/// A parked lane's `SnapshotComplete` still runs once nothing is in front
+/// of it: a stop acknowledges the refused page unwritten, and the completion
+/// behind it is acknowledged (seeding nothing, as a cut-short backfill), so
+/// the lane drains. Only a lane being staged again holds its completion.
+#[tokio::test(start_paused = true)]
+async fn a_parked_lanes_completion_runs_once_a_stop_skipped_the_page_in_front() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Refuse));
+    let producer = rig.stream.lane(&lane(orders())).unwrap().producer;
+    producer.publish(item(&orders(), 0..2, None)).await.unwrap();
+    producer
+        .publish(LaneItem::SnapshotComplete {
+            index: orders(),
+            ticket: stream::Ticket::new(1),
+        })
+        .await
+        .unwrap();
+    let stop = Stop::new();
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_stop(stop.clone()));
+    let task = spawn(Arc::clone(&engine));
+    eventually("the lane parks on the refusal", || {
+        engine.lane_health(&lane(orders())).kind() == "refused"
+    })
+    .await;
+    stop.request();
+    eventually("the parked lane's completion is acknowledged", || {
+        rig.stream.is_idle()
+    })
+    .await;
     task.abort();
 }
 

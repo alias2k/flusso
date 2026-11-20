@@ -579,6 +579,280 @@ async fn generation_deleted_while_running_is_reported_missing_and_is_rebuilt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_generation_deleted_mid_backfill_is_staged_as_created_without_its_checkpoint() {
+    // Issue #428, auto-create forbidden for flusso's generations: the write
+    // after the deletion finds the target missing, and staging again creates
+    // it under another identity, with no checkpoint.
+    const ROWS: usize = 20;
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let status = client
+        .put(format!("{base}/_cluster/settings"))
+        .json(&serde_json::json!({
+            "persistent": { "action.auto_create_index": format!("+flusso_meta,-{LOGICAL}_*,+*") }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(
+        status.is_success(),
+        "setting auto_create_index returned {status}"
+    );
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+
+    let sink = sink(&base);
+    let first = sink.ensure_index(&mapping).await.unwrap();
+    assert!(first.created, "the first generation is new");
+    assert!(first.target.is_some(), "a generation is named by its uuid");
+
+    // ── The backfill lands rows 1..=10 and records how far it got ────────────
+    hold_rows(&sink, &index, 1..=10).await;
+    sink.flush(false).await.unwrap();
+    sink.record_walked(&index, "10").await.unwrap();
+    assert_eq!(
+        sink.seeding(&index).await.unwrap(),
+        sink::Seeding::Unseeded {
+            walked: Some("10".to_owned())
+        }
+    );
+
+    // ── An operator deletes the generation; the next page finds it missing ───
+    let status = client
+        .delete(format!("{base}/{gen1}"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "DELETE {gen1} returned {status}");
+    hold_rows(&sink, &index, 11..=12).await;
+    let report = sink.flush(false).await.unwrap();
+    assert_eq!(
+        report.missing.iter().map(|m| &m.index).collect::<Vec<_>>(),
+        [&index],
+        "{report:?}"
+    );
+
+    // ── Staged again: a new, empty generation, its checkpoint gone ───────────
+    let again = sink.ensure_index(&mapping).await.unwrap();
+    assert!(again.created, "{again:?}");
+    assert_ne!(
+        again.target, first.target,
+        "the recreated generation must not be named as the deleted one"
+    );
+    assert_eq!(
+        sink.seeding(&index).await.unwrap(),
+        sink::Seeding::Unseeded { walked: None },
+        "the deleted generation's checkpoint must not resume the fresh one"
+    );
+
+    // ── The old backfill's remaining pages land, and are not the table ───────
+    hold_rows(&sink, &index, 11..=ROWS).await;
+    sink.flush(true).await.unwrap();
+    assert!(!sink.is_seeded(&index).await.unwrap());
+    assert_eq!(search_count(&client, &base, &hash_alias).await, 10);
+    assert!(!doc_exists(&client, &base, &hash_alias, "1").await);
+
+    // ── The fresh backfill writes every row; only then is it seeded ──────────
+    hold_rows(&sink, &index, 1..=ROWS).await;
+    sink.flush(true).await.unwrap();
+    sink.mark_seeded(&index).await.unwrap();
+    assert!(sink.is_seeded(&index).await.unwrap());
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen1.clone()]
+    );
+    assert_eq!(
+        search_count(&client, &base, &hash_alias).await,
+        ROWS as u64,
+        "the seeded generation holds the table"
+    );
+    for id in 1..=ROWS {
+        assert!(
+            doc_exists(&client, &base, &hash_alias, &id.to_string()).await,
+            "id {id}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn an_auto_created_generation_is_never_seeded_and_is_replaced_by_a_strict_one() {
+    // Issue #428 with OpenSearch's default `action.auto_create_index`: the
+    // unseeded generation is deleted mid-backfill and the next write quietly
+    // recreates it, dynamically mapped, holding only what came after. It is
+    // not the generation flusso made: it is never seeded, and staging (here a
+    // fresh sink, as after a restart) replaces it with a strict, empty one
+    // with no checkpoint, which only a full backfill seeds.
+    const ROWS: usize = 20;
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+
+    let sink = sink(&base);
+    let first = sink.ensure_index(&mapping).await.unwrap();
+    hold_rows(&sink, &index, 1..=10).await;
+    sink.flush(false).await.unwrap();
+    sink.record_walked(&index, "10").await.unwrap();
+
+    let status = client
+        .delete(format!("{base}/{gen1}"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "DELETE {gen1} returned {status}");
+    hold_rows(&sink, &index, 11..=ROWS).await;
+    let report = sink.flush(true).await.unwrap();
+    assert!(
+        report.missing.is_empty(),
+        "auto-create on: the write recreated the generation ({report:?})"
+    );
+    assert_ne!(dynamic_of(&client, &base, &gen1).await, "strict");
+
+    let refused = sink.mark_seeded(&index).await;
+    assert!(
+        matches!(refused, Err(sink::SinkError::TargetChanged(_))),
+        "an auto-created generation must never be seeded: {refused:?}"
+    );
+    let message = refused.unwrap_err().to_string();
+    assert_eq!(
+        message,
+        format!(
+            "the index's target changed: {gen1} is not the generation staged for {LOGICAL} \
+             (deleted, or recreated by a write under action.auto_create_index)"
+        )
+    );
+    assert!(!sink.is_seeded(&index).await.unwrap());
+
+    let restarted = self::sink(&base);
+    let replaced = restarted.ensure_index(&mapping).await.unwrap();
+    assert!(replaced.created, "{replaced:?}");
+    assert_ne!(replaced.target, first.target);
+    assert_eq!(dynamic_of(&client, &base, &gen1).await, "strict");
+    assert_eq!(
+        restarted.seeding(&index).await.unwrap(),
+        sink::Seeding::Unseeded { walked: None },
+        "the impostor's checkpoint must not resume the new generation"
+    );
+    assert_eq!(search_count(&client, &base, &gen1).await, 0);
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen1.clone()]
+    );
+
+    hold_rows(&restarted, &index, 1..=ROWS).await;
+    restarted.flush(true).await.unwrap();
+    restarted.mark_seeded(&index).await.unwrap();
+    assert!(restarted.is_seeded(&index).await.unwrap());
+    assert_eq!(dynamic_of(&client, &base, &gen1).await, "strict");
+    assert_eq!(search_count(&client, &base, &hash_alias).await, ROWS as u64);
+}
+
+/// The `dynamic` setting of `index`'s mapping, as OpenSearch reports it.
+async fn dynamic_of(client: &reqwest::Client, base: &str, index: &str) -> Value {
+    let body: Value = client
+        .get(format!("{base}/{index}/_mapping"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body[index]["mappings"]["dynamic"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_seeded_generation_recreated_by_a_staging_that_then_failed_is_never_served_seeded() {
+    // A seeded generation is deleted; staging recreates it empty, then fails
+    // to write the meta doc (here the meta index refuses writes for a while).
+    // The meta doc must never still say "seeded" beside the empty generation:
+    // the next staging reports it unseeded, so the engine backfills it.
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+
+    let run1 = sink(&base);
+    let first = run1.ensure_index(&mapping).await.unwrap();
+    hold_rows(&run1, &index, 1..=5).await;
+    run1.flush(true).await.unwrap();
+    run1.mark_seeded(&index).await.unwrap();
+    let status = client
+        .delete(format!("{base}/{gen1}"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "DELETE {gen1} returned {status}");
+
+    let block_meta = |blocked: bool| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let status = client
+                .put(format!("{base}/flusso_meta/_settings"))
+                .json(&serde_json::json!({ "index.blocks.write": blocked }))
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert!(
+                status.is_success(),
+                "blocking the meta index returned {status}"
+            );
+        }
+    };
+    block_meta(true).await;
+    assert!(
+        sink(&base).ensure_index(&mapping).await.is_err(),
+        "the meta write is refused, so staging fails"
+    );
+    block_meta(false).await;
+
+    let run2 = sink(&base);
+    let staged = run2.ensure_index(&mapping).await.unwrap();
+    assert_ne!(staged.target, first.target);
+    assert!(
+        !run2.is_seeded(&index).await.unwrap(),
+        "an empty generation must not be served as seeded"
+    );
+    assert_eq!(
+        run2.seeding(&index).await.unwrap(),
+        sink::Seeding::Unseeded { walked: None }
+    );
+    assert_eq!(search_count(&client, &base, &hash_alias).await, 0);
+
+    // What a failure after the create leaves now: an unseeded doc naming no
+    // uuid beside the new generation. Staging adopts it, still unseeded.
+    let status = client
+        .put(format!("{base}/flusso_meta/_doc/{hash_alias}"))
+        .json(&serde_json::json!({ "active_generation": 1, "seeded": false }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(
+        status.is_success(),
+        "rewriting the meta doc returned {status}"
+    );
+    let run3 = sink(&base);
+    let adopted = run3.ensure_index(&mapping).await.unwrap();
+    assert_eq!(adopted.target, staged.target);
+    assert!(!run3.is_seeded(&index).await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
 async fn a_second_reindex_while_rebuilding_stages_nothing() {
     // Issue #121: a reindex while a rebuild is already pending must not stage
     // another generation and orphan the one being built.
@@ -744,7 +1018,15 @@ async fn index_settings_land_on_the_created_generation_per_index_winning() {
     assert_eq!(wide["index.max_result_window"], "20000");
 }
 
-/// The settings of `index` as flat dotted keys.
+/// Hold an upsert of each row in `rows` for the next flush.
+async fn hold_rows(sink: &Buffered, index: &IndexName, rows: std::ops::RangeInclusive<usize>) {
+    for i in rows {
+        sink.apply(&upsert(index, &i.to_string(), &document(i)))
+            .await
+            .unwrap();
+    }
+}
+
 /// How many documents a search through `target` matches right now.
 async fn search_count(client: &reqwest::Client, base: &str, target: &str) -> u64 {
     let body: Value = client

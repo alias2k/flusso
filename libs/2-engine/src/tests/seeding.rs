@@ -275,8 +275,14 @@ impl Rig {
     }
 
     async fn complete(&self, lane: &str) {
-        self.publish(lane, LaneItem::SnapshotComplete { index: index(lane) })
-            .await;
+        self.publish(
+            lane,
+            LaneItem::SnapshotComplete {
+                index: index(lane),
+                ticket: stream::Ticket::new(1),
+            },
+        )
+        .await;
     }
 }
 
@@ -302,6 +308,7 @@ fn batch(lane: &str, id: &str, position: Option<Position>) -> LaneItem {
         .into(),
         hold: Default::default(),
         walked: None,
+        ticket: None,
     })
 }
 

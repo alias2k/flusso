@@ -245,6 +245,62 @@ impl Default for SinkOptions {
     }
 }
 
+/// What [`Sink::ensure_index`] did to an index's target.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct Ensured {
+    /// Which target the index now writes to, if the sink can name it. Two
+    /// answers naming different targets mean the second is not the first:
+    /// whatever was written to the first is not in it.
+    pub target: Option<TargetId>,
+    /// The target was created by this call, empty: whatever was written to
+    /// the index before went with a target that is gone. It carries no
+    /// checkpoint.
+    pub created: bool,
+}
+
+impl Ensured {
+    /// A target that was already there, holding what was written to it.
+    pub fn existing(target: Option<TargetId>) -> Self {
+        Self {
+            target,
+            created: false,
+        }
+    }
+
+    /// A target this call created, empty.
+    pub fn created(target: Option<TargetId>) -> Self {
+        Self {
+            target,
+            created: true,
+        }
+    }
+}
+
+/// Names one target of an index, as the sink tells them apart: a target
+/// created anew (after a deletion, or recreated by anyone else) gets another.
+/// The OpenSearch sink names a generation by its `index.uuid`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TargetId(String);
+
+impl TargetId {
+    /// The target named `name`.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// Its name, as the sink wrote it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for TargetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// What [`Sink::seeding`] answers for an index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -295,8 +351,20 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// this is the one place that has both facts. Never let a marker outlive
     /// the data it describes — a recreated-empty index that claims to be seeded
     /// is served, silently, with nothing in it.
-    async fn ensure_index(&self, _mapping: &IndexMapping) -> Result<()> {
-        Ok(())
+    ///
+    /// The answer names the target the index now writes to
+    /// ([`Ensured::target`]) and says whether this call created it. The
+    /// engine keeps the target an index's backfill was asked for under; a
+    /// later answer naming another means the pages that backfill wrote are
+    /// not there, so it can't seed the index and a fresh backfill is asked
+    /// for. That holds even when the call that created the new target failed
+    /// on a later step: the next one names it. So a sink that can name its
+    /// targets should, and must give a target created anew a new name, also
+    /// one recreated by anyone else (an auto-create, a restore). A created
+    /// target carries no checkpoint ([`record_walked`](Self::record_walked)).
+    /// The default names none and creates nothing.
+    async fn ensure_index(&self, _mapping: &IndexMapping) -> Result<Ensured> {
+        Ok(Ensured::default())
     }
 
     /// Write `envelopes`: index each upserted document, remove each deleted
@@ -468,6 +536,11 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// Called once the index's backfill is written, possibly while other
     /// indexes are written or seeded (see the trait's doc on concurrency).
     /// A failure is retried by calling it again, so it must be idempotent.
+    ///
+    /// A target that is no longer the one [`ensure_index`](Self::ensure_index)
+    /// named (deleted, or recreated by anyone else) must not be seeded:
+    /// answer [`SinkError::TargetChanged`](crate::SinkError::TargetChanged),
+    /// and the engine stages the index again and backfills it in full.
     async fn mark_seeded(&self, _: &IndexName) -> Result<()> {
         Ok(())
     }

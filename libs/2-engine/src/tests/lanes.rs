@@ -422,6 +422,7 @@ async fn lanes_take_turns_so_a_backlog_on_one_index_does_not_starve_another() {
             .into(),
             hold: Default::default(),
             walked: None,
+            ticket: None,
         })
     };
     let orders_lane = stream
@@ -502,6 +503,7 @@ async fn a_snapshot_complete_waits_only_for_its_own_lane() {
             .into(),
             hold: Default::default(),
             walked: None,
+            ticket: None,
         })
     };
     let lane = |index: IndexName| {
@@ -513,12 +515,18 @@ async fn a_snapshot_complete_waits_only_for_its_own_lane() {
     let (orders_lane, users_lane) = (lane(orders()), lane(users()));
     orders_lane.publish(backfill(orders(), "o")).await.unwrap();
     orders_lane
-        .publish(LaneItem::SnapshotComplete { index: orders() })
+        .publish(LaneItem::SnapshotComplete {
+            index: orders(),
+            ticket: stream::Ticket::new(1),
+        })
         .await
         .unwrap();
     users_lane.publish(backfill(users(), "u")).await.unwrap();
     users_lane
-        .publish(LaneItem::SnapshotComplete { index: users() })
+        .publish(LaneItem::SnapshotComplete {
+            index: users(),
+            ticket: stream::Ticket::new(1),
+        })
         .await
         .unwrap();
 
@@ -588,6 +596,7 @@ async fn a_late_live_item_on_a_quiet_lane(backlog_live: bool) -> usize {
             .into(),
             hold: Default::default(),
             walked: None,
+            ticket: None,
         })
     };
     let orders_lane = stream
@@ -733,6 +742,7 @@ async fn a_stalled_index_with_a_backlog_leaves_its_sibling_a_slot() {
             .into(),
             hold: Default::default(),
             walked: None,
+            ticket: None,
         })
     };
     let lane = |index: IndexName| {
@@ -858,6 +868,7 @@ async fn an_ordered_sink_writes_live_items_across_lanes_in_position_order() {
             .into(),
             hold: Default::default(),
             walked: None,
+            ticket: None,
         })
     };
     let lane = |index: IndexName| {
@@ -956,6 +967,7 @@ async fn a_quiet_lane_makes_its_last_writes_searchable_beside_a_stalled_lane() {
             .into(),
             hold: Default::default(),
             walked: None,
+            ticket: None,
         })
     };
     let publish = |index: IndexName, position: u64| {
@@ -1065,6 +1077,7 @@ async fn a_caught_up_write_names_only_its_own_quiet_lanes() {
             .into(),
             hold: Default::default(),
             walked: None,
+            ticket: None,
         })
     };
     let lane = |index: IndexName| {
@@ -1218,6 +1231,7 @@ async fn a_lane_whose_live_item_is_blocked_answers_no_further_than_before() {
             envelopes: Vec::new().into(),
             hold: Default::default(),
             walked: None,
+            ticket: None,
         }))
         .await
         .unwrap();
@@ -1330,6 +1344,7 @@ async fn a_quiet_lanes_caught_up_write_waits_beside_another_lanes_refresh() {
                 .into(),
                 hold: Default::default(),
                 walked: None,
+                ticket: None,
             }))
             .await
             .unwrap();
