@@ -286,8 +286,35 @@ its own batch. Until 6b one task builds one live batch across every index (slice
 | 1 | everything held ≤ `max_built_mib` |
 | 2 | one index ≤ `index_budget_share` of it (default half), with two or more indexes with lanes (decision (b)5) |
 | 3 | backfill over every index ≤ half |
-| 4 | an index holding nothing gets one batch, whatever 1–3 say |
+| 4 | an index holding nothing gets one batch, whatever 1–3 say; **for live, an index holding no live bytes does**, so live keeps room beside the index's own backfill (review round 1) |
 | 5 | a kind holding nothing gets one batch: live then takes every index waiting, at its share or not ("live always fits once it holds no live bytes") |
+
+- **Per index, live keeps room beside its own backfill** (review round 1). At the default share an index's
+  share equals backfill's half, so one index's backfill behind a slow sink can hold the index at its share;
+  with live holding another index's bytes, rule 5 never applies and the index's live changes would get in
+  only at a release where the live candidate happened to be offered, pinning confirmation and every fence
+  at the oldest of them meanwhile. Three engine schedules (`orders` backfilling behind a 20–100 ms sink,
+  `users` changing every 2–10 ms, one `orders` live change) never showed it: the change landed in
+  185–520 ms while the backfill took 0.5–2.6 s. The rule allowed it, though
+  (`an_index_holding_only_backfill_bytes_gets_one_live_batch` failed), so rule 4 for live now looks at the
+  index's **live** bytes: an index holding none gets one live batch, beside its backfill too. That is rule
+  5's "live always fits once it holds no live bytes", per index, and covers a reindex of one index on a
+  live deployment (its walk is this backfill). A bursting index holds live bytes, so its share still binds;
+  the bound per index grows by nothing (rule 4 already allowed one batch past the share). Guards: that budget
+  test and `an_index_backfilling_behind_a_slow_sink_still_builds_its_live_changes` (written before its
+  backfill completes, within 1.5 s).
+- **The budget metrics keep their meaning** (review round 1). `flusso.memory.refused{work}` counts once per
+  wait and `flusso.memory.wait{work}` reports one per wait, as on `main`: a live wait starts at the first
+  refusal of live documents and ends at the grant that leaves no index deferred. A partial grant that
+  defers an index neither ends the wait nor starts another (`Builds::start`), so one index held at its share
+  while others build in many runs is one refusal and one wait of the hold's length. Before the fix the
+  reviewer's case (128 KiB, `users` held about 2 s, five `orders` runs) counted 7; guard
+  `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it` (11 before, 1 after). Overlapping
+  holds of two indexes are one wait. With one index nothing is deferred: the numbers are `main`'s.
+- **One index is `main`'s but for one case** (review round 1): a live run that touched no document is now
+  always granted (an empty `admit` never refuses), where `main`'s `fits(Live, 0)` refused it while live held
+  something and a settle had left the total past the limit. An empty build holds nothing, so it changes no
+  bound.
 
 - **Order and starvation.** A live batch's indexes are offered oldest waiting first (by their oldest waiting
   position). An index refused by its own share doesn't hold others back. The first index refused by the
@@ -300,8 +327,10 @@ its own batch. Until 6b one task builds one live batch across every index (slice
   the other indexes build on (rules 2 and 4).
 - **A backfill batch spanning two indexes** (a page ends one index's walk and starts the next) fits whole or
   not at all.
-- **The bound** is `max_built_mib` plus each in-flight build's actual batch and one batch per index (rule 4);
-  one index holds its share plus at most a batch per build and one more (rule 5).
+- **The bound** is `max_built_mib` plus each in-flight build's actual batch and one batch per index (rule 4).
+  One index holds its share plus at most two batches past it: only rules 4 and 5 grant past the share, at
+  worst a backfill batch past half while backfill held nothing, then a live batch while the index held no
+  live bytes (the three-index schedule checks it at every write).
 - **Which indexes share.** The indexes with lanes (`mappings`): an index with no lane never builds and holds
   nothing. Lanes per index don't matter: a batch's part is counted once, however many lanes carry it. A
   backfill or reindex of one index draws on that index's share and backfill's half; the share is a fixed
@@ -335,7 +364,7 @@ its own batch. Until 6b one task builds one live batch across every index (slice
 | A lone change commits at once (#135) | `main`'s run cut; a waiting id is taken once a slot is free | `a_lone_change_on_a_quiet_stream_commits_without_waiting`, `max_delay_caps_a_batch_while_changes_keep_arriving` | — (rerun on the reader) |
 | Script failures on the ingest side (#198) | in the index task | `skip_policy_leaves_a_failed_document_out_and_keeps_going`, `stop_policy_fails_the_ingest_engine_on_a_failed_document` | slice 8: `a_stop_failure_on_one_index_lets_the_others_land` |
 | Item-level vs flush-wide; lane parking | sink side unchanged | `tests::parking`, `tests::merge`, daemon `a_stop_rejection_halts_its_lane_writing_several_items_at_once` | `a_parked_lane_fills_only_its_index_half_and_other_backfills_go_one_batch_at_a_time` |
-| Memory budget | many reservers; rules 1–5 per §3.5 (slice 4) | `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`, `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds` | `budget::tests` (`concurrent_reservations_never_pass_the_limit`, `a_release_wakes_every_waiting_task`, `a_release_between_the_refusal_and_the_wait_is_not_lost`, `an_index_holding_nothing_gets_one_batch`, `the_oldest_index_refused_by_the_limit_holds_younger_ones_back`, `every_index_gets_every_byte_back_once`), `one_bursting_index_of_three_holds_its_share_and_the_others_build`, `a_deferred_index_is_never_counted_committed_before_its_documents_land`, `an_index_past_its_waiting_bound_holds_the_live_batch_whole`, `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` |
+| Memory budget | many reservers; rules 1–5 per §3.5 (slice 4) | `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`, `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds` | `budget::tests` (`concurrent_reservations_never_pass_the_limit`, `a_release_wakes_every_waiting_task`, `a_release_between_the_refusal_and_the_wait_is_not_lost`, `an_index_holding_nothing_gets_one_batch`, `the_oldest_index_refused_by_the_limit_holds_younger_ones_back`, `every_index_gets_every_byte_back_once`), `one_bursting_index_of_three_holds_its_share_and_the_others_build`, `a_deferred_index_is_never_counted_committed_before_its_documents_land`, `an_index_past_its_waiting_bound_holds_the_live_batch_whole`, `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` (binds: fails with the share off), `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`, `an_index_backfilling_behind_a_slow_sink_still_builds_its_live_changes`, `an_index_holding_only_backfill_bytes_gets_one_live_batch` |
 | Gate fairness | lines per kind; budget asked at grant | `gate::tests` | `a_task_blocked_on_a_full_lane_holds_no_permit` (two indexes, one lane full, `builds = 1`), `a_waiter_refused_by_the_budget_keeps_its_place` |
 | `changes_committed` | computed from `Progress` (§3.6) | daemon status tests | daemon `tests::committed`, `progress::tests::committed` |
 | Resume checkpoints (8b), reindex per sink | the walk and its marks move as they are | `tests::resume`, `a_killed_backfill_resumes_…` e2e, `reindex_control_stages_and_requests_a_snapshot_without_restarting`, `reindex_operation_targets_one_sink` | — |
