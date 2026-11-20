@@ -8,10 +8,11 @@
 - **`on_error = "stop"` no longer stops the sink**, and `/readyz` stays `200` while an index is parked; alert on the new `FlussoLaneParked` instead: [Alerting on a parked index](#alerting-on-a-parked-index).
 - **The retry wait is configurable**: `[backoff]` sets the first and the longest wait of every restart and probe: [Retry timing is configurable](#retry-timing-is-configurable).
 - **A generation deleted mid-backfill is backfilled again in full**, never seeded with rows missing; a cut-down OpenSearch role needs to read index settings (#428): [A generation deleted mid-backfill](#a-generation-deleted-mid-backfill).
+- **`pinned_by` can name an index alone**, with `sink` null in `/status` and no `sink` label on `flusso_slot_pinned_by`: [An index's backlog can pin the slot](#an-indexs-backlog-can-pin-the-slot).
 
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`**: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`**: [For code embedding the crates](#for-code-embedding-the-crates).
 
 ## One index's failure parks its own lane
 
@@ -98,6 +99,32 @@ To tell a generation apart from one recreated under its name, flusso records eac
 - **One extra backfill.** A deletion mid-backfill costs a second full backfill of that index. It stays `backfilling` in `/status`, and `/wait` answers `503`, until the second one lands.
 - **Requests.** Creating a generation writes its meta doc twice. Nothing is added on the write path.
 
+## An index's backlog can pin the slot
+
+**What changed.** Before a change reaches a lane, the documents it touches sit in their index's **backlog**: waiting to be built, or being built, and not yet handed to any sink. When the backlog holds the oldest change flusso hasn't written, the backlog is what holds the replication slot, and `pinned_by` now says so:
+
+| Where | 0.18 | 0.19 |
+| --- | --- | --- |
+| `/status` `pinned_by` | `{ "index", "sink" }` or `null` | also `{ "index", "sink": null }`: that index's backlog |
+| `flusso_slot_pinned_by` | `{index, sink}` | also `{index}` alone, no `sink` label |
+| `stall_seconds`, `flusso_lane_stall_age` | items routed to the lane and not written | the same, plus a built batch the lane hasn't taken yet (a full lane). The backlog ages no lane. |
+
+The backlog form shows up for a moment during live builds. One that stays means builds aren't keeping up: [When an index's backlog holds the slot](stalled-lane.md#when-an-indexs-backlog-holds-the-slot).
+
+**Who is affected.**
+
+- A client that reads `pinned_by.sink` as a string.
+- A dashboard or alert that joins `flusso_slot_pinned_by` with a lane series `on (index, sink)`: the backlog series has no lane to match, so it drops out of the join.
+
+**What to do.**
+
+1. **Accept a `null` `sink`** in anything that parses `/status`.
+2. **Show the backlog series on its own**, matched by `sink=""`. The dev dashboard's WAL panel does it with the slot's whole lag:
+
+   ```promql
+   max by (index) (flusso_slot_pinned_by{sink=""} * on () group_left max(flusso_replication_slot_lag_bytes))
+   ```
+
 ## For code embedding the crates
 
 - **Removed:** `EngineError::DocumentsRejected` (a refusal no longer ends the run).
@@ -108,12 +135,13 @@ To tell a generation apart from one recreated under its name, flusso records eac
 - **`daemon::LaneSnapshot`** (a lane of `/status`) gains the public fields `health`, `parked_since`, `next_probe` and `reason`: code building one with a struct literal must set them. `Status::unhealthy_lanes`, `LaneHealthView` and `LaneHealthState` (`Open`, `Refused`, `Blocked`, `Restaging`; `name()` gives the word `/status` writes) are new.
 - **Removed: `DaemonOptions::max_restart_backoff`.** The schedule comes from the config: `Config.backoff` (`config::BackoffConfig`, each key a `BackoffValue` with its `BackoffOrigin`), resolved by `daemon::backoff(&Config)`. `Daemon::start` fails when `max_ms` is below `initial_ms`. A struct literal of `DaemonOptions` drops the field.
 - **New: `engine::Backoff`** (re-exported as `daemon::Backoff`): `Backoff::new(initial, max)` returns `Err(engine::BackoffError)` for a zero first wait or a cap below it; `initial()`, `max()`, `after(wait)` (doubled, capped); `Default` is 1 s / 60 s. `SinkEngine::with_backoff(Backoff)` sets a sink engine's probe and staging schedule. `config::parse_backoff_ms` parses a flag's or a variable's value.
+- **`Sink::ensure_index`** returns `sink::Ensured { target: Option<TargetId>, created }` instead of `()` (build one with `Ensured::existing(target)` or `Ensured::created(target)`; it is `#[non_exhaustive]`). New `sink::TargetId` names a target; a sink that can tell its targets apart gives one created anew a new id. The default implementation names none.
+- **New: `SinkError::TargetChanged`.** `mark_seeded` answers it for a target that isn't the one `ensure_index` named; the engine then stages the index again and backfills it in full.
+- **`pinned_by` answers an `engine::Pin`** (re-exported as `daemon::Pin`): `Pin::Lane(LaneKey)` or `Pin::Backlog(IndexName)`. `Progress::pinned_by`, `Stalls::pinned_by` and the second half of `Status::stalls()` return `Option<Pin>` instead of `Option<LaneKey>`. `daemon::status::LaneId` is now `PinnedBy` (re-exported as `daemon::PinnedBy`), with `sink: Option<String>`. New `Progress::own_oldest(lane)`: the oldest change the lane holds itself, what its stall age is measured by.
+- **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.
 
 ## Related
 
 - [A lane is stalled](stalled-lane.md)
 - [Handle rejected documents](rejected-documents.md)
 - [Index entries and on_error](../reference/index-and-on-error.md#on_error)
-- **`Sink::ensure_index`** returns `sink::Ensured { target: Option<TargetId>, created }` instead of `()` (build one with `Ensured::existing(target)` or `Ensured::created(target)`; it is `#[non_exhaustive]`). New `sink::TargetId` names a target; a sink that can tell its targets apart gives one created anew a new id. The default implementation names none.
-- **New: `SinkError::TargetChanged`.** `mark_seeded` answers it for a target that isn't the one `ensure_index` named; the engine then stages the index again and backfills it in full.
-- **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.
