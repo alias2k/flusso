@@ -385,14 +385,20 @@ other. 1–5 change nothing a user sees except slice 4's per-index half and slic
   `what_a_failed_run_left_behind_is_rebuilt_from_the_replay_in_batches` (three batches left behind
   are rebuilt two at a time; under give-back it sees one batch of six). Slice 8's per-index restart,
   which doesn't reopen the stream, needs give-back and brings it with its own bound.
-- **A batch carries its own run's newest change**, as on `main`: every document it takes was marked
-  by that run (a document waits only between its run's marking and grant, and what a failed run left
-  is forgotten), so no fallback is needed. Positions grow along a lane within one run; across runs only
-  as the source numbers them: the `ChangeCapture` port promises monotonic positions within one run,
-  and the Postgres capture keeps numbering across reopened streams. A floor at the newest position
-  routed to any lane (review round 1) was removed in round 2: with a source that repeats positions
-  across runs, a replayed change's batch borrowed another lane's newer change, and a lane that never
-  got that change answered through it (`a_replayed_batch_claims_no_change_another_lane_landed`).
+- **A live batch carries its own live run's newest change**, as on `main`: every document it takes
+  was marked by that live run (a document waits only between its live run's marking and grant, and
+  what a failed engine run left is forgotten), so no fallback is needed, and the type says so
+  (`Job::Live.position: Position`, carried out of the gate by `Grant::Live`; a live item whose index
+  has no pending build is `EngineError::UnregisteredLiveItem`). Across engine runs what holds is the
+  **position contract** (the `ChangeCapture` port): positions strictly increase within one stream, and
+  over the capture's life a position never names a different change than it named before, because
+  `Progress` keeps each lane's newest position for its whole life. The Postgres capture keeps
+  numbering across reopened streams; the engine tests' sources give a replayed change the position it
+  had. A floor at the newest position routed to any lane (review round 1) was removed in round 2. It
+  did nothing for Postgres, whose replays are numbered past every earlier position; with a source that
+  replays a change under the position it had, a replayed change's batch borrowed another lane's newer
+  change, and a lane that never got that change answered through it
+  (`a_replayed_batch_claims_no_change_another_lane_landed`, which models such a source).
 - **A run whose changes build nothing is an empty build**, as on `main`: its slot tells every lane
   it was skipped and every sink its changes settled, in grant order (#204).
 - **`pinned_by`** is `engine::Pin`. `/status` gives `{index, sink: null}` for a backlog,

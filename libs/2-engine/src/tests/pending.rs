@@ -322,6 +322,12 @@ async fn a_skipped_lane_is_not_held_by_a_full_lane_of_another_index() {
 /// run's stream replays change 0. Its batch carries change 0's own position:
 /// once both lanes land it, `audit` answers through change 0, never through
 /// change 10, whose document it never got.
+///
+/// It models a source that replays a change under the position it had (the
+/// `MockSource` numbers every stream from 0), which the position contract
+/// allows. Postgres numbers a replay past every earlier position, so the
+/// floor this guards against (the newest position routed to any lane) did
+/// nothing there: this is not a Postgres regression test.
 #[tokio::test]
 async fn a_replayed_batch_claims_no_change_another_lane_landed() {
     let (primary, audit) = (sink_name("primary"), sink_name("audit"));

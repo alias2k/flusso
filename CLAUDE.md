@@ -704,12 +704,14 @@ is the one concrete piece.
   own: stall age, `Pin::Lane`), and its index's **backlog** (waiting ids, builds not sending and not
   registered on it: `Pin::Backlog`), so a full sibling lane still holds back only itself. What a run
   left behind unpublished is forgotten when the next run starts (`forget_all`): confirmation stayed
-  before it, so the replay marks it again. A batch carries its own run's newest change, as on `main`
-  (every document it takes was marked by that run): positions grow along a lane within one run (grant
-  order), and across runs only as the source numbers them. The `ChangeCapture` port promises
-  monotonic positions within one run; the Postgres capture keeps numbering across reopened streams. A
-  batch never borrows another change's position, so a lane that lands it answers through its own
-  run's changes only (guard: `a_replayed_batch_claims_no_change_another_lane_landed`).
+  before it, so the replay marks it again. A live batch carries its own live run's newest change
+  (`Job::Live.position` is a `Position`, carried out of the gate by `Grant::Live`), as on `main`:
+  every document it takes was marked by that live run. Positions grow along a lane in grant order;
+  across engine runs the position contract above is what holds. A batch never borrows another change's
+  position, so a lane that lands it answers through its own changes only (guard:
+  `a_replayed_batch_claims_no_change_another_lane_landed`, with a source that replays a change under
+  the position it had). A live item whose index has no pending build is refused
+  (`EngineError::UnregisteredLiveItem`), never published unregistered.
   Each lane answers `Before(oldest of its unlanded items and its index's pending documents)` /
   `Through(the newest position routed to it)` / `Idle`
   (`source::cdc::Landed`), and several lanes (`landed()`, `over`) answer as the lane that covers least,
@@ -736,9 +738,14 @@ is the one concrete piece.
   is called, which only the stream loop can do (`recv` takes `&mut`), so the wake-up stays. Idle WAL
   is released by the tick's confirmation (keepalives move the horizon only; `read_through` confirms
   nothing). A sink engine that dies before its write returns leaves the item unacked; the lane
-  redelivers it to the restarted engine (idempotent rebuild, deterministic id). Positions are
-  monotonic for the life of the source across reopened streams (`Positions::new(start_lsn,
-  first_seq)` continues `next_seq`), so the `next_seq` test stays exact across an ingest restart.
+  redelivers it to the restarted engine (idempotent rebuild, deterministic id). **The position
+  contract** (the `ChangeCapture` port, `cdc/capture.rs`): positions strictly increase within one
+  stream, and over the capture's life a position never names a different change than it named
+  before, because `Progress` keeps each lane's newest position for its whole life. Two numberings
+  keep it: keep numbering across reopened streams (Postgres: `Positions::new(start_lsn, first_seq)`
+  continues `next_seq`, so the `next_seq` test stays exact across an ingest restart), or give a
+  replayed change the position it had (the engine tests' sources). Renumbering with new meanings is
+  unsafe, on `main` too.
   Guards: `progress::tests` (`every_interleaving_answers_as_the_model_does`, 300 seeded interleavings
   against a model; `a_marked_id_pins_confirmation_until_its_build_lands`,
   `a_build_holds_a_lane_only_until_its_item_is_registered_there`,
