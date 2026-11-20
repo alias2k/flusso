@@ -1283,29 +1283,41 @@ async fn a_document_whose_build_landed_is_built_again_while_an_earlier_slot_wait
     assert_eq!(deployment.recorder.state(), db.expected());
 }
 
-/// A build that fails is left behind and the engine restarts: the new run
-/// forgets it, and the stream resumes after what every lane landed, which
-/// stayed before the failed change, so its replay rebuilds the document and
-/// every sink ends with it.
+/// A failed run leaves more than one batch behind unpublished: changes 1 to
+/// 6 in batches of two over four builds, 1's build held, then failing once
+/// the other two batches landed behind it. The next run forgets them, and
+/// its stream, resumed before the failed change, replays every one: they are
+/// rebuilt in batches of two, as read, never in one batch of all six, and
+/// every sink ends with them.
 #[tokio::test(start_paused = true)]
-async fn a_failed_build_is_forgotten_and_rebuilt_from_the_replay() {
-    let db = Database::new(0, [1, 2, 3].into_iter().map(Change::upsert).collect());
+async fn what_a_failed_run_left_behind_is_rebuilt_from_the_replay_in_batches() {
+    let db = Database::new(0, (1..=6).map(Change::upsert).collect());
     let builder = Builder::new(
         &db,
         Behaviour {
-            fail_once: Mutex::new(HashSet::from([2])),
+            held: Mutex::new(HashSet::from([1])),
+            fail_once: Mutex::new(HashSet::from([1])),
             ..Behaviour::default()
         },
     );
     let mut deployment =
         Deployment::new(Feed::new(&db), Arc::clone(&builder), Recorder::seeded(true))
-            .ingest(|ingest| ingest.with_batch(batch(1)));
+            .ingest(|ingest| ingest.with_batch(batch(2)).with_builds(4));
+    let releaser = {
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            while builder.grants().len() < 3 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            builder.release(1);
+        })
+    };
     assert_eq!(deployment.run_to_end(1).await, 1, "one run failed");
-    assert_eq!(
-        builder.grants().iter().filter(|ids| **ids == [2]).count(),
-        2,
-        "2 is built again from the replay: {:?}",
-        builder.grants()
+    releaser.await.unwrap();
+    let grants = builder.grants();
+    assert!(
+        grants.len() > 3 && grants.iter().all(|ids| ids.len() <= 2),
+        "rebuilt as read, two at a time: {grants:?}"
     );
     assert_eq!(deployment.recorder.state(), db.expected());
     let confirmed = deployment.feed.confirmed.lock().unwrap().clone();

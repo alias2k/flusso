@@ -350,3 +350,49 @@ async fn a_batch_never_carries_a_position_below_what_its_lanes_were_routed() {
         batch.position
     );
 }
+
+/// A run published the batch through change 10 to `primary` only (the send
+/// to `audit` failed and the run ended), and `primary` landed it. The next
+/// run's stream replays change 0. Its batch carries change 0's own position:
+/// once both lanes land it, `audit` answers through change 0, never through
+/// change 10, whose document it never got.
+#[tokio::test]
+async fn a_replayed_batch_claims_no_change_another_lane_landed() {
+    let (primary, audit) = (sink_name("primary"), sink_name("audit"));
+    let sinks = vec![primary.clone(), audit.clone()];
+    let on_primary = LaneKey::new(users(), primary);
+    let on_audit = LaneKey::new(users(), audit);
+    let stream = Arc::new(ChannelStream::over(64, [users()], sinks.clone()));
+    let progress = Arc::new(Progress::of([users()], sinks.clone()));
+    let earlier = progress.next_key(&users()).unwrap();
+    progress.published(&on_primary, earlier, Position::new(10), Position::new(10));
+    progress.applied(&on_primary, earlier);
+
+    IngestEngine::new(
+        Arc::new(MockSource::new(vec![upsert(1)])),
+        Arc::new(MockDocuments::default()),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        sinks,
+        Arc::clone(&progress),
+    )
+    .run()
+    .await
+    .unwrap();
+    for lane in [&on_primary, &on_audit] {
+        let mut consumer = stream.lane(lane).unwrap().consumer;
+        let delivery = consumer.recv().await.unwrap().unwrap();
+        let (item, handle) = delivery.into_parts();
+        let LaneItem::Batch(batch) = item else {
+            panic!("a live batch");
+        };
+        progress.applied(lane, batch.key.unwrap());
+        handle.ack().await.unwrap();
+    }
+
+    assert_eq!(
+        progress.lane(&on_audit, Level::Applied),
+        Some(Landed::Through(Position::new(0))),
+        "audit landed only change 0"
+    );
+    assert_eq!(progress.landed(), Landed::Through(Position::new(0)));
+}
