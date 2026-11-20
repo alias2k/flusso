@@ -14,7 +14,7 @@ The stream port: what sits between the ingest engine and the sink engines. One *
 
 ## The contract
 
-- **Batches, not envelopes.** A lane item is the set of envelopes one ingest commit built, in build order, with the position of the last change it covers. Acknowledging it confirms that position for that lane; contiguity is free because batches are published in order. A live batch with no documents still carries its position. A snapshot batch carries none, and a `SnapshotComplete` marker follows the last one.
+- **Batches, not envelopes.** A lane item is one index's envelopes from one ingest commit, in build order, with the position of the last change it covers. A live item is known on its lane by its `ItemKey`, numbered per index in the order items are published and the same on every lane of the index: a sink engine reports landings by key, since two items of a lane may end on the same change. An index the commit built nothing for gets no item. A snapshot batch carries neither key nor position, and a `SnapshotComplete` marker follows the last one.
 - **Confirmation is not the stream's.** The ingest engine registers what it publishes in the engine's `Progress`, each sink engine reports what landed, and the source is confirmed from that, so the replication slot advances only past what *every* sink holds.
 - **Requests are at-least-once.** The ingest engine acknowledges a `Backfill` only after publishing the `SnapshotComplete` that ends it; a crash in between redelivers the request.
 - **Re-attachable ends.** `lane` and `requests` return fresh ends over the same lane each call. A restarted engine picks up where the last one stopped, including the item it left unacknowledged.

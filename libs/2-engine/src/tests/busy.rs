@@ -214,6 +214,7 @@ fn item(position: u64, ids: &[&str]) -> stream::LaneItem {
         })
         .collect();
     stream::LaneItem::Batch(stream::Batch {
+        key: Some(stream::ItemKey::new(position)),
         position: Some(Position::new(position)),
         changes: 1,
         envelopes: envelopes.into(),
@@ -261,6 +262,7 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
             let position = Position::new(position);
             progress.published(
                 &stream::LaneKey::new(super::users(), name.clone()),
+                stream::ItemKey::new(position.seq),
                 position,
                 position,
             );

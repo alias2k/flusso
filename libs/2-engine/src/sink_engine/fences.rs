@@ -1,10 +1,13 @@
-//! The sink's two fence levels, per lane, kept in position order while writes
+//! The sink's two fence levels, per lane, kept in key order while writes
 //! finish in any order.
 //!
-//! Every positioned lane item is entered under its lane when it is received
-//! and marked when its write returns. *Applied* is the last position before the oldest one
-//! still being written; *searchable* trails it, each position due by what its
-//! own write reported ([`Visibility`]). A caught-up write that returns
+//! Every live lane item is entered under its lane and its [`ItemKey`] when it
+//! is received, with its position, and marked when its write returns. Items
+//! are known by key, not position: two items of one lane may end on the same
+//! change. *Applied* is the last item before the oldest one still being
+//! written; *searchable* trails it, each item due by what its own write
+//! reported ([`Visibility`]). Each is reported by key to the progress and by
+//! the item's position to the observers. A caught-up write that returns
 //! [`Visibility::Immediate`] makes every write that returned before it was
 //! granted searchable, which the port promises; each returned write gets a
 //! sequence number so that "before" is exact.
@@ -19,14 +22,14 @@
 //! the returned-writes counter is shared by every lane.
 //!
 //! The state outlives a restart of the engine's run: a released item comes
-//! back under the same position and takes its old place.
+//! back under the same key and takes its old place.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use kernel::Position;
 use sink::Visibility;
-use stream::LaneKey;
+use stream::{ItemKey, LaneKey};
 use tokio::time::Instant;
 
 /// The fence levels of one sink, per lane, over the positions it has received.
@@ -48,12 +51,12 @@ pub(super) struct Fences {
     deferred: usize,
 }
 
-/// One lane's positions, in lane (position) order.
+/// One lane's items, in lane (key) order, each with its position.
 #[derive(Debug, Default)]
 struct LaneFences {
-    entries: BTreeMap<Position, Entry>,
-    /// The last position reported applied.
-    applied: Option<Position>,
+    entries: BTreeMap<ItemKey, (Position, Entry)>,
+    /// The last item reported applied.
+    applied: Option<ItemKey>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,15 +74,18 @@ enum Due {
 }
 
 impl Fences {
-    /// A positioned item arrived on `lane`: it is being written until
-    /// [`write_returned`](Self::write_returned). A redelivered item keeps its
-    /// place.
-    pub(super) fn received(&mut self, lane: &LaneKey, position: Position) {
+    /// A live item keyed `key`, at `position`, arrived on `lane`: it is being
+    /// written until [`write_returned`](Self::write_returned). A redelivered
+    /// item keeps its place.
+    pub(super) fn received(&mut self, lane: &LaneKey, key: ItemKey, position: Position) {
         let fences = self.lanes.entry(lane.clone()).or_default();
-        if fences.applied.is_some_and(|applied| position <= applied) {
+        if fences.applied.is_some_and(|applied| key <= applied) {
             return;
         }
-        fences.entries.entry(position).or_insert(Entry::Writing);
+        fences
+            .entries
+            .entry(key)
+            .or_insert((position, Entry::Writing));
     }
 
     /// How many writes have returned: what a write granted now covers if it
@@ -88,26 +94,26 @@ impl Fences {
         self.returned
     }
 
-    /// A write returned, holding the items at `written` (each lane's
-    /// position; one write may hold several lanes' items, merged). Each is
+    /// A write returned, holding the items at `written` (each lane's item
+    /// key; one write may hold several lanes' items, merged). Each is
     /// written, due by the write's `visibility`. A caught-up write reporting
     /// `Immediate` makes every write that returned before `covers_below`
     /// searchable now, on the lanes it was caught up for (the `Sink::write`
     /// contract, scoped by `CaughtUp::Indexes`).
     pub(super) fn write_returned(
         &mut self,
-        written: &[(LaneKey, Position)],
+        written: &[(LaneKey, ItemKey)],
         visibility: Visibility,
         caught_up: Option<(u64, &[LaneKey])>,
         now: Instant,
     ) {
         let seq = self.returned;
         self.returned += 1;
-        for (lane, position) in written {
-            let Some(entry) = self
+        for (lane, key) in written {
+            let Some((_, entry)) = self
                 .lanes
                 .get_mut(lane)
-                .and_then(|fences| fences.entries.get_mut(position))
+                .and_then(|fences| fences.entries.get_mut(key))
             else {
                 continue;
             };
@@ -134,7 +140,7 @@ impl Fences {
                     .filter(|(lane, _)| lanes.contains(lane))
                     .map(|(_, fences)| fences)
                 {
-                    for entry in fences.entries.values_mut() {
+                    for (_, entry) in fences.entries.values_mut() {
                         if let Entry::Written { seq, due } = entry
                             && *seq < covers_below
                             && match due {
@@ -159,43 +165,43 @@ impl Fences {
         self.deferred > 0 || self.latest_due.is_some_and(|at| at > now)
     }
 
-    /// `lane`'s new applied position, if its written run from the front
-    /// moved.
-    pub(super) fn advance_applied(&mut self, lane: &LaneKey) -> Option<Position> {
+    /// `lane`'s new applied item (its key and position), if its written run
+    /// from the front moved.
+    pub(super) fn advance_applied(&mut self, lane: &LaneKey) -> Option<(ItemKey, Position)> {
         let fences = self.lanes.get_mut(lane)?;
         let from = fences.applied.map_or(Bound::Unbounded, Bound::Excluded);
         let mut reached = None;
-        for (position, entry) in fences.entries.range((from, Bound::Unbounded)) {
+        for (key, (position, entry)) in fences.entries.range((from, Bound::Unbounded)) {
             match entry {
-                Entry::Written { .. } => reached = Some(*position),
+                Entry::Written { .. } => reached = Some((*key, *position)),
                 Entry::Writing => break,
             }
         }
-        if reached.is_some() {
-            fences.applied = reached;
+        if let Some((key, _)) = reached {
+            fences.applied = Some(key);
         }
         reached
     }
 
-    /// For each lane whose searchable run moved, its last position now
-    /// searchable, dropping it and everything before it.
-    pub(super) fn advance_searchable(&mut self, now: Instant) -> Vec<(LaneKey, Position)> {
+    /// For each lane whose searchable run moved, its last item now searchable
+    /// (its key and position), dropping it and everything before it.
+    pub(super) fn advance_searchable(&mut self, now: Instant) -> Vec<(LaneKey, ItemKey, Position)> {
         let mut moved = Vec::new();
         for (lane, fences) in &mut self.lanes {
             let mut reached = None;
-            while let Some((&position, entry)) = fences.entries.first_key_value() {
+            while let Some((&key, &(position, entry))) = fences.entries.first_key_value() {
                 match entry {
                     Entry::Written {
                         due: Due::At(at), ..
-                    } if *at <= now => {
-                        reached = Some(position);
+                    } if at <= now => {
+                        reached = Some((key, position));
                         fences.entries.pop_first();
                     }
                     _ => break,
                 }
             }
-            if let Some(position) = reached {
-                moved.push((lane.clone(), position));
+            if let Some((key, position)) = reached {
+                moved.push((lane.clone(), key, position));
             }
         }
         moved
@@ -209,9 +215,12 @@ impl Fences {
             .filter_map(|fences| match fences.entries.first_key_value() {
                 Some((
                     _,
-                    Entry::Written {
-                        due: Due::At(at), ..
-                    },
+                    (
+                        _,
+                        Entry::Written {
+                            due: Due::At(at), ..
+                        },
+                    ),
                 )) => Some(*at),
                 _ => None,
             })
@@ -227,7 +236,7 @@ impl Fences {
         }
         let covered = self.covered_below.get(lane).copied().unwrap_or(0);
         self.lanes.get(lane).is_some_and(|fences| {
-            fences.entries.values().any(|entry| match entry {
+            fences.entries.values().any(|(_, entry)| match entry {
                 Entry::Written { seq, due } => {
                     *seq >= covered
                         && match due {
@@ -264,18 +273,28 @@ mod tests {
         let now = Instant::now();
         let users = lane("users");
         let mut fences = Fences::default();
-        fences.received(&users, Position::new(5));
-        fences.received(&users, Position::new(5));
+        fences.received(&users, ItemKey::new(0), Position::new(5));
+        fences.received(&users, ItemKey::new(1), Position::new(5));
         fences.write_returned(
-            &[(users.clone(), Position::new(5))],
+            &[(users.clone(), ItemKey::new(0))],
             Visibility::Immediate,
             None,
             now,
         );
         assert_eq!(
             fences.advance_applied(&users),
+            Some((ItemKey::new(0), Position::new(5))),
+            "only the first item: the second is still being written"
+        );
+        fences.write_returned(
+            &[(users.clone(), ItemKey::new(1))],
+            Visibility::Immediate,
             None,
-            "the second item is still being written"
+            now,
+        );
+        assert_eq!(
+            fences.advance_applied(&users),
+            Some((ItemKey::new(1), Position::new(5)))
         );
     }
 
@@ -285,16 +304,16 @@ mod tests {
         let users = lane("users");
         let mut fences = Fences::default();
         for position in 1..=3 {
-            fences.received(&users, Position::new(position));
+            fences.received(&users, ItemKey::new(position), Position::new(position));
         }
         fences.write_returned(
-            &[(users.clone(), Position::new(3))],
+            &[(users.clone(), ItemKey::new(3))],
             Visibility::Immediate,
             None,
             now,
         );
         fences.write_returned(
-            &[(users.clone(), Position::new(2))],
+            &[(users.clone(), ItemKey::new(2))],
             Visibility::Within(Duration::from_secs(5)),
             None,
             now,
@@ -303,21 +322,24 @@ mod tests {
         assert!(fences.advance_searchable(now).is_empty());
 
         fences.write_returned(
-            &[(users.clone(), Position::new(1))],
+            &[(users.clone(), ItemKey::new(1))],
             Visibility::Immediate,
             None,
             now,
         );
-        assert_eq!(fences.advance_applied(&users), Some(Position::new(3)));
+        assert_eq!(
+            fences.advance_applied(&users),
+            Some((ItemKey::new(3), Position::new(3)))
+        );
         assert_eq!(
             fences.advance_searchable(now),
-            [(users.clone(), Position::new(1))]
+            [(users.clone(), ItemKey::new(1), Position::new(1))]
         );
         assert_eq!(fences.next_due(), Some(now + Duration::from_secs(5)));
         let later = now + Duration::from_secs(5);
         assert_eq!(
             fences.advance_searchable(later),
-            [(users, Position::new(3))]
+            [(users, ItemKey::new(3), Position::new(3))]
         );
     }
 
@@ -326,17 +348,17 @@ mod tests {
         let now = Instant::now();
         let users = lane("users");
         let mut fences = Fences::default();
-        fences.received(&users, Position::new(1));
-        fences.received(&users, Position::new(2));
+        fences.received(&users, ItemKey::new(1), Position::new(1));
+        fences.received(&users, ItemKey::new(2), Position::new(2));
         fences.write_returned(
-            &[(users.clone(), Position::new(1))],
+            &[(users.clone(), ItemKey::new(1))],
             Visibility::Deferred,
             None,
             now,
         );
         let covers_below = fences.returned();
         fences.write_returned(
-            &[(users.clone(), Position::new(2))],
+            &[(users.clone(), ItemKey::new(2))],
             Visibility::Deferred,
             None,
             now,
@@ -349,10 +371,13 @@ mod tests {
             Some((covers_below, std::slice::from_ref(&users))),
             now,
         );
-        assert_eq!(fences.advance_applied(&users), Some(Position::new(2)));
+        assert_eq!(
+            fences.advance_applied(&users),
+            Some((ItemKey::new(2), Position::new(2)))
+        );
         assert_eq!(
             fences.advance_searchable(now),
-            [(users.clone(), Position::new(1))]
+            [(users.clone(), ItemKey::new(1), Position::new(1))]
         );
         assert!(
             fences.wants_a_caught_up_write(&users, now),
@@ -367,16 +392,16 @@ mod tests {
         let now = Instant::now();
         let (users, orders) = (lane("users"), lane("orders"));
         let mut fences = Fences::default();
-        fences.received(&users, Position::new(1));
-        fences.received(&orders, Position::new(2));
+        fences.received(&users, ItemKey::new(1), Position::new(1));
+        fences.received(&orders, ItemKey::new(2), Position::new(2));
         fences.write_returned(
-            &[(users.clone(), Position::new(1))],
+            &[(users.clone(), ItemKey::new(1))],
             Visibility::Deferred,
             None,
             now,
         );
         fences.write_returned(
-            &[(orders.clone(), Position::new(2))],
+            &[(orders.clone(), ItemKey::new(2))],
             Visibility::Deferred,
             None,
             now,
@@ -390,7 +415,7 @@ mod tests {
         );
         assert_eq!(
             fences.advance_searchable(now),
-            [(users.clone(), Position::new(1))]
+            [(users.clone(), ItemKey::new(1), Position::new(1))]
         );
         assert!(!fences.wants_a_caught_up_write(&users, now));
         assert!(fences.wants_a_caught_up_write(&orders, now));
@@ -401,23 +426,26 @@ mod tests {
         let now = Instant::now();
         let users = lane("users");
         let mut fences = Fences::default();
-        fences.received(&users, Position::new(1));
-        fences.received(&users, Position::new(2));
+        fences.received(&users, ItemKey::new(1), Position::new(1));
+        fences.received(&users, ItemKey::new(2), Position::new(2));
         fences.write_returned(
-            &[(users.clone(), Position::new(2))],
+            &[(users.clone(), ItemKey::new(2))],
             Visibility::Immediate,
             None,
             now,
         );
-        fences.received(&users, Position::new(1));
+        fences.received(&users, ItemKey::new(1), Position::new(1));
         assert_eq!(fences.advance_applied(&users), None);
         fences.write_returned(
-            &[(users.clone(), Position::new(1))],
+            &[(users.clone(), ItemKey::new(1))],
             Visibility::Immediate,
             None,
             now,
         );
-        assert_eq!(fences.advance_applied(&users), Some(Position::new(2)));
+        assert_eq!(
+            fences.advance_applied(&users),
+            Some((ItemKey::new(2), Position::new(2)))
+        );
     }
 
     /// Lanes keep their own order: a write still in flight on one index holds
@@ -427,16 +455,22 @@ mod tests {
         let now = Instant::now();
         let (users, orders) = (lane("users"), lane("orders"));
         let mut fences = Fences::default();
-        fences.received(&users, Position::new(1));
-        fences.received(&orders, Position::new(2));
+        fences.received(&users, ItemKey::new(1), Position::new(1));
+        fences.received(&orders, ItemKey::new(2), Position::new(2));
         fences.write_returned(
-            &[(orders.clone(), Position::new(2))],
+            &[(orders.clone(), ItemKey::new(2))],
             Visibility::Immediate,
             None,
             now,
         );
         assert_eq!(fences.advance_applied(&users), None);
-        assert_eq!(fences.advance_applied(&orders), Some(Position::new(2)));
-        assert_eq!(fences.advance_searchable(now), [(orders, Position::new(2))]);
+        assert_eq!(
+            fences.advance_applied(&orders),
+            Some((ItemKey::new(2), Position::new(2)))
+        );
+        assert_eq!(
+            fences.advance_searchable(now),
+            [(orders, ItemKey::new(2), Position::new(2))]
+        );
     }
 }

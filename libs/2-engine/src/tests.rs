@@ -1439,6 +1439,7 @@ impl PositionRig {
     async fn publish(&self, position: Option<u64>) {
         self.lane
             .publish(stream::LaneItem::Batch(stream::Batch {
+                key: position.map(stream::ItemKey::new),
                 position: position.map(Position::new),
                 changes: 1,
                 envelopes: Vec::new().into(),
@@ -1632,6 +1633,7 @@ async fn stop_policy_fails_the_ingest_engine_on_a_failed_document() {
 mod busy;
 mod concurrent;
 mod gone;
+mod keys;
 mod lanes;
 mod merge;
 mod parking;

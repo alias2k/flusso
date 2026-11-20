@@ -738,6 +738,7 @@ impl Lane {
             .collect();
         self.lane
             .publish(LaneItem::Batch(Batch {
+                key: None,
                 position: None,
                 changes: 0,
                 envelopes: envelopes.into(),
@@ -1136,6 +1137,7 @@ impl Pair {
             .unwrap()
             .producer
             .publish(LaneItem::Batch(Batch {
+                key: None,
                 position: None,
                 changes: 0,
                 envelopes: vec![Envelope::upsert(

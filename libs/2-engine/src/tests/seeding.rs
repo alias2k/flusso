@@ -269,6 +269,7 @@ impl Rig {
         self.publish(lane, batch(lane, id, Some(position))).await;
         self.progress.published(
             &LaneKey::new(index(lane), sink_name("primary")),
+            stream::ItemKey::new(position.seq),
             position,
             position,
         );
@@ -296,6 +297,7 @@ impl Drop for Rig {
 
 fn batch(lane: &str, id: &str, position: Option<Position>) -> LaneItem {
     LaneItem::Batch(Batch {
+        key: position.map(|position| stream::ItemKey::new(position.seq)),
         position,
         changes: usize::from(position.is_some()),
         envelopes: vec![Envelope::upsert(

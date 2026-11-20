@@ -410,6 +410,7 @@ async fn lanes_take_turns_so_a_backlog_on_one_index_does_not_starve_another() {
     let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
     let item = |index: IndexName, position: u64| {
         LaneItem::Batch(Batch {
+            key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
             changes: 1,
             envelopes: vec![Envelope::upsert(
@@ -491,6 +492,7 @@ async fn a_snapshot_complete_waits_only_for_its_own_lane() {
     let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
     let backfill = |index: IndexName, id: &str| {
         LaneItem::Batch(Batch {
+            key: None,
             position: None,
             changes: 0,
             envelopes: vec![Envelope::upsert(
@@ -584,6 +586,7 @@ async fn a_late_live_item_on_a_quiet_lane(backlog_live: bool) -> usize {
     let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
     let item = |index: IndexName, id: u64, position: Option<u64>| {
         LaneItem::Batch(Batch {
+            key: position.map(stream::ItemKey::new),
             position: position.map(Position::new),
             changes: usize::from(position.is_some()),
             envelopes: vec![Envelope::upsert(
@@ -730,6 +733,7 @@ async fn a_stalled_index_with_a_backlog_leaves_its_sibling_a_slot() {
     let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
     let item = |index: IndexName, position: u64| {
         LaneItem::Batch(Batch {
+            key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
             changes: 1,
             envelopes: vec![Envelope::upsert(
@@ -856,6 +860,7 @@ async fn an_ordered_sink_writes_live_items_across_lanes_in_position_order() {
     let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
     let item = |index: IndexName, position: u64| {
         LaneItem::Batch(Batch {
+            key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
             changes: 1,
             envelopes: vec![Envelope::upsert(
@@ -955,6 +960,7 @@ async fn a_quiet_lane_makes_its_last_writes_searchable_beside_a_stalled_lane() {
     let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
     let item = |index: IndexName, position: u64| {
         LaneItem::Batch(Batch {
+            key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
             changes: 1,
             envelopes: vec![Envelope::upsert(
@@ -983,7 +989,12 @@ async fn a_quiet_lane_makes_its_last_writes_searchable_beside_a_stalled_lane() {
                 .publish(item(index, position))
                 .await
                 .unwrap();
-            progress.published(&lane, Position::new(position), Position::new(position));
+            progress.published(
+                &lane,
+                stream::ItemKey::new(position),
+                Position::new(position),
+                Position::new(position),
+            );
         }
     };
     publish(orders(), 0).await;
@@ -1065,6 +1076,7 @@ async fn a_caught_up_write_names_only_its_own_quiet_lanes() {
     let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
     let item = |index: IndexName, position: u64| {
         LaneItem::Batch(Batch {
+            key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
             changes: 1,
             envelopes: vec![Envelope::upsert(
@@ -1226,6 +1238,7 @@ async fn a_lane_whose_live_item_is_blocked_answers_no_further_than_before() {
         .unwrap()
         .producer
         .publish(LaneItem::Batch(Batch {
+            key: None,
             position: None,
             changes: 0,
             envelopes: Vec::new().into(),
@@ -1332,6 +1345,7 @@ async fn a_quiet_lanes_caught_up_write_waits_beside_another_lanes_refresh() {
             .unwrap()
             .producer
             .publish(LaneItem::Batch(Batch {
+                key: Some(stream::ItemKey::new(position)),
                 position: Some(Position::new(position)),
                 changes: 1,
                 envelopes: vec![Envelope::upsert(

@@ -225,6 +225,7 @@ impl Rig {
         self.store.published.lock().unwrap().insert(key.to_owned());
         self.lane
             .publish(LaneItem::Batch(Batch {
+                key: None,
                 position: None,
                 changes: 0,
                 envelopes: vec![Envelope::upsert(

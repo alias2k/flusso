@@ -273,6 +273,7 @@ impl Rig {
         };
         producer
             .publish(LaneItem::Batch(Batch {
+                key: position.map(stream::ItemKey::new),
                 position: position.map(Position::new),
                 changes: 1,
                 envelopes: vec![Envelope::upsert(

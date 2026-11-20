@@ -17,7 +17,7 @@ fn p(seq: u64) -> Position {
 /// Register a batch on each of `lanes`, as each lane's send succeeds.
 fn publish(progress: &Progress, lanes: &[&LaneKey], oldest: u64, last: u64) {
     for lane in lanes {
-        progress.published(lane, p(oldest), p(last));
+        progress.published(lane, ItemKey::new(last), p(oldest), p(last));
     }
 }
 
@@ -40,10 +40,10 @@ fn nothing_routed_is_idle() {
 fn a_routed_item_holds_everything_from_its_oldest_change() {
     let a = sink("a");
     let progress = Progress::new([a.clone()]);
-    progress.published(&a, p(1), p(3));
+    progress.published(&a, ItemKey::new(3), p(1), p(3));
     assert_eq!(progress.landed(), Landed::Before(p(1)));
 
-    progress.applied(&a, p(3));
+    progress.applied(&a, ItemKey::new(3));
     assert_eq!(progress.landed(), Landed::Through(p(3)));
 }
 
@@ -55,14 +55,40 @@ fn a_routed_item_holds_everything_from_its_oldest_change() {
 fn two_items_sharing_their_newest_position_land_one_at_a_time() {
     let a = sink("a");
     let progress = Progress::new([a.clone()]);
-    progress.published(&a, p(1), p(5));
-    progress.published(&a, p(3), p(5));
+    let first = progress.next_key(&a.index).unwrap();
+    let second = progress.next_key(&a.index).unwrap();
+    progress.published(&a, first, p(1), p(5));
+    progress.published(&a, second, p(3), p(5));
 
-    progress.applied(&a, p(5));
+    progress.applied(&a, first);
     assert_eq!(
         progress.landed(),
         Landed::Before(p(3)),
         "only the first item landed; the second still holds its oldest change"
+    );
+}
+
+/// Each index numbers its items on its own, from zero, one more each time,
+/// never again for the life of the progress; an index with no lane has none.
+#[test]
+fn keys_number_each_indexs_items_on_their_own() {
+    let users = sink("a");
+    let orders = LaneKey::new(
+        kernel::IndexName::try_new("orders").unwrap(),
+        kernel::SinkName::try_new("a").unwrap(),
+    );
+    let progress = Progress::new([users.clone(), orders.clone()]);
+    assert_eq!(progress.next_key(&users.index), Some(ItemKey::new(0)));
+    assert_eq!(progress.next_key(&users.index), Some(ItemKey::new(1)));
+    assert_eq!(
+        progress.next_key(&orders.index),
+        Some(ItemKey::new(0)),
+        "another index counts on its own"
+    );
+    assert_eq!(progress.next_key(&users.index), Some(ItemKey::new(2)));
+    assert_eq!(
+        progress.next_key(&kernel::IndexName::try_new("unknown").unwrap()),
+        None
     );
 }
 
@@ -74,9 +100,9 @@ fn a_mark_covers_every_item_through_it_and_the_oldest_uncovered_decides() {
     publish(&progress, &[&a], 3, 4);
     publish(&progress, &[&a], 5, 6);
 
-    progress.applied(&a, p(2));
+    progress.applied(&a, ItemKey::new(2));
     assert_eq!(progress.landed(), Landed::Before(p(3)));
-    progress.applied(&a, p(6));
+    progress.applied(&a, ItemKey::new(6));
     assert_eq!(progress.landed(), Landed::Through(p(6)));
 }
 
@@ -86,8 +112,8 @@ fn a_stalled_lane_pins_confirmation_and_its_own_fence_only() {
     let progress = Progress::new([fast.clone(), stalled.clone()]);
     publish(&progress, &[&fast, &stalled], 1, 2);
     publish(&progress, &[&fast, &stalled], 3, 4);
-    progress.applied(&fast, p(4));
-    progress.searchable(&fast, p(4));
+    progress.applied(&fast, ItemKey::new(4));
+    progress.searchable(&fast, ItemKey::new(4));
 
     assert_eq!(progress.landed(), Landed::Before(p(1)));
     assert_eq!(
@@ -114,10 +140,10 @@ fn a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full() {
     let (healthy, full) = (sink("healthy"), sink("full"));
     let progress = Progress::new([healthy.clone(), full.clone()]);
     publish(&progress, &[&healthy, &full], 1, 1);
-    progress.applied(&healthy, p(1));
-    progress.applied(&full, p(1));
+    progress.applied(&healthy, ItemKey::new(1));
+    progress.applied(&full, ItemKey::new(1));
     publish(&progress, &[&healthy], 2, 2);
-    progress.applied(&healthy, p(2));
+    progress.applied(&healthy, ItemKey::new(2));
 
     assert_eq!(
         progress.lane(&healthy, Level::Applied),
@@ -139,7 +165,7 @@ fn a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full() {
 fn a_skipped_lane_pins_nothing() {
     let (busy, idle) = (sink("busy"), sink("idle"));
     let progress = Progress::new([busy.clone(), idle.clone()]);
-    progress.published(&busy, p(1), p(2));
+    progress.published(&busy, ItemKey::new(2), p(1), p(2));
     progress.skipped(&idle, p(2));
     assert_eq!(progress.landed(), Landed::Before(p(1)));
     assert_eq!(
@@ -147,7 +173,7 @@ fn a_skipped_lane_pins_nothing() {
         Some(Landed::Through(p(2))),
         "it needs nothing of the batch"
     );
-    progress.applied(&busy, p(2));
+    progress.applied(&busy, ItemKey::new(2));
     assert_eq!(progress.landed(), Landed::Through(p(2)));
 }
 
@@ -155,14 +181,14 @@ fn a_skipped_lane_pins_nothing() {
 fn a_landing_reported_before_its_registration_still_counts() {
     let a = sink("a");
     let progress = Progress::new([a.clone()]);
-    progress.applied(&a, p(2));
-    progress.searchable(&a, p(2));
+    progress.applied(&a, ItemKey::new(2));
+    progress.searchable(&a, ItemKey::new(2));
     assert_eq!(
         progress.landed(),
         Landed::Idle,
         "a mark alone claims nothing"
     );
-    progress.published(&a, p(1), p(2));
+    progress.published(&a, ItemKey::new(2), p(1), p(2));
     assert_eq!(progress.landed(), Landed::Through(p(2)));
     assert_eq!(
         progress.lane(&a, Level::Searchable),
@@ -176,7 +202,7 @@ fn searchable_trails_applied() {
     let progress = Progress::new([a.clone()]);
     publish(&progress, &[&a], 1, 2);
     publish(&progress, &[&a], 3, 4);
-    progress.applied(&a, p(4));
+    progress.applied(&a, ItemKey::new(4));
     assert_eq!(
         progress.lane(&a, Level::Applied),
         Some(Landed::Through(p(4)))
@@ -185,12 +211,12 @@ fn searchable_trails_applied() {
         progress.lane(&a, Level::Searchable),
         Some(Landed::Before(p(1)))
     );
-    progress.searchable(&a, p(2));
+    progress.searchable(&a, ItemKey::new(2));
     assert_eq!(
         progress.lane(&a, Level::Searchable),
         Some(Landed::Before(p(3)))
     );
-    progress.searchable(&a, p(4));
+    progress.searchable(&a, ItemKey::new(4));
     assert_eq!(
         progress.lane(&a, Level::Searchable),
         Some(Landed::Through(p(4)))
@@ -210,8 +236,8 @@ fn a_mark_never_moves_back() {
     let progress = Progress::new([a.clone()]);
     publish(&progress, &[&a], 1, 2);
     publish(&progress, &[&a], 3, 4);
-    progress.applied(&a, p(4));
-    progress.applied(&a, p(2));
+    progress.applied(&a, ItemKey::new(4));
+    progress.applied(&a, ItemKey::new(2));
     assert_eq!(progress.landed(), Landed::Through(p(4)));
     publish(&progress, &[&a], 5, 6);
     assert_eq!(progress.landed(), Landed::Before(p(5)));
@@ -224,8 +250,8 @@ fn several_lanes_answer_their_least_and_an_unknown_lane_none() {
     let progress = Progress::new([a.clone(), b.clone()]);
     publish(&progress, &[&a, &b], 1, 1);
     publish(&progress, &[&a, &b], 2, 3);
-    progress.applied(&a, p(3));
-    progress.applied(&b, p(1));
+    progress.applied(&a, ItemKey::new(3));
+    progress.applied(&b, ItemKey::new(1));
     assert_eq!(
         progress.over([&a, &b], Level::Applied),
         Some(Landed::Before(p(2)))
@@ -249,7 +275,7 @@ fn every_registration_calls_the_listener() {
     progress.on_registered(Arc::new(move || {
         counted.fetch_add(1, Ordering::SeqCst);
     }));
-    progress.published(&a, p(1), p(1));
+    progress.published(&a, ItemKey::new(1), p(1), p(1));
     progress.skipped(&a, p(2));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
@@ -323,7 +349,12 @@ fn every_interleaving_answers_as_the_model_does() {
                     let l = rng.below(lanes);
                     if let Some(batch) = batches.get(registered[l]) {
                         if batch.lanes.contains(&l) {
-                            progress.published(&names[l], p(batch.oldest), p(batch.last));
+                            progress.published(
+                                &names[l],
+                                ItemKey::new(batch.last),
+                                p(batch.oldest),
+                                p(batch.last),
+                            );
                         } else {
                             progress.skipped(&names[l], p(batch.last));
                         }
@@ -335,7 +366,7 @@ fn every_interleaving_answers_as_the_model_does() {
                     let keys = items(&batches, l);
                     if applied[l] < keys.len() {
                         applied[l] += 1 + rng.below(keys.len() - applied[l]);
-                        progress.applied(&names[l], p(keys[applied[l] - 1]));
+                        progress.applied(&names[l], ItemKey::new(keys[applied[l] - 1]));
                     }
                 }
                 _ => {
@@ -343,7 +374,7 @@ fn every_interleaving_answers_as_the_model_does() {
                     let keys = items(&batches, l);
                     if searchable[l] < applied[l] {
                         searchable[l] += 1 + rng.below(applied[l] - searchable[l]);
-                        progress.searchable(&names[l], p(keys[searchable[l] - 1]));
+                        progress.searchable(&names[l], ItemKey::new(keys[searchable[l] - 1]));
                     }
                 }
             }
@@ -417,7 +448,7 @@ fn concurrent_registration_and_landing_never_answer_past_a_lane() {
                         progress.skipped(&names[l], p(seq));
                     } else {
                         queues[l].lock().unwrap().push_back(seq);
-                        progress.published(&names[l], p(seq), p(seq));
+                        progress.published(&names[l], ItemKey::new(seq), p(seq), p(seq));
                     }
                 }
             }
@@ -438,7 +469,7 @@ fn concurrent_registration_and_landing_never_answer_past_a_lane() {
                     match item {
                         Some(seq) => {
                             landed[l].store(seq + 1, Ordering::Release);
-                            progress.applied(&name, p(seq));
+                            progress.applied(&name, ItemKey::new(seq));
                         }
                         None => thread::yield_now(),
                     }

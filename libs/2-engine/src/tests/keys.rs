@@ -1,0 +1,142 @@
+//! Item keys (ADR 0012 stage 8a, slice 1): every live item is numbered per
+//! index, the same on each lane of the index, and the numbering outlives a
+//! run of the ingest engine, so a lane never holds two items under one key.
+
+use stream::{ItemKey, LaneItem, LaneKey};
+
+use super::*;
+
+/// A source whose live stream replays the same changes from position 0 on
+/// every open, as a stream reopened before anything was confirmed would.
+#[derive(Debug)]
+struct Replaying(Vec<ChangeEvent>);
+
+#[async_trait]
+impl ChangeCapture for Replaying {
+    async fn continuity(&self) -> source::Result<Continuity> {
+        Ok(Continuity::Resumed)
+    }
+
+    async fn prepare(&self) -> source::Result<()> {
+        Ok(())
+    }
+
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
+        let changes = self.0.clone();
+        Ok(Box::pin(futures::stream::iter(
+            changes
+                .into_iter()
+                .enumerate()
+                .map(|(i, event)| Ok((Position::new(i as u64), event))),
+        )))
+    }
+
+    fn confirm(&self, _: source::cdc::Landed) {}
+}
+
+fn ingest(
+    source: Arc<dyn ChangeCapture>,
+    stream: &Arc<ChannelStream>,
+    sinks: Vec<SinkName>,
+    progress: &Arc<Progress>,
+) -> IngestEngine {
+    IngestEngine::new(
+        source,
+        Arc::new(MockDocuments::default()),
+        Arc::clone(stream) as Arc<dyn Stream>,
+        sinks,
+        Arc::clone(progress),
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 1,
+        max_delay: Duration::from_millis(10),
+    })
+}
+
+/// The `(key, position seq)` of the next `count` items on `lane`, left
+/// unacknowledged.
+async fn items(stream: &ChannelStream, lane: &LaneKey, count: usize) -> Vec<(ItemKey, u64)> {
+    let mut consumer = stream.lane(lane).unwrap().consumer;
+    let mut items = Vec::new();
+    let mut held = Vec::new();
+    for _ in 0..count {
+        let delivery = consumer.recv().await.unwrap().unwrap();
+        let (item, handle) = delivery.into_parts();
+        let LaneItem::Batch(batch) = item else {
+            panic!("only live batches were published");
+        };
+        items.push((batch.key.unwrap(), batch.position.unwrap().seq));
+        held.push(handle);
+    }
+    assert!(consumer.is_empty(), "nothing more was published");
+    items
+}
+
+/// A second run replays changes under positions the first run's items still
+/// hold, unacknowledged on the lane: its items get the next keys, so landing
+/// the first run's items covers none of the second's.
+#[tokio::test]
+async fn a_key_survives_an_ingest_restart() {
+    let primary = sink_name("primary");
+    let lane = LaneKey::new(users(), primary.clone());
+    let stream = Arc::new(ChannelStream::over(64, [users()], [primary.clone()]));
+    let progress = Arc::new(Progress::of([users()], [primary.clone()]));
+    let source: Arc<dyn ChangeCapture> = Arc::new(Replaying(vec![upsert(1), upsert(2)]));
+    let engine = ingest(source, &stream, vec![primary], &progress);
+    engine.run().await.unwrap();
+    engine.run().await.unwrap();
+
+    let items = items(&stream, &lane, 4).await;
+    assert_eq!(
+        items,
+        [
+            (ItemKey::new(0), 0),
+            (ItemKey::new(1), 1),
+            (ItemKey::new(2), 0),
+            (ItemKey::new(3), 1)
+        ],
+        "positions repeat across the runs; keys go on"
+    );
+
+    progress.applied(&lane, ItemKey::new(1));
+    assert_eq!(
+        progress.landed(),
+        source::cdc::Landed::Before(Position::new(0)),
+        "the second run's items are still outstanding"
+    );
+    progress.applied(&lane, ItemKey::new(3));
+    assert_eq!(
+        progress.landed(),
+        source::cdc::Landed::Through(Position::new(1))
+    );
+}
+
+/// One batch puts one item on each lane of its index, all under the same key,
+/// and the next batch takes the next one.
+#[tokio::test]
+async fn a_batch_takes_one_key_per_index_for_every_lane() {
+    let (primary, audit) = (sink_name("primary"), sink_name("audit"));
+    let sinks = vec![primary.clone(), audit.clone()];
+    let stream = Arc::new(ChannelStream::over(64, [users()], sinks.clone()));
+    let progress = Arc::new(Progress::of([users()], sinks.clone()));
+    let source: Arc<dyn ChangeCapture> =
+        Arc::new(MockSource::new(vec![upsert(1), upsert(2), upsert(3)]));
+    ingest(source, &stream, sinks, &progress)
+        .run()
+        .await
+        .unwrap();
+
+    let expected = [
+        (ItemKey::new(0), 0),
+        (ItemKey::new(1), 1),
+        (ItemKey::new(2), 2),
+    ];
+    assert_eq!(
+        items(&stream, &LaneKey::new(users(), primary), 3).await,
+        expected
+    );
+    assert_eq!(
+        items(&stream, &LaneKey::new(users(), audit), 3).await,
+        expected
+    );
+}

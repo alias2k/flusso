@@ -548,6 +548,7 @@ impl Rig {
             let envelopes = self.envelopes(mine, Some(position));
             self.producer(index)
                 .publish(LaneItem::Batch(Batch {
+                    key: Some(stream::ItemKey::new(position.seq)),
                     position: Some(position),
                     changes: 1,
                     envelopes,
@@ -559,6 +560,7 @@ impl Rig {
                 .unwrap();
             self.progress.published(
                 &LaneKey::new(index.clone(), self.name.clone()),
+                stream::ItemKey::new(position.seq),
                 position,
                 position,
             );
@@ -578,6 +580,7 @@ impl Rig {
             let envelopes = self.envelopes(&mine, None);
             self.producer(&index)
                 .publish(LaneItem::Batch(Batch {
+                    key: None,
                     position: None,
                     changes: 0,
                     envelopes,
@@ -1223,6 +1226,7 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
         )]
         .into();
         lane.publish(LaneItem::Batch(Batch {
+            key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
             changes: 1,
             envelopes,

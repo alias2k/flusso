@@ -45,7 +45,7 @@
 //! let progress = Progress::new([lane.clone()]);
 //! let stalls = Stalls::new([lane.clone()]);
 //! let start = Instant::now();
-//! progress.published(&lane, Position::new(1), Position::new(1));
+//! progress.published(&lane, stream::ItemKey::new(1), Position::new(1), Position::new(1));
 //! stalls.sample(start, &progress, &NoSource, None);
 //! stalls.sample(start + Duration::from_secs(30), &progress, &NoSource, None);
 //! assert_eq!(stalls.lane(&lane).stalled_for, Duration::from_secs(30));
@@ -338,20 +338,30 @@ mod tests {
         let progress = Progress::new([users.clone()]);
         let stalls = Stalls::new([users.clone()]);
         let start = Instant::now();
-        progress.published(&users, Position::new(1), Position::new(1));
-        progress.published(&users, Position::new(2), Position::new(2));
+        progress.published(
+            &users,
+            stream::ItemKey::new(1),
+            Position::new(1),
+            Position::new(1),
+        );
+        progress.published(
+            &users,
+            stream::ItemKey::new(2),
+            Position::new(2),
+            Position::new(2),
+        );
         stalls.sample(start, &progress, &Lsns, None);
         stalls.sample(at(start, 40), &progress, &Lsns, None);
         assert_eq!(stalls.lane(&users).stalled_for, Duration::from_secs(40));
 
-        progress.applied(&users, Position::new(1));
+        progress.applied(&users, stream::ItemKey::new(1));
         stalls.sample(at(start, 41), &progress, &Lsns, None);
         assert_eq!(
             stalls.lane(&users).stalled_for,
             Duration::ZERO,
             "the next item is the oldest now: the lane moved"
         );
-        progress.applied(&users, Position::new(2));
+        progress.applied(&users, stream::ItemKey::new(2));
         stalls.sample(at(start, 50), &progress, &Lsns, None);
         assert_eq!(stalls.lane(&users), LaneStall::default());
     }
@@ -363,9 +373,14 @@ mod tests {
         let stalls = Stalls::new([users.clone()]);
         let start = Instant::now();
         for second in 1..=100u64 {
-            progress.published(&users, Position::new(second), Position::new(second));
+            progress.published(
+                &users,
+                stream::ItemKey::new(second),
+                Position::new(second),
+                Position::new(second),
+            );
             if second > 1 {
-                progress.applied(&users, Position::new(second - 1));
+                progress.applied(&users, stream::ItemKey::new(second - 1));
             }
             stalls.sample(at(start, second), &progress, &Lsns, None);
             assert!(stalls.lane(&users).stalled_for <= SAMPLE_EVERY);
@@ -379,8 +394,18 @@ mod tests {
         let progress = Progress::new([users.clone(), orders.clone()]);
         let stalls = Stalls::new([users.clone(), orders.clone()]);
         // `orders` holds change 3 (LSN 300); `users` change 7 (LSN 700).
-        progress.published(&orders, Position::new(3), Position::new(3));
-        progress.published(&users, Position::new(7), Position::new(7));
+        progress.published(
+            &orders,
+            stream::ItemKey::new(3),
+            Position::new(3),
+            Position::new(3),
+        );
+        progress.published(
+            &users,
+            stream::ItemKey::new(7),
+            Position::new(7),
+            Position::new(7),
+        );
         stalls.sample(Instant::now(), &progress, &Lsns, Some(1_000));
         assert_eq!(stalls.pinned_by(), Some(orders.clone()));
         assert_eq!(stalls.lane(&orders).wal_behind, Some(1_000));
@@ -426,8 +451,18 @@ mod tests {
         let zzz = lane("zzz");
         let progress = Progress::new([aaa.clone(), zzz.clone()]);
         let stalls = Stalls::new([aaa.clone(), zzz.clone()]);
-        progress.published(&zzz, Position::new(5), Position::new(5));
-        progress.published(&aaa, Position::new(9), Position::new(9));
+        progress.published(
+            &zzz,
+            stream::ItemKey::new(5),
+            Position::new(5),
+            Position::new(5),
+        );
+        progress.published(
+            &aaa,
+            stream::ItemKey::new(9),
+            Position::new(9),
+            Position::new(9),
+        );
         stalls.sample(Instant::now(), &progress, &OneCommit, Some(1_000));
         assert_eq!(progress.landed(), Landed::Before(Position::new(5)));
         assert_eq!(stalls.pinned_by(), Some(zzz));
@@ -440,8 +475,18 @@ mod tests {
         let orders = lane("orders");
         let progress = Progress::new([users.clone(), orders.clone()]);
         let stalls = Stalls::new([users.clone(), orders.clone()]);
-        progress.published(&orders, Position::new(1), Position::new(1));
-        progress.published(&users, Position::new(50), Position::new(50));
+        progress.published(
+            &orders,
+            stream::ItemKey::new(1),
+            Position::new(1),
+            Position::new(1),
+        );
+        progress.published(
+            &users,
+            stream::ItemKey::new(50),
+            Position::new(50),
+            Position::new(50),
+        );
         stalls.sample(Instant::now(), &progress, &Lsns, Some(100));
         assert_eq!(stalls.lane(&users).wal_behind, Some(0));
     }
@@ -452,7 +497,12 @@ mod tests {
         let progress = Progress::new([users.clone()]);
         let stalls = Stalls::new([users.clone()]);
         let start = Instant::now();
-        progress.published(&users, Position::new(1), Position::new(1));
+        progress.published(
+            &users,
+            stream::ItemKey::new(1),
+            Position::new(1),
+            Position::new(1),
+        );
         assert!(stalls.sample(start, &progress, &Lsns, None).is_empty());
         assert!(
             stalls
@@ -476,7 +526,7 @@ mod tests {
                 .as_slice(),
             [StallEvent::Stalled { .. }]
         ));
-        progress.applied(&users, Position::new(1));
+        progress.applied(&users, stream::ItemKey::new(1));
         assert_eq!(
             stalls.sample(at(start, 1300), &progress, &Lsns, None),
             vec![StallEvent::Recovered {

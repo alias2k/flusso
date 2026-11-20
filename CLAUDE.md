@@ -624,7 +624,10 @@ is the one concrete piece.
   builds every enabled index × every sink (`Backends::stream(config, &[LaneKey])`), `Stream::lanes(sink)`
   is a sink engine's set. Publish (`ingest/commit.rs`) groups a built batch by index (`group_by_index`, one
   `Arc<[Envelope]>` per index, the documents moved, each piece carrying the build's `Hold`): one item per
-  `(index, sink)` lane, keyed by the batch's last position on every lane; a lane with no item is
+  `(index, sink)` lane, keyed by the index's next `stream::ItemKey` (`Progress::next_key`: a counter
+  per index in `Progress`, outliving every run, the same key on every lane of the index; ADR 0012 stage
+  8a slice 1), not by its position, since two items of a lane may end on the same change; the item
+  still carries the batch's last position (envelopes, ordered sinks); a lane with no item is
   `Progress::skipped`, so a quiet index pins nothing; `changes` rides on each sink's first item and a sink
   with no item hears `Observer::on_changes_settled`. Snapshots and `SnapshotComplete { index }` go to
   `(index, s)` of each requesting sink; requests are one per index and coalesce by sink set. The sink
@@ -638,7 +641,10 @@ is the one concrete piece.
   and caught-up are per lane (a write is caught up when nothing else of its lane waits). The fence takes
   `indexes` (`/wait?index=…`, repeatable, `UnknownIndex` → 404); `/status` has `sinks.<s>.lanes.<index>`;
   `flusso.lane.outstanding{index,sink}`; `flusso-query` fences on the indexes a read reads, cached per
-  `(level, index)` (`fence.rs`'s `After`). Guards: `engine` `tests::lanes`
+  `(level, index)` (`fence.rs`'s `After`). Guards: `engine` `tests::keys`
+  (`a_key_survives_an_ingest_restart`, `a_batch_takes_one_key_per_index_for_every_lane`),
+  `progress::tests`' `two_items_sharing_their_newest_position_land_one_at_a_time`, `fences::tests`'
+  `two_items_sharing_a_position_are_applied_one_at_a_time`, `tests::lanes`
   (`a_batch_is_split_by_index_and_a_quiet_index_pins_nothing`,
   `a_stalled_index_holds_back_neither_its_siblings_writes_nor_its_progress`,
   `lanes_take_turns_so_a_backlog_on_one_index_does_not_starve_another`,
@@ -673,12 +679,13 @@ is the one concrete piece.
   `fence_before` = commit LSN − 1, `confirm_before` = the **horizon** before it, `confirm_through` =
   the commit LSN if it is its commit's last change, else `confirm_before`), so the capture keeps
   only `next_seq`, the horizon and the confirmed LSN, no map. The ingest engine **routes** a live
-  batch (`commit.rs`'s `publish`): `Progress::published(lane, oldest, last)` registers it on each lane
+  batch (`commit.rs`'s `publish`): `Progress::published(lane, key, oldest, last)` registers it on each lane
   **as that lane's own send succeeds** (one lane per call;
   `skipped(lane, last)` for a lane a batch has nothing for), so a full lane holds back only itself. A sink
   engine raises its lane's **marks** (`Progress::applied` / `searchable`, in `writes.rs`'s
   `write_returned`, before the ack): the last item written, and made searchable, with every item
-  before it in lane order (`Fences`' in-order answers); lane order is registration order, so a mark
+  before it in lane order (`Fences`' in-order answers, by item key; the observer still hears the item's
+  position); lane order is registration order and key order, so a mark
   covers every registered item up to it, and one that runs ahead covers an item registered later.
   Each lane answers `Before(oldest unlanded)` / `Through(the newest position routed to it)` / `Idle`
   (`source::cdc::Landed`), and several lanes (`landed()`, `over`) answer as the lane that covers least,
@@ -2466,7 +2473,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 
 | To work on… | Go to |
 | --- | --- |
-| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the run loop; `ingest/live.rs` batching and dedup, `ingest/builds.rs` admission and the grant-ordered slots, `ingest/gate.rs` the build permits (live first, every fourth contested grant to backfill), `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`; `budget.rs` the memory budget: `Budget`, `Reservation`/`Charge`, the heap walk), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in position order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `sink_engine/walked.rs` (the landed prefix of a backfill walk, recorded for resume), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
+| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the run loop; `ingest/live.rs` batching and dedup, `ingest/builds.rs` admission and the grant-ordered slots, `ingest/gate.rs` the build permits (live first, every fourth contested grant to backfill), `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`; `budget.rs` the memory budget: `Budget`, `Reservation`/`Charge`, the heap walk), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in item-key order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `sink_engine/walked.rs` (the landed prefix of a backfill walk, recorded for resume), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
 | Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `stall.rs` (stall age, WAL behind, `pinned_by`), `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
