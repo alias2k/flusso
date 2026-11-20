@@ -55,7 +55,7 @@ use super::snapshot::Snapshot;
 use crate::budget::{Budget, Charge, Reservation, document_bytes};
 use crate::error::{EngineError, Result};
 use crate::observer::{Observer, Wake, Work};
-use crate::progress::{Progress, Token};
+use crate::progress::{Progress, Step, Token};
 use crate::sink_engine::flights::Flights;
 
 /// The bytes per document a build is first estimated at, before any build
@@ -71,6 +71,7 @@ pub(super) enum Job {
         taken: Vec<(IndexName, Token, Position)>,
         position: Position,
         changes: usize,
+        step: Step,
     },
     /// A snapshot batch, to each lane the slice it asked for, each index's
     /// slice carrying how far its walk got (the batch's greatest key of it).

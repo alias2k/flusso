@@ -59,20 +59,33 @@ impl Report {
         }
     }
 
-    /// A latency point: its `extra.images` also names how the probe measured,
-    /// so a change of probe restarts the series' window in
-    /// `bench-regression.py`, as an image change does.
-    pub(crate) fn latency(&mut self, metric: &str, value: f64) {
+    /// A point whose `extra.images` also names `method` under `key`, so a
+    /// change of method restarts the series' window in `bench-regression.py`,
+    /// as an image change does.
+    fn stamped(&self, metric: &str, unit: &str, value: f64, key: &str, method: &str) -> Point {
         let mut images = serde_json::json!(self.images);
         if let Some(fields) = images.as_object_mut() {
-            fields.insert("probe".to_owned(), serde_json::json!(crate::probe::METHOD));
+            fields.insert(key.to_owned(), serde_json::json!(method));
         }
         let extra = serde_json::json!({ "images": images, "scale": self.scale }).to_string();
-        let point = Point {
+        Point {
             extra: Some(extra),
-            ..self.point(metric, "ms", value)
-        };
+            ..self.point(metric, unit, value)
+        }
+    }
+
+    /// A latency point, stamped with how the probe measured
+    /// ([`probe::METHOD`](crate::probe::METHOD)).
+    pub(crate) fn latency(&mut self, metric: &str, value: f64) {
+        let point = self.stamped(metric, "ms", value, "probe", crate::probe::METHOD);
         self.smaller.push(point);
+    }
+
+    /// A drain throughput point, stamped with what the drain waited for
+    /// ([`flusso::DRAINED`](crate::flusso::DRAINED)).
+    pub(crate) fn drain(&mut self, metric: &str, unit: &str, value: f64) {
+        let point = self.stamped(metric, unit, value, "drain", crate::flusso::DRAINED);
+        self.bigger.push(point);
     }
 
     pub(crate) fn smaller(&mut self, metric: &str, unit: &str, value: f64) {

@@ -309,6 +309,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let control = running.control();
     let fence = running.fence();
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
+    let _changes_committed = metrics::register_changes_committed_counter(Arc::clone(&status));
     let _visibility_wait_gauge = metrics::register_visibility_wait_gauge(Arc::clone(&status));
     let _lane_outstanding_gauge = metrics::register_lane_outstanding_gauge(Arc::clone(&status));
     let _lane_parked_gauge = metrics::register_lane_parked_gauge(Arc::clone(&status));

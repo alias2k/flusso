@@ -176,6 +176,28 @@ pub(crate) fn register_in_flight_gauge(status: Arc<Status>) -> ObservableGauge<u
         .build()
 }
 
+/// Register `flusso.changes.committed` as an observable counter read from
+/// the daemon's [`Status`] at collection: per sink, the live changes every
+/// lane of that sink has landed or had nothing for, with every change read
+/// before them. Read, not added up from commits, so a redelivered item that
+/// had landed counts once.
+pub(crate) fn register_changes_committed_counter(status: Arc<Status>) -> ObservableCounter<u64> {
+    global::meter("flusso")
+        .u64_observable_counter("flusso.changes.committed")
+        .with_description(
+            "Live changes a sink has landed on every lane (or had nothing for), in read order",
+        )
+        .with_callback(move |observer| {
+            for sink in status.sinks() {
+                observer.observe(
+                    status.committed(sink),
+                    &[KeyValue::new("sink", sink.as_ref().to_owned())],
+                );
+            }
+        })
+        .build()
+}
+
 /// Register `flusso.lane.parked` as an observable gauge read from the daemon's
 /// [`Status`] at collection: 1 per `(index, sink)` lane flusso doesn't write,
 /// with `why` `refused` (a refusal under `on_error = "stop"`), `blocked` (the

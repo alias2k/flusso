@@ -32,7 +32,7 @@ use super::{IngestEngine, Lanes, document_id};
 use crate::error::{EngineError, Result};
 use crate::observer::{BuildStats, Stage, StageTiming, Wake, Work};
 use crate::policy::FailurePolicy;
-use crate::progress::{Holds, Token};
+use crate::progress::{Holds, Step, Token};
 
 impl IngestEngine {
     /// Grant every batch the gate allows and publish every slot that is
@@ -173,10 +173,12 @@ impl IngestEngine {
         let (ids, taken) = self.take_all(builds);
         let changes = pending.count;
         pending.clear();
+        let step = self.progress.close_step();
         let job = Job::Live {
             taken,
             position,
             changes,
+            step,
         };
         builds
             .start(&self.documents, ids, job, &|built| self.halts(built))
@@ -294,10 +296,16 @@ impl IngestEngine {
                         taken,
                         position,
                         changes,
+                        step,
                     },
                     Some(built),
                 ) => {
-                    self.publish_live(built, &taken, position, changes, &hold, lanes)
+                    let granted = Granted {
+                        position,
+                        changes,
+                        step,
+                    };
+                    self.publish_live(built, &taken, granted, &hold, lanes)
                         .await?;
                 }
                 (Job::Backfill { requested, marks }, Some(built)) => {
@@ -314,16 +322,20 @@ impl IngestEngine {
     /// so a full lane delays only its own copy. A batch that built no
     /// document is still published (empty), so the lanes acknowledge its
     /// position.
-    #[tracing::instrument(name = "ingest.commit", level = "debug", skip_all, fields(changes = changes))]
+    #[tracing::instrument(name = "ingest.commit", level = "debug", skip_all, fields(changes = granted.changes))]
     async fn publish_live(
         &self,
         built: Built,
         taken: &[(IndexName, Token, Position)],
-        position: Position,
-        changes: usize,
+        granted: Granted,
         hold: &Hold,
         lanes: &Lanes,
     ) -> Result<()> {
+        let Granted {
+            position,
+            changes,
+            step,
+        } = granted;
         let (envelopes, by_index) = self.envelopes(built.documents?, Some(position))?;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Live));
@@ -342,7 +354,8 @@ impl IngestEngine {
         // envelopes of that index, in build order, under the index's next key
         // (the same on each of its lanes; lanes are ordered by index, so an
         // index's lanes are adjacent). A sink's first item carries the batch's
-        // changes; a sink with no item is told they settled.
+        // changes. Every lane, with an item or not, is registered with the
+        // batch's step: what a sink's committed count follows.
         let mut by_lane: Vec<Item<'_>> = Vec::new();
         let mut skipped: Vec<&LaneKey> = Vec::new();
         let mut counted: Vec<&SinkName> = Vec::new();
@@ -377,7 +390,7 @@ impl IngestEngine {
                     by_lane.push((
                         lane,
                         producer,
-                        Some((*oldest, position, *token)),
+                        Some((*oldest, position, *token, step)),
                         LaneItem::Batch(Batch {
                             key: Some(item_key),
                             position: Some(position),
@@ -398,16 +411,11 @@ impl IngestEngine {
         // back. A lane that lands the item first leaves its mark for the
         // registration to find.
         for key in &skipped {
-            match taken.iter().find(|(index, _, _)| *index == key.index) {
-                Some((_, token, _)) => self.progress.skipped_build(key, position, *token),
-                None => self.progress.skipped(key, position),
-            }
-        }
-        for key in skipped {
-            if !counted.contains(&&key.sink) {
-                counted.push(&key.sink);
-                self.observer.on_changes_settled(&key.sink, changes);
-            }
+            let token = taken
+                .iter()
+                .find(|(index, _, _)| *index == key.index)
+                .map(|(_, token, _)| *token);
+            self.progress.skipped_build(key, position, token, step);
         }
         self.publish(by_lane, Work::Live, started).await?;
         // Registered on every lane of each index: the builds no longer hold
@@ -491,9 +499,9 @@ impl IngestEngine {
                 .map(|(lane, producer, routed, item)| async move {
                     let key = item.key();
                     producer.publish(item).await?;
-                    if let (Some((oldest, last, token)), Some(key)) = (routed, key) {
+                    if let (Some((oldest, last, token, step)), Some(key)) = (routed, key) {
                         self.progress
-                            .published_build(lane, key, oldest, last, token);
+                            .published_build(lane, key, oldest, last, token, step);
                     }
                     self.observer.on_stage(
                         StageTiming::new(Stage::LaneWait, started.elapsed())
@@ -557,13 +565,22 @@ impl IngestEngine {
     }
 }
 
+/// A live build's grant: its live run's newest position, how many changes
+/// the run read, and the step they fall in.
+#[derive(Debug, Clone, Copy)]
+struct Granted {
+    position: Position,
+    changes: usize,
+    step: Step,
+}
+
 /// One lane's item of a batch, with its lane, its producer and, for a live
 /// item, the oldest and last position it registers under and the pending
 /// build it carries.
 type Item<'a> = (
     &'a LaneKey,
     &'a Box<dyn Producer<LaneItem>>,
-    Option<(Position, Position, Token)>,
+    Option<(Position, Position, Token, Step)>,
     LaneItem,
 );
 

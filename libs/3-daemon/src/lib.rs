@@ -289,6 +289,7 @@ impl Daemon {
                 Instant::now(),
             )
             .with_fence(fence.clone())
+            .with_progress(Arc::clone(&progress))
             .with_source(Arc::clone(&capture))
             .with_budget(Arc::clone(&budget))
             .with_stalls(Arc::clone(&stalls)),

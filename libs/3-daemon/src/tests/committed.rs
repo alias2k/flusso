@@ -22,6 +22,7 @@ use stream_channel::ChannelStream;
 use tokio::sync::{Notify, oneshot};
 
 use super::{MockBackends, fast_restarts, primary, users, wait_until};
+use crate::status::LaneHealthState;
 use crate::{Daemon, StatusSnapshot};
 
 fn orders() -> IndexName {
@@ -147,12 +148,15 @@ impl DocumentBuilder for ByTable {
 }
 
 /// Holds every write touching an index in `held` until it is released;
-/// rejects every document of an index in `refused`; counts writes.
+/// rejects every document of an index in `refused`, reports one in
+/// `blocked` blocked and one in `missing` without its target; counts writes.
 #[derive(Debug, Default)]
 struct Gate {
     held: Mutex<HashSet<String>>,
     released: Notify,
     refused: Mutex<HashSet<String>>,
+    blocked: Mutex<HashSet<String>>,
+    missing: Mutex<HashSet<String>>,
     writes: AtomicU64,
 }
 
@@ -187,7 +191,7 @@ impl Sink for Gate {
         }
         self.writes.fetch_add(1, Ordering::SeqCst);
         let refused = self.refused.lock().unwrap().clone();
-        Ok(WriteReport::clean().rejecting(
+        let mut report = WriteReport::clean().rejecting(
             envelopes
                 .iter()
                 .filter(|envelope| refused.contains(envelope.index.as_ref()))
@@ -196,7 +200,18 @@ impl Sink for Gate {
                     id: envelope.id.clone(),
                     reason: "refused".to_owned(),
                 }),
-        ))
+        );
+        let indexes: HashSet<&IndexName> =
+            envelopes.iter().map(|envelope| &envelope.index).collect();
+        for index in indexes {
+            if self.blocked.lock().unwrap().contains(index.as_ref()) {
+                report = report.blocking(index.clone(), "blocked");
+            }
+            if self.missing.lock().unwrap().contains(index.as_ref()) {
+                report = report.missing_target(index.clone(), "gone");
+            }
+        }
+        Ok(report)
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -592,16 +607,15 @@ async fn a_change_whose_documents_were_all_skipped_still_counts() {
     run.abort();
 }
 
-/// A lane parked on a `stop` refusal holds its sink's count, while a sibling
-/// sink counts everything; the parked sink's changes stay in flight.
-#[tokio::test]
-async fn a_parked_lane_holds_its_sinks_count_and_a_sibling_counts_on() {
+/// A lane that isn't written (parked on a `stop` refusal, blocked, or
+/// staged again because its target is gone) holds its sink's count, while a
+/// sibling sink counts everything; the held sink's changes stay in flight.
+async fn a_lane_not_written_holds_its_sinks_count(
+    park: impl FnOnce(&Gate),
+    health: LaneHealthState,
+) {
     let parked = Arc::new(Gate::default());
-    parked
-        .refused
-        .lock()
-        .unwrap()
-        .insert(users().as_ref().to_owned());
+    park(&parked);
     let healthy = Arc::new(Gate::default());
     let (source, _end) = scripted(vec![change("users", 1), change("orders", 2)]);
     let backends = backends_over(
@@ -618,16 +632,63 @@ async fn a_parked_lane_holds_its_sinks_count_and_a_sibling_counts_on() {
         committed(&status.snapshot(), "audit") == 2
     })
     .await;
+    wait_until("the users lane on primary to be held", || {
+        status.snapshot().sinks["primary"].lanes["users"].health == health
+    })
+    .await;
     settle().await;
     let snapshot = status.snapshot();
     assert_eq!(
         committed(&snapshot, "primary"),
         0,
-        "held by the parked lane"
+        "held by the {} lane",
+        health.name()
     );
     assert_eq!(snapshot.sinks["primary"].changes_in_flight, 2);
     assert_eq!(snapshot.changes_in_flight, 2, "the slowest sink");
     run.abort();
+}
+
+#[tokio::test]
+async fn a_refused_lane_holds_its_sinks_count_and_a_sibling_counts_on() {
+    a_lane_not_written_holds_its_sinks_count(
+        |gate| {
+            gate.refused
+                .lock()
+                .unwrap()
+                .insert(users().as_ref().to_owned());
+        },
+        LaneHealthState::Refused,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_blocked_lane_holds_its_sinks_count_and_a_sibling_counts_on() {
+    a_lane_not_written_holds_its_sinks_count(
+        |gate| {
+            gate.blocked
+                .lock()
+                .unwrap()
+                .insert(users().as_ref().to_owned());
+        },
+        LaneHealthState::Blocked,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_restaging_lane_holds_its_sinks_count_and_a_sibling_counts_on() {
+    a_lane_not_written_holds_its_sinks_count(
+        |gate| {
+            gate.missing
+                .lock()
+                .unwrap()
+                .insert(users().as_ref().to_owned());
+        },
+        LaneHealthState::Restaging,
+    )
+    .await;
 }
 
 /// A graceful stop ends with every change counted on every sink, `skip`ped

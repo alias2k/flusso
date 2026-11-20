@@ -32,7 +32,6 @@ use super::script_log::field_label;
 #[derive(Debug)]
 pub(crate) struct OtelObserver {
     changes_captured: Counter<u64>,
-    changes_committed: Counter<u64>,
     documents_built: Counter<u64>,
     batches: Counter<u64>,
     indexes_seeded: Counter<u64>,
@@ -70,10 +69,6 @@ impl OtelObserver {
             changes_captured: meter
                 .u64_counter("flusso.changes.captured")
                 .with_description("Changes pulled from the source by the ingest engine")
-                .build(),
-            changes_committed: meter
-                .u64_counter("flusso.changes.committed")
-                .with_description("Changes whose batch a sink has flushed and acknowledged")
                 .build(),
             lane_probes: meter
                 .u64_counter("flusso.lane.probes")
@@ -298,7 +293,6 @@ impl Observer for OtelObserver {
 
     fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
         let label = [self.sink_label(sink)];
-        self.changes_committed.add(stats.changes as u64, &label);
         self.batches.add(1, &label);
         self.flush_duration
             .record(stats.flush.as_secs_f64(), &label);

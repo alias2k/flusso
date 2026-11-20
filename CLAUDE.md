@@ -81,7 +81,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   with `ps`), plus flush p50/p99 from `/metrics` for attribution and, per phase, a table of each
   stage's busy seconds per wall second, by task (`attribution.md`, from `flusso.stage.duration`;
   issue #399). The latency probe polls every 5 ms and reports the midpoint between the last miss and
-  the hit; latency points carry `extra.images.probe` so that change restarts their window. (2) **Docker-backed component
+  the hit; latency points carry `extra.images.probe` so that change restarts their window, and drain points
+  `extra.images.drain` (`flusso.rs`'s `DRAINED`: what `wait_drained`'s `changes_in_flight` 0 means, which
+  moved in ADR 0012 stage 8a slice 3). (2) **Docker-backed component
   benches** (`postgres`, `opensearch`, `engine`'s `pipeline` — attribution only; its backfill group
   is gone; plus `source-postgres`'s `cases`, `build_many` over batch sizes, hit ratios, key types and
   root shapes, run only by `just bench-components` and `just review-ab`, never by `bench.yml`, so the
@@ -628,8 +630,14 @@ is the one concrete piece.
   per index in `Progress`, outliving every run, the same key on every lane of the index; ADR 0012 stage
   8a slice 1), not by its position, since two items of a lane may end on the same change; the item
   still carries the batch's last position (envelopes, ordered sinks); a lane with no item is
-  `Progress::skipped`, so a quiet index pins nothing; `changes` rides on each sink's first item and a sink
-  with no item hears `Observer::on_changes_settled`. Snapshots and `SnapshotComplete { index }` go to
+  `Progress::skipped`, so a quiet index pins nothing. **A sink's `changes_committed` is `Progress::committed`**
+  (stage 8a slice 3, §3.6 of its note): each read (`Progress::change_read`) falls in the `Step` closed at its
+  live grant (`close_step`), every lane is registered with the step (`published_build`/`skipped_build`, an
+  empty build too), and a sink has committed the reads through the oldest step all its lanes have landed
+  or skipped; counted per read, so a replayed change counts once per read and a redelivered item once;
+  reads of a run that ended before its grant close a step at the next run's `forget_all` and count with
+  the next routed one. Computed when read (`Status::with_progress`, the observable `flusso.changes.committed`);
+  nothing listens. Guards: `daemon` `tests::committed`, `progress::tests::committed`. Snapshots and `SnapshotComplete { index }` go to
   `(index, s)` of each requesting sink; requests are one per index and coalesce by sink set. The sink
   engine (`writes.rs`'s `Run`) keeps per lane a consumer, its window, counts and barrier; admission is per
   lane (two lanes never share a document); `pick` takes live first, every fourth contested grant to

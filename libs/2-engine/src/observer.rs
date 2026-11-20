@@ -67,7 +67,9 @@ pub struct BuildStats {
 pub struct CommitStats {
     /// Envelopes applied to the sink in this batch.
     pub envelopes: usize,
-    /// Source changes the batch covered; `0` for a snapshot batch.
+    /// Source changes the live batch covered, on the sink's first item of
+    /// it; `0` on its other items and for a snapshot batch. Not when they
+    /// count as committed: that is [`Progress::committed`](crate::Progress::committed).
     pub changes: usize,
     /// How long the flush took.
     pub flush: Duration,
@@ -409,12 +411,6 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
     }
 
     /// A sink engine applied, flushed, and acknowledged one batch.
-    /// A batch built `changes` source changes into no document `sink`
-    /// receives: they are settled for `sink` without a write.
-    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
-        let _ = (sink, changes);
-    }
-
     fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
         let _ = (sink, stats);
     }
@@ -594,12 +590,6 @@ impl Observer for FanOut {
     fn on_sink_started(&self, sink: &SinkName) {
         for observer in &self.observers {
             observer.on_sink_started(sink);
-        }
-    }
-
-    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
-        for observer in &self.observers {
-            observer.on_changes_settled(sink, changes);
         }
     }
 

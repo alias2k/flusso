@@ -40,11 +40,40 @@ fn commit(changes: usize, envelopes: usize) -> CommitStats {
     )
 }
 
+/// A status over `users` on `sinks` that reads each sink's committed count
+/// from the progress it returns.
+fn status_over(sinks: &[SinkName]) -> (Arc<Status>, Arc<engine::Progress>) {
+    let progress = Arc::new(engine::Progress::of([users()], sinks.iter().cloned()));
+    let status = Status::new([users()], sinks.iter().cloned(), Instant::now())
+        .with_progress(Arc::clone(&progress));
+    (Arc::new(status), progress)
+}
+
+/// `changes` live changes read, as the ingest engine reports and counts
+/// them, granted as one step and routed to `lane` as one item: its key.
+fn read_and_route(
+    observer: &StatusObserver,
+    progress: &engine::Progress,
+    lanes: &[::stream::LaneKey],
+    changes: u64,
+) -> ::stream::ItemKey {
+    for _ in 0..changes {
+        observer.on_change_captured();
+        progress.change_read();
+    }
+    let step = progress.close_step();
+    let key = progress.next_key(&users()).unwrap();
+    for lane in lanes {
+        progress.published_step(lane, key, Position::new(1), Position::new(changes), step);
+    }
+    key
+}
+
 /// The observer drives the status surface through a full lifecycle — one
 /// ingest side, one sink — and the snapshot serializes to the `/status` shape.
 #[test]
 fn observer_drives_status_through_its_lifecycle() {
-    let status = Arc::new(Status::new([users()], [primary()], Instant::now()));
+    let (status, progress) = status_over(&[primary()]);
     let observer = StatusObserver::new(Arc::clone(&status));
 
     let snap = status.snapshot();
@@ -70,9 +99,8 @@ fn observer_drives_status_through_its_lifecycle() {
     assert_eq!(snap.sinks["primary"].phase, SinkPhase::Live);
 
     // Three changes captured, two distinct documents built, one commit.
-    observer.on_change_captured();
-    observer.on_change_captured();
-    observer.on_change_captured();
+    let lane = ::stream::LaneKey::new(users(), primary());
+    let key = read_and_route(&observer, &progress, std::slice::from_ref(&lane), 3);
     observer.on_batch_built(BuildStats {
         changes: 3,
         documents: 2,
@@ -85,6 +113,7 @@ fn observer_drives_status_through_its_lifecycle() {
         "built but not yet committed by the sink"
     );
     observer.on_batch_committed(&primary(), commit(3, 2));
+    progress.applied(&lane, key);
     observer.on_slot_lag(4096);
 
     let snap = status.snapshot();
@@ -252,11 +281,7 @@ fn status_reports_script_failures_per_index() {
 #[test]
 fn status_tracks_each_sink_separately() {
     let audit = SinkName::try_new("audit").unwrap();
-    let status = Arc::new(Status::new(
-        [users()],
-        [primary(), audit.clone()],
-        Instant::now(),
-    ));
+    let (status, progress) = status_over(&[primary(), audit.clone()]);
     let observer = StatusObserver::new(Arc::clone(&status));
 
     // `audit` never backfills (`backfill = false`); `primary` seeds.
@@ -276,9 +301,11 @@ fn status_tracks_each_sink_separately() {
     observer.on_index_seeded(&primary(), &users());
     assert_eq!(status.snapshot().phase, Phase::Live);
 
-    observer.on_change_captured();
-    observer.on_change_captured();
+    let on_audit = ::stream::LaneKey::new(users(), audit.clone());
+    let lanes = [::stream::LaneKey::new(users(), primary()), on_audit.clone()];
+    let key = read_and_route(&observer, &progress, &lanes, 2);
     observer.on_batch_committed(&audit, commit(2, 2));
+    progress.applied(&on_audit, key);
     assert_eq!(
         status.in_flight(),
         2,
@@ -1196,7 +1223,11 @@ async fn failed_ingest_engine_restarts_and_resumes_the_stream() {
     );
     let snap = status.snapshot();
     assert_eq!(snap.errors, 1);
-    assert_eq!(snap.sinks["primary"].changes_committed, 2);
+    // The failed run's read and its replay are two reads: both count once
+    // the replay landed, so nothing is left in flight.
+    assert_eq!(snap.changes_captured, 3);
+    assert_eq!(snap.sinks["primary"].changes_committed, 3);
+    assert_eq!(snap.changes_in_flight, 0);
     assert_eq!(snap.phase, Phase::Stopped);
 }
 
