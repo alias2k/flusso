@@ -5,6 +5,8 @@
 
 use source::cdc::Landed;
 use stream::{ItemKey, LaneItem, LaneKey};
+
+use crate::Level;
 use tokio::sync::Notify;
 
 use super::*;
@@ -120,5 +122,241 @@ async fn a_document_being_built_holds_confirmation_in_the_progress() {
         progress.landed(),
         Landed::Through(Position::new(0)),
         "landed, and the ghost index's document pins nothing"
+    );
+}
+
+fn orders() -> IndexName {
+    IndexName::try_new("orders").unwrap()
+}
+
+/// Change 9 touches only a `ghost` index no lane receives; every other
+/// change touches its row's `users` and `orders` documents. The first build
+/// holding a `users` document waits for `release` while `hold` is set;
+/// `users` documents fail while `fail_users` is set.
+#[derive(Debug, Default)]
+struct TwoIndexes {
+    hold: AtomicBool,
+    fail_users: bool,
+    release: Notify,
+}
+
+#[async_trait]
+impl DocumentBuilder for TwoIndexes {
+    async fn resolve(
+        &self,
+        _table: &TableName,
+        key: &RowKey,
+        _before: Option<&RowImage>,
+        _after: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        let indexes = if *key == super::key(9) {
+            vec![IndexName::try_new("ghost").unwrap()]
+        } else {
+            vec![users(), orders()]
+        };
+        Ok(indexes
+            .into_iter()
+            .map(|index| DocumentId {
+                index,
+                key: key.clone(),
+            })
+            .collect())
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        if self.fail_users && id.index == users() {
+            return Ok(Document::Failed {
+                id: id.clone(),
+                failure: source::document::BuildFailure {
+                    field: "label".to_owned(),
+                    message: "boom".to_owned(),
+                    position: None,
+                },
+            });
+        }
+        Ok(Document::Upsert {
+            id: id.clone(),
+            body: kernel::GenericValue::Map(BTreeMap::new()),
+        })
+    }
+
+    async fn build_many(&self, ids: &[DocumentId]) -> source::Result<Vec<Document>> {
+        if ids.iter().any(|id| id.index == users()) && self.hold.swap(false, Ordering::SeqCst) {
+            self.release.notified().await;
+        }
+        let mut documents = Vec::with_capacity(ids.len());
+        for id in ids {
+            documents.push(self.build(id).await?);
+        }
+        Ok(documents)
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        Vec::new()
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(None)
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        _: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        Ok(Vec::new())
+    }
+}
+
+/// What a test reads off the observer: batches built and changes settled,
+/// in order.
+#[derive(Debug, Default)]
+struct Events(Mutex<Vec<String>>);
+
+impl Observer for Events {
+    fn on_batch_built(&self, stats: crate::BuildStats) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("built {}", stats.documents));
+    }
+
+    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("settled {changes} on {sink}"));
+    }
+}
+
+/// A change that builds no document is settled in slot order, as an empty
+/// batch was: after the batch granted before it is published, never ahead
+/// of it.
+#[tokio::test(start_paused = true)]
+async fn a_change_that_builds_nothing_settles_after_the_batch_before_it() {
+    let primary = sink_name("primary");
+    let indexes = [orders(), users()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(Progress::of(indexes, [primary.clone()]));
+    let documents = Arc::new(TwoIndexes::default());
+    documents.hold.store(true, Ordering::SeqCst);
+    let events = Arc::new(Events::default());
+    let engine = IngestEngine::new(
+        Arc::new(MockSource::new(vec![upsert(1), upsert(9)])),
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![primary],
+        Arc::clone(&progress),
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 1,
+        max_delay: Duration::from_millis(10),
+    })
+    .with_observer(Arc::clone(&events) as Arc<dyn Observer>);
+    let run = tokio::spawn(async move { engine.run().await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    documents.release.notify_one();
+    run.await.unwrap().unwrap();
+    assert_eq!(
+        *events.0.lock().unwrap(),
+        ["built 2", "settled 1 on primary"],
+        "the empty batch settles after the one granted before it"
+    );
+}
+
+/// Every document a build made for `users` fails under `skip`, so the
+/// `users` lane gets no item and is told it was skipped; the `orders` lane
+/// is full, so the batch's send to it waits. The `users` lane is settled
+/// with nothing to land, and doesn't wait for the full lane of another index.
+#[tokio::test(start_paused = true)]
+async fn a_skipped_lane_is_not_held_by_a_full_lane_of_another_index() {
+    let primary = sink_name("primary");
+    let indexes = [orders(), users()];
+    let stream = Arc::new(ChannelStream::over(2, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(Progress::of(indexes, [primary.clone()]));
+    let users_lane = LaneKey::new(users(), primary.clone());
+    let orders_lane = LaneKey::new(orders(), primary.clone());
+    stream
+        .lane(&orders_lane)
+        .unwrap()
+        .producer
+        .publish(LaneItem::Batch(stream::Batch {
+            key: None,
+            position: None,
+            changes: 0,
+            envelopes: Vec::new().into(),
+            hold: Default::default(),
+            walked: None,
+            ticket: None,
+        }))
+        .await
+        .unwrap();
+    let engine = IngestEngine::new(
+        Arc::new(MockSource::new(vec![upsert(1)])),
+        Arc::new(TwoIndexes {
+            fail_users: true,
+            ..TwoIndexes::default()
+        }) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![primary],
+        Arc::clone(&progress),
+    )
+    .with_failure_policies(crate::FailurePolicies::new(crate::FailurePolicy::Skip));
+    let run = tokio::spawn(async move { engine.run().await });
+    super::wait_for(|| {
+        progress.lane(&users_lane, Level::Applied) == Some(Landed::Through(Position::new(0)))
+    })
+    .await;
+    assert!(!run.is_finished(), "the orders lane's send still waits");
+    assert_eq!(
+        progress.lane(&orders_lane, Level::Applied),
+        Some(Landed::Before(Position::new(0)))
+    );
+    run.abort();
+}
+
+/// A build a failed run left behind is published by the next run before it
+/// reads any change (the stream ends at once): its item never carries a
+/// position below what its lanes were already routed.
+#[tokio::test]
+async fn a_batch_never_carries_a_position_below_what_its_lanes_were_routed() {
+    let primary = sink_name("primary");
+    let lane = LaneKey::new(users(), primary.clone());
+    let stream = Arc::new(ChannelStream::over(64, [users()], [primary.clone()]));
+    let progress = Arc::new(Progress::of([users()], [primary.clone()]));
+    let earlier = progress.next_key(&users()).unwrap();
+    progress.published(&lane, earlier, Position::new(10), Position::new(10));
+    progress.applied(&lane, earlier);
+    progress.mark([(
+        DocumentId {
+            index: users(),
+            key: super::key(1),
+        },
+        Position::new(2),
+    )]);
+    progress
+        .take(&users(), usize::MAX, &|_: &RowKey| false)
+        .unwrap();
+    IngestEngine::new(
+        Arc::new(MockSource::new(Vec::new())),
+        Arc::new(MockDocuments::default()),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![primary],
+        Arc::clone(&progress),
+    )
+    .run()
+    .await
+    .unwrap();
+    let mut consumer = stream.lane(&lane).unwrap().consumer;
+    let delivery = consumer.recv().await.unwrap().unwrap();
+    let LaneItem::Batch(batch) = delivery.item() else {
+        panic!("a live batch");
+    };
+    assert!(
+        batch.position >= Some(Position::new(10)),
+        "positions never go back along a lane: {:?}",
+        batch.position
     );
 }

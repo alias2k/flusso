@@ -636,3 +636,78 @@ fn a_build_left_unpublished_waits_again() {
     assert_eq!(again.ids.len(), 2);
     assert_eq!(again.oldest, p(1));
 }
+
+/// Register `taken`'s item on `lane` under `key`: the call the ingest
+/// engine makes once that lane's send returned.
+fn register(progress: &Progress, lane: &LaneKey, key: ItemKey, taken: &Taken, last: Position) {
+    progress.published(lane, key, taken.oldest, last);
+    progress.build_registered(lane, taken.token);
+}
+
+/// Each answer a registration moves is followed by a notification, so a
+/// fence waiter on that lane wakes. Here the sink lands the item before its
+/// registration (the ingest task resumed late) and a sibling lane hasn't
+/// taken it: the last notification must see the lane's new answer.
+#[test]
+fn a_registration_that_moves_a_lanes_answer_notifies_after_it() {
+    let (a, b) = (sink("a"), sink("b"));
+    let progress = Arc::new(Progress::new([a.clone(), b.clone()]));
+    let seen: Arc<Mutex<Vec<Option<Landed>>>> = Arc::default();
+    let weak = Arc::downgrade(&progress);
+    let log = Arc::clone(&seen);
+    let lane = a.clone();
+    progress.on_registered(Arc::new(move || {
+        if let Some(progress) = weak.upgrade() {
+            log.lock()
+                .unwrap()
+                .push(progress.lane(&lane, Level::Applied));
+        }
+    }));
+    progress.mark([(id("users", 1), p(3))]);
+    let taken = progress.take(&a.index, usize::MAX, &nothing_held).unwrap();
+    let key = progress.next_key(&a.index).unwrap();
+    progress.applied(&a, key);
+    register(&progress, &a, key, &taken, p(3));
+
+    assert_eq!(
+        progress.lane(&a, Level::Applied),
+        Some(Landed::Through(p(3)))
+    );
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.last().copied().flatten(),
+        Some(Landed::Through(p(3))),
+        "a waiter on `a` was woken after its answer moved: {seen:?}"
+    );
+}
+
+/// A build whose item reached some lanes and waits on another is that
+/// lane's to answer for: it pins the slot by that lane and ages it.
+#[test]
+fn a_build_sent_to_some_lanes_and_blocked_on_one_pins_that_lane() {
+    let (a, b) = (sink("a"), sink("b"));
+    let progress = Progress::new([a.clone(), b.clone()]);
+    progress.mark([(id("users", 1), p(3))]);
+    let taken = progress.take(&a.index, usize::MAX, &nothing_held).unwrap();
+    let key = progress.next_key(&a.index).unwrap();
+    register(&progress, &a, key, &taken, p(3));
+    progress.applied(&a, key);
+
+    assert_eq!(progress.pinned_by(), Some(Pin::Lane(b.clone())));
+    assert_eq!(progress.own_oldest(&b), Some(p(3)));
+}
+
+/// On a tie across lanes, a lane's own item is named, not another index's
+/// backlog, whatever the lanes' order.
+#[test]
+fn a_lane_wins_a_tie_with_another_indexs_backlog() {
+    let users = sink("a");
+    let orders = LaneKey::new(
+        kernel::IndexName::try_new("orders").unwrap(),
+        kernel::SinkName::try_new("a").unwrap(),
+    );
+    let progress = Progress::new([users.clone(), orders.clone()]);
+    progress.published(&users, ItemKey::new(0), p(5), p(5));
+    progress.mark([(id("orders", 1), p(5))]);
+    assert_eq!(progress.pinned_by(), Some(Pin::Lane(users)));
+}
