@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-sink-v0.18.0...flusso-sink-v0.19.0) - 2026-11-21
+
+### Fixed
+
+- *(engine,sink-opensearch)* cut a backfill by its target's identity, not one staging's word
+- *(engine)* a backfill whose target was created anew no longer seeds it
+
+### Other
+
+- *(sink)* an ordered sink's order is per lane; a parked lane is overtaken
+- *(engine)* a lane parks alone on a refusal or a write block, and restages alone on a missing target
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-sink-v0.17.0...flusso-sink-v0.18.0) - 2026-11-19
 
 ### Added

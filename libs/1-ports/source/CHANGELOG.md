@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-source-v0.18.0...flusso-source-v0.19.0) - 2026-11-21
+
+### Other
+
+- *(source)* state the position contract the engine relies on
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-source-v0.17.0...flusso-source-v0.18.0) - 2026-11-19
 
 ### Added

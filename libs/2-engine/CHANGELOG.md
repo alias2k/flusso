@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.18.0...flusso-engine-v0.19.0) - 2026-11-21
+
+### Added
+
+- *(engine)* a reader task reads and marks ahead of one builder, up to a lead
+- *(engine)* waiting lines for build permits, and a key-read permit
+- *(engine)* share the memory budget per index, for many reservers
+- *(engine)* changes_committed counts what every lane of a sink landed
+- *(engine)* [**breaking**] keep each index's pending documents in the progress
+- *(config)* a [backoff] table sets the engines' retry schedule
+- *(engine)* [**breaking**] a lane parks alone on a refusal or a write block, and restages alone on a missing target
+
+### Fixed
+
+- *(engine)* review round 4 of slice 6a: one drain before every batch, one word for the handshake, fair budget
+- *(engine)* review round 2 of slice 6a: a grant takes every run handed over, a hand-over beside a build walks nothing
+- *(engine)* batches cut as main cut them, captured counted read on every path, the reader awaited on an error
+- *(engine)* the gate reserves only at the generation it chose the waiter at
+- *(engine)* a waiter's standing is read from the budget's current generation, never a stale mark
+- *(engine)* a waiter refused for being behind is eligible again when one ahead leaves
+- *(engine)* an index holding no live bytes always gets one live batch
+- *(engine)* the share bounds an index's live bytes, and nothing per index passes the limit
+- *(engine)* live keeps room beside an index's backfill, and a held index is one budget wait
+- *(engine)* a skipped step always replaces a lane's newest entry; steps_kept reads with the unlanded count
+- *(engine)* a lane keeps a bounded record of steps while it is parked
+- *(engine)* a batch carries its own run's newest change, no floor
+- *(engine)* pending builds by step, main's admission and settle order
+- *(engine)* a live lane item without a key fails the sink engine
+- *(engine)* only a lane being staged again holds its SnapshotComplete
+- *(engine)* a held walk keeps nothing, and a live item's release holds no walk
+- *(engine,sink-opensearch)* cut a backfill by its target's identity, not one staging's word
+- *(engine)* a backfill whose target was created anew no longer seeds it
+- *(daemon)* a probe past every date reads as the latest one, never a panic
+- *(daemon)* /status names a refused lane `refused`, as the metric's `why` does
+- *(engine)* a park between two stagings keeps the staging's own backoff; the staging warning says when
+- *(engine)* a staging that comes due inside a grant starts at once, not at the next wake-up
+- *(engine)* let go of a part's batch before acknowledging it
+- *(engine)* a lane staged again keeps its backoff until one of its writes lands
+- *(engine)* a parked lane's waiting backfill doesn't end the other lanes' merge wait
+
+### Other
+
+- *(engine)* an ended future polled again fails its test; the budget wake under block_on stated
+- *(engine)* the reader and the builder as two futures of one task
+- *(engine)* a grant pass alone is one hold of the gate's lock; one scan per index
+- *(engine)* pin where a parked index's backlog stops the reading, and that rule 5 is never blocked
+- *(engine)* drop the change counts nothing reads
+- *(source)* state the position contract the engine relies on
+- *(engine)* a live batch's position is a Position, not an Option
+- *(engine)* a replayed batch claims no change another lane landed
+- *(engine)* the review of stage 8a slice 2, red first
+- *(engine)* a document being built holds confirmation in the progress
+- *(engine)* two indexes into two sinks each key their own items
+- *(engine)* fences keep live items in key order, observers hear positions
+- *(engine)* [**breaking**] key lane items per index, not by their position
+- *(engine)* two lane items sharing a position land one at a time
+- *(engine)* a parked lane's completion runs once a stop skipped the page in front
+- the target identity rule in CLAUDE.md, the ticket's process assumption
+- *(engine)* a cut survives every staging attempt that fails after it
+- *(engine)* a target deleted mid-backfill is seeded only after a full backfill
+- *(engine)* a park between two stagings keeps the staging's own backoff
+- *(engine)* a lane whose write landed after its staging is staged again at once next time
+- *(engine)* pipeline's stop branches assert the lane parked on its own refusal (512 bytes, NaN)
+- FlussoLaneParked fires for a parked lane, a refused backfill page and a lane stuck restaging; restaging is exported in flusso.lane.parked
+- *(engine)* a part's bytes are back when its acknowledgement returns
+- *(engine)* a parked lane's waiting backfill doesn't end another lane's merge wait
+- *(engine)* a lane is staged again only once its own writes in flight returned
+- *(engine)* a missing target staging can't cure is retried with a backoff, not in a loop
+- *(engine)* a lane parks alone on a refusal or a write block, and restages alone on a missing target
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.17.0...flusso-engine-v0.18.0) - 2026-11-19
 
 ### Added

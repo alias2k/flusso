@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.18.0...flusso-cli-v0.19.0) - 2026-11-21
+
+### Added
+
+- *(cli)* [concurrency] max_waiting_per_index and max_waiting, with flags and FLUSSO_* variables
+- *(engine)* share the memory budget per index, for many reservers
+- *(engine)* changes_committed counts what every lane of a sink landed
+- *(engine)* [**breaking**] keep each index's pending documents in the progress
+- *(config)* a [backoff] table sets the engines' retry schedule
+- *(alerts)* FlussoLaneParked, and a lane stuck restaging in flusso.lane.parked
+- *(daemon)* /status names each lane's health; flusso.lane.parked and flusso.lane.probes
+
+### Fixed
+
+- *(cli)* an unset max_waiting rises to max_waiting_per_index, and the other way round
+- *(engine)* the share bounds an index's live bytes, and nothing per index passes the limit
+- *(engine)* a backfill whose target was created anew no longer seeds it
+- *(cli)* the stop message says a refused lane is refused, from the one name /status gives
+- *(cli)* one judge for [backoff], and an unset cap rises with the first wait
+- *(daemon)* /status names a refused lane `refused`, as the metric's `why` does
+
+### Other
+
+- *(engine)* drop the change counts nothing reads
+- *(engine)* [**breaking**] key lane items per index, not by their position
+- *(cli)* an open lane has no flusso_lane_parked series
+- *(cli)* a stop with a write-blocked lane exits 1 at the deadline naming the lane, and a restart converges
+- rustfmt
+- FlussoLaneParked fires for a parked lane, a refused backfill page and a lane stuck restaging; restaging is exported in flusso.lane.parked
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.17.0...flusso-cli-v0.18.0) - 2026-11-19
 
 ### Added

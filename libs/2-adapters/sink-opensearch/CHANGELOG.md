@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-sink-opensearch-v0.18.0...flusso-sink-opensearch-v0.19.0) - 2026-11-21
+
+### Added
+
+- *(engine)* [**breaking**] a lane parks alone on a refusal or a write block, and restages alone on a missing target
+
+### Fixed
+
+- *(sink-opensearch)* a generation is created only after its meta doc says unseeded
+- *(engine,sink-opensearch)* cut a backfill by its target's identity, not one staging's word
+- *(engine)* a backfill whose target was created anew no longer seeds it
+
+### Other
+
+- *(sink-opensearch)* a generation deleted or replaced mid-backfill, case by case
+- *(sink-opensearch)* a seeded generation recreated by a failed staging is never served seeded
+- *(sink-opensearch)* an auto-created generation is never seeded
+- *(sink-opensearch)* staging a generation deleted mid-backfill says it is new
+- LaneHealthView.state documented, Chunk below the imports, LaneSnapshot's new fields on the upgrade page
+- *(engine)* a lane parks alone on a refusal or a write block, and restages alone on a missing target
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-sink-opensearch-v0.17.0...flusso-sink-opensearch-v0.18.0) - 2026-11-19
 
 ### Added
