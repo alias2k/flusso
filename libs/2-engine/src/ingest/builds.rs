@@ -684,6 +684,7 @@ impl Builds {
     ) -> Option<Vec<IndexName>> {
         self.refused = None;
         if !self.has_room() {
+            self.leave_lines();
             return None;
         }
         let taken = self.live_part(documents)?;

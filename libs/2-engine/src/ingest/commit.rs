@@ -137,23 +137,38 @@ impl IngestEngine {
             } else {
                 runs.candidate(false)
             };
-            if let Some(candidate) = live
-                && let Some(documents) = self.waiting(builds, candidate.position)
-                && let Some(admitted) = builds.can_take_last(&documents)
-            {
-                self.start_live(runs, builds, candidate, &admitted).await;
-                continue;
+            let documents = live.and_then(|candidate| self.waiting(builds, candidate.position));
+            match &documents {
+                Some(documents) => {
+                    if let (Some(candidate), Some(admitted)) =
+                        (live, builds.can_take_last(documents))
+                    {
+                        self.start_live(runs, builds, candidate, &admitted).await;
+                        continue;
+                    }
+                }
+                // Nothing this pass could ask for: no place in a line, or a
+                // turn would wake it to ask for nothing, again and again.
+                None => builds.leave_lines(),
             }
             if builds.running() == 0 {
                 // Nothing builds: what holds the last batch back is the
                 // budget, which the sinks' acknowledgements free.
                 match (live.is_some(), builds.refused(), self.budget.as_deref()) {
                     (true, Some(_), Some(budget)) => {
-                        // The release wakes this; the timeout is a backstop
-                        // should one ever go unheard.
+                        // The release wakes this, or its turn at the gate
+                        // (a waiter that can't ask holds a freed permit
+                        // back); the timeout is a backstop should either go
+                        // unheard.
                         let since = builds.refused_since();
-                        let _ =
-                            tokio::time::timeout(CONFIRM_TICK, budget.released_since(since)).await;
+                        let turn = turn_or_never(builds);
+                        let _ = tokio::time::timeout(CONFIRM_TICK, async {
+                            tokio::select! {
+                                () = budget.released_since(since) => {}
+                                () = turn => {}
+                            }
+                        })
+                        .await;
                         continue;
                     }
                     // Another builder holds the permits: its turn comes when
@@ -166,9 +181,16 @@ impl IngestEngine {
                     _ => return Ok(()),
                 }
             }
-            match builds.next().await {
-                Some((seq, output)) => builds.land(seq, output, &|built| self.halts(built)),
-                None => return Ok(()),
+            // Its turn at the gate is heard while a build runs: a waiter
+            // that doesn't ask would hold a freed permit back from every
+            // other builder until this build lands (G9′).
+            let turn = turn_or_never(builds);
+            tokio::select! {
+                landed = builds.next() => match landed {
+                    Some((seq, output)) => builds.land(seq, output, &|built| self.halts(built)),
+                    None => return Ok(()),
+                },
+                () = turn => {}
             }
         }
     }
@@ -720,6 +742,18 @@ impl IngestEngine {
                 failure: Box::new(failure),
             }),
             FailurePolicy::Skip => Ok(()),
+        }
+    }
+}
+
+/// Ready on `builds`' turn at the gate while it waits in a line; never
+/// otherwise.
+fn turn_or_never(builds: &Builds) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let turn = builds.in_line().then(|| builds.turn());
+    async move {
+        match turn {
+            Some(turn) => turn.await,
+            None => std::future::pending().await,
         }
     }
 }
