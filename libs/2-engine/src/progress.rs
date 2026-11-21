@@ -88,8 +88,8 @@
 //! lanes ([`Progress::committed`]), every read with no lane. A change a
 //! replaying source reads again is a second read, and a redelivered item that
 //! had landed moves nothing. After an engine run ends, the least read it left
-//! unbuilt caps every catch-up until the next step closes
-//! ([`Progress::forget_all`]).
+//! unbuilt caps each lane's catch-up until a step is registered on that lane
+//! after the restart ([`Progress::forget_all`]).
 //!
 //! **What the reader routed.** After a run's marks and count the reader
 //! raises [`Progress::routed`]: a lane with nothing outstanding answers through
@@ -757,7 +757,11 @@ impl Progress {
     /// a read counted before its marks) caps each lane's catch-up until a
     /// live step is registered on that lane after the restart (ADR 0012
     /// stage 8a, §3.9 D2): a lane the next grant passes by (its index
-    /// deferred) keeps its cap.
+    /// deferred) keeps its cap. That never strands a cap while every grant
+    /// registers every lane not deferred, with an item or a skip; once a
+    /// builder registers only its own index's lanes (slice 6b-1c), the first
+    /// grant after a restart must also lift the cap of every lane whose index
+    /// has nothing waiting or building, or a quiet index stays capped.
     pub fn forget_all(&self) {
         // One step for a reader: it holds the registry lock before any
         // pending lock, so it sees the run whole or forgotten whole, never

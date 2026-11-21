@@ -1742,17 +1742,29 @@ mod forgetting {
         let reader = Arc::clone(&progress);
         let early = Arc::new(Mutex::new(None));
         let during = Arc::clone(&early);
+        let ran = Arc::new(AtomicBool::new(false));
+        let hooked = Arc::clone(&ran);
         WHILE_FORGETTING.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 let reader = Arc::clone(&reader);
                 let seen = seen.clone();
+                let (starting, started) = mpsc::channel();
                 thread::spawn(move || {
+                    let _ = starting.send(());
                     let _ = seen.send(read(&reader));
                 });
+                started
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the reader thread starts");
                 *during.lock().unwrap() = saw.recv_timeout(Duration::from_millis(100)).ok();
+                hooked.store(true, Ordering::Release);
             }));
         });
         progress.forget_all();
+        assert!(
+            ran.load(Ordering::Acquire),
+            "the hook ran inside forget_all"
+        );
         let observed = early.lock().unwrap().take();
         assert_eq!(
             observed, None,

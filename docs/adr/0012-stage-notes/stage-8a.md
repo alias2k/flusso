@@ -1117,7 +1117,8 @@ document waiting at its take or marked after it). Then:
   a quiet index catches up (6b-1a: the one builder's skips give every lane but a deferred index's an entry
   at every grant, and a deferred index is taken later, which registers its lanes; 6b-1c, where a builder
   registers only its own lanes: the first grant after the restart must also lift the cap of every lane
-  whose index has nothing waiting or building, or a quiet index stays capped; a waiting or deferred
+  whose index has nothing waiting or building, or a quiet index stays capped (6b-1c's test, written first:
+  `after_a_restart_a_quiet_indexs_lanes_catch_up_with_no_step_of_their_own`); a waiting or deferred
   index's lanes keep it until their own step); a short replay or a stream end lands what was read and
   catches up; a second restart before a lane's step keeps the lower cap. A replay that never comes (the stream ends at once) leaves the count short of reads never
   built, which is right;
