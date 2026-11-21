@@ -1042,6 +1042,56 @@ async fn a_reader_panic_unwinds_the_engine_run() {
     assert_eq!(text, "resolving 1 panicked");
 }
 
+/// Tokio's cooperative budget (review round 4). The reader and the builder
+/// share one task, so one poll spends one budget between them. A burst read
+/// through a tokio channel (one unit per change) exhausts it again and again:
+/// the reader's `now_or_never` then sees the ready stream as pending and cuts
+/// its run short, and its next read polls the stream with its own waker,
+/// which the spent budget wakes at once, so the reader is never parked with
+/// changes ready. A cut run looks like the stream blocking, so the builder
+/// may grant the batch then, short of `max_changes`, as `main` committed at
+/// its own `now_or_never` cut (measured: 40 runs, 21 batches, the first 128
+/// changes, the rest about 253: the budget a poll leaves after the builder's
+/// turn). Every change lands, no batch is past
+/// `max_changes`, and runs outnumber batches, so the budget did cut them.
+#[tokio::test(start_paused = true)]
+async fn a_burst_past_the_cooperative_budget_neither_stalls_nor_breaks_a_batch() {
+    const CHANGES: i64 = 5_000;
+    let db = Database::new(0, (0..CHANGES).map(Change::upsert).collect());
+    let builder = instant(&db);
+    let stop = Stop::new();
+    let stages = Arc::new(Stages::default());
+    let observer = Arc::clone(&stages);
+    let mut deployment = Deployment::new(
+        Feed::new(&db).through_a_tokio_channel().open(),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(256))
+            .with_builds(4)
+            .with_stop(stop.clone())
+            .with_observer(observer)
+    });
+    run_beside(&mut deployment, &db, &stop, async {}).await;
+    let grants = builder.grants();
+    let built: usize = grants.iter().map(Vec::len).sum();
+    assert_eq!(built, CHANGES as usize, "every change built once");
+    assert!(grants.iter().all(|grant| grant.len() <= 256));
+    let runs = stages
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(stage, _)| *stage == Stage::Resolve)
+        .count();
+    assert!(
+        runs > CHANGES as usize / 256 + 1,
+        "the budget cut runs short: {runs} runs"
+    );
+}
+
 /// R3 with resolving that takes time, which `main_batches` doesn't model: a
 /// backlog of 600 changes ready at once, each taking 1 ms to resolve, builds
 /// of 20 ms, `max_changes = 256`. `main` read one change a millisecond into

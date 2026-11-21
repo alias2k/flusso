@@ -626,8 +626,10 @@ is the one concrete piece.
   The ingest engine's run polls a **reader** (`ingest/reader.rs`, `reading`) beside the **builder** as
   two futures of its own task (`ingest/together.rs`, review round 3: a spawned reader cost a scheduler
   hop per hand-over and per grant, +22% at one change per batch): each gets its own waker, a wake
-  during the poll only raises a flag and the poll goes on (reader first), at most 32 passes per poll,
-  and the stop is watched once per run (the reader reads the flag and registers nothing for it). It
+  during the poll only raises a flag and the poll goes on, at most 32 passes per poll (a spent tokio
+  budget ends a poll by itself), the one polled first swapping every poll so neither takes the whole budget; the flags and the "being polled" mark are one atomic byte (a wake is a `fetch_or`, a
+  pass ends with a `compare_exchange`; loom-modelled), only running futures' flags count, and the stop
+  is watched once per run (the reader reads the flag and registers nothing for it). It
   owns the live stream and the resolver, reads a run as `main`'s `drain_ready` did (cut at
   `max_changes`, `max_delay`, would-block, the stop), resolves it, **marks** its documents
   (`Progress::mark`), **counts** it (`Progress::read_changes`), then **hands it over** (`Run`, unbounded
@@ -635,8 +637,9 @@ is the one concrete piece.
   (`ingest/live.rs`'s `Runs::candidate`: every change read before `max(the first one's read, the last
   live grant) + max_delay`, up to `max_changes`, cut inside a run where needed; full at `max_changes`;
   no deadline in `settle`; checked against `main_batches`, a model of `main`'s loop, in
-  `ingest::tests::reading`; every arm that grants first takes the runs already handed over
-  (`take_handed`), since `select!` picks a ready arm at random; beside a running live build, where only
+  `ingest::tests::reading`, valid on a millisecond grid with no two arrivals at one instant; `Runs` owns
+  the hand-over's receiver and drains it before forming any candidate, so no wake of the builder forms a
+  batch without a change already read; beside a running live build, where only
   a full batch may start, a hand-over walks nothing until `max_changes` are queued and stops walking once
   the deadline is known to cut the batch, `Runs::full_candidate`), takes only documents marked through the batch's last change (`Progress::take_through`) and
   closes its step there (`close_step_through`), so no step claims a newer run's change. **The lead**:
@@ -657,13 +660,15 @@ is the one concrete piece.
   marked and counted before the hand-over, the lead per index, in all and in changes, a take before the
   registration and before the wait, the stop in a run and at the lead, an error, a panic, the run
   dropped), `together::tests` (wakes served in one poll, a wake from outside, a wake from another thread
-  mid-pass, the pass cap, the watch), `ingest::tests::reading` (batches as `main` cut them, a
+  mid-pass and at the end of a pass, the pass cap, the watch, an ended reader keeping no poll going, and
+  the loom model of the one-word handshake), `live::tests` (a batch formed only after the hand-over is
+  drained), `ingest::tests::reading` (batches as `main` cut them, a
   paced trickle and bursts behind slow builds against `main_batches`, a backlog resolved a change a
   millisecond, a batch ending inside a run closing its step there, a grant beside a landing taking the
   runs handed over, a full batch beside a running build after one its deadline cut, a stop's batches of
   `max_changes`, captured equal to read when a build error aborts the reader, a trickle beside a
   running build, nothing committed ahead, confirmation pinned, the stop mid-run and
-  far ahead, both errors, a reader panic, the idle/resolve split, a parked lane bounding pending memory), the CLI's
+  far ahead, both errors, a reader panic, a burst past tokio's cooperative budget, the idle/resolve split, a parked lane bounding pending memory), the CLI's
   `max_waiting` binary and `run::tests`, the daemon's `a_waiting_bound_below_one_index_stops_the_start`.
 
 - **One lane per `(index, sink)` (ADR 0012 stage 7).** `stream::LaneKey { index, sink }`; the daemon

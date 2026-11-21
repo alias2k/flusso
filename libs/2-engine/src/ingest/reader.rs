@@ -1,10 +1,11 @@
 //! The reader: the future that reads the live stream, resolves each change to
 //! the documents it touches, and marks them pending, ahead of the builds (ADR
 //! 0012 stage 8a, slice 6a; the rules R1–R10 are in the stage note, §3.8).
-//! The engine run polls it beside the builder in its own task, the reader
-//! first on every wake ([`reading`]): a hand-over or a grant wakes one task,
+//! The engine run polls it beside the builder in its own task ([`reading`],
+//! [`together`](mod@super::together)): a hand-over or a grant wakes one task,
 //! never another worker, and the two interleave at their awaits as `main`'s
-//! one task did.
+//! one task did. Which of the two a pass polls first decides nothing: a run
+//! handed over is queued before any batch is formed (R3).
 //!
 //! **A run** is what one read takes: every change the stream has ready, cut
 //! at `max_changes` changes, at `max_delay` from its first change, when the

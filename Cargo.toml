@@ -159,6 +159,9 @@ rustls = { version = "0.23.*", default-features = false }
 webpki-root-certs = { version = "1.*" }
 testcontainers-modules = { version = "0.15.*" }
 criterion = { version = "0.8.*", features = ["async_tokio"] }
+# Exhaustive interleavings of a lock-free handshake, under its memory model
+# (the engine's `together`); a dev-dependency only.
+loom = "0.7"
 proptest = { version = "1.*" }
 axum = { version = "0.8.*" }
 # The sender of a stop signal (`siginfo`), which tokio's signals don't expose.

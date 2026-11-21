@@ -8,9 +8,11 @@ use std::sync::Arc;
 
 use kernel::Position;
 use source::document::DocumentId;
+use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use super::reader::{Lead, Run};
+use crate::observer::{Observer, Stage, StageTiming, Work};
 
 /// The runs handed over and not yet granted, oldest first, and the position
 /// a grant kept for documents the budget left waiting.
@@ -33,6 +35,10 @@ pub(super) struct Runs {
     max_changes: usize,
     max_delay: Duration,
     lead: Arc<Lead>,
+    /// The reader's hand-over: drained before any batch is formed, so no
+    /// batch misses a change already read (R3, review round 4).
+    handed: mpsc::UnboundedReceiver<Run>,
+    observer: Arc<dyn Observer>,
 }
 
 /// The live batch a grant would take: through which change, how many
@@ -53,7 +59,13 @@ pub(super) struct Candidate {
 }
 
 impl Runs {
-    pub(super) fn new(max_changes: usize, max_delay: Duration, lead: Arc<Lead>) -> Self {
+    pub(super) fn new(
+        max_changes: usize,
+        max_delay: Duration,
+        lead: Arc<Lead>,
+        handed: mpsc::UnboundedReceiver<Run>,
+        observer: Arc<dyn Observer>,
+    ) -> Self {
         Self {
             queue: VecDeque::new(),
             taken: 0,
@@ -64,12 +76,32 @@ impl Runs {
             max_changes: max_changes.max(1),
             max_delay,
             lead,
+            handed,
+            observer,
         }
     }
 
+    /// The reader's next run, `None` once it ended. Not queued yet: the
+    /// caller closes its idle wait first, then [`push`](Self::push)es it.
+    /// Cancel-safe.
+    pub(super) async fn next(&mut self) -> Option<Run> {
+        self.handed.recv().await
+    }
+
+    /// Queue a run, reporting how long the reader took to read it.
     pub(super) fn push(&mut self, run: Run) {
+        self.observer
+            .on_stage(StageTiming::new(Stage::Resolve, run.resolved).work(Work::Live));
         self.queued += run.changes.len();
         self.queue.push_back(run);
+    }
+
+    /// Queue every run already handed over. Every way to form a batch
+    /// starts here.
+    fn drain(&mut self) {
+        while let Ok(run) = self.handed.try_recv() {
+            self.push(run);
+        }
     }
 
     /// The changes handed over and not yet granted.
@@ -83,10 +115,11 @@ impl Runs {
     /// batch's deadline is known to cut it short: a hand-over that can't
     /// start a build costs no walk.
     pub(super) fn full_candidate(&mut self) -> Option<Candidate> {
+        self.drain();
         if self.short || self.queued < self.max_changes {
             return None;
         }
-        let candidate = self.candidate(true).filter(|candidate| candidate.full);
+        let candidate = self.form(true).filter(|candidate| candidate.full);
         // With `max_changes` queued, a batch that isn't full was cut by its
         // deadline, which later changes can't move.
         self.short = candidate.is_none();
@@ -102,7 +135,16 @@ impl Runs {
     /// grant reopened it). `settle` passes `deadline: false`: at the end
     /// every change read is built, in batches of `max_changes`. With no
     /// change queued, what the last grant kept for the budget's leftovers.
-    pub(super) fn candidate(&self, deadline: bool) -> Option<Candidate> {
+    ///
+    /// Every run already handed over is queued first, so the batch misses no
+    /// change read before it, whichever wake of the builder forms it.
+    pub(super) fn candidate(&mut self, deadline: bool) -> Option<Candidate> {
+        self.drain();
+        self.form(deadline)
+    }
+
+    /// [`candidate`](Self::candidate) over what is queued.
+    fn form(&self, deadline: bool) -> Option<Candidate> {
         let first = self
             .queue
             .front()
@@ -203,5 +245,59 @@ impl PendingBatch {
         self.ids.clear();
         self.seen.clear();
         self.count = 0;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::observer::NoopObserver;
+    use crate::policy::MaxWaiting;
+
+    fn run(seq: u64, read: u64) -> Run {
+        Run {
+            changes: vec![(Position::new(seq), Instant::now())],
+            read,
+            resolved: Duration::ZERO,
+        }
+    }
+
+    /// R3 (review round 4): a batch is formed only after the hand-over is
+    /// drained, whichever wake of the builder forms it. Runs sent and never
+    /// pushed by the loop are in the very next candidate, full or not.
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_is_formed_only_after_every_run_handed_over_is_queued() {
+        let (sender, handed) = mpsc::unbounded_channel();
+        let lead = Lead::new(
+            MaxWaiting {
+                per_index: 100,
+                total: 100,
+            },
+            0,
+        );
+        let mut runs = Runs::new(
+            2,
+            Duration::from_secs(1),
+            lead,
+            handed,
+            Arc::new(NoopObserver),
+        );
+        sender.send(run(0, 1)).unwrap();
+        sender.send(run(1, 2)).unwrap();
+        let candidate = runs.candidate(true).unwrap();
+        assert_eq!(
+            (candidate.position, candidate.changes),
+            (Position::new(1), 2)
+        );
+        assert!(candidate.full);
+        runs.granted(candidate, false);
+        sender.send(run(2, 3)).unwrap();
+        sender.send(run(3, 4)).unwrap();
+        let candidate = runs.full_candidate().unwrap();
+        assert_eq!(
+            (candidate.position, candidate.changes),
+            (Position::new(3), 2)
+        );
     }
 }

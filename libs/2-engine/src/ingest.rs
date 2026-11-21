@@ -347,7 +347,7 @@ impl IngestEngine {
         // before all of it, so this run's stream replays it.
         self.progress.forget_all();
         let lead = Lead::new(self.max_waiting(), self.progress.changes_read());
-        let (sender, mut handed) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, handed) = tokio::sync::mpsc::unbounded_channel();
         let (reading, mut reader) = reader::reading(
             Reader {
                 resolver: Arc::clone(&self.resolver),
@@ -364,7 +364,13 @@ impl IngestEngine {
             },
             live,
         );
-        let mut runs = Runs::new(self.batch.max_changes, self.batch.max_delay, lead);
+        let mut runs = Runs::new(
+            self.batch.max_changes,
+            self.batch.max_delay,
+            lead,
+            handed,
+            Arc::clone(&self.observer),
+        );
         let building = async {
             let mut snapshot: Option<Snapshot> = None;
             let mut last_confirmed: Option<Landed> = None;
@@ -400,7 +406,7 @@ impl IngestEngine {
                     // ends before anything is settled.
                     let ended = match ended.take() {
                         Some(ended) => ended,
-                        None => self.reader_end(&mut reader, &mut handed, &mut runs).await?,
+                        None => self.reader_end(&mut reader, &mut runs).await?,
                     };
                     self.wind_down(
                         &mut runs,
@@ -420,7 +426,7 @@ impl IngestEngine {
                     () = self.stop.requested(), if ended.is_some() => {
                         mark = self.waited(mark, None, &mut snapshot, building);
                     }
-                    run = handed.recv(), if ended.is_none() => match run {
+                    run = runs.next(), if ended.is_none() => match run {
                         None => {
                             let end = reader.join().await?;
                             mark = if end.waiting {
@@ -432,11 +438,7 @@ impl IngestEngine {
                         }
                         Some(run) => {
                             self.waited(mark, run.started(), &mut snapshot, building);
-                            self.observer.on_stage(
-                                StageTiming::new(Stage::Resolve, run.resolved).work(Work::Live),
-                            );
                             runs.push(run);
-                            self.take_handed(&mut handed, &mut runs);
                             builds.woke(Wake::Change);
                             self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                             self.confirm(&mut last_confirmed, false);
@@ -447,14 +449,12 @@ impl IngestEngine {
                         if builds.refused().is_some() =>
                     {
                         builds.woke(Wake::Released);
-                        self.take_handed(&mut handed, &mut runs);
                         self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                         self.confirm(&mut last_confirmed, false);
                         mark = Instant::now();
                     }
                     landed = builds.next(), if building => {
                         builds.woke(Wake::Landed);
-                        self.take_handed(&mut handed, &mut runs);
                         self.landed(landed, &mut runs, &mut snapshot, builds, lanes).await?;
                         self.confirm(&mut last_confirmed, false);
                         mark = Instant::now();
@@ -474,7 +474,6 @@ impl IngestEngine {
                             Ok(Step::Done) => active.done = true,
                         }
                         builds.woke(Wake::Page);
-                        self.take_handed(&mut handed, &mut runs);
                         self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                         mark = Instant::now();
                     },
@@ -502,8 +501,7 @@ impl IngestEngine {
                         // so it costs a second, never the run.
                         if builds.refused().is_some() {
                             builds.woke(Wake::Tick);
-                            self.take_handed(&mut handed, &mut runs);
-                            self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
+                                self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                             mark = Instant::now();
                         }
                         self.confirm(&mut last_confirmed, true);
@@ -511,41 +509,16 @@ impl IngestEngine {
                 }
             }
         };
-        // One task, two futures (§3.8, review round 3): the reader first on
-        // every wake, so a run it read is handed over before the builder
-        // looks. The run ends with the builder; returning drops the reader in
-        // place (R9), so nothing of it outlives the run, the next run's
-        // `forget_all` included.
+        // One task, two futures (§3.8, review round 3). The run ends with the
+        // builder; returning drops the reader in place (R9), so nothing of it
+        // outlives the run, the next run's `forget_all` included.
         together(reading, building, self.stop.requested()).await
-    }
-
-    /// Queue every run the reader handed over and this loop hasn't taken
-    /// yet. Every arm that grants takes them first: `select!` picks among
-    /// ready arms at random, and a grant must see every change read before
-    /// it (R3), not only those an earlier arm happened to take.
-    fn take_handed(
-        &self,
-        handed: &mut tokio::sync::mpsc::UnboundedReceiver<reader::Run>,
-        runs: &mut Runs,
-    ) {
-        while let Ok(run) = handed.try_recv() {
-            self.observer
-                .on_stage(StageTiming::new(Stage::Resolve, run.resolved).work(Work::Live));
-            runs.push(run);
-        }
     }
 
     /// The reader's end once the stop is requested: every run it hands over
     /// on the way queued, then its join (R7).
-    async fn reader_end(
-        &self,
-        reader: &mut ReaderEnd,
-        handed: &mut tokio::sync::mpsc::UnboundedReceiver<reader::Run>,
-        runs: &mut Runs,
-    ) -> Result<reader::Ended> {
-        while let Some(run) = handed.recv().await {
-            self.observer
-                .on_stage(StageTiming::new(Stage::Resolve, run.resolved).work(Work::Live));
+    async fn reader_end(&self, reader: &mut ReaderEnd, runs: &mut Runs) -> Result<reader::Ended> {
+        while let Some(run) = runs.next().await {
             runs.push(run);
         }
         reader.join().await

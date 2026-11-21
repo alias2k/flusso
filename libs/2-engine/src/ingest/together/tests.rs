@@ -8,13 +8,15 @@ use tokio::sync::{mpsc, oneshot};
 use super::*;
 
 thread_local! {
-    /// What runs on this thread just before a pass's "being polled" mark
-    /// drops: a wake there lands while the task still counts as polled.
+    /// What runs on this thread after a pass read the flags and before it
+    /// drops the "being polled" mark: a wake there lands while the task
+    /// still counts as polled, after the pass looked.
     static BEFORE_THE_MARK_DROPS: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         std::cell::RefCell::new(None);
 }
 
-/// The hook `together` calls at the end of each pass, before the mark drops.
+/// The hook [`Flags::end_pass`] calls between reading the flags and
+/// dropping the mark.
 pub(super) fn before_the_mark_drops() {
     BEFORE_THE_MARK_DROPS.with(|hook| {
         if let Some(hook) = hook.borrow_mut().as_mut() {
@@ -232,4 +234,184 @@ fn a_wake_at_the_end_of_a_pass_is_not_lost() {
         first_polls.load(Ordering::SeqCst) >= 2,
         "the first was polled again in the same poll"
     );
+}
+
+/// Point 2 of review round 4: once `first` has ended, nothing of it keeps a
+/// poll going. The watch ending wakes no ended `first`, and a stale waker of
+/// it raises a flag no pass reads: the poll ends at once, with no pass spent
+/// and no wake of the task.
+#[test]
+fn an_ended_first_keeps_no_poll_going() {
+    let stale: Arc<std::sync::Mutex<Option<Waker>>> = Arc::default();
+    let stash = Arc::clone(&stale);
+    let first = std::future::poll_fn(move |cx| {
+        *stash.lock().unwrap() = Some(cx.waker().clone());
+        Poll::Ready(())
+    });
+    let second_polls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&second_polls);
+    let second = std::future::poll_fn(move |_| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Poll::<()>::Pending
+    });
+    let (fire, fired) = oneshot::channel::<()>();
+    let mut fired = fired;
+    let watch = std::future::poll_fn(move |cx| Pin::new(&mut fired).poll(cx).map(|_| ()));
+    let (task, waker) = task();
+    let mut run = std::pin::pin!(together(first, second, watch));
+    assert!(poll_once(run.as_mut(), &waker).is_pending());
+    assert_eq!(task.wakes(), 0);
+    fire.send(()).unwrap();
+    assert_eq!(task.wakes(), 1, "the watch woke the task");
+    assert!(poll_once(run.as_mut(), &waker).is_pending());
+    assert_eq!(task.wakes(), 1, "no pass cap reached, no self-wake");
+    if let Some(stale) = stale.lock().unwrap().take() {
+        stale.wake();
+    }
+    assert!(poll_once(run.as_mut(), &waker).is_pending());
+    assert_eq!(task.wakes(), 2, "only the stale wake itself");
+    assert_eq!(second_polls.load(Ordering::SeqCst), 1, "never woken");
+}
+
+// [`Flags`] over loom's atomics, with the orderings `std`'s byte has.
+word!(loom::sync::atomic::AtomicU8);
+
+/// The handshake of [`Flags`], over loom's atomics: every interleaving, and
+/// loom's model of acquire/release, of a poll's passes against wakes from
+/// two other threads. Each wake is either taken by a pass (which then sees
+/// what the waker wrote before waking: the hand-over's run, in the engine)
+/// or wakes the task; never neither. A wake lost this way would leave a
+/// future pending forever with its event already happened.
+#[test]
+fn every_wake_is_taken_by_a_pass_or_wakes_the_task_in_every_interleaving() {
+    use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicBool, AtomicUsize};
+
+    loom::model(|| {
+        let flags = Arc::new(Flags(loom::sync::atomic::AtomicU8::new(0)));
+        let woken = Arc::new(AtomicBool::new(false));
+        let written = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+        flags.begin();
+        let wakers: Vec<_> = [FIRST, SECOND]
+            .into_iter()
+            .enumerate()
+            .map(|(at, bit)| {
+                let (flags, woken, written) =
+                    (Arc::clone(&flags), Arc::clone(&woken), Arc::clone(&written));
+                loom::thread::spawn(move || {
+                    written[at].store(1, Ordering::Relaxed);
+                    if flags.raise(bit) {
+                        woken.store(true, Ordering::Release);
+                    }
+                })
+            })
+            .collect();
+        let mut taken = [false; 2];
+        loop {
+            for (at, bit) in [FIRST, SECOND].into_iter().enumerate() {
+                if flags.take(bit) {
+                    taken[at] = true;
+                    assert_eq!(
+                        written[at].load(Ordering::Relaxed),
+                        1,
+                        "seen what it woke for"
+                    );
+                }
+            }
+            if flags.end_pass(FIRST | SECOND) {
+                break;
+            }
+        }
+        let woke = woken.load(Ordering::Acquire);
+        for waker in wakers {
+            waker.join().unwrap();
+        }
+        for (at, bit) in [FIRST, SECOND].into_iter().enumerate() {
+            if !taken[at] {
+                // Not taken by this poll: its wake must have woken the task,
+                // and the next poll finds its flag.
+                assert!(
+                    woke || woken.load(Ordering::Acquire),
+                    "a wake neither taken nor waking the task"
+                );
+                assert!(flags.take(bit), "the next poll finds it");
+            }
+        }
+    });
+}
+
+/// Tokio's cooperative budget (review round 4), with the spender polled
+/// first or second. A future that spends every unit it is given does not
+/// starve the other: the one polled first swaps every poll, so the other
+/// gets a fresh budget every second poll. And a spent budget makes no pass
+/// for nothing: tokio wakes the spender it refused only once the poll has
+/// returned, so 1,000 units at 128 a poll waste about one poll of the
+/// spender per poll that spent the budget.
+async fn a_spender_starves_nothing(spender_first: bool) {
+    const UNITS: usize = 1_000;
+    let spent = Arc::new(AtomicUsize::new(0));
+    let wasted = Arc::new(AtomicUsize::new(0));
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done, finished) = oneshot::channel::<()>();
+    let spender = {
+        let (spent, wasted, stopped) = (
+            Arc::clone(&spent),
+            Arc::clone(&wasted),
+            Arc::clone(&stopped),
+        );
+        let mut done = Some(done);
+        let mut spending = Box::pin(async move {
+            while !stopped.load(Ordering::SeqCst) {
+                tokio::task::consume_budget().await;
+                if spent.fetch_add(1, Ordering::SeqCst) + 1 == UNITS
+                    && let Some(done) = done.take()
+                {
+                    let _ = done.send(());
+                }
+            }
+        });
+        std::future::poll_fn(move |cx| {
+            let polled = spending.as_mut().poll(cx);
+            if !tokio::task::coop::has_budget_remaining() {
+                wasted.fetch_add(1, Ordering::SeqCst);
+            }
+            polled
+        })
+    };
+    // Waits for the spender's signal, which needs budget of its own, then
+    // stops the spender.
+    let waiter = {
+        let stopped = Arc::clone(&stopped);
+        async move {
+            let _ = finished.await;
+            stopped.store(true, Ordering::SeqCst);
+        }
+    };
+    let run = async move {
+        if spender_first {
+            together(spender, waiter, std::future::pending()).await;
+        } else {
+            together(waiter, spender, std::future::pending()).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), tokio::spawn(run))
+        .await
+        .expect("the other was not starved of budget")
+        .unwrap();
+    assert!(spent.load(Ordering::SeqCst) >= UNITS);
+    let wasted = wasted.load(Ordering::SeqCst);
+    assert!(
+        wasted <= 2 * (UNITS / 128 + 2),
+        "{wasted} polls found the budget spent"
+    );
+}
+
+#[tokio::test]
+async fn a_spender_polled_first_starves_nothing() {
+    a_spender_starves_nothing(true).await;
+}
+
+#[tokio::test]
+async fn a_spender_polled_second_starves_nothing() {
+    a_spender_starves_nothing(false).await;
 }

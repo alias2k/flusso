@@ -556,11 +556,23 @@ unbounded the same bench ran in a third of the time, so the cost was the round t
 tasks, a hand-over waking the builder on another worker and a grant waking the reader back. So the
 reader is not spawned. The engine run polls the reader's future and the builder's in its own task
 (`ingest/together.rs`), each with a waker of its own: woken while the task is being polled, a waker
-raises its future's flag and the poll goes on with that future, the reader first on every pass;
-woken from elsewhere, it also wakes the task. So a hand-over or a grant costs a flag, not a trip
-through the scheduler. A poll ends when no flag was raised during its last pass (read after the
-"being polled" mark drops, so a wake from another thread mid-pass is never lost), or after 32
-passes, when it yields to the worker and is woken again at once. Concurrency between the two is
+raises its future's flag and the poll goes on with that future; woken from elsewhere, it also wakes
+the task. So a hand-over or a grant costs a flag, not a trip through the scheduler. Which of the two a
+pass polls first swaps on every poll (review round 4), so neither spends the whole of tokio's
+per-poll budget every time; no rule depends on the order, since a run handed over is queued before
+any batch is formed (R3). The flags and the
+"being polled" mark are bits of **one atomic byte** (review round 4): a wake is one `fetch_or`
+that also reads the mark, and a pass ends with one `compare_exchange` that drops the mark only while
+no running future's flag is raised, so a wake is either taken by the pass or wakes the task, on any
+architecture (one location's changes are seen in one order by every thread; round 3's two
+locations needed a `SeqCst` store-load argument). A loom model checks every interleaving and loom's
+acquire/release model (`every_wake_is_taken_by_a_pass_or_wakes_the_task_in_every_interleaving`).
+Only running futures' flags count: an ended reader, woken by the stop or a stale waker, keeps no
+poll going. A poll ends when no running future's flag is raised, or after 32 passes, yielding to the
+worker and woken again at once. A spent cooperative budget ends a poll by itself: tokio wakes a
+future it refused for want of budget only once the task's poll has returned, so no flag is raised
+for it meanwhile (a check of `has_budget_remaining` before each further pass was tried and dropped:
+its mutation broke nothing, for that reason). Concurrency between the two is
 interleaving at their awaits, which is what `main`'s one task had: the reader's waits (the stream, a
 resolve, the lead) overlap the builder's (a build, a lane, the budget, a page), and neither runs while
 the other computes. The reader runs without yielding only while the stream has changes ready and the
@@ -578,7 +590,7 @@ index; the reader stays a future of the dispatcher's task.
 | --- | --- |
 | R1 | **A run** is what `main`'s `drain_ready` buffered: the changes the stream has ready, cut at `max_changes` changes, at `max_delay` from the run's first change, when the stream would block, or at the stop. The reader resolves each change, then **marks** every id of the run (`Progress::mark`, one lock per touched index; ids of an index with no lane are dropped there), then **counts** the run's changes read (`Progress::read_changes`), then **hands the run over**, each change with the instant it was read. Marks, count, hand-over, in that order. |
 | R2 | **The lead.** Before reading a run the reader waits while one index has `max_waiting_per_index` ids waiting (marked, not taken), or every index together has `max_waiting`, or `max_waiting` changes are read and not yet in a granted batch. It waits on the builder's take and the stop, nothing else. Finding the lead reached, it registers its wake-up, says it waits, and reads the lead again, so a take after the first read is seen by the second and one after the second wakes it (review round 3: with room, the first read is all it costs). The stop is read on every poll; the engine run's watch wakes it (above). A run may overshoot by its own ids and changes, once. |
-| R3 | **Batches as `main` cut them** (review round 1). `main` stopped reading once a batch closed and read the backlog the moment the next grant reopened it, so its batch's deadline ran from the later of its first change's read and the previous live grant. The builder's live candidate is, from the oldest change not yet granted, every change read before `max(that change's read, the last live grant) + max_delay`, up to `max_changes`, cut inside a run where needed (the reader's runs end where the stream would block, not where `main`'s batch closed), plus what an earlier grant left waiting for the budget. It is **full** at `max_changes` changes. Every arm of the builder's loop that grants first takes the runs already handed over (`take_handed`; review round 2): `select!` picks among ready arms at random, and a landing taken before a run waiting in the channel would otherwise grant without changes read before it. Beside a running live build only a full candidate may start, so a hand-over there walks nothing while fewer than `max_changes` changes are queued, nor once the candidate is known to be cut by its deadline, which only a grant moves (`Runs::full_candidate`; review round 2). A trickle read while a live build runs is one batch after it, a backlog read while builds outlast `max_delay` is taken whole, up to `max_changes`, and a second live build starts only beside a full candidate. At the end (`settle`) the deadline is ignored: everything read is built in batches of `max_changes`. Checked against a model of `main`'s loop over the same arrivals (`main_batches` in `ingest::tests::reading`). |
+| R3 | **Batches as `main` cut them** (review round 1). `main` stopped reading once a batch closed and read the backlog the moment the next grant reopened it, so its batch's deadline ran from the later of its first change's read and the previous live grant. The builder's live candidate is, from the oldest change not yet granted, every change read before `max(that change's read, the last live grant) + max_delay`, up to `max_changes`, cut inside a run where needed (the reader's runs end where the stream would block, not where `main`'s batch closed), plus what an earlier grant left waiting for the budget. It is **full** at `max_changes` changes. **A batch is formed only after the hand-over is drained**: `Runs` owns the channel's receiving end, and both ways to form a candidate (`candidate`, `full_candidate`) queue every run already handed over first (review round 4; round 2 had each arm of the builder's loop call `take_handed`, and three arms were untested): `select!` picks among ready arms at random, and an arm taken before a run waiting in the channel would otherwise grant without changes read before it. Beside a running live build only a full candidate may start, so a hand-over there walks nothing while fewer than `max_changes` changes are queued, nor once the candidate is known to be cut by its deadline, which only a grant moves (`Runs::full_candidate`; review round 2). A trickle read while a live build runs is one batch after it, a backlog read while builds outlast `max_delay` is taken whole, up to `max_changes`, and a second live build starts only beside a full candidate. At the end (`settle`) the deadline is ignored: everything read is built in batches of `max_changes`. Checked against a model of `main`'s loop over the same arrivals (`main_batches` in `ingest::tests::reading`), valid for arrivals on a millisecond grid without two at one instant: tokio's paused timer rounds a sleep up to the next millisecond, so microsecond arrivals reach the engine at other instants than the model reads them (the only divergence the review of round 3 found). **Tokio's cooperative budget** (review round 4): the reader and the builder spend one budget per poll, as `main`'s one task did. Once it is spent, a tokio-backed stream answers the reader's `now_or_never` as pending, so the run is cut and, the stream looking blocked, the builder may grant the batch then, short of `max_changes`, as `main` committed at its own `now_or_never` cut. The reader's next read polls the stream with its own waker, which the spent budget wakes at once, so it is never parked with changes ready, and a spent budget ends `together`'s poll by itself, since tokio wakes what it refused only once the poll has returned (`a_burst_past_the_cooperative_budget_neither_stalls_nor_breaks_a_batch`: 5,000 changes through a tokio channel, 40 runs, 21 batches of about 253 after a first of 128, every change landed). What does differ from `main` is that two futures share the budget: polled first every time, a reader under a burst would spend it all on every poll and leave the builder only pending answers until the lead stopped it, so `together` swaps which one a poll takes first (before the swap the same burst gave 24 batches, every third about 125; `a_spender_polled_first_starves_nothing`, `a_spender_polled_second_starves_nothing`). |
 | R4 | **A take never reaches past its candidate.** A live build takes, from each index the budget admits, only the ids waiting at or before the candidate's last position (`take_through`), closes the step through the candidate's read count (`close_step_through`), and carries the candidate's last position. A newer run's id waits for the next grant. The candidate is offered only while none of those ids is in a running build (`main`'s admission). |
 | R5 | **Every build goes through the lines.** `Gate::choose` is gone. A grant pass (`Gate::pass`) puts each batch the builder has ready, with a slot to run it, in its kind's line, asks once (G4 between its two batches, G5–G6 under the gate's lock), and leaves before the pass ends. So it waits in a line only while it can use a permit now, and every reservation obeys G6. With no waiter in either line (one task, today) the pass is one hold of the gate's lock: its batches stand at the front of empty lines, nothing joins, watches or wakes (review round 1, for the hot path). |
 | R6 | **Confirmation and fences** move as on `main`: a marked id holds its index's lanes (the pending minimum); a change read but not yet routed by a build (a queued run, or the reader's run in progress) is never confirmed or fenced, by the source's own `next_seq` test, as `main`'s buffered run was. The builder confirms after every grant and landing, and on the tick. |
@@ -639,7 +651,8 @@ batch take the permit in the same pass (G5) where `main` granted nothing until t
 | Only indexes with lanes | `Progress::mark` drops ids of an index with no lane, so they never wait, pin or count toward the lead |
 
 **Mutations of the reader's and the builder's rules** (re-run in review round 1, on the code as pushed;
-the rows review round 3 touched, R1, R2, R5, R7–R9 and `together`, re-run on round 3's code;
+the rows review round 3 touched, R1, R2, R5, R7–R9 and `together`, re-run on round 3's code, and
+round 4's, R3's drain and `together`, on round 4's;
 each compiles; run over the engine's unit tests with nextest's 10 s per-test limit; "hang" marks a test
 the limit ended). `tests::concurrent::a_document_is_never_written_twice_at_once_and_its_versions_never_go_down`
 takes about 25 s on the unchanged code (28 s before this slice) and is left out of these runs.
@@ -666,6 +679,8 @@ takes about 25 s on the unchanged code (28 s before this slice) and is left out 
 | R3: a split run loses its rest | `a_batch_ends_inside_a_run_where_main_closed_it` (hang), the random schedules |
 | R3: a batch ending inside a run closes its step at the run's last change (`read: run.read`, review round 2) | `a_batch_ending_inside_a_run_closes_its_step_at_its_own_last_change` |
 | R3: a landing grants without taking the runs handed over (review round 2) | `a_grant_takes_the_runs_handed_over_beside_the_landing_that_wakes_it` (one round in two fails; sixteen rounds) |
+| R3: a candidate formed without draining the hand-over (round 4: `Runs` owns the receiver; replaces round 2's per-arm `take_handed`, three of whose five calls were untested) | `a_batch_is_formed_only_after_every_run_handed_over_is_queued` |
+| R3: a full candidate formed without draining the hand-over (round 4) | `a_batch_is_formed_only_after_every_run_handed_over_is_queued` |
 | R3: the hand-over check keeps "cut by its deadline" past a grant | `a_full_batch_starts_beside_a_running_build_after_one_its_deadline_cut` |
 | R3: the hand-over check counts a granted change as still queued | the same, 4 more (hang) |
 | R3: the hand-over check walks with fewer than `max_changes` queued | the same, 4 more (hang): a candidate short of changes, not cut by its deadline, would be taken as cut |
@@ -689,11 +704,16 @@ takes about 25 s on the unchanged code (28 s before this slice) and is left out 
 | R1: no deadline for a run | `a_backlog_resolved_a_change_a_millisecond_is_batched_as_main_batched_it` |
 | R5: nothing reserved whatever the parts (round 3) | 12 tests, the budget's |
 | R5: the budget asked with nothing to reserve (round 2's form) | **equivalent**: an empty reservation is always admitted and adds nothing; a lock, nothing else |
-| `together`: the flags read before the "being polled" mark drops | `a_wake_at_the_end_of_a_pass_is_not_lost` |
-| `together`: a wake from outside never wakes the task | 74 tests (most hang) |
-| `together`: a wake while polled also wakes the task | `wakes_between_the_two_are_served_in_the_same_poll`, `a_wake_from_another_thread_during_a_pass_is_not_lost`, `a_poll_yields_to_the_worker_after_its_passes` |
+| `together` (round 4, one word): the mark dropped by a store after the flags are read, round 3's two-step form | `a_wake_at_the_end_of_a_pass_is_not_lost`, `every_wake_is_taken_by_a_pass_or_wakes_the_task_in_every_interleaving` (loom) |
+| `together`: relaxed orderings on the word | `every_wake_is_taken_by_a_pass_or_wakes_the_task_in_every_interleaving` (loom: a pass that took a flag misses what its waker wrote) |
+| `together`: a wake from outside never wakes the task | 79 tests (most hang) |
+| `together`: a wake while polled also wakes the task | `wakes_between_the_two_are_served_in_the_same_poll`, `a_wake_from_another_thread_during_a_pass_is_not_lost`, `a_wake_at_the_end_of_a_pass_is_not_lost`, `a_poll_yields_to_the_worker_after_its_passes` |
 | `together`: no cap on the passes | `a_poll_yields_to_the_worker_after_its_passes` |
-| `together`: the watch ending wakes no one | 21 tests, `the_watch_is_polled_when_it_fires_and_its_end_wakes_the_first` among them |
+| `together`: an ended future's flag keeps the poll going | `an_ended_first_keeps_no_poll_going` |
+| `together`: the watch ending raises an ended first | **equivalent**: the flag of an ended future is masked at the end of a pass (the row above is the mask's) |
+| `together`: the first always polled first | `a_spender_polled_first_starves_nothing` |
+| `together`: the second always polled first | `a_spender_polled_second_starves_nothing` |
+| `together`: the watch ending wakes no one | 22 tests, `the_watch_is_polled_when_it_fires_and_its_end_wakes_the_first` among them |
 | `together`: the watch polled on every pass | `the_watch_is_polled_when_it_fires_and_its_end_wakes_the_first` |
 | R10: nothing forgotten as a run starts | the random schedules, the tiny-budget and three-index schedules (some hang) |
 | `Idle` ends where the builder woke | `the_builders_idle_ends_where_the_reader_began_the_run` |
@@ -753,7 +773,7 @@ put the reader in the engine run's task):
   kept as runs come and go), then one walk, and none after it while the deadline is known to cut the
   candidate (`Runs::full_candidate`, review round 2). Without a live build running, the candidate's walk
   over the changes it takes, as below.
-- **Per wake of an arm that grants:** one `try_recv` on the hand-over channel (`take_handed`).
+- **Per candidate formed:** one `try_recv` on the hand-over channel (`Runs` drains it first).
 - **Per batch (a live grant):** two budget locks and one gate lock, as `main` took: `affordable` admits
   (`Budget::admit`, the first budget lock), then the pass reserves under the gate's lock (the gate lock,
   and `reserve_behind`, the second budget lock, skipped when nothing is reserved: no budget counts the
@@ -765,8 +785,9 @@ put the reader in the engine run's task):
   `main` took two locks per index (the count, then the held check, which walked too while builds ran).
   The walk is skipped while nothing builds and the candidate covers everything waiting; it covers only
   the candidate's documents otherwise.
-- **Per poll of the engine run's task:** the task's waker registered, and a "being polled" mark set and
-  cleared once per pass (two `SeqCst` stores, three flag reads).
+- **Per poll of the engine run's task:** the task's waker registered, one `fetch_or` for the "being
+  polled" mark, one `fetch_and` per flag taken, and one load and one `compare_exchange` to end a pass
+  (review round 4: one atomic byte; round 3 had two `SeqCst` stores and three flag reads per pass).
 - **Beside real waiters (6b):** joining, asking and leaving the lines cost what slice 5's waiters cost.
 
 **Review round 3's A/B** (`engine` bench, `taskset -c 0-3,12-15`, three rounds of `main` 637c2ab3 then

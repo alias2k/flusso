@@ -190,6 +190,9 @@ struct Feed {
     /// When each change arrives, from the stream's opening, whenever it is
     /// polled: a source's own clock, not a gap after each poll.
     arrivals: Option<Arc<Vec<Duration>>>,
+    /// Hand the changes over through a tokio channel, whose receiving end
+    /// spends the task's cooperative budget, as a real source's does.
+    through_channel: bool,
 }
 
 impl Feed {
@@ -203,7 +206,15 @@ impl Feed {
             open: false,
             confirmed: Mutex::default(),
             arrivals: None,
+            through_channel: false,
         }
+    }
+
+    /// Read through a tokio channel, which spends the reading task's
+    /// cooperative budget per change.
+    fn through_a_tokio_channel(mut self) -> Self {
+        self.through_channel = true;
+        self
     }
 
     fn with_delay(mut self, delay: Duration) -> Self {
@@ -258,7 +269,8 @@ impl ChangeCapture for Feed {
         let arrivals = self.arrivals.clone();
         let opened = tokio::time::Instant::now();
         let from = self.from.load(Ordering::SeqCst);
-        Ok(Box::pin(futures::stream::unfold(from, move |next| {
+        let through_channel = self.through_channel;
+        let changes = Box::pin(futures::stream::unfold(from, move |next| {
             let db = Arc::clone(&db);
             let gaps = gaps.clone();
             let arrivals = arrivals.clone();
@@ -289,6 +301,21 @@ impl ChangeCapture for Feed {
                 db.reveal(next + 1);
                 Some((Ok((Position::new(next as u64), change.event())), next + 1))
             }
+        }));
+        if !through_channel {
+            return Ok(changes);
+        }
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut changes = changes;
+            while let Some(change) = futures::StreamExt::next(&mut changes).await {
+                if sender.send(change).is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(Box::pin(futures::stream::poll_fn(move |cx| {
+            receiver.poll_recv(cx)
         })))
     }
 
