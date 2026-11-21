@@ -1918,6 +1918,54 @@ wait), as round 1 said: neither has a deterministic trigger short of a test harn
 | per `settle` wait | a turn future selected beside the landing or the release (an `Arc` clone and a `Notify` registration while in a line) |
 | per change in the reader | fewer lookups: one builder search per run of documents of one index, not one per document |
 
+#### 6b-2 as designed against the code (checked before building)
+
+§5's and §8's 6b-2 rules, read against the code after 6b-1c's two fix rounds (the `newest` rule,
+permits dropped on the build's task, the gate deciding the budget beside other builders, `Holds` as a
+visitor). Where the paper design needed a detail it didn't give, or the code changed under it:
+
+- **"Held" is its own flag, not the fold.** The fold lasts until nothing waits on the index; held
+  (§5) ends at the next live grant or once a blocked publish went through. The exemption reads held, so
+  a builder that was released and is draining its backlog still at the cap stays exempt (the latch
+  clears only below the cap, §5) but is not latched anew. `Lead`'s queue gets a `held` flag beside
+  `folding`, written by the builder: set when its live batch is refused by the budget (the fold check
+  sees `refused() == Live`, the gate's refusal included since fix round 1 made the gate decide) or a
+  publish pends on a full lane (`publish_ready`); cleared by a live grant (`start_live`, a backlog take
+  included) and when the blocked publish completes. Setting it wakes the reader: the reader may be
+  waiting at that index's cap (D4).
+- **The latch is the reader's, in `Lead::reached`**, as §5 says: per builder, set when the builder is
+  held and its index has `max_waiting_per_index` documents or more waiting, cleared when fewer wait.
+  The per-index and total bounds sum the non-exempt indexes' `waiting_on` (one atomic load per index per
+  lead check, where 6b-1c read two global atomics); the exempt indexes' documents count only toward
+  `max_pending_documents`. The changes bound is unchanged: an exempt index folds, so its queue holds
+  nothing.
+- **One builder: no exemption.** With one index there is nothing to read on for, and 6b-1b's path stays
+  as it is (a lead with no indexes keeps the two global loads). The fold needs two builders already.
+- **`max_pending_documents` is its own setting**, not a field of `MaxWaiting` (which bounds what the
+  reader reads ahead for builds that keep up): `[concurrency] max_pending_documents`,
+  `--max-pending-documents`, `FLUSSO_MAX_PENDING_DOCUMENTS`, default 1,000,000, never in the lock,
+  refused at 0 by `check`, `build` and `run` naming where it came from; `IngestEngine::with_max_pending_documents`.
+  Below `max_waiting_per_index` it still works (an index is exempt at the cap and its first documents
+  past it stop the reading), so nothing more is refused.
+- **What the operator sees** (per-index status and metrics are slice 7's): the reader logs a warning
+  when it latches an index exempt (the index, its documents waiting, that the slot stays pinned and the
+  WAL grows) and an info line when the latch clears; a warning when reading stops at
+  `max_pending_documents` (the exempt indexes and their counts), and an info line when it reads on.
+  The slot's pin is named by `flusso.slot.pinned_by` and `/status` as today.
+- **The stop (O3)** needs no new path: an exempt index folds, and `settle` already takes a folding
+  builder's backlog in `max_changes` takes. Added: the stop's deadline log names each index with
+  documents read and not built and how many (`daemon::Status::waiting_by_index`, from
+  `Progress::waiting_by_index`; a log line, not a status field); and **no run ends `Ok` with a document
+  waiting**: after every builder returned, the dispatcher fails the run naming them
+  (`EngineError::DocumentsLeft`). §8 put the same check there.
+- **The restart** needs nothing new: an exempt backlog is pending documents, forgotten by
+  `forget_all`, and its takes are backlog takes, whose registrations the `newest` rule covers (fix
+  round 1). The seeded model gains backlog takes; the random schedules gain one index stuck for a
+  random stretch.
+- **Release.** A released exempt builder drains its backlog in `max_changes` takes through the same
+  lines as everyone (G9′: a FIFO per kind across builders, G4, G6), so a healthy index's batches keep
+  their turns. Nothing new; pinned by a test.
+
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
 | Rule | |
