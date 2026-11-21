@@ -673,8 +673,8 @@ async fn routed_moves_only_after_the_runs_marks() {
 }
 
 /// D2 (stage 8a slice 6b-1a): a run cut by an error before its marks is
-/// counted as read and never marked, so after the restart no sink counts it
-/// before the next run's first live grant.
+/// counted as read and never marked, so no sink counts it before the next
+/// run's first live grant: not while the engine waits to restart, nor after.
 #[tokio::test(start_paused = true)]
 async fn a_run_cut_before_its_marks_counts_no_sooner_than_the_first_grant() {
     let progress = progress();
@@ -695,7 +695,12 @@ async fn a_run_cut_before_its_marks_counts_no_sooner_than_the_first_grant() {
         .unwrap();
     assert!(ended.is_err());
     assert_eq!(progress.changes_read(), 3);
-    progress.forget_all();
     let sink = SinkName::try_new("primary").unwrap();
+    assert_eq!(
+        progress.committed(&sink),
+        0,
+        "the engine restarts after a backoff: none of the three counts meanwhile"
+    );
+    progress.forget_all();
     assert_eq!(progress.committed(&sink), 0, "none of the three was built");
 }

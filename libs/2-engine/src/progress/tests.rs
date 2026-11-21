@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::sync::atomic::AtomicBool;
 use std::thread;
 
@@ -1467,6 +1468,46 @@ mod restart {
         );
     }
 
+    /// The first grant after a restart defers an index (the budget): its
+    /// lanes get no entry, so they keep the cap, and a second restart
+    /// doesn't let them catch up through the first ended run's reads.
+    #[test]
+    fn a_deferred_index_keeps_its_cap_until_its_own_lanes_get_a_step() {
+        let users = lane("users", "a");
+        let items = lane("items", "a");
+        let progress = Progress::new([users.clone(), items.clone()]);
+        mark(&progress, "items", 0, 1);
+        read_through(&progress, 1);
+        progress.forget_all();
+
+        mark(&progress, "users", 1, 2);
+        mark(&progress, "items", 5, 2);
+        read_through(&progress, 2);
+        let taken = progress
+            .take(&users.index, usize::MAX, &nothing_held)
+            .unwrap();
+        let steps = progress.close_steps([(users.index.clone(), taken.frontier)]);
+        let key = progress.next_key(&users.index).unwrap();
+        progress.published_build(
+            &users,
+            key,
+            taken.oldest,
+            p(2),
+            taken.token,
+            steps[&users.index],
+        );
+        progress.release(&users.index, taken.token);
+        progress.applied(&users, key);
+        assert_eq!(progress.committed(&name("a")), 0, "items waits");
+
+        progress.forget_all();
+        assert_eq!(
+            progress.committed(&name("a")),
+            0,
+            "read 1 was never built on items: its lanes got no step since the first restart"
+        );
+    }
+
     /// The intermediate count: an ended run's unbuilt read counts no sooner
     /// than the new run's first live grant, through the replay's marks.
     #[test]
@@ -1643,11 +1684,266 @@ mod restart {
     }
 }
 
+thread_local! {
+    static WHILE_FORGETTING: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+}
+
+/// Called by [`Progress::forget_all`] once every pending set is forgotten:
+/// runs the hook a test set on this thread.
+pub(super) fn while_forgetting() {
+    let hook = WHILE_FORGETTING.with(|hook| hook.borrow_mut().take());
+    if let Some(mut hook) = hook {
+        hook();
+    }
+}
+
+/// `forget_all` against a reader on another thread (review round 1 of
+/// slice 6b-1a): the reader sees the ended run whole or forgotten whole,
+/// never its documents gone while what it routed still answers.
+mod forgetting {
+    use std::sync::Barrier;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    fn users() -> LaneKey {
+        sink("a")
+    }
+
+    /// One lane; the ended run read one change, marked its document and
+    /// routed it, and built nothing.
+    fn ended_run() -> Arc<Progress> {
+        let progress = Arc::new(Progress::new([users()]));
+        progress.mark_reads([(id("users", 1), p(1), 1)]);
+        progress.change_read();
+        progress.routed(p(1));
+        progress
+    }
+
+    /// What a reader may see: nothing counted, no lane through the change.
+    fn conservative(committed: u64, lane: Option<Landed>) -> bool {
+        committed == 0 && lane != Some(Landed::Through(p(1)))
+    }
+
+    fn read(progress: &Progress) -> (u64, Option<Landed>) {
+        (
+            progress.committed(&SinkName::try_new("a").unwrap()),
+            progress.lane(&users(), Level::Applied),
+        )
+    }
+
+    /// A reader started inside `forget_all`, after the pending sets are
+    /// forgotten: it gets in only once the whole forgetting is done.
+    #[test]
+    fn a_reader_started_mid_forget_sees_none_of_it_half_done() {
+        let progress = ended_run();
+        let (seen, saw) = mpsc::channel();
+        let reader = Arc::clone(&progress);
+        let early = Arc::new(Mutex::new(None));
+        let during = Arc::clone(&early);
+        WHILE_FORGETTING.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let reader = Arc::clone(&reader);
+                let seen = seen.clone();
+                thread::spawn(move || {
+                    let _ = seen.send(read(&reader));
+                });
+                *during.lock().unwrap() = saw.recv_timeout(Duration::from_millis(100)).ok();
+            }));
+        });
+        progress.forget_all();
+        let observed = early.lock().unwrap().take();
+        assert_eq!(
+            observed, None,
+            "a reader got in while forgetting: {observed:?}"
+        );
+    }
+
+    /// The same, as a stress loop: a reader looping on another thread while
+    /// `forget_all` runs, for at most `ROUNDS` rounds or `BUDGET`.
+    fn stress(read_one: fn(&Progress) -> bool) -> usize {
+        const ROUNDS: usize = 2_000;
+        const BUDGET: Duration = Duration::from_secs(2);
+        let started = Instant::now();
+        let mut bad = 0;
+        for _ in 0..ROUNDS {
+            if started.elapsed() > BUDGET {
+                break;
+            }
+            let progress = ended_run();
+            let done = Arc::new(AtomicBool::new(false));
+            let barrier = Arc::new(Barrier::new(2));
+            let reader = {
+                let (progress, done, barrier) = (
+                    Arc::clone(&progress),
+                    Arc::clone(&done),
+                    Arc::clone(&barrier),
+                );
+                thread::spawn(move || {
+                    barrier.wait();
+                    let mut bad = false;
+                    while !done.load(Ordering::Acquire) {
+                        bad |= !read_one(&progress);
+                    }
+                    bad |= !read_one(&progress);
+                    bad
+                })
+            };
+            barrier.wait();
+            progress.forget_all();
+            done.store(true, Ordering::Release);
+            if reader.join().unwrap() {
+                bad += 1;
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn the_count_read_during_forget_all_never_counts_the_forgotten_run() {
+        let bad = stress(|progress| progress.committed(&SinkName::try_new("a").unwrap()) == 0);
+        assert_eq!(bad, 0, "rounds where the count credited the forgotten run");
+    }
+
+    #[test]
+    fn a_lane_read_during_forget_all_never_answers_through_the_forgotten_run() {
+        let bad = stress(|progress| {
+            progress.lane(&users(), Level::Applied) != Some(Landed::Through(p(1)))
+        });
+        assert_eq!(
+            bad, 0,
+            "rounds where a lane answered through the forgotten run"
+        );
+    }
+
+    #[test]
+    fn what_a_reader_may_see_is_stated_once() {
+        let progress = ended_run();
+        let (committed, lane) = read(&progress);
+        assert!(
+            conservative(committed, lane),
+            "before: {committed}, {lane:?}"
+        );
+        progress.forget_all();
+        let (committed, lane) = read(&progress);
+        assert!(
+            conservative(committed, lane),
+            "after: {committed}, {lane:?}"
+        );
+    }
+}
+
+/// Reads cut before their marks (a reader error ends the run): they count
+/// no sooner than the next run's first grant, from the moment they are
+/// counted (review round 1 of slice 6b-1a, point 2).
+mod cut {
+    use super::*;
+
+    fn users() -> LaneKey {
+        sink("a")
+    }
+
+    fn a() -> SinkName {
+        SinkName::try_new("a").unwrap()
+    }
+
+    #[test]
+    fn reads_cut_before_their_marks_count_no_sooner_than_their_replay() {
+        let progress = Progress::new([users()]);
+        progress.change_read();
+        assert_eq!(progress.committed(&a()), 1, "read 1 touched nothing");
+        progress.read_unmarked(2);
+        assert_eq!(
+            progress.committed(&a()),
+            1,
+            "reads 2 and 3 were never marked"
+        );
+        progress.forget_all();
+        assert_eq!(progress.committed(&a()), 1, "nor built");
+
+        progress.mark_reads([(id("users", 1), p(2), 4)]);
+        progress.change_read();
+        progress.change_read();
+        let taken = progress
+            .take(&users().index, usize::MAX, &nothing_held)
+            .unwrap();
+        let steps = progress.close_steps([(users().index, taken.frontier)]);
+        let key = progress.next_key(&users().index).unwrap();
+        progress.published_build(
+            &users(),
+            key,
+            taken.oldest,
+            p(3),
+            taken.token,
+            steps[&users().index],
+        );
+        progress.release(&users().index, taken.token);
+        assert_eq!(progress.committed(&a()), 1, "the replay hasn't landed");
+        progress.applied(&users(), key);
+        assert_eq!(progress.committed(&a()), 5);
+    }
+
+    /// The builder may still grant runs handed over before the cut: their
+    /// steps register no frontier past it, and lift nothing.
+    #[test]
+    fn a_step_closed_after_a_cut_in_the_same_run_counts_no_cut_read() {
+        let orders = LaneKey::new(IndexName::try_new("orders").unwrap(), a());
+        let progress = Progress::new([users(), orders.clone()]);
+        progress.mark_reads([(id("users", 1), p(1), 1)]);
+        progress.change_read();
+        progress.read_unmarked(2);
+        let taken = progress
+            .take(&users().index, usize::MAX, &nothing_held)
+            .unwrap();
+        assert_eq!(taken.frontier, 1, "reads 2 and 3 were cut");
+        assert_eq!(progress.frontier(&orders.index), 1);
+        let steps = progress.close_steps([
+            (users().index, taken.frontier),
+            (orders.index.clone(), progress.frontier(&orders.index)),
+        ]);
+        let key = progress.next_key(&users().index).unwrap();
+        progress.published_build(
+            &users(),
+            key,
+            taken.oldest,
+            p(1),
+            taken.token,
+            steps[&users().index],
+        );
+        progress.skipped_step(&orders, p(1), steps[&orders.index]);
+        progress.release(&users().index, taken.token);
+        progress.applied(&users(), key);
+        assert_eq!(progress.committed(&a()), 1);
+        assert_eq!(
+            progress.close_step().read,
+            1,
+            "a whole step stops at the cut too"
+        );
+        progress.forget_all();
+        assert_eq!(progress.committed(&a()), 1);
+    }
+}
+
+#[test]
+fn a_frontier_never_passes_the_read_count() {
+    let progress = Progress::new([sink("a")]);
+    progress.mark_reads([(id("users", 1), p(1), 3)]);
+    assert_eq!(
+        progress.frontier(&sink("a").index),
+        0,
+        "nothing is read yet"
+    );
+}
+
 /// The frontier against a model kept apart from the code: seeded reads
 /// marking documents of three indexes, grants of the one builder (each
-/// index taken whole or capped, every lane registered with an item or a
-/// skip), landings in lane order, and ended runs (with reads cut before
-/// their marks), on two sinks. The model knows, per read and index, whether
+/// index taken whole, capped, around a held document, or deferred; every
+/// lane of a taken index registered with an item or as an empty build
+/// under its token, every other lane with a skip), landings in lane order
+/// and redelivered landings, reads cut before their marks (checked until
+/// the run ends), and ended runs (with a build taken and never published),
+/// on two sinks. The model knows, per read and index, whether
 /// its documents wait, which step took them, or that its run ended; a read
 /// is done for a lane once each of its takes landed there, and an ended
 /// run's read once the lane landed an entry of a step closed after the
@@ -1781,10 +2077,27 @@ mod model {
         let grant = |progress: &Progress, model: &mut Model, rng: &mut Rng, seq: u64| {
             let mut taken: BTreeMap<IndexName, Taken> = BTreeMap::new();
             let mut frontiers = Vec::new();
+            let mut deferred: Vec<IndexName> = Vec::new();
             for index in INDEXES {
                 let index = IndexName::try_new(index).unwrap();
+                let waits = progress
+                    .waiting_by_index()
+                    .iter()
+                    .any(|(of, count)| *of == index && *count > 0);
+                if waits && rng.below(4) == 0 {
+                    deferred.push(index);
+                    continue;
+                }
                 let max = if rng.below(3) == 0 { 1 } else { usize::MAX };
-                match progress.take(&index, max, &nothing_held) {
+                let held = rng.below(6) as i64;
+                let hold = rng.below(3) == 0;
+                let held = move |key: &source::RowKey| {
+                    hold && matches!(
+                        key.0.first(),
+                        Some((_, kernel::GenericValue::BigInt(n))) if *n == held
+                    )
+                };
+                match progress.take(&index, max, &held) {
                     Some(take) => {
                         frontiers.push((index.clone(), take.frontier));
                         taken.insert(index, take);
@@ -1818,7 +2131,14 @@ mod model {
             }
             let mut keys: BTreeMap<IndexName, ItemKey> = BTreeMap::new();
             for (lane, _) in &lanes {
+                if deferred.contains(&lane.index) {
+                    continue;
+                }
                 let entry = match taken.get(&lane.index) {
+                    Some(take) if rng.below(4) == 0 => {
+                        progress.skipped_build(lane, p(seq), Some(take.token), steps[&lane.index]);
+                        None
+                    }
                     Some(take) => {
                         let key = *keys
                             .entry(lane.index.clone())
@@ -1848,9 +2168,10 @@ mod model {
                 progress.release(index, take.token);
             }
         };
+        let mut cut = false;
         for _ in 0..400 {
-            match rng.below(10) {
-                0..=3 => {
+            match rng.below(12) {
+                0..=3 if !cut => {
                     seq += 1;
                     let read = progress.changes_read() + 1;
                     let mut needs = Vec::new();
@@ -1866,7 +2187,7 @@ mod model {
                     progress.routed(p(seq));
                     model.reads.push(needs);
                 }
-                4..=5 => grant(&progress, &mut model, &mut rng, seq),
+                0..=5 => grant(&progress, &mut model, &mut rng, seq),
                 6..=8 => {
                     let (lane, _) = &lanes[rng.below(lanes.len() as u64) as usize];
                     let registered = model.entries.get(lane).map_or(0, |entries| {
@@ -1881,20 +2202,40 @@ mod model {
                             .unwrap();
                         progress.applied(lane, key);
                         *landed += 1;
+                    } else if *landed > 0 {
+                        // Redelivered: an item that had landed lands again.
+                        let key = model.entries[lane]
+                            .iter()
+                            .filter_map(|(_, key)| *key)
+                            .nth(rng.below(*landed as u64) as usize)
+                            .unwrap();
+                        progress.applied(lane, key);
                     }
+                }
+                9 => {
+                    // The reader fails mid-run: its cut reads were never
+                    // marked; the builder may still grant what was handed
+                    // over before, and nothing is read until the restart.
+                    let reads = 1 + rng.below(2);
+                    progress.read_unmarked(reads);
+                    for _ in 0..reads {
+                        model.reads.push(
+                            (0..INDEXES.len())
+                                .map(|at| (at, Need::Waiting(-1)))
+                                .collect(),
+                        );
+                    }
+                    cut = true;
                 }
                 _ => {
                     if rng.below(2) == 0 {
-                        let cut = rng.below(3);
-                        progress.read_unmarked(cut);
-                        for _ in 0..cut {
-                            model.reads.push(
-                                (0..INDEXES.len())
-                                    .map(|at| (at, Need::Waiting(-1)))
-                                    .collect(),
-                            );
-                        }
+                        // A build taken and never published: the run ends
+                        // with it in flight.
+                        let index = IndexName::try_new(INDEXES[rng.below(3) as usize]).unwrap();
+                        let _ = progress.take(&index, usize::MAX, &nothing_held);
+                        check(&progress, &model, &mut last);
                     }
+                    cut = false;
                     progress.forget_all();
                     let from = model.steps;
                     for read in &mut model.reads {
@@ -1908,7 +2249,19 @@ mod model {
             }
             check(&progress, &model, &mut last);
         }
-        // Build what waits, land everything: every read counts.
+        // Restart a cut run, build what waits, land everything: every read
+        // counts.
+        if cut {
+            progress.forget_all();
+            let from = model.steps;
+            for read in &mut model.reads {
+                for (_, need) in read.iter_mut() {
+                    if matches!(need, Need::Waiting(_)) {
+                        *need = Need::Ended(from);
+                    }
+                }
+            }
+        }
         grant(&progress, &mut model, &mut rng, seq);
         while progress.waiting() > 0 {
             grant(&progress, &mut model, &mut rng, seq);

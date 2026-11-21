@@ -47,14 +47,19 @@
 //! );
 //! ```
 //!
-//! **Why no answer claims too much.** A lane's answer covers only what is
-//! registered on it, and an item is registered only after its send succeeded,
-//! so a lane never answers past an item it doesn't hold. Until the item is
-//! registered the lane answers `Through` its previous newest (or `Idle`):
-//! the batch's changes were already emitted, so the source's own `next_seq`
-//! test keeps that `Through` short of them, and an `Idle` after an emission
-//! moves nothing. Several lanes take the least answer, so a lane still behind
-//! a registration holds the others back.
+//! **Why no answer claims too much.** A lane answers `Before` the oldest of
+//! its unlanded items and its index's **backlog**: a document waiting, or in
+//! a build not yet registered on the lane. Only with neither does it answer
+//! `Through(max(newest, routed))`: the newest position registered on it, or
+//! the newest the reader routed. The reader raises `routed` only after the
+//! run's marks, and a reader of `Progress` takes the registry lock before
+//! any pending lock, so whoever sees a routed position sees every document
+//! it marked: a change routed and not landed is in the backlog or on the
+//! lane. An item is registered only after its send succeeded, before its
+//! build leaves the backlog, so between the two both hold the lane back.
+//! An engine restart forgets the run's documents and its `routed` in one
+//! step under the registry lock ([`Progress::forget_all`]). Several lanes take
+//! the least answer, so a lane still behind holds the others back.
 //!
 //! **Who writes what.** The ingest engine is the only writer of the
 //! registrations, under one lock it takes once per lane per batch; the sink
@@ -211,10 +216,6 @@ struct Registry {
     /// The newest position the reader routed in this engine run: a lane with
     /// nothing outstanding answers through it (§3.9 D1).
     routed: Option<Position>,
-    /// While set, no lane's catch-up passes it: one below the least read the
-    /// last ended engine run left unbuilt, until a live step closes after it
-    /// (§3.9 D2).
-    restart: Option<u64>,
 }
 
 /// One lane's routed items not yet covered, as `(key, oldest, step)` in
@@ -234,6 +235,10 @@ struct Registered {
     steps: VecDeque<Step>,
     /// The most it has answered as committed: it never answers less.
     committed: u64,
+    /// While set, its catch-up never passes it: one below the least read an
+    /// ended engine run left unbuilt, until a step is registered on the lane
+    /// after the restart (§3.9 D2).
+    restart: Option<u64>,
 }
 
 /// How far one lane's sink engine has written, in lane order: the key's
@@ -271,7 +276,6 @@ impl Progress {
                     .collect(),
                 next_step: 0,
                 routed: None,
-                restart: None,
             }),
             marks,
             keys,
@@ -415,6 +419,7 @@ impl Progress {
             if let Some(step) = step {
                 registered.committed(marks);
                 registered.record(step, item.is_some());
+                registered.restart = None;
             }
             if let Some((key, oldest)) = item {
                 registered.unlanded.push_back((key, oldest, step));
@@ -635,7 +640,7 @@ impl Progress {
     /// waiting document, or every change read with none waiting. What a live
     /// grant that takes nothing of the index registers on its lanes.
     pub fn frontier(&self, index: &IndexName) -> u64 {
-        let read = self.changes_read();
+        let read = self.readable();
         match self.pending.get(index) {
             Some(pending) => frontier(&lock(pending), read),
             None => read,
@@ -693,7 +698,7 @@ impl Progress {
         through: Option<Position>,
         held: &dyn Fn(&RowKey) -> bool,
     ) -> Option<Taken> {
-        let read = self.changes_read();
+        let read = self.readable();
         let mut pending = lock(self.pending.get(index)?);
         let mut taken = pending.take(index, max, through, held)?;
         taken.frontier = frontier(&pending, read);
@@ -749,9 +754,15 @@ impl Progress {
     /// What the ended run routed goes with it: until the new run routes its
     /// own, a lane answers through what was registered on it. The least read
     /// it leaves unbuilt (a document waiting, one in a build never released,
-    /// a read counted before its marks) caps every lane's catch-up until a
-    /// live step closes after the restart (ADR 0012 stage 8a, §3.9 D2).
+    /// a read counted before its marks) caps each lane's catch-up until a
+    /// live step is registered on that lane after the restart (ADR 0012
+    /// stage 8a, §3.9 D2): a lane the next grant passes by (its index
+    /// deferred) keeps its cap.
     pub fn forget_all(&self) {
+        // One step for a reader: it holds the registry lock before any
+        // pending lock, so it sees the run whole or forgotten whole, never
+        // its documents gone while `routed` and no cap still answer for it.
+        let mut registry = lock(&self.registry);
         let mut least = match self.unmarked.swap(u64::MAX, Ordering::AcqRel) {
             u64::MAX => None,
             read => Some(read),
@@ -761,11 +772,14 @@ impl Progress {
             self.stopped_waiting(index, forgotten);
             least = least.into_iter().chain(unbuilt).min();
         }
-        let mut registry = lock(&self.registry);
+        #[cfg(test)]
+        tests::while_forgetting();
         registry.routed = None;
         if let Some(least) = least {
             let cap = least.saturating_sub(1);
-            registry.restart = Some(registry.restart.map_or(cap, |held| held.min(cap)));
+            for registered in registry.lanes.values_mut() {
+                registered.restart = Some(registered.restart.map_or(cap, |held| held.min(cap)));
+            }
         }
     }
 
@@ -781,15 +795,19 @@ impl Progress {
     }
 
     /// `changes` more live changes were read and never marked (a run cut
-    /// before its marks): counted as read, and unbuilt until their replay
-    /// (see [`forget_all`](Self::forget_all)). Returns how many have been
-    /// read in all.
+    /// before its marks): counted as read, and unbuilt until their replay.
+    /// From now on no frontier and no catch-up passes the first of them,
+    /// until the next run's first step (see [`forget_all`](Self::forget_all)).
+    /// Returns how many have been read in all.
     pub fn read_unmarked(&self, changes: u64) -> u64 {
-        let before = self.read.fetch_add(changes, Ordering::Release);
-        if changes > 0 {
-            self.unmarked.fetch_min(before + 1, Ordering::AcqRel);
+        if changes == 0 {
+            return self.changes_read();
         }
-        before + changes
+        // The cut is recorded before the count moves (release), so whoever
+        // reads the count (acquire) sees it.
+        let first = self.read.load(Ordering::Acquire) + 1;
+        self.unmarked.fetch_min(first, Ordering::AcqRel);
+        self.read.fetch_add(changes, Ordering::Release) + changes
     }
 
     /// How many live changes have been read, over every engine run.
@@ -797,11 +815,25 @@ impl Progress {
         self.read.load(Ordering::Acquire)
     }
 
+    /// The reads a frontier may cover: every read, or those before the first
+    /// read this run cut before its marks.
+    fn readable(&self) -> u64 {
+        let read = self.changes_read();
+        Self::short_of_the_cut(read, self.unmarked.load(Ordering::Acquire))
+    }
+
+    fn short_of_the_cut(read: u64, unmarked: u64) -> u64 {
+        match unmarked {
+            u64::MAX => read,
+            first => read.min(first.saturating_sub(1)),
+        }
+    }
+
     /// Close a step through every change read, for every index: right only
     /// while every document of every index read through it was taken
     /// (nothing waits). The engine closes [`close_steps`](Self::close_steps).
     pub fn close_step(&self) -> Step {
-        let read = self.changes_read();
+        let read = self.readable();
         let mut registry = lock(&self.registry);
         Self::next_step(&mut registry, read)
     }
@@ -828,7 +860,6 @@ impl Progress {
             read,
         };
         registry.next_step += 1;
-        registry.restart = None;
         step
     }
 
@@ -842,7 +873,9 @@ impl Progress {
     pub fn committed(&self, sink: &SinkName) -> u64 {
         let read = self.changes_read();
         let mut registry = lock(&self.registry);
-        let cap = registry.restart;
+        // Read under the registry lock: `forget_all` turns the cut into the
+        // restart caps inside it.
+        let readable = Self::short_of_the_cut(read, self.unmarked.load(Ordering::Acquire));
         let mut least: Option<u64> = None;
         for (lane, marks) in &self.marks {
             if lane.sink != *sink {
@@ -858,7 +891,7 @@ impl Progress {
                     .get(&lane.index)
                     .is_none_or(|pending| lock(pending).is_idle());
             let caught_up = if idle {
-                cap.map_or(read, |cap| cap.min(read))
+                registered.restart.map_or(readable, |cap| cap.min(readable))
             } else {
                 0
             };

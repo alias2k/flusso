@@ -563,14 +563,18 @@ granted count with the next step routed. Nothing listens to the count; readers p
 
 **6b-1a replaces the global step with a frontier per index** (§3.9, I5): with independent builders a
 quiet index's lanes are registered with no other index's step, so the global order the steps rely on
-is gone. The definition above does not change; three moments do:
+is gone. The definition above does not change; these moments do:
 
 - **a change that builds nothing** counts as soon as it is read and everything before it landed (the
   catch-up), before its empty build publishes: earlier than 6a and `main`, correct by the definition;
 - **a sink's count never goes down** (a per-lane high-water), and across an engine restart an ended
   run's unbuilt reads count no sooner than the new run's first live grant (slice 3's moment), while reads
   that built nothing or all landed count at once (the restart cap, §3.9 §3);
-- **a sink with no lane** has committed every read (slice 3: every closed step).
+- **a sink with no lane** has committed every read (slice 3: every closed step);
+- **a lane that never had an item** answers `Through(routed)` where it answered `Idle`: the source
+  confirms through a run that built nothing even before any grant;
+- **reads cut before their marks** (a reader error) stop every frontier and catch-up from the moment
+  they are counted, through the restart's backoff, not only from the next run's `forget_all`.
 
 ### 3.7 Run lifecycle
 
@@ -1062,7 +1066,12 @@ take (the cap, the backlog) counts only through its oldest document left.
 **Routed (D1; built in 6b-1a).** `Progress` keeps the newest position the reader has routed, raised
 after a run's marks and its count (R1), under the registry lock, then the fence listener fires. A
 reader of `Progress` takes the registry lock first and each index's pending set under it, so one that
-sees a routed position sees every mark made before it. A lane with nothing outstanding (no unlanded
+sees a routed position sees every mark made before it. The two writers that change what such a reader
+combines across both kinds of lock keep it whole: `forget_all` holds the registry lock across every
+pending set's forgetting, the unset of `routed` and the caps (review round 1: it took the registry lock
+only after the pending sets, and a reader between saw the documents gone with `routed` still set and no
+cap); `read_unmarked` records the cut before the read count moves (release), and `committed` and every
+frontier read the count (acquire) before the cut, so whoever counts the cut reads sees the cut. A lane with nothing outstanding (no unlanded
 item, no build of its index not yet registered on it, nothing waiting on its index) answers
 `Through(max(newest, routed))`, and `Idle` only while both are unset. So a quiet index no longer pins
 confirmation or a per-sink fence at the last grant that registered its lanes, and a lane that never had a
@@ -1090,21 +1099,27 @@ on 6b-1a's user-visible list.
 **Ended runs (D2): the restart cap.** At `forget_all` `Progress` records the least read number among
 what the ended run leaves unbuilt: documents waiting, documents in builds taken and never released, and
 reads the reader counted without marking them (R9's guard counts a run cut before its marks through
-`Progress::read_unmarked`). Until a live step is closed after the restart, every lane's catch-up is
-capped one below it; entries taken before the restart are below it already (a frontier is below every
+`Progress::read_unmarked`). Until a live step is registered on the lane after the restart, the lane's
+catch-up is capped one below it (per lane: a lane the first grant passes by, its index deferred by the
+budget, keeps its cap; review round 1 found the global lift through the seeded model). A cut is honoured
+from the moment it is counted: until the next run's `forget_all`, no frontier and no catch-up passes the
+first cut read, and no step of the dying run lifts that; entries taken before the restart are below it already (a frontier is below every
 document waiting at its take or marked after it). Then:
 
-- **never earlier than slice 3's moment**: an ended run's unbuilt read counts no sooner than the new
-  run's first live grant, when slice 3 counted it ("with the next step routed");
+- **never earlier than slice 3's moment**: an ended run's unbuilt read counts no sooner than the first
+  live grant after the restart that registers the lane, when slice 3 counted it ("with the next step
+  routed"; slice 4 already left a deferred index's lanes out of a step);
 - **reads before the cap still count**: a change that built nothing (confirmed through `routed`, never
   replayed) or whose documents all landed; a cap over the whole ended run would hold such a count short
   for ever;
 - **never short for ever once everything read has landed**: after the first grant an index credits the
   ended run's reads with its first entry after the restart once it lands, or by the catch-up once idle;
-  a quiet index catches up (6b-1a: the one builder's skips give every lane an entry at every grant; 6b-1c:
-  the first grant after the restart lifts the cap for every lane, slice 3's moment kept); a short replay
-  or a stream end lands what was read and catches up; a second restart before the first grant keeps the
-  lower cap. A replay that never comes (the stream ends at once) leaves the count short of reads never
+  a quiet index catches up (6b-1a: the one builder's skips give every lane but a deferred index's an entry
+  at every grant, and a deferred index is taken later, which registers its lanes; 6b-1c, where a builder
+  registers only its own lanes: the first grant after the restart must also lift the cap of every lane
+  whose index has nothing waiting or building, or a quiet index stays capped; a waiting or deferred
+  index's lanes keep it until their own step); a short replay or a stream end lands what was read and
+  catches up; a second restart before a lane's step keeps the lower cap. A replay that never comes (the stream ends at once) leaves the count short of reads never
   built, which is right;
 - **never down**: the cap only stops a lane from rising; the high-water keeps what it had.
 
@@ -1128,8 +1143,9 @@ however many empty builds pass (an empty build holds no budget, so a parked inde
 change). `progress::tests::parked` is ported per index.
 
 **Model test** (written first, the model independent of the code, as slice 3's): seeded reads marking
-documents, takes (whole and capped), publishes, landings, skips, routed raises and ended runs on three
-indexes and two sinks. The model keeps, per read, the documents it marked on each index and the take
+documents, takes (whole, capped, around a held document), deferrals, publishes, empty builds under a
+token, landings and redelivered landings, skips, routed raises, cuts and ended runs (one with a build in
+flight) on three indexes and two sinks. The model keeps, per read, the documents it marked on each index and the take
 that covered each; a read is done for a lane once every such take has landed there, and an ended run's
 undone reads once the lane has landed an entry of a step closed after the restart (slice 3's floor). At
 every step each sink's count is at most the model's and never lower than before; once everything has
@@ -1363,12 +1379,16 @@ Built as §3 states, with today's one builder. Where the code sits:
   `Step { number, read: frontier }` per index. `publish_live` registers each lane with its index's step.
   `close_step_through` is gone. `close_step` (every read, every index) stays for embedders and tests
   where nothing waits.
-- **`committed`.** It loads the read count first, then takes the registry lock, and each lane's pending
-  lock for `is_idle`. Per lane: the max of the landed step's frontier, the catch-up (the read count,
-  capped while `restart` is set), and the lane's high-water. A sink with no lane answers the read count.
-- **`forget_all`.** It unsets `routed`. It sets `restart` to the least of its cap and one below the least
-  read among the waiting documents, the builds never released and the unmarked reads. `next_step`
-  clears it.
+- **`committed`.** It loads the read count first, then takes the registry lock, reads the cut, and each
+  lane's pending lock for `is_idle`. Per lane: the max of the landed step's frontier, the catch-up (the
+  read count short of the cut, capped while the lane's `restart` is set), and the lane's high-water. A
+  sink with no lane answers the read count.
+- **The cut.** `read_unmarked` records its first read (`unmarked`, a `fetch_min`) before it raises the
+  count. `readable()` (the count short of the cut) bounds every frontier (`take`, `frontier`,
+  `close_step`) and `committed` bounds the catch-up with it.
+- **`forget_all`.** Under the registry lock throughout: it takes the cut, forgets every pending set,
+  unsets `routed`, and lowers every lane's `restart` to one below the least read among the waiting
+  documents, the builds never released and the cut. A step registered on a lane clears that lane's.
 - **Deferred indexes** (slice 4) get no frontier and no registration at a grant, as they got no step
   before: their lanes keep their last entry, and their waiting documents keep their backlog answer.
 
@@ -1416,6 +1436,67 @@ never see an older entry answer again. The high-water is pinned by the three tes
   (`is_idle`), under the registry lock. Confirmation and fences (`least_of`) add one `Option<Position>`
   read.
 - **Per engine restart:** a walk of every waiting document and build for the least read.
+
+#### 6b-1a review round 1: what changed
+
+Each point was reproduced before it was fixed; the tests were written first and failed on the code as
+pushed (`8646caef`).
+
+| Point | Change | Tests |
+| --- | --- | --- |
+| 1. `forget_all` cleared the pending sets before it unset `routed` and set the cap | holds the registry lock throughout (registry before pending, the documented order; no writer takes the registry lock holding a pending lock) | `forgetting::a_reader_started_mid_forget_sees_none_of_it_half_done` (a test hook starts a reader inside `forget_all` after the pending sets are forgotten; it must not get in before the end); `forgetting::the_count_read_during_forget_all_never_counts_the_forgotten_run`, `forgetting::a_lane_read_during_forget_all_never_answers_through_the_forgotten_run` (stress, ≤ 2,000 rounds or 2 s; both failed within 0.13 s on `8646caef`) |
+| 2. Reads cut before their marks counted until the next `forget_all` | the cut is recorded before the count and bounds every frontier and catch-up until `forget_all` turns it into the caps | `cut::reads_cut_before_their_marks_count_no_sooner_than_their_replay`, `cut::a_step_closed_after_a_cut_in_the_same_run_counts_no_cut_read`, the reader's `a_run_cut_before_its_marks_counts_no_sooner_than_the_first_grant` (asserts before `forget_all` too) |
+| 3. The model's blind spots | the model gains deferral, a held document, empty builds under a token (per lane), redelivered landings, a cut checked until the run ends, a build in flight across `forget_all`; it found a third defect: the restart cap was lifted for every lane by the first grant, so a lane whose index that grant deferred lost its cap, and a second restart let it catch up through the first ended run's unbuilt reads. The cap is now per lane, lifted by a step registered on that lane | the model (200 seeds; 2,000 once by hand), `restart::a_deferred_index_keeps_its_cap_until_its_own_lanes_get_a_step` |
+| 4. Minor | the module doc's "Why no answer claims too much" rewritten for `Through(max(newest, routed))` and the backlog; the lock argument above extended to `forget_all` and `read_unmarked`; `a_frontier_never_passes_the_read_count`; the contributor page's "released"; the moment of a lane that never had an item (§3.6) | |
+
+**What the model still does not cover**, and what does: threads (the `forgetting` tests; the reader's
+own order, `reader::tests`' `routed_moves_only_after_the_runs_marks`); publish order against grant order
+(the model grants synchronously; one builder publishes in grant order, `ingest::tests`); the searchable
+level (fence tests); the stop and its drain (`tests::stop`).
+
+**Writers checked** (point 1): every multi-step update a reader holding the registry lock may combine is
+atomic for it, or each intermediate state answers no further and counts no more.
+
+- `mark_reads`, then `read_changes`, then `routed`: marks without the count only add backlog; the count
+  (release) follows the marks, and `routed` (registry lock) follows both.
+- `read_unmarked`: the cut before the count; a concurrent count can only lower the recorded cut.
+- `take`: one pending lock moves documents from waiting to a build, both backlog; the frontier uses the
+  readable count loaded before the lock (older is lower).
+- `close_steps`: numbers only, under the registry lock.
+- `published_build`/`skipped_build`: the lane's entry (registry lock; the lane's cap cleared) before the
+  build is settled for the sink (pending lock). Between, both the item and the build hold the lane back;
+  a skip's entry counts its frontier, which the build needed nothing of on that lane.
+- `build_sending`, `build_landed`, `release`: one pending lock each; `release` after every lane's
+  registration.
+- `applied`/`searchable`: one atomic per lane, its sink engine the only writer; read early, a lane only
+  answers older.
+- The high-water: written by `committed` under the registry lock.
+- `forget_all`: one critical section, as above.
+- Not combined with answers: the item key counters, the waiting counters (the lead).
+
+No `loom` model: `Progress` and `Pending` use `std` locks and atomics throughout, so a model would mean
+loom types through both; the hook test pins the gap deterministically and the stress loops cover the
+interleavings around it.
+
+**Mutations of this round** (same harness; no test hung):
+
+| Mutation | Tests that fail |
+| --- | --- |
+| `forget_all` takes the registry lock after forgetting the pending sets | the three `forgetting` tests above |
+| the catch-up ignores the cut | 4: both `cut` tests, the reader's cut test, the model |
+| `read_unmarked` records no cut | 5: both `cut` tests, `reads_cut_before_their_marks_count_no_sooner_than_the_first_grant`, the reader's cut test, the model |
+| a take ignores the cut | `cut::a_step_closed_after_a_cut_in_the_same_run_counts_no_cut_read`, the model |
+| `frontier()` ignores the cut | the same two |
+| a frontier past the read count (no `.min(read)`) | `a_frontier_never_passes_the_read_count` |
+| the cap lifted for every lane at the next step (as pushed) | `a_deferred_index_keeps_its_cap_until_its_own_lanes_get_a_step`, the model |
+| the cap never lifted by a registration | `after_the_first_grant_a_change_that_builds_nothing_counts_once_read` |
+| `forget_all` replaces a lane's lower cap instead of keeping the least | `a_deferred_index_keeps_its_cap_until_its_own_lanes_get_a_step`, the model |
+| the cut recorded after the count moves | not testable single-threaded (one writer); argued above |
+
+**Costs this round adds** (measured nothing): one more atomic load per take, per `frontier`, per
+`committed` read and per `read_unmarked`; `forget_all` (once per engine restart) holds the registry lock
+while it forgets every pending set and writes one cap per lane, so a `/status`, `/metrics`, `/wait` or
+confirmation read waits that long once per restart.
 
 #### 12. Rules, bounds, guarantees, mutation skeleton
 

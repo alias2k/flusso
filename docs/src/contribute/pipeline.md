@@ -153,11 +153,12 @@ A sink's `changes_committed` is not an event: `Status` reads it from `Progress` 
 
 - **Read numbers.** The reader numbers every live change it reads. A document marked pending keeps the read number of the oldest change that touched it.
 - **A frontier per index.** At each live grant an index's lanes are registered with that index's frontier. With documents still waiting after the take, it is one below the oldest of their read numbers; with none waiting, it is every change read. A lane has committed the frontier of the newest entry it landed, with every item before it.
-- **The catch-up.** A lane with nothing unlanded, whose index has nothing waiting and no build taken and not yet registered, has committed every change read. So a change that builds nothing counts as soon as it is read and everything before it landed.
+- **The catch-up.** A lane with nothing unlanded, whose index has nothing waiting and no build taken and not yet released, has committed every change read. So a change that builds nothing counts as soon as it is read and everything before it landed.
 - **Never down.** Each lane keeps the highest value it answered; a sink's count is the least over its lanes, and a sink with no lane has committed every read.
-- **Across an engine restart.** The ended run's least unbuilt read (a document waiting, a build never released, a run cut before its marks) caps every lane's catch-up until the new run's first live grant. So those reads count no sooner than that grant; reads before the cap count at once.
+- **A run cut before its marks.** When a reader error cuts a run, its reads are counted as read and never marked. From that moment, no frontier and no catch-up passes the first of them, through the restart's backoff.
+- **Across an engine restart.** The ended run's least unbuilt read (a document waiting, a build never released, a run cut before its marks) caps each lane's catch-up until a step is registered on that lane after the restart, so an index the first grant defers keeps its cap. Those reads count no sooner than the index's first grant after the restart; reads before the cap count at once. The restart forgets the run in one step under the registry lock: a reader sees the run whole or forgotten, never its documents gone while its routed position still answers.
 
-A stalled lane holds its sink's count, as it holds confirmation. A redelivered item that had landed moves nothing, and a change a source replays after an ingest restart is a second read. Guards: the daemon's `tests::committed`; `progress::tests::{committed, frontier, restart, model, parked}`.
+A stalled lane holds its sink's count, as it holds confirmation. A redelivered item that had landed moves nothing, and a change a source replays after an ingest restart is a second read. Guards: the daemon's `tests::committed`; `progress::tests::{committed, frontier, restart, model, parked, forgetting, cut}`.
 
 ## Where this shows up
 

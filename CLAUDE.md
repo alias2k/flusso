@@ -706,13 +706,16 @@ is the one concrete piece.
   its index idle (nothing waiting, no build unreleased: `Pending::is_idle`), the read count (the
   catch-up: a change that builds nothing counts once read and everything before it landed); each lane
   keeps a high-water, so a sink's count (the least over its lanes; every read with no lane) never goes
-  down. `forget_all` caps every catch-up one below the least read the ended run left unbuilt (waiting,
-  in a build never released, or counted without marks by the reader's guard, `Progress::read_unmarked`)
-  until the next step closes. The read count is written with release after the marks and read with
+  down. Reads the reader's guard counts without marks (a run cut by an error, `Progress::read_unmarked`)
+  stop every frontier and catch-up at once (`readable`), until the next run. `forget_all` caps each
+  lane's catch-up one below the least read the ended run left unbuilt (waiting, in a build never
+  released, or cut) until a step is registered on that lane, so a lane the first grant defers keeps
+  it; it runs under the registry lock throughout, so a reader sees the run whole or forgotten, never
+  its documents gone while `routed` still answers. The read count is written with release after the marks and read with
   acquire first. Computed when read (`Status::with_progress`, the observable `flusso.changes.committed`);
   nothing listens. A lane keeps at most `k + 2` steps (`k` its unlanded items: a skip replaces the
   lane's newest entry), so a parked lane holds no growing record (`Progress::steps_kept`). Guards:
-  `daemon` `tests::committed`, `progress::tests::{committed,frontier,routed,restart,model,parked,compaction_changes_no_count}`,
+  `daemon` `tests::committed`, `progress::tests::{committed,frontier,routed,restart,model,parked,compaction_changes_no_count,forgetting,cut}`,
   `reader::tests`' `routed_moves_only_after_the_runs_marks` and `a_run_cut_before_its_marks_counts_no_sooner_than_the_first_grant`,
   `ingest::tests::reading`'s `a_fence_on_a_quiet_index_passes_while_another_index_builds`. Snapshots and `SnapshotComplete { index }` go to
   `(index, s)` of each requesting sink; requests are one per index and coalesce by sink set. The sink
