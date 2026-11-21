@@ -14,7 +14,7 @@ mod stop;
 mod tests;
 
 pub use budget::{
-    Admission, Budget, Charge, FLOOR, Held, Reservation, document_bytes, value_bytes,
+    Admission, Budget, Charge, FLOOR, Held, Refusal, Reservation, document_bytes, value_bytes,
 };
 pub use error::*;
 pub use ingest::{IngestEngine, KEY_PAGE, document_id};

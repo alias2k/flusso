@@ -33,6 +33,7 @@ use kernel::{IndexName, SinkName};
 use source::RowKey;
 use source::document::{DocumentBuilder, DocumentId};
 use stream::{AckHandle, Consumer, LaneItem, LaneKey, Request, Ticket};
+use tokio::sync::Semaphore;
 use tokio::time::{Duration, Instant, timeout_at};
 
 use crate::error::Result;
@@ -135,7 +136,12 @@ impl IngestEngine {
             plans.insert(index, plan);
         }
         let mut snapshot = Snapshot {
-            walk: Walk::new(Arc::clone(&self.documents), indexes.iter().cloned()).planned(plans),
+            walk: Walk::new(
+                Arc::clone(&self.documents),
+                indexes.iter().cloned(),
+                Arc::clone(&self.key_reads),
+            )
+            .planned(plans),
             requested,
             indexes: indexes.iter().cloned().collect(),
             handles,
@@ -269,8 +275,12 @@ pub(super) struct Walk {
     pub(super) keys: VecDeque<RowKey>,
     /// Whether the keys in hand are the index's last.
     pub(super) last: bool,
-    /// The read in flight: the walk's bound, then its pages.
+    /// The read in flight: the walk's bound, then its pages. It holds the
+    /// key-read permit while it runs (K1), so a dropped walk gives it back.
     pub(super) fetch: Option<BoxFuture<'static, source::Result<Fetched>>>,
+    /// The one key-read permit every walk shares (ADR 0012 stage 8a, K1):
+    /// one page or bound read at a time, as `main` read its one page.
+    key_reads: Arc<Semaphore>,
     /// Per index, where its walk starts and which lanes join where; an
     /// index with none walks from the first key for every lane.
     pub(super) plans: HashMap<IndexName, WalkPlan>,
@@ -312,6 +322,7 @@ impl Walk {
     pub(super) fn new(
         documents: Arc<dyn DocumentBuilder>,
         indexes: impl IntoIterator<Item = IndexName>,
+        key_reads: Arc<Semaphore>,
     ) -> Self {
         Self {
             documents,
@@ -321,6 +332,7 @@ impl Walk {
             keys: VecDeque::new(),
             last: false,
             fetch: None,
+            key_reads,
             plans: HashMap::new(),
             started: false,
             joining: BTreeSet::new(),
@@ -384,26 +396,28 @@ impl Walk {
                 .get(index)
                 .and_then(|plan| plan.joins.front())
                 .map(|(point, _)| point.clone());
-            let fetch =
-                self.fetch.get_or_insert_with(|| {
-                    let documents = Arc::clone(&self.documents);
-                    let index = index.clone();
-                    match &self.through {
-                        None => Box::pin(async move {
-                            documents.last_key(&index).await.map(Fetched::Through)
-                        }),
-                        Some(through) => {
-                            let after = self.after.clone();
-                            let through = segment_end.clone().unwrap_or_else(|| through.clone());
-                            Box::pin(async move {
-                                documents
-                                    .keys(&index, after.as_ref(), &through, KEY_PAGE)
-                                    .await
-                                    .map(Fetched::Page)
-                            })
-                        }
+            let fetch = self.fetch.get_or_insert_with(|| {
+                let documents = Arc::clone(&self.documents);
+                let index = index.clone();
+                let key_reads = Arc::clone(&self.key_reads);
+                match &self.through {
+                    None => Box::pin(async move {
+                        let _read = key_reads.acquire_owned().await;
+                        documents.last_key(&index).await.map(Fetched::Through)
+                    }),
+                    Some(through) => {
+                        let after = self.after.clone();
+                        let through = segment_end.clone().unwrap_or_else(|| through.clone());
+                        Box::pin(async move {
+                            let _read = key_reads.acquire_owned().await;
+                            documents
+                                .keys(&index, after.as_ref(), &through, KEY_PAGE)
+                                .await
+                                .map(Fetched::Page)
+                        })
                     }
-                });
+                }
+            });
             let fetched = fetch.await;
             self.fetch = None;
             match fetched? {
@@ -546,5 +560,114 @@ impl Consumer<Request> for ClosedConsumer {
 
     fn is_empty(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use async_trait::async_trait;
+    use kernel::{ColumnName, GenericValue, TableName};
+    use source::RowImage;
+    use source::document::Document;
+
+    use super::*;
+
+    /// Keys `0..rows` of every index, each read taking 10 ms, counting how
+    /// many reads run at once.
+    #[derive(Debug, Default)]
+    struct Counted {
+        now: AtomicUsize,
+        most: AtomicUsize,
+    }
+
+    fn key(id: i64) -> RowKey {
+        RowKey(vec![(
+            ColumnName::try_new("id").unwrap(),
+            GenericValue::BigInt(id),
+        )])
+    }
+
+    impl Counted {
+        async fn read<T>(&self, value: T) -> source::Result<T> {
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            self.now.fetch_sub(1, Ordering::SeqCst);
+            Ok(value)
+        }
+    }
+
+    #[async_trait]
+    impl DocumentBuilder for Counted {
+        async fn resolve(
+            &self,
+            _: &TableName,
+            _: &RowKey,
+            _: Option<&RowImage>,
+            _: Option<&RowImage>,
+        ) -> source::Result<Vec<DocumentId>> {
+            Ok(Vec::new())
+        }
+
+        async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+            Ok(Document::Delete { id: id.clone() })
+        }
+
+        fn backfill_indexes(&self) -> Vec<IndexName> {
+            Vec::new()
+        }
+
+        async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+            self.read(Some(key(3 * KEY_PAGE as i64))).await
+        }
+
+        async fn keys(
+            &self,
+            _: &IndexName,
+            after: Option<&RowKey>,
+            _: &RowKey,
+            limit: usize,
+        ) -> source::Result<Vec<RowKey>> {
+            let start = after.map_or(0, |after| match after.0.first() {
+                Some((_, GenericValue::BigInt(id))) => *id + 1,
+                _ => 0,
+            });
+            let end = (start + limit as i64).min(3 * KEY_PAGE as i64 + 1);
+            self.read((start..end).map(key).collect()).await
+        }
+    }
+
+    /// K1: walks sharing the key-read permit read one page or bound at a
+    /// time, as `main` read its one page; both still walk to the end.
+    #[tokio::test(start_paused = true)]
+    async fn walks_read_one_key_page_at_a_time() {
+        let documents = Arc::new(Counted::default());
+        let key_reads = Arc::new(Semaphore::new(1));
+        let walk = |name: &str| {
+            Walk::new(
+                Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+                [IndexName::try_new(name).unwrap()],
+                Arc::clone(&key_reads),
+            )
+        };
+        let drive = |mut walk: Walk| async move {
+            let mut read = 0;
+            loop {
+                match walk.step().await.unwrap() {
+                    Step::Keys => read += std::mem::take(&mut walk.keys).len(),
+                    Step::Done => return read,
+                }
+            }
+        };
+        let (users, orders) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(drive(walk("users")), drive(walk("orders")))
+        })
+        .await
+        .unwrap();
+        assert_eq!((users, orders), (3 * KEY_PAGE + 1, 3 * KEY_PAGE + 1));
+        assert_eq!(documents.most.load(Ordering::SeqCst), 1);
     }
 }

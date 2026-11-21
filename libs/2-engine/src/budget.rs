@@ -66,7 +66,9 @@
 //! reservation are one step and two reservers never pass the limit together.
 //! Every release bumps a generation and wakes every waiter
 //! ([`Budget::released_since`]), outside the lock: a waiter that read the
-//! generation with its refusal is woken by any release after it.
+//! generation with its refusal is woken by any release after it. While a
+//! waiter is in a build gate's line, an add does the same, so a refusal at
+//! the current generation is always what the budget would answer now.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -129,9 +131,22 @@ pub struct Admission {
     /// Whether something offered was refused: the build waits for a release
     /// for it (all of it for a backfill batch, what was left out for live).
     pub refused: bool,
+    /// Whether a refusal was by the limit (rules 1 and 2), not by an index's
+    /// share: what holds younger waiters back from room by the limit.
+    pub by_limit: bool,
     /// The release generation the decision was made at: a waiter passes it
     /// to [`Budget::released_since`].
     pub generation: u64,
+}
+
+/// Why [`Budget::reserve_behind`] refused, and when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Refusal {
+    /// The release generation of the refusal: a release past it may let
+    /// the batch go ([`Budget::released_since`]).
+    pub generation: u64,
+    /// Refused by the limit (rules 1 and 2), not by an index's share.
+    pub by_limit: bool,
 }
 
 impl Admission {
@@ -150,8 +165,13 @@ struct State {
     /// Each index's bytes, live and backfill; an index holding nothing has
     /// no entry.
     by_index: BTreeMap<IndexName, Held>,
-    /// Bumped by every release.
+    /// Bumped by every release, and by every add while a waiter is
+    /// [`watch`](Budget::watch)ing.
     generation: u64,
+    /// Waiters in a gate's lines (stage 8a's G3): while there is one, what
+    /// is held never changes without the generation moving, so a refusal
+    /// made at the current generation is what the budget would answer now.
+    watched: usize,
 }
 
 impl State {
@@ -165,7 +185,8 @@ impl State {
             .map_or(0, |held| held.total - held.backfill)
     }
 
-    fn add(&mut self, work: Work, index: Option<&IndexName>, bytes: usize) {
+    /// Add `bytes`; whether the generation moved (only while watched).
+    fn add(&mut self, work: Work, index: Option<&IndexName>, bytes: usize) -> bool {
         self.total = self.total.saturating_add(bytes);
         if work == Work::Backfill {
             self.backfill = self.backfill.saturating_add(bytes);
@@ -177,6 +198,11 @@ impl State {
                 held.backfill = held.backfill.saturating_add(bytes);
             }
         }
+        let moved = self.watched > 0;
+        if moved {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        moved
     }
 
     fn release(&mut self, work: Work, index: Option<&IndexName>, bytes: usize) {
@@ -330,7 +356,8 @@ impl Budget {
     }
 
     /// The release generation now: [`released_since`](Self::released_since)
-    /// returns once a release moves past it.
+    /// returns once a release (or, while a waiter is in a build gate's line,
+    /// an add) moves past it.
     pub fn generation(&self) -> u64 {
         self.state().generation
     }
@@ -341,7 +368,7 @@ impl Budget {
     pub fn admit(&self, work: Work, parts: &[(IndexName, usize)]) -> Admission {
         let admission = {
             let state = self.state();
-            self.decide(&state, work, parts)
+            self.decide(&state, work, parts, false)
         };
         #[cfg(test)]
         if let Some(hook) = self
@@ -356,20 +383,30 @@ impl Budget {
         admission
     }
 
-    fn decide(&self, state: &State, work: Work, parts: &[(IndexName, usize)]) -> Admission {
+    /// `behind`: the caller waits behind an older one the limit refused, so
+    /// it takes no room by the limit (rules 1 and 2), only rule 5 or 4.
+    fn decide(
+        &self,
+        state: &State,
+        work: Work,
+        parts: &[(IndexName, usize)],
+        behind: bool,
+    ) -> Admission {
         let generation = state.generation;
         let all = || parts.iter().map(|(index, _)| index.clone()).collect();
         if parts.is_empty() {
             return Admission {
                 admitted: Vec::new(),
                 refused: false,
+                by_limit: false,
                 generation,
             };
         }
         match work {
             Work::Live => {
                 let mut running = state.total;
-                let mut blocked = false;
+                let mut blocked = behind;
+                let mut by_limit = false;
                 let mut admitted = Vec::with_capacity(parts.len());
                 for (index, estimate) in parts {
                     let live = state.live_by(index);
@@ -395,6 +432,7 @@ impl Budget {
                         // The oldest refused by the limit keeps younger
                         // indexes that hold live bytes from taking room by it.
                         blocked = true;
+                        by_limit = true;
                         false
                     };
                     if fits {
@@ -406,6 +444,7 @@ impl Budget {
                 Admission {
                     admitted,
                     refused,
+                    by_limit,
                     generation,
                 }
             }
@@ -414,11 +453,13 @@ impl Budget {
                 // Rule 4, then rules 2 and 1: backfill as on `main`, whichever
                 // indexes it walks.
                 let fits = state.backfill == 0
-                    || (state.backfill.saturating_add(estimate) <= self.limit / 2
+                    || (!behind
+                        && state.backfill.saturating_add(estimate) <= self.limit / 2
                         && state.total.saturating_add(estimate) <= self.limit);
                 Admission {
                     admitted: if fits { all() } else { Vec::new() },
                     refused: !fits,
+                    by_limit: !fits,
                     generation,
                 }
             }
@@ -434,15 +475,58 @@ impl Budget {
         work: Work,
         parts: &[(IndexName, usize)],
     ) -> Result<Vec<Reservation>, u64> {
-        let mut state = self.state();
-        let admission = self.decide(&state, work, parts);
+        self.reserve_behind(work, parts, false)
+            .map_err(|refusal| refusal.generation)
+    }
+
+    /// [`reserve`](Self::reserve) for a waiter behind an older one: with
+    /// `behind`, it takes no room by the limit (rules 1 and 2), so only rule
+    /// 5 (live) or 4 (backfill) can grant it, and small batches can't starve
+    /// the larger one ahead. The refusal says whether the limit refused it.
+    pub fn reserve_behind(
+        self: &Arc<Self>,
+        work: Work,
+        parts: &[(IndexName, usize)],
+        behind: bool,
+    ) -> Result<Vec<Reservation>, Refusal> {
+        let state = self.state();
+        self.reserve_locked(state, work, parts, behind)
+    }
+
+    /// [`reserve_behind`](Self::reserve_behind), only while the generation
+    /// is still `generation`: `None` when it moved since, so a caller that
+    /// chose at `generation` reserves nothing on a choice that change made
+    /// out of date.
+    pub(crate) fn reserve_at(
+        self: &Arc<Self>,
+        work: Work,
+        parts: &[(IndexName, usize)],
+        behind: bool,
+        generation: u64,
+    ) -> Option<Result<Vec<Reservation>, Refusal>> {
+        let state = self.state();
+        (state.generation == generation).then(|| self.reserve_locked(state, work, parts, behind))
+    }
+
+    fn reserve_locked(
+        self: &Arc<Self>,
+        mut state: MutexGuard<'_, State>,
+        work: Work,
+        parts: &[(IndexName, usize)],
+        behind: bool,
+    ) -> Result<Vec<Reservation>, Refusal> {
+        let admission = self.decide(&state, work, parts, behind);
         if admission.refused {
-            return Err(admission.generation);
+            return Err(Refusal {
+                generation: admission.generation,
+                by_limit: admission.by_limit,
+            });
         }
-        Ok(parts
+        let mut moved = false;
+        let reserved = parts
             .iter()
             .map(|(index, bytes)| {
-                state.add(work, Some(index), *bytes);
+                moved |= state.add(work, Some(index), *bytes);
                 Reservation {
                     budget: Arc::clone(self),
                     work,
@@ -450,7 +534,12 @@ impl Budget {
                     bytes: *bytes,
                 }
             })
-            .collect())
+            .collect();
+        drop(state);
+        if moved {
+            self.released.notify_waiters();
+        }
+        Ok(reserved)
     }
 
     /// Reserve `estimate` bytes for a build of `work` counted toward no
@@ -471,7 +560,11 @@ impl Budget {
         if !fits {
             return None;
         }
-        state.add(work, None, estimate);
+        let moved = state.add(work, None, estimate);
+        drop(state);
+        if moved {
+            self.released.notify_waiters();
+        }
         Some(Reservation {
             budget: Arc::clone(self),
             work,
@@ -480,8 +573,9 @@ impl Budget {
         })
     }
 
-    /// Returns once a release has moved the generation past `since` (at once
-    /// if one already has). The wait is registered before the generation is
+    /// Returns once a release (or, while a waiter is in a build gate's line,
+    /// an add) has moved the generation past `since` (at once if one already
+    /// has). The wait is registered before the generation is
     /// read, so a release between the two still wakes it.
     pub async fn released_since(&self, since: u64) {
         loop {
@@ -496,7 +590,23 @@ impl Budget {
     }
 
     fn add(&self, work: Work, index: Option<&IndexName>, bytes: usize) {
-        self.state().add(work, index, bytes);
+        let moved = self.state().add(work, index, bytes);
+        if moved {
+            self.released.notify_waiters();
+        }
+    }
+
+    /// A waiter joins a gate's line: until it [`unwatch`](Self::unwatch)es,
+    /// every add moves the generation and wakes the waiters too, not only a
+    /// release, so no refusal it or another waiter reads is out of date.
+    pub(crate) fn watch(&self) {
+        self.state().watched += 1;
+    }
+
+    /// A waiter leaves a gate's line (granted or dropped).
+    pub(crate) fn unwatch(&self) {
+        let mut state = self.state();
+        state.watched = state.watched.saturating_sub(1);
     }
 
     /// Give `bytes` back and wake every waiter, once, with the lock let go.

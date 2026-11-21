@@ -60,6 +60,13 @@ filter = 'package(flusso-query-derive) & binary(boundary) | package(flusso-query
 test-group = 'boundary'
 slow-timeout = { period = "300s", terminate-after = 3 }
 
+# The gate's tests run on paused time: a waiter that loops without yielding
+# stops the runtime and every tokio timeout with it, so end such a test here.
+# Each one takes milliseconds.
+[[profile.default.overrides]]
+filter = 'package(flusso-engine) & kind(lib) & test(/^ingest::gate::tests::/)'
+slow-timeout = { period = "10s", terminate-after = 3 }
+
 # CI: don't stop at the first failure, and emit JUnit for the runner to surface.
 [profile.ci]
 retries = 0
@@ -67,6 +74,13 @@ fail-fast = false
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# The gate's tests run on paused time: a waiter that loops without yielding
+# stops the runtime and every tokio timeout with it, so end such a test here.
+# Each one takes milliseconds.
+[[profile.ci.overrides]]
+filter = 'package(flusso-engine) & kind(lib) & test(/^ingest::gate::tests::/)'
+slow-timeout = { period = "10s", terminate-after = 3 }
 
 # Passing tests' output too, for the binaries with a `test_postgres::pinned`
 # test: the postgres-matrix summary finds them by the one line it prints. A
