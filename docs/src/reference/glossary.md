@@ -6,7 +6,7 @@ The project's nouns, each with a pointer to the page that owns it.
 | --- | --- | --- |
 | **backfill** | Seeding an unseeded index by reading its root keys, a page at a time, and building each through the normal pipeline beside live capture. | [How flusso works](../start/how-it-works.md#seeding-and-continuity) |
 | **applied** | A fence level: the sink's write for a change, and every earlier one, has returned, so a fetch by id sees it. | [HTTP endpoints](http.md#get-waitpositionposition) |
-| **batch** | The changes grouped into one build: everything the stream has ready, committed the moment it would block, capped at `max_changes` / `max_delay_ms`. A sink may merge several ready batches (of several indexes) into one write. | [batch](config-toml.md#batch) |
+| **batch** | One index's changes grouped into one build: everything the stream has ready, committed the moment it would block, capped at `max_changes` / `max_delay_ms`; one build takes at most `max_changes` documents. A sink may merge several ready batches (of several indexes) into one write. | [batch](config-toml.md#batch) |
 | **computed field** | A read-time field given by a Rust function over the document and the context. Value only. | [Read-time fields](../query/read-time-fields.md#computed-fields) |
 | **context** | The request-time values a root's read-time fields are decided from (the clock, the caller), in one consumer-defined type. | [Read-time fields](../query/read-time-fields.md#the-context) |
 | **convenience alias** | The bare logical name (`users`) kept as an alias on the current generation, for humans and dashboards. Best-effort. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |

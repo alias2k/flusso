@@ -44,7 +44,7 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--admin-password <pw>` | `flusso` | Basic-auth password. A loud warning is logged on every start while it's the default. |
 | `--lag-poll-secs <n>` | `15` | How often to sample slot lag. |
 | `--index-prefix <prefix>` | `prefix` from config, else none | Prefix every owned index name. |
-| `--batch-max-changes <n>` | `[batch] max_changes`, else `256` | Commit a batch once this many live changes have accumulated. |
+| `--batch-max-changes <n>` | `[batch] max_changes`, else `256` | Changes per batch, and documents per build of one index. |
 | `--batch-max-delay-ms <ms>` | `[batch] max_delay_ms`, else `50` | The longest a batch stays open while changes keep arriving, and the longest a sink holds a ready batch for its writes out so it goes out merged. |
 | `--writes <n>` | `[concurrency] writes`, else `4` | Bulk writes each sink runs at once; never two holding the same document. Never written into the lock. |
 | `--max-built-mib <n>` | `[concurrency] max_built_mib`, else `512` | MiB of built documents held until every sink acknowledges them; past it the ingest engine waits. 16 to 1,048,576. Never written into the lock. |
