@@ -1966,6 +1966,98 @@ visitor). Where the paper design needed a detail it didn't give, or the code cha
   lines as everyone (G9′: a FIFO per kind across builders, G4, G6), so a healthy index's batches keep
   their turns. Nothing new; pinned by a test.
 
+#### 6b-2 as built
+
+Built as "6b-2 as designed against the code" states. What building added:
+
+- **Three slice-4 and 6b-1c tests pinned the old cap and were turned around or moved**:
+  `a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap` is now
+  `a_parked_index_changing_many_documents_does_not_stop_the_reading` (the acceptance test: the reading
+  goes on for ten minutes, `orders` ends with its fifty documents waiting, `users`' lane fence passes
+  within two batches of what was read at every sample, confirmation stays pinned before `orders`' first
+  unbuilt change from the 70th second to the end, and the budget stays within its rules at every write);
+  `an_index_past_its_waiting_bound_holds_the_live_batch_whole` is now
+  `an_index_held_past_its_waiting_bound_is_exempt_and_the_reading_goes_on`; `a_backlog_take_wakes_the_reader`
+  now waits at `max_pending_documents` (two), where a held index waits since its cap stops nothing.
+- **The memory per pending document is measured**: 266 B held and 314 B at the peak for a one-column
+  integer key (`tests/pending_memory.rs`, a counting global allocator, a million documents; Linux x86_64),
+  under §10's 300 B and 360 B, which are the test's ceilings. At the default cap: about 266 MB, 314 MB
+  while the map grows. The key's column name is a string of its own per document (a decoder makes one
+  per key); a wider key costs more.
+- **The stop's exit names the indexes**: the CLI's deadline log adds `orders: 1200 documents read and not
+  built` beside the sinks (`shutdown::unbuilt_indexes`). The binary's `shutdown` e2e is not extended:
+  it would need one index's lane filled behind a paused OpenSearch (a new scenario in the serialized
+  OpenSearch group); the engine test that the stop doesn't end and the unit test of the line pin the two
+  halves.
+
+**Tests** (each fails under its mutation; "hang" never: every wait is bounded):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| I8 latch | never exempt | the four lead unit tests, the acceptance test, `an_index_held_past_its_waiting_bound_is_exempt_and_the_reading_goes_on`, `the_stream_end_builds_an_exempt_backlog`, `a_stop_builds_and_lands_an_exempt_backlog_under_the_deadline`, `reading_stops_for_every_index_at_max_pending_documents`, `an_index_reaches_its_exemption_with_nothing_else_in_flight`, `a_released_backlog_drains_in_parts_beside_another_indexs_changes` |
+| I8 | the latch cleared only when nothing waits | `an_exemption_ends_below_max_waiting_per_index` |
+| I6 | exempt documents counted toward `max_waiting` | `exempt_documents_count_toward_no_other_bound` and five engine tests |
+| I6 | no `max_pending_documents` | `exempt_documents_stop_the_reading_only_at_max_pending_documents`, `reading_stops_for_every_index_at_max_pending_documents`, `a_backlog_take_wakes_the_reader` |
+| I7 (D4) | becoming held wakes no reader | `holding_a_builder_wakes_a_reader_waiting_at_its_cap` |
+| I7 | a blocked publish holds nothing | five engine tests, `an_index_reaches_its_exemption_with_nothing_else_in_flight` among them |
+| I7 | a budget refusal holds nothing | the acceptance test, `an_index_held_past_its_waiting_bound_is_exempt_and_the_reading_goes_on` |
+| I12 | `settle` skips a folding backlog | `an_index_held_past_its_waiting_bound_is_exempt_and_the_reading_goes_on` (a builder's own loop drains its backlog before it settles in the other end tests) |
+| I5 (`newest`, exempt takes) | registration raises `newest` whatever waits | the seeded model (now with backlog takes), `random_schedules_under_a_tiny_budget_stay_within_it_and_finish` |
+
+**Not pinned**: a live grant ending the hold (M7: a hold left set after a grant only shows when a budget
+hold is followed by slow builds reaching the cap unheld, a scenario of its own); the dispatcher's
+`DocumentsLeft` check (M9: no path leaves a document waiting at the end, so nothing reaches it; it is the
+guard against one); the line order on release (a waiter-newest-first gate: with two builders a freed
+permit wakes both and the one polled first asks first, so the order in the line rarely decides;
+`a_released_backlog_drains_in_parts_beside_another_indexs_changes` pins the latency, not the order); the
+`shutdown` e2e through the binary (above). The random schedules hold `orders` stuck for a random stretch
+in every third two-index seed, with failures restarting the run; they check order and the final state,
+and resume after what was confirmed, so a confirmation past an exempt index's unbuilt document would lose
+it.
+
+**Writers checked** (6b-2's, beside fix round 1's table):
+
+| State | Writer | Readers |
+| --- | --- | --- |
+| `Queue.held` | the builder: set on a live refusal (fold check) and a pending publish; cleared at a live grant and when the publish goes through | the reader's latch |
+| `Queue.exempt` | the reader, in `Lead::reached` | the reader |
+| `Exemption.at_cap` | the reader (log edge only) | the reader |
+| a lane's `newest` from an exempt take | `Progress::register`, under the `newest` rule (a backlog take registers at the newest position waiting, raised only once nothing at or before it waits) | confirmation, fences |
+
+**Costs against 6b-1c** (nothing measured):
+
+| Where | What it costs |
+| --- | --- |
+| per lead check, two or more builders | one `waiting_on` atomic load per index and two atomic flags per builder, where 6b-1c read two global atomics; a log line on each latch edge |
+| per live grant | one atomic swap (`hold(false)`) |
+| per budget refusal seen by the fold check, per blocked publish | an atomic swap, and a reader wake when it turns held |
+| per run end | one `waiting_by_index` (a lock per index) |
+| per exempt document | about 266 B, up to `max_pending_documents` (default 1,000,000: about 266 MB, 314 MB while the map grows), outside `max_built_mib` |
+| one builder | nothing: its lead keeps 6b-1b's check |
+
+**User-visible** (for the documentation agent; the 0.19 upgrade page):
+
+- **`[concurrency] max_pending_documents`** (`--max-pending-documents`, `FLUSSO_MAX_PENDING_DOCUMENTS`),
+  default 1,000,000, at least 1 (`check`, `build` and `run` refuse 0, naming where it was set), never in
+  the lock, settable in the designer's config form.
+- **A stuck index no longer stops the others**: with two or more indexes, an index held by the memory
+  budget (its lane not acknowledging, so its share full) or by a full lane, with `max_waiting_per_index`
+  documents waiting, is exempt. The other indexes keep being read, built and written, and their fences
+  keep passing. The stuck index's changes are kept as documents to build (each document once, about
+  266 B), up to `max_pending_documents` over every exempt index; there the reading stops for every index,
+  as it did at `max_waiting_per_index` before. A warning names the index when it becomes exempt and when
+  the reading stops at the cap; an info line when it ends.
+- **What it does not do**: the slot stays pinned by the stuck index (confirmation never passes its
+  oldest unbuilt change), so WAL grows for as long as it is stuck (`flusso.replication.slot_lag`,
+  `flusso.slot.pinned_by`). An index that is merely slow, not held, still paces the reading at its cap.
+  With one index nothing changes. Per-index status and metrics come later (slice 7).
+- **The stop**: a stop builds and lands everything read, a stuck index's documents included, within
+  `--shutdown-timeout-secs`; if it can't (the index still stuck), it exits 1 and the log names each
+  index with documents read and not built and how many; it never exits 0 with read changes unbuilt. The
+  next start reads them again from the slot.
+- **Memory**: plan for up to about 266 B per document a stuck index keeps (314 B at the peak), on top of
+  `max_built_mib`: about 270–320 MB at the default cap.
+
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
 | Rule | |
@@ -2058,14 +2150,14 @@ visitor). Where the paper design needed a detail it didn't give, or the code cha
 | I5 (routed) | routed raised before the run's marks | `routed_moves_only_after_the_runs_marks` (a listener that checks the marks when it fires) |
 | I5 (routed) | routed kept across `forget_all` | `a_forgotten_run_answers_through_nothing_it_routed` |
 | I6 | a per-index changes bound (F1) | `a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap`, `a_held_index_rewriting_one_document_holds_no_bound_and_no_memory_per_change` |
-| I6 | an exempt index counted in `max_waiting` (6b-2) | `a_parked_index_changing_many_documents_does_not_stop_the_reading` (6b-2) |
-| I6 | no bound on exempt documents (6b-2) | `reading_stops_for_every_index_at_max_pending_documents` (6b-2) |
+| I6 | an exempt index counted in `max_waiting` (6b-2) | `exempt_documents_count_toward_no_other_bound`, `a_parked_index_changing_many_documents_does_not_stop_the_reading` |
+| I6 | no bound on exempt documents (6b-2) | `reading_stops_for_every_index_at_max_pending_documents`, `exempt_documents_stop_the_reading_only_at_max_pending_documents` |
 | I7 | the queued slices kept on entering the fold | none: the mutation survives (at most one empty build later; see "6b-1c as built") |
 | I7 | the fold ends at the next grant | no test |
 | I7 | the backlog in one take | no test of its own (the backlog take shares the capped take's bound) |
 | I7 | a blocked publish not held | `an_index_parked_at_its_lane_backstop_folds` |
-| I8 | exemption decided in the builder's poll (D4) (6b-2) | `an_index_reaches_its_exemption_with_nothing_else_in_flight` (6b-2) |
-| I8 | the latch cleared only when nothing waits (6b-2) | `an_exemption_ends_below_max_waiting_per_index` (6b-2) |
+| I8 | exemption decided in the builder's poll (D4) (6b-2) | `an_index_reaches_its_exemption_with_nothing_else_in_flight`, `holding_a_builder_wakes_a_reader_waiting_at_its_cap` |
+| I8 | the latch cleared only when nothing waits (6b-2) | `an_exemption_ends_below_max_waiting_per_index` |
 | I9 | waiters leave the line after each pass (old G9, F4) | `no_build_takes_room_by_the_limit_ahead_of_a_waiter_the_limit_refused` across two builders; `a_freed_permit_wakes_a_waiting_builder` |
 | I9 | a waiter left in its line across an await outside the loop | `a_builder_awaiting_outside_its_loop_holds_no_place_in_a_line` |
 | I9 | a builder joins while its publish is blocked, or keeps a finished build's permit | `a_builder_awaiting_outside_its_loop_holds_no_place_in_a_line` (fix round 1) |
@@ -2076,7 +2168,7 @@ visitor). Where the paper design needed a detail it didn't give, or the code cha
 | I10 | builders return before the end signal | `a_request_queued_for_one_index_after_live_ends_is_served` |
 | I11 | the key read stepped by its walk (6b-3) | `one_index_stuck_mid_walk_does_not_stop_another_indexs_key_reads` (6b-3) |
 | I11 | a builder waiting for the token stops coalescing | no test |
-| I12 | an exempt backlog left at the stream's end (6b-2) | `the_stream_end_builds_an_exempt_backlog` (6b-2) |
+| I12 | an exempt backlog left at the stream's end (6b-2) | `an_index_held_past_its_waiting_bound_is_exempt_and_the_reading_goes_on`; `the_stream_end_builds_an_exempt_backlog` and `a_stop_builds_and_lands_an_exempt_backlog_under_the_deadline` pin the outcome |
 | I12 | a run ending `Ok` with documents waiting | no test of its own; the random schedules check every document landed |
 | I12 | a builder returns before the reader's end | `a_stop_mid_run_builds_what_the_reader_marked_last` (several indexes) |
 | I13 | the other builders left running after an error | `a_build_error_ends_the_run_and_drops_every_builder_in_place` |

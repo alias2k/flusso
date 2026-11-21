@@ -715,9 +715,30 @@ is the one concrete piece.
   `[concurrency]` keys, `--max-waiting-per-index`/`--max-waiting` + `FLUSSO_MAX_WAITING*`, never in the
   lock, defaults `2 × max_changes` and `2 × builds × max_changes`, an unset one following the other
   as `[backoff]`'s pair does, judged by `daemon::max_waiting` in `check`/`build`/`run`/`Daemon::start`:
-  0, or both set with the total below the per-index bound, refused naming each origin). **The stop**: the reader hands over
+  0, or both set with the total below the per-index bound, refused naming each origin). **The exemption
+  (6b-2)**: with two or more builders, an index whose builder is **held** (`Lead::hold`, written by the
+  builder: its live batch refused by the budget, or a publish pending on a full lane, until its next live
+  grant or the publish going through) with `max_waiting_per_index` documents or more waiting is latched
+  **exempt** by the reader in `Lead::reached` (cleared when fewer wait); its documents count toward no
+  per-index or total bound, only toward `max_pending_documents` over every exempt index
+  (`IngestEngine::with_max_pending_documents`, `[concurrency] max_pending_documents`,
+  `--max-pending-documents` + `FLUSSO_MAX_PENDING_DOCUMENTS`, default 1,000,000, never in the lock,
+  judged by `daemon::max_pending_documents`), where the reading stops for every index. Becoming held
+  wakes the reader (D4). The slot stays pinned by the exempt index (its oldest unbuilt document is its
+  lanes' backlog), so WAL grows; the reader logs each latch edge and the pending cap. One builder keeps
+  6b-1b's lead. A pending document costs 266 B held, 314 B at the peak (`tests/pending_memory.rs`, a
+  counting allocator). Guards: `reader::tests`' `an_index_at_its_cap_is_exempt_only_while_its_builder_is_held`
+  and siblings, `ingest::tests`' `a_parked_index_changing_many_documents_does_not_stop_the_reading` (slice
+  4's acceptance test turned around), `ingest::tests::builders`' `reading_stops_for_every_index_at_max_pending_documents`,
+  `an_index_reaches_its_exemption_with_nothing_else_in_flight`, `the_stream_end_builds_an_exempt_backlog`,
+  `a_stop_builds_and_lands_an_exempt_backlog_under_the_deadline`, `a_stop_with_an_exempt_index_still_stuck_does_not_end`;
+  the random schedules hold `orders` stuck for a random stretch in every third two-index seed. **The stop**: the reader hands over
   its cut run, ends and returns the stream; the builder waits for that (the barrier), builds and
-  publishes every run handed over and hands its end to the dispatcher, which drains, then `close_live`.
+  publishes every run handed over, an exempt backlog included (O3), and hands its end to the dispatcher,
+  which drains, then `close_live`. A run never ends `Ok` with a document waiting
+  (`EngineError::DocumentsLeft`); a stop cut short by `--shutdown-timeout-secs` exits 1 and the CLI's log
+  names each index left with documents read and not built (`shutdown::unbuilt_indexes`,
+  `daemon::Status::waiting_by_index`).
   A reader error (through the builder, which joins the reader) or a builder error reaches the
   dispatcher over the builder's one-shot and ends the run; a panic in any of the three unwinds the run's
   task, as `main`'s did; returning drops the reader and the builder in place (nothing spawned, nothing
