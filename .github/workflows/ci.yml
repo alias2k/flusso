@@ -12,6 +12,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Bump to drop the boundary test's restored results.
+  BOUNDARY_CACHE: flusso-boundary-v1
 
 jobs:
   # `clippy + tests` runs in parts (issue #444; docs/src/contribute/testing.md):
@@ -21,18 +23,22 @@ jobs:
   #   build    Builds every test binary once into a nextest archive, checks the
   #            parts hold each test of the run exactly once, uploads it. On a
   #            docs-only change, runs only what reads the changed docs.
-  #   lint     fmt, clippy, the two `cargo check`s, the hash-seed guard,
-  #            doctests, doc links.
+  #   lint     fmt, clippy, the two `cargo check`s, the hash-seed guard, doc
+  #            links.
+  #   doctests The workspace doctests, on the build job's cache.
   #   tests    One job per part, from the archive: the `opensearch` group in
   #            three, the derive's boundary test, and the rest.
   #   clippy + tests
   #            The required check: green only when every job above succeeded
   #            and the parts' JUnit reports hold every test the build listed.
   #
+  # A part that flakes is re-run with "Re-run failed jobs" while the archive is
+  # kept (7 days); after that, "Re-run all jobs" builds a new one.
+  #
   # Build caches are saved from `main` only and restored on pull requests (the
-  # repository's 10 GB cache quota): `build` saves the test build, `lint` its
-  # own; the parts restore none (they run the archive; the tests that compile
-  # with cargo build in their own target dirs, as before).
+  # repository's 10 GB cache quota): `build` saves the test build (`doctests`
+  # restores it), `lint` its own, the boundary part its results; the other
+  # parts restore none (they run the archive).
   plan:
     name: "tests: plan"
     runs-on: ubuntu-latest
@@ -100,7 +106,6 @@ jobs:
       - uses: ./.github/actions/rust-test-setup
         if: needs.plan.outputs.docs_only != 'true' || needs.plan.outputs.cargo == 'true'
         with:
-          components: clippy
           shared-key: test
           save-if: ${{ github.ref == 'refs/heads/main' && needs.plan.outputs.docs_only != 'true' }}
 
@@ -122,7 +127,9 @@ jobs:
           .github/scripts/test-parts.py check ${READ_SIDE_ONLY:+--read-side-only} \
             --summary "$GITHUB_STEP_SUMMARY" --output "$GITHUB_OUTPUT" -- --workspace
 
-      # Already zstd-compressed; kept a day, only this run's parts read it.
+      # Already zstd-compressed (about 1 GB). Kept 7 days, so "Re-run failed
+      # jobs" can re-run a part that flaked within a working week; artifact
+      # storage is free on a public repository and expires on its own.
       - name: Upload the archive
         if: needs.plan.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v7
@@ -130,7 +137,7 @@ jobs:
           name: nextest-archive
           path: ${{ runner.temp }}/nextest-archive.tar.zst
           compression-level: 0
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: error
 
       # Docs-only: only the tests that read the changed files (the selection
@@ -165,7 +172,7 @@ jobs:
           if-no-files-found: ignore
 
   lint:
-    name: "tests: lint (fmt, clippy, checks, docs)"
+    name: "tests: lint (fmt, clippy, checks, doc links)"
     needs: plan
     if: needs.plan.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
@@ -176,9 +183,7 @@ jobs:
       # build's.
       - uses: ./.github/actions/rust-test-setup
         with:
-          components: clippy
           shared-key: lint
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
         run: cargo fmt --all --check
@@ -209,16 +214,32 @@ jobs:
       - name: Check the binary keeps a per-process hash seed (issue #355)
         run: .github/scripts/check-ahash-seed.py
 
-      # nextest does not run doctests; run them separately.
-      - name: Doctests
-        run: cargo test --workspace --doc
-
       # The crate docs are a living reference (lots of intra-doc `[`links`]`), so
       # gate on them resolving: `-D warnings` turns a broken/ambiguous/redundant
       # link into a build error. `--document-private-items` checks internal docs
       # too, since much of the documentation is on private items.
       - name: Doc links
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+
+  # The doctests build the debug dependency graph the test build already has:
+  # on the build job's cache (restored, never saved here) they compile only the
+  # workspace's crates. A job of their own, so the parts don't wait for them.
+  doctests:
+    name: "tests: doctests"
+    needs: plan
+    if: needs.plan.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/rust-test-setup
+        with:
+          shared-key: test
+          save-if: "false"
+
+      # nextest does not run doctests; run them separately.
+      - name: Doctests
+        run: cargo test --workspace --doc
 
   tests:
     name: "tests: ${{ matrix.part.name }}"
@@ -245,9 +266,24 @@ jobs:
 
       # The derive's boundary and consumer_lints tests and the trybuild `ui`
       # harnesses run cargo `--offline`: they need the locked crates on disk,
-      # which the build job had and this runner doesn't.
+      # which the build job had and this runner doesn't. The OpenSearch parts
+      # run no cargo.
       - name: Fetch the locked crates
+        if: matrix.part.cargo
         run: cargo fetch --locked
+
+      # The boundary test's results, one file per generated file, named after a
+      # hash of its text and of every input it depends on (the derive,
+      # `flusso-query`, kernel, config, fixtures, lock, compiler): an unchanged
+      # derive compiles nothing. The test's own hash decides what is reused; this
+      # key only says when a result set is worth restoring. Saved from `main`.
+      - name: Restore the boundary test's results
+        if: matrix.part.id == 'boundary'
+        id: boundary-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: target/tests/flusso-boundary/cache
+          key: ${{ env.BOUNDARY_CACHE }}-${{ hashFiles('sdk/query-derive/src/**', 'sdk/query-derive/Cargo.toml', 'sdk/query-derive/tests/fixtures/**', 'sdk/query-derive/tests/boundary.rs', 'sdk/query/src/**', 'sdk/query/Cargo.toml', 'libs/0-kernel/src/**', 'libs/0-kernel/Cargo.toml', 'libs/0-kernel/derive/src/**', 'libs/0-kernel/derive/Cargo.toml', 'libs/1-config/src/**', 'libs/1-config/Cargo.toml', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}
 
       - name: Download the archive
         uses: actions/download-artifact@v8
@@ -266,9 +302,18 @@ jobs:
           FILTER: ${{ matrix.part.filter }}
         run: |
           cargo nextest run --archive-file "$RUNNER_TEMP/archive/nextest-archive.tar.zst" \
-            --extract-to "$GITHUB_WORKSPACE" --workspace-remap "$GITHUB_WORKSPACE" \
+            --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --workspace-remap "$GITHUB_WORKSPACE" \
             --profile ci --run-ignored all --no-tests=warn -E "$FILTER"
 
+      - name: Save the boundary test's results
+        if: matrix.part.id == 'boundary' && (github.ref == 'refs/heads/main' || github.head_ref == 'ci/split-tests') && steps.boundary-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: target/tests/flusso-boundary/cache
+          key: ${{ steps.boundary-cache.outputs.cache-primary-key }}
+
+      # A re-run part replaces its attempt's report, so the verdict reads the
+      # latest attempt of each part.
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v7
@@ -276,12 +321,13 @@ jobs:
           name: nextest-junit-${{ matrix.part.id }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
+          overwrite: true
 
   verdict:
     name: clippy + tests
-    needs: [plan, build, lint, tests]
+    needs: [plan, build, lint, doctests, tests]
     # Runs whatever the parts did: a failed, cancelled or skipped part is red
-    # here, except the lint and test jobs a docs-only change skips.
+    # here, except the jobs a docs-only change skips (all but plan and build).
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -461,9 +507,11 @@ jobs:
         with:
           job: other-platforms
 
+      # The pinned toolchain only: another one beside it would change the
+      # cache key on every stable release (issue #444).
       - name: Install Rust
         if: steps.change.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/pinned-rust
 
       # Saved from `main` only; pull requests restore it (issue #444).
       - name: Cache build artifacts
