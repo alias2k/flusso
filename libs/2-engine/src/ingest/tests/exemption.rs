@@ -74,9 +74,9 @@ async fn whole_sink_down(indexes: usize, capacity: usize, budget: bool) -> (u64,
 async fn with_a_whole_sink_down_two_indexes_behind_full_lanes_stop_reading() {
     let (read, waiting) = whole_sink_down(2, 2, false).await;
     assert!(
-        read <= 20 && waiting <= 12,
-        "every index held: the reading stops at the non-exempt bounds, as before 6b-2 (read \
-         {read}, {waiting} waiting)"
+        read <= 15 && waiting <= 8,
+        "every index held: the reading stops at the non-exempt bounds, as before 6b-2, measured \
+         plus one (read {read}, {waiting} waiting)"
     );
 }
 
@@ -85,9 +85,9 @@ async fn with_a_whole_sink_down_two_indexes_behind_full_lanes_stop_reading() {
 async fn with_a_whole_sink_down_two_indexes_held_by_the_budget_stop_reading() {
     let (read, waiting) = whole_sink_down(2, 1 << 20, true).await;
     assert!(
-        read <= 20 && waiting <= 12,
-        "every index held: the reading stops at the non-exempt bounds, as before 6b-2 (read \
-         {read}, {waiting} waiting)"
+        read <= 15 && waiting <= 9,
+        "every index held: the reading stops at the non-exempt bounds, as before 6b-2, measured \
+         plus one (read {read}, {waiting} waiting)"
     );
 }
 
@@ -96,9 +96,9 @@ async fn with_a_whole_sink_down_two_indexes_held_by_the_budget_stop_reading() {
 async fn with_a_whole_sink_down_three_indexes_held_by_the_budget_stop_reading() {
     let (read, waiting) = whole_sink_down(3, 1 << 20, true).await;
     assert!(
-        read <= 20 && waiting <= 12,
-        "every index held: the reading stops at the non-exempt bounds, as before 6b-2 (read \
-         {read}, {waiting} waiting)"
+        read <= 17 && waiting <= 11,
+        "every index held: the reading stops at the non-exempt bounds, as before 6b-2, measured \
+         plus one (read {read}, {waiting} waiting)"
     );
 }
 
@@ -107,7 +107,7 @@ async fn with_a_whole_sink_down_three_indexes_held_by_the_budget_stop_reading() 
 async fn with_a_whole_sink_down_one_index_behind_a_full_lane_stops_reading() {
     let (read, waiting) = whole_sink_down(1, 2, false).await;
     assert!(
-        read <= 12 && waiting <= 4,
+        read <= 9 && waiting <= 5,
         "one index: unchanged by the exemption (read {read}, {waiting} waiting)"
     );
 }
@@ -117,7 +117,7 @@ async fn with_a_whole_sink_down_one_index_behind_a_full_lane_stops_reading() {
 async fn with_a_whole_sink_down_one_index_held_by_the_budget_stops_reading() {
     let (read, waiting) = whole_sink_down(1, 1 << 20, true).await;
     assert!(
-        read <= 12 && waiting <= 4,
+        read <= 11 && waiting <= 5,
         "one index: unchanged by the exemption (read {read}, {waiting} waiting)"
     );
 }
@@ -349,4 +349,386 @@ async fn the_exemption_lasts_while_some_index_flows_and_stops_when_none_does() {
         db.expected(),
         "let through, everything lands"
     );
+}
+
+/// A whole sink down over three indexes, `users` and `orders` changing one
+/// document each every `every` from 0 s, `items` as `items` says; every
+/// write stalls. Returns the changes read and the documents waiting at each
+/// of `at`, then resumes the sink and checks everything lands.
+async fn sink_down_beside(
+    items: Items,
+    every: Duration,
+    pending: usize,
+    budget: Option<(usize, f64)>,
+    at: &[u64],
+) -> Vec<(u64, usize)> {
+    let changes: i64 = 600;
+    let mut log: Vec<Change> = Vec::new();
+    let mut arrivals: Vec<Duration> = Vec::new();
+    for n in 0..changes {
+        // users (n % 3 == 0) and orders (n % 3 == 1) only.
+        let id = 3 * (n / 2) + n % 2;
+        log.push(Change::upsert(id));
+        arrivals.push(every * u32::try_from(n).unwrap());
+    }
+    match items {
+        Items::Silent | Items::Backfilling => {}
+        Items::OneChange => {
+            log.insert(0, Change::upsert(2));
+            arrivals.insert(0, Duration::ZERO);
+        }
+        Items::EverySecond => {
+            for n in 0..40u32 {
+                let at = Duration::from_secs(u64::from(n));
+                let slot = arrivals.partition_point(|arrival| *arrival <= at);
+                log.insert(slot, Change::upsert(3 * i64::from(n) + 2));
+                arrivals.insert(slot, at);
+            }
+        }
+    }
+    let rows = if items == Items::Backfilling { 600 } else { 0 };
+    let db = Database::new(rows, log);
+    let builder = Builder::over(
+        &db,
+        Behaviour {
+            padding: if budget.is_some() { 8 * KIB } else { 0 },
+            ..Behaviour::default()
+        },
+        3,
+    );
+    let recorder = Recorder::seeded(items != Items::Backfilling);
+    if items == Items::Backfilling {
+        recorder
+            .seeded_indexes
+            .lock()
+            .unwrap()
+            .extend(["users".to_owned(), "orders".to_owned()]);
+    }
+    recorder.stall();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        if budget.is_some() { 1 << 20 } else { 2 },
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(2)
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+            .with_max_pending_documents(pending)
+    });
+    if let Some((bytes, share)) = budget {
+        deployment = deployment.with_budget_shared_at(bytes, share);
+    }
+    let progress = deployment.ingest.progress();
+    let at = at.to_vec();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            let mut seen = Vec::new();
+            let start = tokio::time::Instant::now();
+            for second in at {
+                tokio::time::sleep_until(start + Duration::from_secs(second)).await;
+                seen.push((progress.changes_read(), progress.waiting()));
+            }
+            recorder.resume();
+            seen
+        })
+    };
+    tokio::time::timeout(LIMIT * 4, deployment.run_to_end(0))
+        .await
+        .expect("the run ends once the sink resumes");
+    assert_eq!(deployment.recorder.state(), db.expected());
+    watcher.await.unwrap()
+}
+
+/// What `items` does while the sink is down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Items {
+    /// No change at all.
+    Silent,
+    /// One change, at the start.
+    OneChange,
+    /// One change a second.
+    EverySecond,
+    /// No change; its rows are backfilled.
+    Backfilling,
+}
+
+/// (a) A whole sink down beside a silent index: `items` has no change and
+/// nothing outstanding, so it is free, and the held `users` and `orders` read
+/// on, exempt, to `max_pending_documents`: what one index stuck beside quiet
+/// healthy ones does, which this cannot be told apart from. Bounded by the
+/// cap.
+#[tokio::test(start_paused = true)]
+async fn with_a_whole_sink_down_a_silent_index_lets_the_others_read_on_to_the_pending_cap() {
+    let seen = sink_down_beside(Items::Silent, Duration::from_millis(10), 100, None, &[10]).await;
+    let (read, waiting) = seen[0];
+    assert!(
+        read > 50 && waiting <= 100 + 2,
+        "reads on to the cap and no further: {read} read, {waiting} waiting"
+    );
+}
+
+/// (b) The same with one `items` change the sink never acknowledges: after
+/// five seconds `items` is not free either, nobody is, and the reading
+/// stops, having grown by about five seconds of changes at most.
+#[tokio::test(start_paused = true)]
+async fn with_a_whole_sink_down_one_unacknowledged_change_stops_the_reading_after_five_seconds() {
+    let seen = sink_down_beside(
+        Items::OneChange,
+        Duration::from_millis(50),
+        1000,
+        None,
+        &[7, 20],
+    )
+    .await;
+    let ((read, waiting), (later, _)) = (seen[0], seen[1]);
+    assert_eq!(read, later, "the reading stopped: {seen:?}");
+    assert!(
+        read <= 5 * 20 + 12 && waiting <= 5 * 20 + 12,
+        "at most five seconds of changes, twenty a second, past the bounds: {seen:?}"
+    );
+}
+
+/// (c) A light index publishing one change a second to a dead sink is not
+/// free once its first item has waited five seconds, long before the budget
+/// would hold it (a quarter of 1 MiB each: its share takes about 28 seconds
+/// to fill, while `users` and `orders` fill theirs at once): the reading
+/// stops.
+#[tokio::test(start_paused = true)]
+async fn with_a_whole_sink_down_a_light_index_is_not_free_once_its_item_waits_five_seconds() {
+    let seen = sink_down_beside(
+        Items::EverySecond,
+        Duration::from_millis(20),
+        100_000,
+        Some((1024 * KIB, 0.25)),
+        &[8, 20],
+    )
+    .await;
+    assert_eq!(seen[0].0, seen[1].0, "the reading stopped by 8 s: {seen:?}");
+}
+
+/// (d) An index only backfilling to a dead sink is not free once its backfill
+/// items have waited five seconds: the reading stops.
+#[tokio::test(start_paused = true)]
+async fn with_a_whole_sink_down_a_backfilling_index_is_not_free_once_its_items_wait_five_seconds() {
+    let seen = sink_down_beside(
+        Items::Backfilling,
+        Duration::from_millis(20),
+        100_000,
+        Some((64 * KIB, 0.5)),
+        &[8, 20],
+    )
+    .await;
+    assert_eq!(seen[0].0, seen[1].0, "the reading stopped by 8 s: {seen:?}");
+}
+
+/// (e) One stuck index beside a quiet healthy one and a flowing one:
+/// `orders` is exempt, `items` (quiet, nothing outstanding) and `users`
+/// (acknowledged) are free, and `users`' changes are read and land.
+#[tokio::test(start_paused = true)]
+async fn one_stuck_index_beside_a_quiet_and_a_flowing_one_is_exempt() {
+    let changes: i64 = 400;
+    let log: Vec<Change> = (0..changes)
+        .map(|n| Change::upsert(3 * (n / 2) + n % 2))
+        .collect();
+    let arrivals: Vec<Duration> = (0..changes as u64)
+        .map(|n| Duration::from_millis(20 * n))
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::over(&db, Behaviour::default(), 3);
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        2,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(2)
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+    });
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(9)).await;
+            let seen = (
+                progress.changes_read(),
+                recorder.state().keys().filter(|id| *id % 3 == 0).count(),
+            );
+            recorder.refused_indexes.lock().unwrap().clear();
+            seen
+        })
+    };
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    let (read, users) = watcher.await.unwrap();
+    assert_eq!(
+        read, changes as u64,
+        "every change read beside the stuck orders"
+    );
+    assert_eq!(users, 200, "every users change landed");
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// (f) Self-correction: `orders` is stuck (its lane refuses, its budget
+/// share fills: held); `users`, one change a second, is healthy but each
+/// write takes eight seconds, so for three seconds of each it has an item
+/// waiting longer than five: not free, `orders` freezes and the reading
+/// stops. When `users`'
+/// item is acknowledged it is free again, and the reader, parked, is woken
+/// by the dispatcher's tick: the reading goes on, write after write.
+#[tokio::test(start_paused = true)]
+async fn a_slow_healthy_index_lets_the_reading_go_on_after_each_acknowledgement() {
+    // orders (odd ids) every 40 ms, users (even) once a second, for 80 s.
+    let mut timed: Vec<(Duration, i64)> = (0..2000i64)
+        .map(|n| (Duration::from_millis(40 * n as u64), 2 * n + 1))
+        .chain((0..80i64).map(|n| (Duration::from_secs(n as u64), 2 * n)))
+        .collect();
+    timed.sort();
+    let log: Vec<Change> = timed.iter().map(|(_, id)| Change::upsert(*id)).collect();
+    let arrivals: Vec<Duration> = timed.iter().map(|(at, _)| *at).collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(true);
+    *recorder.write_delay.lock().unwrap() = Some(Duration::from_secs(8));
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        1 << 20,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(2)
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+    })
+    .with_budget_shared_at(16 * 1024 * KIB, 0.05);
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..12 {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                seen.push(progress.changes_read());
+            }
+            recorder.refused_indexes.lock().unwrap().clear();
+            *recorder.write_delay.lock().unwrap() = None;
+            seen
+        })
+    };
+    tokio::time::timeout(LIMIT * 8, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    let seen = watcher.await.unwrap();
+    let grew = seen.windows(2).filter(|pair| pair[1] > pair[0]).count();
+    let stood = seen.windows(2).filter(|pair| pair[1] == pair[0]).count();
+    assert!(
+        grew >= 3 && stood >= 1,
+        "the reading stopped while users waited and went on after its acknowledgements: {seen:?}"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// A hold ending wakes the reader (review round 2, item 5): `orders` stuck
+/// and exempt, `users` stuck too, so the reading stops; `users` is let
+/// through, and once its lane takes its items again (its first write after
+/// the release) the reading goes on within half a second, before the
+/// dispatcher's tick could have carried it.
+#[tokio::test(start_paused = true)]
+async fn the_reading_goes_on_within_half_a_second_of_a_hold_ending() {
+    let changes: i64 = 600;
+    let log: Vec<Change> = (0..changes).map(Change::upsert).collect();
+    let arrivals: Vec<Duration> = (0..changes as u64)
+        .map(|n| Duration::from_millis(20 * n))
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(&db, Behaviour::default());
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .extend(["orders".to_owned(), "users".to_owned()]);
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        2,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(2)
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+    });
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            let stopped = progress.changes_read();
+            let written = recorder.landings.lock().unwrap().len();
+            recorder.refused_indexes.lock().unwrap().remove("users");
+            while recorder.landings.lock().unwrap().len() <= written {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let landed = tokio::time::Instant::now();
+            while progress.changes_read() <= stopped {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let after = landed.elapsed();
+            recorder.refused_indexes.lock().unwrap().clear();
+            (stopped, after)
+        })
+    };
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    let (stopped, after) = watcher.await.unwrap();
+    assert!(
+        stopped < changes as u64,
+        "the reading had stopped: {stopped}"
+    );
+    assert!(
+        after < Duration::from_millis(500),
+        "the reading went on {after:?} after users' lane took its items again"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
 }

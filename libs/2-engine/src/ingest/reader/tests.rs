@@ -765,6 +765,10 @@ fn exempting(pending: usize) -> Arc<Lead> {
         0,
         vec![orders(), users()],
         pending,
+        Arc::new(crate::ingest::outstanding::Outstanding::new([
+            orders(),
+            users(),
+        ])),
     )
 }
 
@@ -851,6 +855,10 @@ fn exempt_documents_count_toward_no_other_bound() {
         0,
         vec![orders(), users()],
         1000,
+        Arc::new(crate::ingest::outstanding::Outstanding::new([
+            orders(),
+            users(),
+        ])),
     );
     lead.hold(0, true);
     mark_docs(&progress, orders(), 0, 20);
@@ -966,6 +974,15 @@ impl std::io::Write for Lines {
 }
 
 impl Lines {
+    /// The last line logged that holds one of `lines`.
+    fn last_of(&self, lines: &[&str]) -> Option<String> {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .lines()
+            .rev()
+            .find(|logged| lines.iter().any(|line| logged.contains(line)))
+            .map(str::to_owned)
+    }
+
     fn count(&self, line: &str) -> usize {
         String::from_utf8_lossy(&self.0.lock().unwrap())
             .matches(line)
@@ -973,9 +990,10 @@ impl Lines {
     }
 }
 
-/// Review of #452: an index hovering at its cap latches and clears again
-/// and again; each kind of line is logged at most once a minute, the first
-/// always.
+/// Review of #452, corrected in round 2: an index hovering at its cap
+/// latches and clears again and again; the pair of lines is logged at most
+/// once a minute, the first always, and once the minute is over the current
+/// state is logged at the next check if it differs from the last line.
 #[tokio::test(start_paused = true)]
 async fn an_index_hovering_at_its_cap_logs_each_kind_of_line_at_most_once_a_minute() {
     let lines = Lines::default();
@@ -998,19 +1016,60 @@ async fn an_index_hovering_at_its_cap_logs_each_kind_of_line_at_most_once_a_minu
             assert!(!lead.reached(&progress), "below its cap: cleared");
         }
     };
+    let (exempt, cleared) = ("exempt, so reading goes on", "no longer exempt");
     flap(0, 10);
     assert_eq!(
-        lines.count("exempt, so reading goes on"),
-        1,
-        "latched ten times"
+        (lines.count(exempt), lines.count(cleared)),
+        (1, 0),
+        "ten flaps in a minute: the first line only"
     );
-    assert_eq!(lines.count("no longer exempt"), 1, "cleared ten times");
     tokio::time::advance(Duration::from_secs(61)).await;
+    assert!(!lead.reached(&progress));
+    assert_eq!(
+        lines.count(cleared),
+        1,
+        "the minute over, the next check logs the current state"
+    );
     flap(10, 1);
     assert_eq!(
-        lines.count("exempt, so reading goes on"),
-        2,
-        "a minute later"
+        (lines.count(exempt), lines.count(cleared)),
+        (1, 1),
+        "within the next minute"
     );
-    assert_eq!(lines.count("no longer exempt"), 2, "a minute later");
+}
+
+/// Review round 2 of #452: an index latched, cleared, then latched again
+/// within the minute, and exempt for an hour: the last line logged must name
+/// its current state (exempt), not the line before (no longer exempt).
+#[tokio::test(start_paused = true)]
+async fn the_last_line_logged_names_the_current_state_within_a_minute_of_a_change() {
+    let lines = Lines::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer({
+            let lines = lines.clone();
+            move || lines.clone()
+        })
+        .finish();
+    let _logging = tracing::subscriber::set_default(subscriber);
+    let progress = progress();
+    let lead = exempting(1000);
+    lead.hold(0, true);
+    mark_docs(&progress, orders(), 0, 2);
+    assert!(!lead.reached(&progress), "held at its cap: exempt");
+    progress.take(&orders(), 2, &|_| false).unwrap();
+    assert!(!lead.reached(&progress), "below its cap: cleared");
+    tokio::time::advance(Duration::from_secs(5)).await;
+    mark_docs(&progress, orders(), 100, 2);
+    assert!(!lead.reached(&progress), "exempt again");
+    for _ in 0..60 {
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(!lead.reached(&progress), "still exempt");
+    }
+    let last = lines.last_of(&["exempt, so reading goes on", "no longer exempt"]);
+    assert!(
+        last.as_deref()
+            .is_some_and(|line| line.contains("exempt, so reading goes on")),
+        "exempt for an hour, the last line logged names it: {last:?}"
+    );
 }

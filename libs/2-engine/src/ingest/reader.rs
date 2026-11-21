@@ -53,6 +53,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant};
 
 use super::LiveStream;
+use super::outstanding::Outstanding;
 use crate::error::{EngineError, Result};
 use crate::observer::Observer;
 use crate::policy::{BatchPolicy, MaxWaiting};
@@ -124,9 +125,8 @@ pub(super) struct Queue {
     /// held), the count it stopped growing at: it may drain, not pass it.
     /// `usize::MAX` while it grows or isn't latched. Written by the reader.
     ceiling: AtomicUsize,
-    /// When the latch was last set and last cleared, for the log's throttle.
-    latched_log: LogEdge,
-    cleared_log: LogEdge,
+    /// The exempt / no longer exempt lines, throttled together.
+    log: LogPair,
 }
 
 /// What a latched index may do this lead check.
@@ -142,24 +142,38 @@ enum Exempt {
     Frozen(usize),
 }
 
-/// One log line's last moment, so an index hovering at its cap logs at most
-/// one line per kind a minute (the first always).
+/// A pair of log lines naming two states (exempt or not; the reading
+/// stopped at the pending cap or reading on), throttled together: at most
+/// one line a minute, the first always, and once the minute is over a state
+/// that differs from the last line logged is logged at the next check. So
+/// within a minute and a check of any change, the last line names the
+/// current state (review round 2 of #452: throttled per kind, the last line
+/// could name the state before).
 #[derive(Debug, Default)]
-struct LogEdge(AtomicU64);
+struct LogPair {
+    /// The state the last line named (`false`, the quiet one, before any).
+    logged: AtomicBool,
+    /// When it was logged: milliseconds since the lead began, `0` never.
+    at: AtomicU64,
+}
 
-/// How often one kind of exemption line may be logged.
+/// How often a pair of exemption lines may log.
 const LOG_EVERY: Duration = Duration::from_secs(60);
 
-impl LogEdge {
-    /// Whether a line may be logged now, `since` the lead began; marks it.
-    fn allow(&self, since: Duration) -> bool {
-        let now = u64::try_from(since.as_millis()).unwrap_or(u64::MAX).max(1);
-        let last = self.0.load(Ordering::Relaxed);
-        let every = LOG_EVERY.as_millis() as u64;
-        if last != 0 && now.saturating_sub(last) < every {
+impl LogPair {
+    /// Whether the line naming `state` is due now, `since` the lead began;
+    /// marks it logged.
+    fn due(&self, state: bool, since: Duration) -> bool {
+        if self.logged.load(Ordering::Relaxed) == state {
             return false;
         }
-        self.0.store(now, Ordering::Relaxed);
+        let now = u64::try_from(since.as_millis()).unwrap_or(u64::MAX).max(1);
+        let last = self.at.load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < LOG_EVERY.as_millis() as u64 {
+            return false;
+        }
+        self.logged.store(state, Ordering::Relaxed);
+        self.at.store(now, Ordering::Relaxed);
         true
     }
 }
@@ -171,12 +185,11 @@ struct Exemption {
     indexes: Vec<IndexName>,
     /// The exempt indexes together stop the reading at this many documents.
     max_pending: usize,
-    /// The reader is stopped at `max_pending`: logged once per stretch.
-    at_cap: AtomicBool,
-    /// When the pending cap was last reached and last left, for the log's
-    /// throttle.
-    full_log: LogEdge,
-    reading_on_log: LogEdge,
+    /// The reading stopped at `max_pending` / reading on, throttled together.
+    cap_log: LogPair,
+    /// What each index has waiting on lanes unacknowledged: whether another
+    /// index is free (review round 2 of #452).
+    outstanding: Arc<Outstanding>,
     /// When the lead began: what the log's throttle measures from.
     began: Instant,
 }
@@ -203,6 +216,7 @@ impl Lead {
         read: u64,
         indexes: Vec<IndexName>,
         max_pending_documents: usize,
+        outstanding: Arc<Outstanding>,
     ) -> Arc<Self> {
         let builders = indexes.len();
         Arc::new(Self::of(
@@ -212,9 +226,8 @@ impl Lead {
             Some(Exemption {
                 indexes,
                 max_pending: max_pending_documents,
-                at_cap: AtomicBool::new(false),
-                full_log: LogEdge::default(),
-                reading_on_log: LogEdge::default(),
+                cap_log: LogPair::default(),
+                outstanding,
                 began: Instant::now(),
             }),
         ))
@@ -235,8 +248,7 @@ impl Lead {
                     held: AtomicBool::new(false),
                     exempt: AtomicBool::new(false),
                     ceiling: AtomicUsize::new(usize::MAX),
-                    latched_log: LogEdge::default(),
-                    cleared_log: LogEdge::default(),
+                    log: LogPair::default(),
                 })
                 .collect(),
         }
@@ -364,9 +376,18 @@ impl Lead {
             .iter()
             .filter(|queue| queue.held.load(Ordering::Relaxed))
             .count();
-        // The exemption is there so other indexes keep going: it applies
-        // only while some index isn't held (a whole sink down holds all).
-        let someone_free = held < self.queues.len();
+        // The exemption is there so other indexes keep going: a held index
+        // grows exempt only while some index is free, not held and nothing of
+        // it waiting unacknowledged for `STUCK_AFTER` (a quiet index with
+        // nothing outstanding is free). Read only while some index is held.
+        let someone_free = held == 0
+            || self
+                .queues
+                .iter()
+                .zip(&exemption.indexes)
+                .any(|(queue, index)| {
+                    !queue.held.load(Ordering::Relaxed) && !exemption.outstanding.stuck(index)
+                });
         let since = exemption.began.elapsed();
         let mut others = 0;
         let mut exempt = 0;
@@ -392,17 +413,15 @@ impl Lead {
             return true;
         }
         let full = exempt >= exemption.max_pending;
-        if exemption.at_cap.swap(full, Ordering::Relaxed) != full {
+        if exemption.cap_log.due(full, since) {
             if full {
-                if exemption.full_log.allow(since) {
-                    tracing::warn!(
-                        documents = exempt,
-                        max_pending_documents = exemption.max_pending,
-                        "reading stopped for every index: the exempt indexes have \
-                         max_pending_documents documents waiting to be built; it reads on as they are built"
-                    );
-                }
-            } else if exemption.reading_on_log.allow(since) {
+                tracing::warn!(
+                    documents = exempt,
+                    max_pending_documents = exemption.max_pending,
+                    "reading stopped for every index: the exempt indexes have \
+                     max_pending_documents documents waiting to be built; it reads on as they are built"
+                );
+            } else {
                 tracing::info!(
                     documents = exempt,
                     "the exempt indexes are below max_pending_documents: reading on"
@@ -424,15 +443,34 @@ impl Lead {
         someone_free: bool,
         since: Duration,
     ) -> Exempt {
-        if waiting < self.max.per_index {
-            queue.ceiling.store(usize::MAX, Ordering::Relaxed);
-            if queue.exempt.swap(false, Ordering::Relaxed) && queue.cleared_log.allow(since) {
+        let exempt = Self::decide(queue, waiting, self.max.per_index, someone_free);
+        let latched = exempt != Exempt::No;
+        if queue.log.due(latched, since) {
+            if latched {
+                tracing::warn!(
+                    %index,
+                    waiting,
+                    "index held at max_waiting_per_index: exempt, so reading goes on for the other \
+                     indexes; its changes are kept as documents waiting, up to max_pending_documents \
+                     for every exempt index, and the replication slot stays pinned by it, so WAL grows"
+                );
+            } else {
                 tracing::info!(
                     %index,
                     waiting,
                     "index below max_waiting_per_index: no longer exempt; it paces the reading again"
                 );
             }
+        }
+        exempt
+    }
+
+    /// [`latched`](Self::latched)'s decision, writing the latch and the
+    /// ceiling.
+    fn decide(queue: &Queue, waiting: usize, cap: usize, someone_free: bool) -> Exempt {
+        if waiting < cap {
+            queue.ceiling.store(usize::MAX, Ordering::Relaxed);
+            queue.exempt.store(false, Ordering::Relaxed);
             return Exempt::No;
         }
         let grows = queue.held.load(Ordering::Relaxed) && someone_free;
@@ -441,15 +479,6 @@ impl Lead {
                 return Exempt::No;
             }
             queue.exempt.store(true, Ordering::Relaxed);
-            if queue.latched_log.allow(since) {
-                tracing::warn!(
-                    %index,
-                    waiting,
-                    "index held at max_waiting_per_index: exempt, so reading goes on for the other \
-                     indexes; its changes are kept as documents waiting, up to max_pending_documents \
-                     for every exempt index, and the replication slot stays pinned by it, so WAL grows"
-                );
-            }
         }
         if grows {
             queue.ceiling.store(usize::MAX, Ordering::Relaxed);
@@ -461,6 +490,17 @@ impl Lead {
         }
         queue.ceiling.store(waiting, Ordering::Relaxed);
         Exempt::Frozen(waiting)
+    }
+
+    /// The dispatcher's tick (1 s): wake a reader waiting at its lead while
+    /// the lead exempts, so it checks its bounds again. An acknowledgement
+    /// wakes nobody; this is what lets a reader stopped because no index was
+    /// free read on once one is (self-correction, review round 2 of #452),
+    /// and logs a line that came due while it waited.
+    pub(super) fn tick(&self) {
+        if self.exemption.is_some() {
+            self.wake();
+        }
     }
 }
 

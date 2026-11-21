@@ -1040,6 +1040,15 @@ impl Deployment {
         self.with_shared_budget(bytes, most, Some(indexes))
     }
 
+    /// [`with_budget`](Self::with_budget), each index's live share `share`
+    /// of the limit.
+    fn with_budget_shared_at(mut self, bytes: usize, share: f64) -> Self {
+        let budget = Arc::new(Budget::new(bytes).with_index_share(self.indexes, share));
+        self.ingest = self.ingest.with_budget(Arc::clone(&budget));
+        self.budget = Some(budget);
+        self
+    }
+
     /// [`with_budget`](Self::with_budget), shared over `indexes` (`None`:
     /// not shared, the budget's rules before slice 4).
     fn with_shared_budget(mut self, bytes: usize, most: usize, indexes: Option<usize>) -> Self {

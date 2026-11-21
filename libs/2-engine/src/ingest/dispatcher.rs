@@ -32,6 +32,7 @@
 //!   registration ────┘  └────────── tick, stop, end ────┘
 //! ```
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
@@ -44,6 +45,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::builder::BuilderEnd;
 use super::confirm::CONFIRM_TICK;
+use super::reader::Lead;
 use super::reader::{self, ReaderEnd};
 use super::snapshot::ClosedConsumer;
 use super::{Ended, IngestEngine};
@@ -168,6 +170,7 @@ impl IngestEngine {
         builders: Vec<Builder<'_>>,
         reports: &Reports,
         mut reader: ReaderEnd,
+        lead: Arc<Lead>,
     ) -> Result<Ended> {
         let mut last_confirmed: Option<Landed> = None;
         let mut tick = tokio::time::interval(CONFIRM_TICK);
@@ -257,6 +260,9 @@ impl IngestEngine {
                 }
                 _ = tick.tick() => {
                     self.confirm(&mut last_confirmed, true);
+                    // A reader stopped because no index was free re-checks
+                    // once a second (review round 2 of #452).
+                    lead.tick();
                     for builder in &signals {
                         builder.tick.store(true, Ordering::Release);
                         builder.builder.wake();

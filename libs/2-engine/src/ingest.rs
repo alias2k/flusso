@@ -48,6 +48,7 @@ mod confirm;
 mod dispatcher;
 mod gate;
 mod live;
+mod outstanding;
 mod reader;
 mod snapshot;
 #[cfg(test)]
@@ -120,6 +121,9 @@ pub struct IngestEngine {
     /// How many documents the exempt indexes together may have waiting
     /// before the reader stops for every index (6b-2).
     max_pending_documents: usize,
+    /// What each index has waiting on lanes unacknowledged, for the
+    /// exemption: kept across engine runs, as the items on lanes are.
+    outstanding: Arc<outstanding::Outstanding>,
     budget: Option<Arc<Budget>>,
     /// The budget waits open across engine runs (see [`Builds::with_waits`]).
     budget_waits: Arc<std::sync::Mutex<builds::Waits>>,
@@ -166,6 +170,7 @@ impl IngestEngine {
             builds: 1,
             max_waiting: None,
             max_pending_documents: DEFAULT_MAX_PENDING_DOCUMENTS,
+            outstanding: Arc::new(outstanding::Outstanding::new(progress.indexes().cloned())),
             budget: None,
             budget_waits: Arc::default(),
             key_reads: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -401,6 +406,7 @@ impl IngestEngine {
                     .filter_map(|builds| builds.index().cloned())
                     .collect(),
                 self.max_pending_documents,
+                Arc::clone(&self.outstanding),
             )
         } else {
             Lead::over(
@@ -462,6 +468,7 @@ impl IngestEngine {
                 result,
             });
         }
+        let lead_for_ticks = Arc::clone(&lead);
         let (reading, reader) = reader::reading(
             Reader {
                 resolver: Arc::clone(&self.resolver),
@@ -478,7 +485,7 @@ impl IngestEngine {
             },
             live,
         );
-        let dispatching = self.dispatch(requests, dispatched, &reports, reader);
+        let dispatching = self.dispatch(requests, dispatched, &reports, reader, lead_for_ticks);
         // One task: the reader, the dispatcher and a builder per index
         // (§3.9 I1). The run ends with the dispatcher; returning drops the
         // reader and the builders in place (R9), so nothing of them outlives
