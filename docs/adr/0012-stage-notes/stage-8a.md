@@ -1231,21 +1231,70 @@ hold wakes the reader: becoming held may turn a cap into an exemption, a hold en
 index grow again (some index is free again) or may be the moment nobody is held. One predicate decides
 it (`Lead::documents_reached`'s `someone_free`), so the owner can change the rule in one place.
 
+**"Some other index" means a free index (review round 2 of #452).** Round 1's rule took "not held" for
+"making progress", and an index with no traffic is never held: a whole sink down with one quiet index
+still read every exempt index to `max_pending_documents`, and at the defaults a light index is held only
+once its 256 MiB share fills, a backfilling-only one never (only a live refusal held). So: **an index is
+free while it is not held and none of its items has been waiting on a lane for an acknowledgement for
+`STUCK_AFTER` (5 s) or more without any of them being acknowledged.** An exempt index grows only while
+it is held itself and some other index is free; otherwise it is frozen, as above.
+
+| An index | Free? |
+| --- | --- |
+| quiet, nothing outstanding on any lane | yes: healthy as far as anyone knows (a stuck index beside it must still be exempt, or a later change of it would sit unread behind the stuck one's backlog) |
+| publishing and acknowledged (an acknowledgement within `STUCK_AFTER` of the last, or of the first publish) | yes |
+| items outstanding, none acknowledged for `STUCK_AFTER`: live or backfill, on any lane | no: evidence it is stuck too, long before the budget holds it |
+| held (its live batch refused, or a publish blocked on a full lane) | no |
+
+What counts as outstanding: an item from its publish until every lane is done with it, i.e. its `Hold`
+is dropped (acknowledged and out of every ledger). A `backfill = false` lane is never sent a backfill
+item; a lane that acknowledges without applying drops it at once; a lane at rest holds nothing. So none
+of them makes an index look stuck. **Why not the stall age** (`daemon::Stalls`): it lives in the daemon,
+a layer above the engine, and it counts live items only (backfill items carry no position), so a
+backfilling-only index on a dead sink would look free. The engine keeps one small record per index
+instead (`Outstanding`: how many items are outstanding, and when one was last acknowledged or the
+first published), written where the items are published (a guard inside the item's `Hold`) and when
+the last lane lets go of one (the guard's drop). It is read only while some index is held.
+
+**`STUCK_AFTER` = 5 s.** A healthy sink acknowledges within its flush, hundreds of milliseconds (a
+`Within(refresh_interval)` report delays the searchable fence, not the acknowledgement), and a busy index
+is acknowledged many times a second. A sink engine restarting after a failure waits 1 s, then 2 s, 4 s,
+… up to 60 s: one restart stays under 5 s, a third failure in a row (1 + 2 + 4 = 7 s) does not, which is
+when a sink is failing rather than blinking. The cost of the wait: while the first-held index waits for
+the others to turn not free, it may add `STUCK_AFTER × its change rate` documents (5,000 at 1,000 a
+second), always within `max_pending_documents`. A constant, not a setting.
+
+**Self-correction.** A healthy index whose acknowledgements take longer than 5 s counts as not free; an
+exempt index then freezes and the reader may stop. When the slow item is acknowledged the index is free
+again; the reader parked at its lead is woken by the dispatcher's 1 s tick (it wakes a waiting reader
+while the lead exempts, so it re-checks the bounds, and logs a line due, at most once a second). No
+faster polling; the acknowledgement itself wakes nobody.
+
 **A whole sink down** (two or more indexes, every lane of the one sink stalled: every builder is held,
 by its full lane or by the budget its unacknowledged items keep). No index benefits from reading on, so
 none becomes exempt, and an index already exempt is frozen. The reader stops at the non-exempt bounds,
 as before 6b-2: `max_waiting_per_index` per index and `max_waiting` together, at most one run past them,
 plus whatever an exempt index had when the last other index was held (that backlog stays as it is). So
 what is read during the outage is what `2e5e598e` read, the memory is the lead's, and the reader runs no
-reverse-resolution queries against Postgres while it waits. As first built, 6b-2 latched every index
+reverse-resolution queries against Postgres while it waits. **In truth** (round 2): that holds within
+about `STUCK_AFTER` of each index with traffic having an item unacknowledged; in those first seconds a
+held index may grow exempt by `STUCK_AFTER × its rate` documents. **A truly silent index** (no change,
+nothing outstanding) stays free, so the held ones read on, exempt, until `max_pending_documents` (at the
+defaults about 266 MB and 1,000,000 documents, resolving each change they read) or until the silent index
+gets a change and that change too goes unacknowledged for 5 s. That case cannot be told apart from "one
+index stuck beside quiet healthy ones", the slice's main case, and is bounded by the cap. As first built, 6b-2 latched every index
 exempt and read on to `max_pending_documents` (1,000,000 by default, about 300 MB), resolving every
 change it read: the review's `with_a_whole_sink_down_*` read 106 changes of 600 with 100 waiting where
 the exemption off read 13 with 7. When any index's hold ends the reader is woken, and the others' backlogs
 grow again, exempt, while that index flows. One index is unchanged (it is never exempt).
 
-**The log** (review of #452): each kind of line (an index latched, an index cleared, the pending cap
-reached, reading on) is logged at most once a minute per index, the first always, so an index hovering
-at its cap doesn't flood the log.
+**The log** (review of #452, corrected in round 2): each pair of lines (an index exempt / no longer
+exempt; the reading stopped at the pending cap / reading on) is throttled together: at most one line of
+the pair a minute per index, the first always, and when the minute is over and the state differs from the
+last line logged, the current state is logged at the next check. The reader is checked at least once a
+second while it waits (the tick above), so **within a minute and a second of any change, the last line
+logged for an index names its current state**. Round 1 throttled each kind on its own, so "no longer
+exempt" could be the last line for an hour of exemption.
 
 **The lead (I6).** Before each run the reader waits while:
 
