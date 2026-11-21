@@ -405,7 +405,14 @@ impl Reader {
             .await?;
         tracing::trace!(documents = affected.len(), "change resolved to documents");
         if !reading.slices.is_empty() {
+            // A change's documents come grouped by index: the builder is
+            // looked up once per group, not per document.
+            let mut previous: Option<&IndexName> = None;
             for id in &affected {
+                if previous == Some(&id.index) {
+                    continue;
+                }
+                previous = Some(&id.index);
                 if let Some(slice) = self
                     .runs
                     .iter()
