@@ -160,6 +160,12 @@ impl IngestEngine {
         sinks: Vec<SinkName>,
         progress: Arc<Progress>,
     ) -> Self {
+        // With one index there is no exemption, so no record to keep.
+        let indexes: Vec<IndexName> = progress.indexes().cloned().collect();
+        let several = indexes.len() > 1;
+        let outstanding = Arc::new(outstanding::Outstanding::new(
+            indexes.into_iter().filter(|_| several),
+        ));
         Self {
             source,
             resolver: Arc::clone(&documents),
@@ -170,7 +176,7 @@ impl IngestEngine {
             builds: 1,
             max_waiting: None,
             max_pending_documents: DEFAULT_MAX_PENDING_DOCUMENTS,
-            outstanding: Arc::new(outstanding::Outstanding::new(progress.indexes().cloned())),
+            outstanding,
             budget: None,
             budget_waits: Arc::default(),
             key_reads: Arc::new(tokio::sync::Semaphore::new(1)),

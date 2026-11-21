@@ -713,11 +713,16 @@ impl IngestEngine {
         groups
             .keys()
             .map(|index| {
-                let item = PublishedItem {
-                    _charge: charges.get(index).cloned(),
-                    _outstanding: self.outstanding.publish(index),
+                let charge = charges.get(index).cloned();
+                let hold = match self.outstanding.publish(index) {
+                    Some(outstanding) => Hold::new(Arc::new(PublishedItem {
+                        _charge: charge,
+                        _outstanding: outstanding,
+                    })),
+                    // One index keeps no record: its hold is the charge's.
+                    None => charge.map_or_else(Hold::default, |charge| Hold::new(charge)),
                 };
-                (index.clone(), Hold::new(Arc::new(item)))
+                (index.clone(), hold)
             })
             .collect()
     }
@@ -785,7 +790,7 @@ fn turn_or_never(builds: &Builds) -> impl std::future::Future<Output = ()> + Sen
 /// What one index's lane items of a published batch keep alive.
 struct PublishedItem {
     _charge: Option<Arc<crate::budget::Charge>>,
-    _outstanding: Option<super::outstanding::Published>,
+    _outstanding: super::outstanding::Published,
 }
 
 /// A live build's grant: its live run's newest position, how many changes

@@ -2198,7 +2198,7 @@ cost: per published batch, one allocation per index (the guard beside the budget
 item's `Hold`) and an atomic add; per item let go by every lane, a clock read, a store and an atomic
 subtract; per lead check while some index is held, one load per index (a clock read and two loads for
 an index with items outstanding); one wake of a waiting reader per second while the lead exempts. With
-one builder the record is kept (the guards ride every item) but never read.
+one index there is no record and an item's hold is the budget's charge alone, as before.
 
 **Mutations** (round 2):
 
