@@ -491,11 +491,11 @@ impl IngestEngine {
                     changes,
                     steps,
                 };
-                self.publish_live(built, &taken, granted, &charges, lanes)
+                self.publish_live(built, &taken, granted, charges, lanes)
                     .await?;
             }
             (Job::Backfill { requested, marks }, Some(built)) => {
-                self.publish_backfill(built, &requested, &marks, &charges, lanes)
+                self.publish_backfill(built, &requested, &marks, charges, lanes)
                     .await?;
             }
             (_, None) => {}
@@ -513,7 +513,7 @@ impl IngestEngine {
         built: Built,
         taken: &[(IndexName, Token, Position)],
         granted: Granted,
-        charges: &super::builds::Charges,
+        charges: super::builds::Charges,
         lanes: &Lanes,
     ) -> Result<()> {
         let Granted {
@@ -618,7 +618,7 @@ impl IngestEngine {
         built: Built,
         requested: &BTreeMap<SinkName, BTreeMap<IndexName, stream::Ticket>>,
         marks: &BTreeMap<IndexName, stream::WalkMark>,
-        charges: &super::builds::Charges,
+        charges: super::builds::Charges,
         lanes: &Lanes,
     ) -> Result<()> {
         let (envelopes, by_index) = self.envelopes(built.documents?, None)?;
@@ -708,18 +708,24 @@ impl IngestEngine {
     fn holds(
         &self,
         groups: &BTreeMap<IndexName, Arc<[Envelope]>>,
-        charges: &super::builds::Charges,
+        mut charges: super::builds::Charges,
     ) -> BTreeMap<IndexName, Hold> {
+        let Some(exemption) = &self.exemption else {
+            // One index keeps no record: its hold is the charge's.
+            return charges
+                .into_iter()
+                .map(|(index, charge)| (index, Hold::new(charge)))
+                .collect();
+        };
         groups
             .keys()
             .map(|index| {
-                let charge = charges.get(index).cloned();
-                let hold = match self.outstanding.publish(index) {
+                let charge = charges.remove(index);
+                let hold = match exemption.outstanding.publish(index) {
                     Some(outstanding) => Hold::new(Arc::new(PublishedItem {
                         _charge: charge,
                         _outstanding: outstanding,
                     })),
-                    // One index keeps no record: its hold is the charge's.
                     None => charge.map_or_else(Hold::default, |charge| Hold::new(charge)),
                 };
                 (index.clone(), hold)
