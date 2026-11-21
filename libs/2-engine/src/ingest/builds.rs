@@ -50,7 +50,7 @@ use source::document::{Document, DocumentBuilder, DocumentId};
 use tokio::task::AbortHandle;
 use tokio::time::{Duration, Instant};
 
-use super::gate::{Asked, Gate, Permit, Waiter};
+use super::gate::{Gate, Permit};
 use super::snapshot::Snapshot;
 use crate::budget::{Budget, Charge, Reservation, document_bytes};
 use crate::error::{EngineError, Result};
@@ -193,7 +193,9 @@ pub(super) struct LiveCandidate<L> {
 /// the live candidate was offered with and the indexes it may take.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Grant<L> {
-    Live(L, Vec<IndexName>),
+    /// What the live candidate was offered with, the indexes taken, and the
+    /// indexes the budget left waiting.
+    Live(L, Vec<IndexName>, Vec<IndexName>),
     Backfill,
 }
 
@@ -413,30 +415,22 @@ impl Builds {
         }
     }
 
-    /// Ask the gate once for each waiter joined in this grant pass (the
-    /// live one again after the backfill one, should a refusal of the
-    /// backfill batch have moved the offer on to it), keeping the permit and
-    /// the reservation of the first granted. Every refusal is recorded as a
-    /// hold. The waiters not granted leave their lines when the caller drops
-    /// them, at the end of the pass (ADR 0012 stage 8a, R5).
-    fn ask(&mut self, live: &mut Option<Waiter>, backfill: &mut Option<Waiter>) -> Option<Work> {
-        for work in [Work::Live, Work::Backfill, Work::Live] {
-            let waiter = match work {
-                Work::Live => live.as_mut(),
-                Work::Backfill => backfill.as_mut(),
-            };
-            let Some(waiter) = waiter else { continue };
-            match waiter.try_grant() {
-                Asked::Granted(permit, reserved) => {
-                    self.granted = Some(permit);
-                    self.reserved = reserved;
-                    return Some(work);
-                }
-                Asked::Refused(refusal) => self.refuse(work, refusal.generation),
-                Asked::NotNow(_) => {}
-            }
+    /// Ask the gate for a permit for the batches ready (R5, G9), keeping
+    /// the permit and the reservation it grants. Every refusal is recorded
+    /// as a hold.
+    fn ask(
+        &mut self,
+        live: Option<Vec<(IndexName, usize)>>,
+        backfill: Option<Vec<(IndexName, usize)>>,
+    ) -> Option<Work> {
+        let passed = self.gate.pass(live, backfill);
+        for (work, refusal) in passed.refused {
+            self.refuse(work, refusal.generation);
         }
-        None
+        let (work, permit, reserved) = passed.granted?;
+        self.granted = Some(permit);
+        self.reserved = reserved;
+        Some(work)
     }
 
     /// Builds running on their own tasks.
@@ -504,18 +498,17 @@ impl Builds {
             (!self.holds_any(ids) && self.affordable(Work::Backfill, &documents).is_some())
                 .then_some(documents)
         });
-        let mut live_waiter = live.as_ref().map(|(_, taken)| {
-            let parts = self.reserving(Work::Live, taken);
-            self.gate.join(Work::Live, parts)
-        });
-        let mut backfill_waiter = backfill.as_ref().map(|documents| {
-            let parts = self.reserving(Work::Backfill, documents);
-            self.gate.join(Work::Backfill, parts)
-        });
-        match (self.ask(&mut live_waiter, &mut backfill_waiter)?, live) {
-            (Work::Live, Some((live, taken))) => Some(Grant::Live(
+        let live_parts = live
+            .as_ref()
+            .map(|(_, (taken, _))| self.reserving(Work::Live, taken));
+        let backfill_parts = backfill
+            .as_ref()
+            .map(|documents| self.reserving(Work::Backfill, documents));
+        match (self.ask(live_parts, backfill_parts)?, live) {
+            (Work::Live, Some((live, (taken, left)))) => Some(Grant::Live(
                 live,
                 taken.into_iter().map(|(index, _)| index).collect(),
+                left.into_iter().map(|(index, _)| index).collect(),
             )),
             (Work::Backfill, _) => Some(Grant::Backfill),
             (Work::Live, None) => None,
@@ -524,35 +517,37 @@ impl Builds {
 
     /// Which of the live batch's `documents` (per index, oldest waiting
     /// first) could be granted ignoring the rule that a second live build
-    /// waits for a full batch: for the last batch of a run. `None` when none.
+    /// waits for a full batch: for the last batch of a run, with the indexes
+    /// the budget left waiting. `None` when none.
     pub(super) fn can_take_last(
         &mut self,
         documents: &[(IndexName, usize)],
-    ) -> Option<Vec<IndexName>> {
+    ) -> Option<(Vec<IndexName>, Vec<IndexName>)> {
         self.refused = None;
         if !self.has_room() {
             return None;
         }
-        let taken = self.live_part(documents, false)?;
-        let mut live = Some(
-            self.gate
-                .join(Work::Live, self.reserving(Work::Live, &taken)),
-        );
-        self.ask(&mut live, &mut None)?;
-        Some(taken.into_iter().map(|(index, _)| index).collect())
+        let (taken, left) = self.live_part(documents, false)?;
+        let parts = self.reserving(Work::Live, &taken);
+        self.ask(Some(parts), None)?;
+        Some((
+            taken.into_iter().map(|(index, _)| index).collect(),
+            left.into_iter().map(|(index, _)| index).collect(),
+        ))
     }
 
     /// The part of a live batch's `documents` (per index, oldest waiting
     /// first) a build may take now: the indexes the budget has room for,
     /// when every index left out may wait (see
     /// [`with_deferral`](Self::with_deferral)) and the build takes
-    /// something, or settles `changes` read since the last grant. `None`
-    /// when the batch waits.
+    /// something, or settles `changes` read since the last grant; with the
+    /// part left waiting. `None` when the batch waits.
+    #[allow(clippy::type_complexity)]
     fn live_part(
         &mut self,
         documents: &[(IndexName, usize)],
         changes: bool,
-    ) -> Option<Vec<(IndexName, usize)>> {
+    ) -> Option<(Vec<(IndexName, usize)>, Vec<(IndexName, usize)>)> {
         let admitted = self.affordable(Work::Live, documents);
         let admitted = match (admitted, self.defer_below) {
             (Some(admitted), _) => admitted,
@@ -570,7 +565,7 @@ impl Builds {
         if !may_wait || (taken.is_empty() && !left.is_empty() && !changes) {
             return None;
         }
-        Some(taken)
+        Some((taken, left))
     }
 
     /// An empty id list to fill, reusing one a finished build gave back.

@@ -658,21 +658,11 @@ impl Progress {
     /// build holds it (`None`: none is held), so a take now would leave it
     /// behind.
     pub fn any_waiting_held(&self, held: Option<Holds<'_>>) -> bool {
-        self.any_waiting_held_through(held, None)
-    }
-
-    /// [`any_waiting_held`](Self::any_waiting_held), among the documents
-    /// marked at or before `through` (every one for `None`).
-    pub fn any_waiting_held_through(
-        &self,
-        held: Option<Holds<'_>>,
-        through: Option<Position>,
-    ) -> bool {
         self.pending.iter().any(|(index, pending)| {
             let held = held.map(|held| move |key: &RowKey| held(index, key));
             lock(pending).any_held(
                 held.as_ref().map(|held| held as &dyn Fn(&RowKey) -> bool),
-                through,
+                None,
             )
         })
     }
@@ -835,26 +825,37 @@ impl Progress {
             .unwrap_or(0)
     }
 
-    /// [`waiting_by_index`](Self::waiting_by_index), counting only the ids
-    /// marked at or before `through`: what a take through it would reach.
-    pub fn waiting_by_index_through(&self, through: Position) -> Vec<(IndexName, usize)> {
-        let mut waiting: Vec<(Position, IndexName, usize)> = self
-            .pending
-            .iter()
-            .filter_map(|(index, pending)| {
-                let pending = lock(pending);
-                let count = pending.waiting_through(Some(through));
-                pending
-                    .oldest_waiting()
-                    .filter(|_| count > 0)
-                    .map(|oldest| (oldest, index.clone(), count))
-            })
-            .collect();
+    /// Each index's documents waiting that were marked at or before
+    /// `through`, how many, oldest waiting first: what a take through it
+    /// would reach. `None` when one of them is building or `held` says a
+    /// running build holds it (a take now would leave it behind). One lock
+    /// and at most one walk per index.
+    pub fn waiting_through(
+        &self,
+        through: Position,
+        held: Option<Holds<'_>>,
+    ) -> Option<Vec<(IndexName, usize)>> {
+        let mut waiting: Vec<(Position, IndexName, usize)> = Vec::new();
+        for (index, pending) in &self.pending {
+            let held = held.map(|held| move |key: &RowKey| held(index, key));
+            let pending = lock(pending);
+            let count = pending.scan(
+                through,
+                held.as_ref().map(|held| held as &dyn Fn(&RowKey) -> bool),
+            )?;
+            if count > 0
+                && let Some(oldest) = pending.oldest_waiting()
+            {
+                waiting.push((oldest, index.clone(), count));
+            }
+        }
         waiting.sort();
-        waiting
-            .into_iter()
-            .map(|(_, index, count)| (index, count))
-            .collect()
+        Some(
+            waiting
+                .into_iter()
+                .map(|(_, index, count)| (index, count))
+                .collect(),
+        )
     }
 
     /// How many items routed to `lane` it hasn't landed.

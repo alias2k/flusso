@@ -296,6 +296,28 @@ impl Pending {
             .any(|(_, key)| self.building.contains(key) || held.is_some_and(|held| held(key)))
     }
 
+    /// How many ids wait that were marked at or before `through`, or `None`
+    /// when one of them is building or `held` says a running build holds
+    /// it: one walk for both, none while nothing builds and nothing was
+    /// marked after `through`.
+    pub(crate) fn scan(
+        &self,
+        through: Position,
+        held: Option<&dyn Fn(&RowKey) -> bool>,
+    ) -> Option<usize> {
+        if self.building.is_empty() && held.is_none() {
+            return Some(self.waiting_through(Some(through)));
+        }
+        let mut count = 0;
+        for (_, key) in self.through(Some(through)) {
+            if self.building.contains(key) || held.is_some_and(|held| held(key)) {
+                return None;
+            }
+            count += 1;
+        }
+        Some(count)
+    }
+
     /// How many ids wait.
     pub(crate) fn waiting(&self) -> usize {
         self.waiting.len()
@@ -489,5 +511,26 @@ mod tests {
                 .take(&index(), usize::MAX, Some(p(4)), &none)
                 .is_none()
         );
+    }
+
+    /// The one walk a grant pass makes per index: how many wait through a
+    /// position, or `None` when one of those is building or held; ids marked
+    /// after the position are neither counted nor looked at.
+    #[test]
+    fn a_scan_counts_through_a_position_and_stops_at_a_held_id() {
+        let mut pending = Pending::default();
+        pending.mark(key(1), p(1));
+        pending.mark(key(2), p(2));
+        pending.mark(key(3), p(5));
+        assert_eq!(pending.scan(p(2), None), Some(2));
+        assert_eq!(pending.scan(p(9), None), Some(3));
+        let three = |k: &RowKey| *k == key(3);
+        assert_eq!(pending.scan(p(2), Some(&three)), Some(2), "3 is past it");
+        assert_eq!(pending.scan(p(5), Some(&three)), None);
+        let taken = pending.take(&index(), 1, None, &none).unwrap();
+        pending.mark(key(1), p(6));
+        assert_eq!(pending.scan(p(9), None), None, "1 builds and waits again");
+        pending.release(taken.token);
+        assert_eq!(pending.scan(p(9), None), Some(3));
     }
 }

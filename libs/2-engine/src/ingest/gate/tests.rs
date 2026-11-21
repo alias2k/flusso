@@ -848,3 +848,61 @@ async fn with_no_waiter_an_add_moves_no_generation() {
     drop(held_permit);
     adds_move_nothing(&budget);
 }
+
+/// The kind a pass with both kinds ready and nothing to reserve is granted.
+fn pass_both(gate: &Arc<Gate>) -> Option<(Work, Permit)> {
+    gate.pass(Some(Vec::new()), Some(Vec::new()))
+        .granted
+        .map(|(work, permit, _)| (work, permit))
+}
+
+/// G4 and G9 with no one in the lines: a pass is decided as joining at the
+/// front of empty lines would decide it: live first, every fourth contested
+/// grant to backfill, an uncontested grant moving no count.
+#[test]
+fn a_pass_alone_takes_live_first_but_every_fourth_contested_grant_is_backfill() {
+    let gate = Gate::new(1, unlimited());
+    let kinds: Vec<Work> = (0..8)
+        .map(|_| pass_both(&gate).map(|(work, _)| work).unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [Work::Live, Work::Live, Work::Live, Work::Backfill].repeat(2)
+    );
+    let alone = gate.pass(None, Some(Vec::new()));
+    assert!(matches!(alone.granted, Some((Work::Backfill, _, _))));
+    drop(alone);
+    assert_eq!(
+        pass_both(&gate).map(|(work, _)| work),
+        Some(Work::Live),
+        "the uncontested grant moved no count"
+    );
+}
+
+/// G5 and G9 with no one in the lines: the budget refuses the live batch
+/// whose turn it is, so the permit goes to the backfill batch in the same
+/// pass, and the count doesn't move (the live batch was not eligible).
+#[test]
+fn a_pass_alone_hands_the_permit_to_the_other_kind_when_its_turn_is_refused() {
+    let budget = Arc::new(Budget::new(64 * KIB));
+    let users = held(&budget, "users", 60);
+    let gate = Gate::new(1, Arc::clone(&budget));
+    let passed = gate.pass(
+        Some(vec![(index("users"), 16 * KIB)]),
+        Some(vec![(index("orders"), 8 * KIB)]),
+    );
+    assert_eq!(passed.refused.len(), 1);
+    assert_eq!(passed.refused[0].0, Work::Live);
+    let Some((Work::Backfill, permit, reserved)) = passed.granted else {
+        panic!("the backfill batch takes the permit");
+    };
+    drop((permit, reserved, users));
+    let kinds: Vec<Work> = (0..4)
+        .map(|_| pass_both(&gate).map(|(work, _)| work).unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [Work::Live, Work::Live, Work::Live, Work::Backfill],
+        "the refusal moved no count"
+    );
+}

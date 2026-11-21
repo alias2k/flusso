@@ -47,12 +47,14 @@
 //!   wakes only while someone waits.
 //! - **G8.** A waiter dropped before its grant leaves its line and wakes the
 //!   others; a permit dropped gives itself back, once.
-//! - **G9.** Every build waits in a line (ADR 0012 stage 8a, 6a): the
-//!   builder joins the line of each kind it has a batch ready for and a slot
-//!   to run ([`Gate::join`]), asks once ([`Waiter::try_grant`]), and leaves
-//!   before its grant pass ends, so it holds a place only while it can use a
-//!   permit now, and every reservation obeys G5 and G6. With both kinds
-//!   ready it is in both lines at once, so G4's count moves as it did.
+//! - **G9.** Every build goes through the lines (ADR 0012 stage 8a, 6a): a
+//!   task's grant pass ([`Gate::pass`]) puts each batch it has ready, with a
+//!   slot to run it, in its kind's line, asks once, and leaves before the
+//!   pass ends, so it holds a place only while it can use a permit now, and
+//!   every reservation obeys G5 and G6. With both kinds ready it is in both
+//!   lines at once, so G4's count moves as it did. With no waiter in either
+//!   line the pass is decided in one hold of the lock, as joining at the
+//!   front of empty lines would decide it.
 //!
 //! ```text
 //! both kinds ready, one permit at a time:  live, live, live, backfill, live, …
@@ -275,6 +277,15 @@ impl Drop for Waiter {
     }
 }
 
+/// What a grant pass got ([`Gate::pass`]).
+#[derive(Debug, Default)]
+pub(crate) struct Passed {
+    /// The kind granted, its permit and the reservation of its batch.
+    pub(crate) granted: Option<(Work, Permit, Vec<Reservation>)>,
+    /// Every refusal of the pass, with its kind.
+    pub(crate) refused: Vec<(Work, Refusal)>,
+}
+
 /// What one ask of a waiter got ([`Waiter::try_grant`]).
 pub(crate) enum Asked {
     /// The permit, and the reservation of the waiter's parts.
@@ -386,6 +397,89 @@ impl Gate {
     pub(crate) fn waiters(&self) -> usize {
         let state = self.state();
         state.live.len() + state.backfill.len()
+    }
+
+    /// One grant pass of a task with a batch of each kind it has ready and a
+    /// slot to run (G9): the permit and the reservation of the batch G4 gives
+    /// it, if any, and every refusal the budget gave it. With no waiter in
+    /// either line (one task, as in slice 6a) this is one hold of the gate's
+    /// lock: the pass's own batches stand where joining would put them, at
+    /// the front of empty lines, so G4 picks between them, G5 asks the
+    /// budget (a refusal hands the permit to the other kind, without moving
+    /// the count), and no one is behind (G6); nothing joins, watches or
+    /// wakes. Otherwise each batch joins its line, is asked once, and leaves.
+    pub(crate) fn pass(
+        self: &Arc<Self>,
+        live: Option<Vec<(IndexName, usize)>>,
+        backfill: Option<Vec<(IndexName, usize)>>,
+    ) -> Passed {
+        let mut state = self.state();
+        if state.is_waiting() {
+            drop(state);
+            return self.pass_in_lines(live, backfill);
+        }
+        let mut passed = Passed::default();
+        let (mut live, mut backfill) = (live, backfill);
+        while state.free > 0 {
+            let contested = live.is_some() && backfill.is_some();
+            let Some(work) = state.turn(live.is_some(), backfill.is_some()) else {
+                break;
+            };
+            let parts = match work {
+                Work::Live => live.take(),
+                Work::Backfill => backfill.take(),
+            }
+            .unwrap_or_default();
+            match self.budget.reserve_behind(work, &parts, false) {
+                Ok(reserved) => {
+                    if contested {
+                        state.contested += 1;
+                    }
+                    state.free -= 1;
+                    drop(state);
+                    passed.granted = Some((
+                        work,
+                        Permit {
+                            gate: Arc::clone(self),
+                        },
+                        reserved,
+                    ));
+                    return passed;
+                }
+                Err(refusal) => passed.refused.push((work, refusal)),
+            }
+        }
+        passed
+    }
+
+    /// [`pass`](Self::pass) beside waiters: each batch joins its line, is
+    /// asked once (the live one again after the backfill one, should a
+    /// refusal of the backfill batch have moved the offer on to it), and
+    /// leaves before the pass returns.
+    fn pass_in_lines(
+        self: &Arc<Self>,
+        live: Option<Vec<(IndexName, usize)>>,
+        backfill: Option<Vec<(IndexName, usize)>>,
+    ) -> Passed {
+        let mut live = live.map(|parts| self.join(Work::Live, parts));
+        let mut backfill = backfill.map(|parts| self.join(Work::Backfill, parts));
+        let mut passed = Passed::default();
+        for work in [Work::Live, Work::Backfill, Work::Live] {
+            let waiter = match work {
+                Work::Live => live.as_mut(),
+                Work::Backfill => backfill.as_mut(),
+            };
+            let Some(waiter) = waiter else { continue };
+            match waiter.try_grant() {
+                Asked::Granted(permit, reserved) => {
+                    passed.granted = Some((work, permit, reserved));
+                    return passed;
+                }
+                Asked::Refused(refusal) => passed.refused.push((work, refusal)),
+                Asked::NotNow(_) => {}
+            }
+        }
+        passed
     }
 
     /// Join the back of `work`'s line, to reserve `parts` from the gate's
