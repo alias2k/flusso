@@ -18,17 +18,37 @@ cargo +nightly fuzz run pgoutput_decode             # from libs/2-adapters/sourc
 
 ## CI order
 
-Match this before assuming green:
+The required check `clippy + tests` is a verdict over several jobs, so the test suite runs in parallel. Match this before assuming green.
+
+`tests: lint (fmt, clippy, checks, doc links)` runs:
 
 1. `cargo fmt --all --check`
 2. `cargo clippy --workspace`
 3. `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench` (compiles benches and examples, which clippy and nextest skip; the features unlock the three feature-gated in-process bench targets)
 4. `cargo check -p flusso-cli --no-default-features` (the server-only image build)
-5. `cargo nextest run --profile ci --workspace --run-ignored all`
-6. `cargo test --workspace --doc`
-7. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`
+5. `.github/scripts/check-ahash-seed.py` (the binary keeps a per-process hash seed)
+6. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`
 
-On a PR confined to the query train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`), step 5 skips every integration-test binary of `source-postgres`, `engine` and `sink-opensearch`, which those paths can't break; everything else, the query train's own e2e included, still runs. Pushes to `main` run everything.
+Beside it, `tests: doctests` runs `cargo test --workspace --doc` on the test build's cache, and the tests:
+
+- **`tests: build (archive)`** builds every test binary once (`cargo nextest archive --workspace`), checks that the parts hold each test of the run exactly once, and uploads the archive.
+- **One job per part** runs its share of the archive: `cargo nextest run --archive-file … --profile ci --run-ignored all -E <part>`. The `opensearch` group is split over three jobs by measured time; the derive's `boundary` test has a job to itself; `rest` takes everything else (unit and integration tests, the `docker` group, the trybuild `ui` harnesses, `consumer_lints`). Each job keeps the group caps of `.config/nextest.toml`, so a runner still runs one OpenSearch at a time. Each uploads its JUnit report as `nextest-junit-<part>`.
+- **`clippy + tests`** is green only when every job succeeded and the parts' JUnit reports hold as many tests as the build listed. A failed, cancelled or skipped job turns it red; only a [docs-only](#docs-only-pull-requests) run may skip the lint, doctest and test jobs.
+
+The parts and their filtersets live in `.github/scripts/test-parts.py`.
+
+On a PR confined to the query train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`), every part skips the integration-test binaries of `source-postgres`, `engine` and `sink-opensearch`, which those paths can't break; everything else, the query train's own e2e included, still runs. Pushes to `main` run everything.
+
+Rust build caches are saved from `main` only, one per job kind (the test build, the lint job, the bench, fuzz and other-platform jobs); a pull request restores them and saves none, which keeps the repository under GitHub's 10 GB cache quota. Every job installs only the toolchain `rust-toolchain.toml` pins (`.github/actions/pinned-rust`), since rust-cache keys on every installed toolchain and a floating stable would miss each cache on its release. The test parts restore no build cache: they run the archive. The `boundary` part restores the boundary test's results (`target/tests/flusso-boundary/cache`, a few MB), so on an unchanged derive it compiles nothing; any change to what it hashes compiles every case again.
+
+### When a part fails
+
+- **A part flaked.** Press **Re-run failed jobs** on the run. The part runs again from the same archive, replaces its JUnit report, and `clippy + tests` reruns over the latest attempt of each part, still holding the reports to the full count.
+- **The archive expired.** It's kept 7 days; after that a re-run part fails at "Download the archive". Press **Re-run all jobs**, which builds a new one, or push.
+
+### Adding a test binary to a part
+
+A binary in no test group, or in the `docker` group, lands in `rest` with nothing to do. A binary in the `opensearch` group also needs its id (`<package>::<binary>`, as nextest prints it) in the `binaries` of one `opensearch-*` part in `test-parts.py`. Otherwise its tests are in no part, and the build job fails naming the binary. Pick the part with the least time; the JUnit report's `time` per binary says what each one adds.
 
 ### Docs-only pull requests
 
@@ -38,8 +58,8 @@ A PR into the default branch whose every changed file is documentation skips wha
 - **What is diffed.** The whole PR as it would merge: the merge commit against the base. So a docs-only push to a PR that also changes code still runs everything. Diffing against the previous push would be cheaper, but the required checks vouch for the merge result, and a green docs-only push would hide a code change that never got a full run. A rename counts both of its paths.
 - **Only into the default branch.** A PR on any other base runs everything. Stacked on a code branch, its head carries that branch's commits, and the checks stay attached to that head when the PR is retargeted.
 - **The base's rule judges.** Each job runs the base's copies of `change-class.sh` and `change_class.py` (`git show HEAD^1:…`), never the PR's own, so a PR can't loosen the rule that judges it. A base without them, a script that fails, or a classifier whose output doesn't end with its verdict means a full run. So does a checkout whose merge commit's second parent isn't the PR's head, since then its first parent need not be the base. A PR that changes the rule is judged by the old one, and runs everything anyway, since `.github/` isn't documentation. What stays the PR's own: the action's few lines that fetch and run the base's script, and the workflows that call it. A PR can always change its own workflows, so this guards against a mistaken rule, not a hostile change; review catches that.
-- **What still runs.** The `manual (build + links)` and `CI scripts (tests)` jobs, always in full. In `clippy + tests`, only the tests that read the changed files: `agent_docs_paths` for a change under `plugin/` or `.claude/`, and for any deleted or renamed file; the generated-tables drift test for `docs/src/reference/generated/`; the upgrade-page snippets for `upgrade-to-0-18.md`; the derive's two manual checks for `document-structs.md` and the query `maps.md` pages. A crate `README.md` compiled into its crate (`#![doc = include_str!("../README.md")]`) also runs that crate's clippy (its doc lints read the README), doctests and doc links. Removing such a README runs everything.
-- **What is skipped.** fmt, clippy, the `cargo check` steps, the full nextest run with every container suite, the workspace doctests and doc links, the fuzz run, the designer SPA job, the CLI check on Windows and macOS, and the in-process bench A/B. A docs-only run doesn't save the Rust build cache, so the PR's next full run starts warm.
+- **What still runs.** The `manual (build + links)` and `CI scripts (tests)` jobs, always in full. In `clippy + tests` (its build job), only the tests that read the changed files: `agent_docs_paths` for a change under `plugin/` or `.claude/`, and for any deleted or renamed file; the generated-tables drift test for `docs/src/reference/generated/`; the upgrade-page snippets for `upgrade-to-0-18.md`; the derive's two manual checks for `document-structs.md` and the query `maps.md` pages. A crate `README.md` compiled into its crate (`#![doc = include_str!("../README.md")]`) also runs that crate's clippy (its doc lints read the README), doctests and doc links. Removing such a README runs everything.
+- **What is skipped.** The lint job (fmt, clippy, the `cargo check` steps, the workspace doctests and doc links), the archive and every test part with its container suites, the fuzz run, the designer SPA job, the CLI check on Windows and macOS, and the in-process bench A/B.
 - **Where the rule lives.** `.github/scripts/change_class.py`: the patterns, and `DOC_TESTS`, which test reads which files; `.github/scripts/change-class.sh` runs it, and `.github/actions/change-class` runs that. `test_change_class.py` fails when a Rust source holds a string literal naming documentation (a `.md` file or extension, or a path through `docs`, `plugin` or `.claude`) that no `DOC_TESTS` entry of its package covers, so a new `include_str!` of a page needs an entry there; a literal that reads nothing is listed in its `NOT_READS` with the reason. Its limits: it reads Rust only, and only literals. A path built from no literal naming documentation (an environment variable, a computed name, a file listed by a walk of an unrelated directory) and a read from a script or a build tool are not seen. Every other event (a push to `main`, `workflow_dispatch`) runs everything, and so does a diff the job can't take.
 
 A separate job runs a 60-second `pgoutput_decode` fuzz on a pinned nightly; another builds and lints the designer SPA; a `docs` job builds the book and link-checks it. A `postgres-matrix` workflow runs the Postgres-backed suites on the other tested majors; see [Other majors](#other-majors). A `bench` workflow gates PRs on the in-process benches and records scenario history on `main`; see [Benchmarks](benchmarks.md). An `audit` workflow checks RustSec advisories weekly and on manifest or lock changes; see [Dependency updates](dependencies.md).
@@ -50,7 +70,7 @@ The workspace lints deny `unwrap_used` and `expect_used`, and test targets use `
 
 ## The e2e suites
 
-The `#[ignore]`d suites spin up containers with `testcontainers`. They're legitimately slow and occasionally flaky, so `.config/nextest.toml` puts each binary in a test group by what it needs and retries it twice: the `docker` group (no OpenSearch, eight at a time) and the `opensearch` group (anything with OpenSearch, one at a time). Both groups get a longer slow-timeout than ordinary tests, a little longer still under the `ci` profile; `.config/nextest.toml` holds the numbers. A new e2e binary must be added to the filtersets in both profiles.
+The `#[ignore]`d suites spin up containers with `testcontainers`. They're legitimately slow and occasionally flaky, so `.config/nextest.toml` puts each binary in a test group by what it needs and retries it twice: the `docker` group (no OpenSearch, eight at a time) and the `opensearch` group (anything with OpenSearch, one at a time). Both groups get a longer slow-timeout than ordinary tests, a little longer still under the `ci` profile; `.config/nextest.toml` holds the numbers. A new e2e binary must be added to the filtersets in both profiles, and an `opensearch` one to a [part](#adding-a-test-binary-to-a-part).
 
 ### How many builds
 
@@ -109,9 +129,9 @@ The full source-to-sink e2e lives in `engine`, not in a source crate: a leaf sou
 
 ### Other majors
 
-flusso supports Postgres 14 or newer. CI tests three majors: the oldest supported, `14-alpine`; the default, `16-alpine`; and the newest, `18-alpine`. They're `TESTED_TAGS` in `dev/test-postgres`, beside the default. Step 5 of the [CI order](#ci-order) runs the default on every PR. The `postgres-matrix` workflow runs each of the others as one leg:
+flusso supports Postgres 14 or newer. CI tests three majors: the oldest supported, `14-alpine`; the default, `16-alpine`; and the newest, `18-alpine`. They're `TESTED_TAGS` in `dev/test-postgres`, beside the default. The test parts of the [CI order](#ci-order) run the default on every PR. The `postgres-matrix` workflow runs each of the others as one leg:
 
-- **What a leg runs.** The test suites of every crate that starts Postgres, with `FLUSSO_TEST_PG_TAG` set: `cargo nextest run --profile ci --workspace --run-ignored all -E 'rdeps(flusso-test-postgres)'`. It uses the same `ci` profile as step 5 and the same setup steps (the composite action `.github/actions/rust-test-setup`). It doesn't run the Docker-backed benches (`postgres`, `pipeline`, `cases`) or `just review-ab`, which takes its image from `--pg`. A leg takes about as long as `clippy + tests`.
+- **What a leg runs.** The test suites of every crate that starts Postgres, with `FLUSSO_TEST_PG_TAG` set: `cargo nextest run --profile ci --workspace --run-ignored all -E 'rdeps(flusso-test-postgres)'`. It uses the same `ci` profile as the test parts and the same setup steps (the composite action `.github/actions/rust-test-setup`). It doesn't run the Docker-backed benches (`postgres`, `pipeline`, `cases`) or `just review-ab`, which takes its image from `--pg`. A leg runs in one job, about 25 minutes.
 - **When.** Nightly and on demand (`workflow_dispatch`). Never on a PR by itself, never a required check. To run it for a PR, dispatch it on the PR's branch. Its checks attach to the branch's head commit (the commit's checks page and the Actions tab), not to the PR's checks list:
 
   ```sh

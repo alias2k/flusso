@@ -70,10 +70,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # Caches ./target (the PR's) only; the base's target dir is seeded from
-      # it below, so both sides start from the cached dependencies.
+      # it below, so both sides start from the cached dependencies. Restores
+      # the `scenarios` job's cache from `main` (same key: `bench`, same
+      # CARGO_TARGET_DIR) and saves nothing: a save per pull request filled the
+      # repository's 10 GB cache quota (issue #444).
       - name: Cache build artifacts
         if: steps.change.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench
+          save-if: "false"
 
       # The base gets its own worktree and target dir, both kept for the whole
       # job so the gate can re-measure a breach on it from its own build. The
@@ -134,6 +140,10 @@ jobs:
       contents: write
       issues: write
       actions: write
+    env:
+      # The in-process job's value: rust-cache keys on CARGO_* variables, and
+      # that job restores this one's cache.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v7
         with:
@@ -159,8 +169,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Shared with the in-process job, which restores it on pull requests;
+      # saved from `main` only.
       - name: Cache build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build flusso (release, no designer — the image configuration)
         run: cargo build --release -p flusso-cli --no-default-features

@@ -13,8 +13,8 @@ name: postgres-matrix
 #   report  Nightly only: one issue, opened or updated on a failure and
 #           closed by a passing nightly (.github/scripts/postgres-matrix.py).
 #
-# Not a required check, and no `pull_request` trigger: a leg takes about as
-# long as `clippy + tests`. For a PR, dispatch it on the PR's branch
+# Not a required check, and no `pull_request` trigger: a leg runs its suites
+# in one job, about 25 minutes. For a PR, dispatch it on the PR's branch
 # (`gh workflow run postgres-matrix.yml --ref <branch>`); its checks attach to
 # the head commit (its checks page, the Actions tab), not to the PR's checks list.
 
@@ -76,11 +76,12 @@ jobs:
       # The same toolchain, nextest and cache steps as `clippy + tests`. One
       # cache for every leg (the build doesn't depend on the tag), saved by
       # the first leg only: legs saving under one key would race, a key per
-      # leg would double the space.
+      # leg would double the space. Saved from `main` only: a dispatch on a
+      # pull request's branch restores it (the 10 GB cache quota, issue #444).
       - uses: ./.github/actions/rust-test-setup
         with:
           shared-key: postgres-matrix
-          save-if: ${{ matrix.tag == fromJSON(needs.plan.outputs.tags)[0] }}
+          save-if: ${{ matrix.tag == fromJSON(needs.plan.outputs.tags)[0] && github.ref == 'refs/heads/main' }}
 
       # The `ci` profile of `clippy + tests`: retries, test groups, JUnit.
       - name: Test (every crate that starts Postgres)
