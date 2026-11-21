@@ -553,7 +553,11 @@ impl Builds {
                     return Some(work);
                 }
                 Asked::Refused(refusal) => self.refuse(work, refusal.generation),
-                Asked::NotNow(_) => {}
+                // Still refused at the budget's generation: a release, not a
+                // change of the gate, lets it go, so the builder waits on the
+                // budget for it.
+                Asked::NotNow(Some(generation)) => self.refuse(work, generation),
+                Asked::NotNow(None) => {}
             }
         }
         None
@@ -628,8 +632,9 @@ impl Builds {
             });
         let backfill = backfill.and_then(|ids| {
             let documents = per_index(ids);
-            (!self.holds_any(ids) && self.affordable(Work::Backfill, &documents).is_some())
-                .then_some(documents)
+            (!self.holds_any(ids)
+                && (self.several || self.affordable(Work::Backfill, &documents).is_some()))
+            .then_some(documents)
         });
         let live_parts = live
             .as_ref()
@@ -669,7 +674,14 @@ impl Builds {
     /// budget has room for all of them; `None` when the batch waits whole
     /// (each builder builds one index: no index is left out while others
     /// build).
+    ///
+    /// Beside other builders the gate decides (G5): a batch the budget
+    /// refuses keeps its waiter in the line, so a younger builder reserves
+    /// behind it (G6) and small batches of other indexes can't starve it.
     fn live_part(&mut self, documents: &[(IndexName, usize)]) -> Option<Vec<(IndexName, usize)>> {
+        if self.several {
+            return Some(documents.to_vec());
+        }
         let admitted = self.affordable(Work::Live, documents)?;
         documents
             .iter()
@@ -1041,37 +1053,45 @@ mod tests {
         }
     }
 
-    /// ADR 0012 stage 8a's acceptance test for R5: the builder's live batch
-    /// would fit by the limit, but a waiter the limit refused is in the live
-    /// line ahead of it, so it reserves behind (G6) and takes no room by the
-    /// limit: refused. With that waiter gone it is granted.
+    /// ADR 0012 stage 8a's acceptance test for R5, across two builders
+    /// (G9′): `orders`' live batch is refused by the limit and waits in the
+    /// live line; `users`' batch would fit by the limit, but `orders` is
+    /// ahead of it, so it reserves behind (G6) and takes no room by the
+    /// limit: refused. Once `orders` leaves the line, `users` is granted.
     #[tokio::test(start_paused = true)]
     async fn no_build_takes_room_by_the_limit_ahead_of_a_waiter_the_limit_refused() {
         let budget = Arc::new(Budget::new(64 * 1024));
         let _x = held(&budget, "x", 36);
         let _users = held(&budget, "users", 8);
         let _orders = held(&budget, "orders", 4);
-        let mut builds = Builds::new(2, Some(Arc::clone(&budget)));
-        let gate = Arc::clone(&builds.gate);
-        let older = tokio::spawn(async move {
-            gate.acquire(Work::Live, &[(index("orders"), 24 * 1024)])
-                .await
-        });
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        let gate = Gate::new(2, Arc::clone(&budget));
+        let builder = |name: &str| {
+            Builds::new(2, Some(Arc::clone(&budget)))
+                .with_gate(Arc::clone(&gate))
+                .of_index(index(name))
+                .beside_others(true)
+        };
+        let mut orders = builder("orders");
+        let mut users = builder("users");
+        let two_orders = LiveCandidate {
+            live: (),
+            documents: vec![(index("orders"), 2)],
+            full: true,
+        };
         assert!(
-            !older.is_finished(),
-            "orders is refused by the limit (72 of 64 KiB)"
+            orders.choose(Some(two_orders), None).is_none(),
+            "orders is refused by the limit (80 of 64 KiB)"
         );
+        assert!(orders.in_line(), "orders waits in the live line");
         let held_before = budget.held();
         assert!(
-            builds.choose(Some(one_user()), None).is_none(),
+            users.choose(Some(one_user()), None).is_none(),
             "users would fit by the limit (64 of 64 KiB), but not behind orders"
         );
         assert_eq!(budget.held(), held_before, "nothing reserved");
-        older.abort();
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        orders.leave_lines();
         assert!(
-            builds.choose(Some(one_user()), None).is_some(),
+            users.choose(Some(one_user()), None).is_some(),
             "with orders gone, users fits"
         );
     }
