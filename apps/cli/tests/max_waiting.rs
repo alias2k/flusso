@@ -1,6 +1,7 @@
 #![allow(unused_crate_dependencies, clippy::unwrap_used, clippy::expect_used)]
 
-//! `[concurrency] max_waiting_per_index` and `max_waiting` through the real
+//! `[concurrency] max_waiting_per_index`, `max_waiting` and
+//! `max_pending_documents` through the real
 //! binary, no database: `check`, `build` and `run` judge them with the one
 //! function, a refused value says where it came from, and neither reaches the
 //! lock. Each command runs as a child process with its own environment, so
@@ -40,6 +41,7 @@ fn flusso(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         .args(args)
         .env_remove("FLUSSO_MAX_WAITING_PER_INDEX")
         .env_remove("FLUSSO_MAX_WAITING")
+        .env_remove("FLUSSO_MAX_PENDING_DOCUMENTS")
         .stdin(Stdio::null());
     for (var, value) in env {
         command.env(var, value);
@@ -153,4 +155,29 @@ fn the_variable_beats_the_file_and_the_flag_beats_the_variable() {
         "{}",
         text(&output)
     );
+}
+
+/// `max_pending_documents` (6b-2): `check`, `build` and `run` refuse 0 with
+/// the same words; a value in range checks, builds and stays out of the
+/// lock.
+#[test]
+fn max_pending_documents_is_judged_alike_and_stays_out_of_the_lock() {
+    let dir = project("pending_zero", "[concurrency]\nmax_pending_documents = 0\n");
+    let said = "[concurrency] max_pending_documents = 0 (set in flusso.toml's [concurrency] \
+                max_pending_documents)";
+    for args in [&["check", "--offline"][..], &["build"][..], RUN] {
+        let output = flusso(&dir, args, &[]);
+        assert!(!output.status.success(), "{args:?}: {}", text(&output));
+        assert!(text(&output).contains(said), "{args:?}: {}", text(&output));
+    }
+    let dir = project(
+        "pending_set",
+        "[concurrency]\nmax_pending_documents = 5000\n",
+    );
+    for args in [&["check", "--offline"][..], &["build"][..]] {
+        let output = flusso(&dir, args, &[]);
+        assert!(output.status.success(), "{args:?}: {}", text(&output));
+    }
+    let lock = std::fs::read_to_string(dir.join("flusso.lock")).unwrap();
+    assert!(!lock.contains("max_pending_documents"), "{lock}");
 }

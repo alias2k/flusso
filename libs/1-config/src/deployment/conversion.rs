@@ -49,6 +49,10 @@ impl From<ConfigToml> for Config {
                     .max_waiting_per_index
                     .map(CountValue::from_file),
                 max_waiting: toml.concurrency.max_waiting.map(CountValue::from_file),
+                max_pending_documents: toml
+                    .concurrency
+                    .max_pending_documents
+                    .map(CountValue::from_file),
             },
             backoff: BackoffConfig {
                 initial_ms: toml.backoff.initial_ms.map(BackoffValue::from_file),

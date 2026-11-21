@@ -150,6 +150,11 @@ pub struct ConcurrencyConfig {
     /// ahead, with where it was set (`--max-waiting` / `FLUSSO_MAX_WAITING`
     /// over the file).
     pub max_waiting: Option<CountValue>,
+    /// Documents every held index together may have waiting before reading
+    /// stops for every index, with where it was set
+    /// (`--max-pending-documents` / `FLUSSO_MAX_PENDING_DOCUMENTS` over the
+    /// file).
+    pub max_pending_documents: Option<CountValue>,
 }
 
 /// A `[concurrency]` count and where it was set. Taken as it is written: the
@@ -206,7 +211,8 @@ impl BackoffValue {
 
 /// Where a setting of the machine that runs flusso (`[backoff]`,
 /// `[concurrency] index_budget_share`, `max_waiting_per_index`,
-/// `max_waiting`) was set, so a refusal can say how to change it.
+/// `max_waiting`, `max_pending_documents`) was set, so a refusal can say how
+/// to change it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// `flusso.toml`.

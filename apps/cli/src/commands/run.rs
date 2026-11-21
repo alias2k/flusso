@@ -199,6 +199,18 @@ pub(crate) struct RunArgs {
     #[arg(long, value_parser = config::parse_max_waiting)]
     max_waiting: Option<u64>,
 
+    /// Documents every held index together may have waiting before flusso
+    /// stops reading changes for every index. With two or more indexes, an
+    /// index held by the memory budget or a full lane stops no other index's
+    /// reading once it has `--max-waiting-per-index` documents waiting; its
+    /// changes are kept as documents to build, up to this many over every
+    /// such index. Overrides `[concurrency].max_pending_documents` from
+    /// config; defaults to 1,000,000. At least 1. Never written into the
+    /// lock.
+    /// [env: FLUSSO_MAX_PENDING_DOCUMENTS]
+    #[arg(long, value_parser = config::parse_max_waiting)]
+    max_pending_documents: Option<u64>,
+
     /// The first wait before trying again, in milliseconds: a failed engine's
     /// restart, a parked lane's probe, a re-staged lane's next staging. Each
     /// wait doubles up to `--backoff-max-ms`. Overrides `[backoff].initial_ms`
@@ -282,6 +294,9 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         args.max_waiting,
         |name| std::env::var(name).ok(),
     )?;
+    lay_max_pending_documents(&mut config, args.max_pending_documents, |name| {
+        std::env::var(name).ok()
+    })?;
 
     // Adapter knobs given as flags/env are laid over the file's entries, then
     // every entry is validated against its adapter before anything connects.
@@ -714,6 +729,31 @@ fn lay_max_waiting(
     config.concurrency.max_waiting =
         layer(total, "FLUSSO_MAX_WAITING", config.concurrency.max_waiting)?;
     daemon::max_waiting(config)?;
+    Ok(())
+}
+
+/// Lay `--max-pending-documents`, else `FLUSSO_MAX_PENDING_DOCUMENTS`, over
+/// `[concurrency]`, keeping where it was set, then check it with the
+/// daemon's judge, so 0 fails before anything connects.
+fn lay_max_pending_documents(
+    config: &mut config::Config,
+    flag: Option<u64>,
+    env: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<()> {
+    const NAME: &str = "FLUSSO_MAX_PENDING_DOCUMENTS";
+    if let Some(count) = flag {
+        config.concurrency.max_pending_documents = Some(config::CountValue {
+            count,
+            origin: config::Origin::Flag,
+        });
+    } else if let Some(text) = env(NAME).filter(|text| !text.is_empty()) {
+        config.concurrency.max_pending_documents = Some(config::CountValue {
+            count: config::parse_max_waiting(&text)
+                .map_err(|why| anyhow::anyhow!("{NAME}: {why}"))?,
+            origin: config::Origin::Env,
+        });
+    }
+    daemon::max_pending_documents(config)?;
     Ok(())
 }
 
