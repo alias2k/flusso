@@ -97,6 +97,16 @@ pub struct Concurrency {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_waiting: Option<u64>,
+    /// Documents every held index together may have waiting before the
+    /// ingest engine stops reading changes for every index (default
+    /// 1,000,000). With two or more indexes, an index held by the memory
+    /// budget or a full lane stops no other index's reading once it has
+    /// `max_waiting_per_index` documents waiting: its changes are kept as
+    /// documents to build, about 266 B each, up to this many over every such
+    /// index. At least 1; `check`, `build` and `run` refuse 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_pending_documents: Option<u64>,
 }
 
 /// A number as written, whole or not: the range is the daemon's to judge,
@@ -124,8 +134,8 @@ pub fn parse_index_budget_share(text: &str) -> Result<f64, String> {
         .map_err(|_| format!("`{text}` is not a number; give a share above 0, at most 1"))
 }
 
-/// `max_waiting_per_index` or `max_waiting` from a flag or an env var: a
-/// whole number. Zero, and a total below the per-index bound, are judged
+/// `max_waiting_per_index`, `max_waiting` or `max_pending_documents` from a
+/// flag or an env var: a whole number. Zero, and a total below the per-index bound, are judged
 /// with the file's values, naming where each came from.
 pub fn parse_max_waiting(text: &str) -> Result<u64, String> {
     text.trim()
@@ -226,5 +236,6 @@ impl Concurrency {
             && self.index_budget_share.is_none()
             && self.max_waiting_per_index.is_none()
             && self.max_waiting.is_none()
+            && self.max_pending_documents.is_none()
     }
 }

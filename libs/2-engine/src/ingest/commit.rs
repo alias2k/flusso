@@ -269,6 +269,8 @@ impl IngestEngine {
     ) {
         let position = candidate.position;
         let backlog = builds.folding();
+        // A live grant ends the hold (§3.9 §5).
+        runs.lead().hold(runs.slot(), false);
         let (ids, taken, mut frontiers) = self.take_all(builds, admitted, position, backlog);
         if !backlog {
             // Documents a capped take left behind keep the candidate: a later
@@ -447,9 +449,14 @@ impl IngestEngine {
             }
             builds.leave_lines();
             if let Some(runs) = runs.as_deref_mut() {
+                // Held by a full lane until the publish goes through.
+                runs.lead().hold(runs.slot(), true);
                 super::builder::enter_fold(runs, builds);
             }
             publishing.await?;
+            if let Some(runs) = runs.as_deref_mut() {
+                runs.lead().hold(runs.slot(), false);
+            }
         }
         Ok(published)
     }
@@ -462,13 +469,6 @@ impl IngestEngine {
         charges: super::builds::Charges,
         lanes: &Lanes,
     ) -> Result<()> {
-        // Every lane's item of an index shares the index's one charge: its
-        // bytes come back when the last copy is dropped (every lane of the
-        // index acknowledged it, and no ledger can redeliver it).
-        let holds: BTreeMap<IndexName, Hold> = charges
-            .into_iter()
-            .map(|(index, charge)| (index, Hold::new(charge)))
-            .collect();
         match (job, built) {
             (Job::Complete(mut finished), _) => {
                 let started = Instant::now();
@@ -491,11 +491,11 @@ impl IngestEngine {
                     changes,
                     steps,
                 };
-                self.publish_live(built, &taken, granted, &holds, lanes)
+                self.publish_live(built, &taken, granted, charges, lanes)
                     .await?;
             }
             (Job::Backfill { requested, marks }, Some(built)) => {
-                self.publish_backfill(built, &requested, &marks, &holds, lanes)
+                self.publish_backfill(built, &requested, &marks, charges, lanes)
                     .await?;
             }
             (_, None) => {}
@@ -513,7 +513,7 @@ impl IngestEngine {
         built: Built,
         taken: &[(IndexName, Token, Position)],
         granted: Granted,
-        holds: &BTreeMap<IndexName, Hold>,
+        charges: super::builds::Charges,
         lanes: &Lanes,
     ) -> Result<()> {
         let Granted {
@@ -545,6 +545,7 @@ impl IngestEngine {
         let mut skipped: Vec<(&LaneKey, Step)> = Vec::new();
         let mut keyed: Option<(&IndexName, ItemKey)> = None;
         let groups = group_by_index(envelopes);
+        let holds = self.holds(&groups, charges);
         for (lane, producer) in lanes {
             let Some(step) = steps.get(&lane.index).copied() else {
                 continue;
@@ -617,7 +618,7 @@ impl IngestEngine {
         built: Built,
         requested: &BTreeMap<SinkName, BTreeMap<IndexName, stream::Ticket>>,
         marks: &BTreeMap<IndexName, stream::WalkMark>,
-        holds: &BTreeMap<IndexName, Hold>,
+        charges: super::builds::Charges,
         lanes: &Lanes,
     ) -> Result<()> {
         let (envelopes, by_index) = self.envelopes(built.documents?, None)?;
@@ -625,6 +626,7 @@ impl IngestEngine {
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Backfill));
         let started = Instant::now();
         let groups = group_by_index(envelopes);
+        let backfill_holds = self.holds(&groups, charges);
         let documents: usize = groups.values().map(|envelopes| envelopes.len()).sum();
         let mut publishes = Vec::new();
         for (sink, indexes) in requested {
@@ -645,7 +647,7 @@ impl IngestEngine {
                         key: None,
                         position: None,
                         envelopes: Arc::clone(envelopes),
-                        hold: holds.get(index).cloned().unwrap_or_default(),
+                        hold: backfill_holds.get(index).cloned().unwrap_or_default(),
                         walked: marks.get(index).cloned(),
                         ticket: Some(*ticket),
                     }),
@@ -696,6 +698,39 @@ impl IngestEngine {
         self.observer
             .on_stage(StageTiming::new(Stage::Publish, started.elapsed()).work(work));
         Ok(())
+    }
+
+    /// What every lane's item of each index in `groups` keeps alive until
+    /// the last copy is dropped (every lane of the index acknowledged it, and
+    /// no ledger can redeliver it): the index's one budget charge, whose
+    /// bytes then come back, and the item's place among the index's
+    /// outstanding items (whether the index is free, for the exemption).
+    fn holds(
+        &self,
+        groups: &BTreeMap<IndexName, Arc<[Envelope]>>,
+        mut charges: super::builds::Charges,
+    ) -> BTreeMap<IndexName, Hold> {
+        let Some(exemption) = &self.exemption else {
+            // One index keeps no record: its hold is the charge's.
+            return charges
+                .into_iter()
+                .map(|(index, charge)| (index, Hold::new(charge)))
+                .collect();
+        };
+        groups
+            .keys()
+            .map(|index| {
+                let charge = charges.remove(index);
+                let hold = match exemption.outstanding.publish(index) {
+                    Some(outstanding) => Hold::new(Arc::new(PublishedItem {
+                        _charge: charge,
+                        _outstanding: outstanding,
+                    })),
+                    None => charge.map_or_else(Hold::default, |charge| Hold::new(charge)),
+                };
+                (index.clone(), hold)
+            })
+            .collect()
     }
 
     /// The built documents as envelopes tagged with `position`, counted per
@@ -756,6 +791,12 @@ fn turn_or_never(builds: &Builds) -> impl std::future::Future<Output = ()> + Sen
             None => std::future::pending().await,
         }
     }
+}
+
+/// What one index's lane items of a published batch keep alive.
+struct PublishedItem {
+    _charge: Option<Arc<crate::budget::Charge>>,
+    _outstanding: super::outstanding::Published,
 }
 
 /// A live build's grant: its live run's newest position, how many changes

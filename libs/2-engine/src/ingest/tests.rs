@@ -713,6 +713,8 @@ struct Recorder {
     marked_at: Mutex<BTreeMap<String, tokio::time::Instant>>,
     /// When each document was first written.
     written_at: Mutex<BTreeMap<i64, tokio::time::Instant>>,
+    /// Every write of a version: the document, the version, when.
+    landings: Mutex<Vec<(i64, u64, tokio::time::Instant)>>,
 }
 
 impl Recorder {
@@ -844,6 +846,12 @@ impl Sink for Recorder {
                 *seen = version.max(*seen);
             }
             last.insert(id, version);
+            if let Some(version) = version {
+                self.landings
+                    .lock()
+                    .unwrap()
+                    .push((id, version, tokio::time::Instant::now()));
+            }
             self.written_at
                 .lock()
                 .unwrap()
@@ -1032,6 +1040,15 @@ impl Deployment {
         self.with_shared_budget(bytes, most, Some(indexes))
     }
 
+    /// [`with_budget`](Self::with_budget), each index's live share `share`
+    /// of the limit.
+    fn with_budget_shared_at(mut self, bytes: usize, share: f64) -> Self {
+        let budget = Arc::new(Budget::new(bytes).with_index_share(self.indexes, share));
+        self.ingest = self.ingest.with_budget(Arc::clone(&budget));
+        self.budget = Some(budget);
+        self
+    }
+
     /// [`with_budget`](Self::with_budget), shared over `indexes` (`None`:
     /// not shared, the budget's rules before slice 4).
     fn with_shared_budget(mut self, bytes: usize, most: usize, indexes: Option<usize>) -> Self {
@@ -1188,6 +1205,7 @@ impl Deployment {
 }
 
 mod builders;
+mod exemption;
 mod reading;
 
 fn instant(db: &Arc<Database>) -> Arc<Builder> {
@@ -1248,21 +1266,45 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
     let feed = Feed::new(&db).with_gaps(seed.wrapping_mul(17));
     let feed = if open { feed.open() } else { feed };
     let stop = Stop::new();
-    let mut deployment = Deployment::new(feed, Arc::clone(&builder), Recorder::seeded(rows == 0))
-        .ingest(|ingest| {
+    let recorder = Recorder::seeded(rows == 0);
+    let mut deployment =
+        Deployment::new(feed, Arc::clone(&builder), Arc::clone(&recorder)).ingest(|ingest| {
             ingest
                 .with_batch(batch(max_changes))
                 .with_builds(builds)
                 .with_stop(stop.clone())
         });
+    // Over two indexes, every third seed holds `orders` stuck for a random
+    // stretch (every document refused, its lane parked): held at its cap it
+    // becomes exempt (6b-2) while failures restart the run, and nothing of it
+    // may be confirmed before it lands.
+    let stuck = (two && seed % 3 == 1).then(|| {
+        let from = Duration::from_millis(random.below(200));
+        let lasting = Duration::from_millis(50 + random.below(1000));
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(from).await;
+            recorder
+                .refused_indexes
+                .lock()
+                .unwrap()
+                .insert("orders".to_owned());
+            tokio::time::sleep(lasting).await;
+            recorder.refused_indexes.lock().unwrap().clear();
+        })
+    });
     if open {
         deployment.run_until_landed(&db, &stop, 8).await;
     } else {
         deployment.run_to_end(8).await;
     }
+    if let Some(stuck) = stuck {
+        stuck.await.unwrap();
+    }
 
     let context = format!(
-        "seed {seed}, builds {builds}, two indexes {two}, {changes} changes over {ids} ids, {rows} rows, max_changes {max_changes}, fan {fan}"
+        "seed {seed}, builds {builds}, two indexes {two}, {changes} changes over {ids} ids, {rows} rows, max_changes {max_changes}, fan {fan}, stuck {}",
+        seed % 3 == 1 && two
     );
     assert!(
         !builder.overlapped.load(Ordering::SeqCst),
@@ -2567,11 +2609,12 @@ async fn a_deferred_index_is_never_counted_committed_before_its_documents_land()
     }
 }
 
-/// An index may wait while others build only up to two runs of documents:
-/// past that the live batch waits whole, and a full run stops the reading,
-/// as with one index, so the pending set stays bounded.
+/// An index held by the budget past its waiting bound (two documents of
+/// `users` behind a stalled sink) is exempt (6b-2): the reading goes on to
+/// `orders` 1, which is built, while `users`' documents keep waiting; once
+/// the sink resumes everything lands.
 #[tokio::test(start_paused = true)]
-async fn an_index_past_its_waiting_bound_holds_the_live_batch_whole() {
+async fn an_index_held_past_its_waiting_bound_is_exempt_and_the_reading_goes_on() {
     // `users` 0, 2, 4, 6 (distinct documents), then `orders` 1.
     let db = Database::new(0, [0, 2, 4, 6, 1].map(Change::upsert).to_vec());
     let builder = Builder::two(&db, Behaviour::default());
@@ -2599,11 +2642,11 @@ async fn an_index_past_its_waiting_bound_holds_the_live_batch_whole() {
     deployment.run_to_end(0).await;
     let (built, read) = resumer.await.unwrap();
     assert!(
-        !built.contains(&1),
-        "users has two documents waiting (one run's worth twice over), so the reading \
-         stopped before orders 1: {built:?}"
+        built.contains(&1),
+        "users is held with two documents waiting: exempt, so orders 1 was read and built: \
+         {built:?}"
     );
-    assert!(read < 5, "{read} changes read");
+    assert_eq!(read, 5, "every change was read");
     assert_eq!(deployment.recorder.state(), db.expected());
 }
 
@@ -3081,18 +3124,19 @@ async fn a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minu
     }
 }
 
-/// What this slice does when the stuck index keeps changing many distinct
-/// documents: `orders` parked at its share, as in the test above, but
-/// changing all ten minutes over fifty documents, one a second. Each change
-/// of a new document joins its waiting set (a parked lane never gives its
-/// live bytes back, so `orders` is never granted again); once it has
-/// `2 × max_changes` documents waiting (32 here) the live batch waits whole
-/// and the reading stops for every index, `users` included, as before 0.19
-/// once the budget was full. Pinned here; ADR 0012 stage 8a's 6b exempts an
-/// index held by the budget from that bound, and this scenario with the
-/// reading going on is its acceptance test.
+/// ADR 0012 stage 8a's acceptance test for 6b-2, turned around from slice
+/// 4's: `orders` parked at its share (every document refused under `stop`,
+/// so its lane never gives its live bytes back) changes one of fifty
+/// documents a second for ten minutes beside `users`' bursts. From the 61st
+/// second it has `2 × max_changes` documents waiting (32), where slice 4
+/// stopped the reading for every index. Held at its cap, it is exempt: the
+/// reading goes on to the end, `orders`' documents keep waiting (fifty, one
+/// per document), `users` keeps being written and its lane's fence keeps
+/// passing, while confirmation stays pinned before `orders`' first unbuilt
+/// change (the slot holds, WAL grows). The budget holds within its rules the
+/// whole time. Then `orders` is let through and everything converges.
 #[tokio::test(start_paused = true)]
-async fn a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap() {
+async fn a_parked_index_changing_many_documents_does_not_stop_the_reading() {
     let log: Vec<Change> = (0..9600)
         .map(|n| {
             if n % 16 == 0 {
@@ -3102,6 +3146,7 @@ async fn a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting
             }
         })
         .collect();
+    let total = log.len() as u64;
     let db = Database::new(400, log);
     let builder = Builder::over(
         &db,
@@ -3122,6 +3167,9 @@ async fn a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting
         .lock()
         .unwrap()
         .insert("orders".to_owned());
+    // The limit, plus a live batch of each index and a backfill batch, each
+    // up to sixteen documents of about 9 KiB, and their settles.
+    let most = 512 * KIB + 3 * 16 * 10 * KIB;
     let mut deployment = Deployment::with_lanes(
         Feed::new(&db).with_bursts(16, Duration::from_secs(1)),
         Arc::clone(&builder),
@@ -3129,8 +3177,9 @@ async fn a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting
         1 << 20,
     )
     .ingest(|ingest| ingest.with_batch(batch(16)).with_builds(4))
-    .with_budget(512 * KIB, usize::MAX);
+    .with_budget(512 * KIB, most);
     let progress = deployment.ingest.progress();
+    let users_lane = stream::LaneKey::new(users(), sink_name());
     let watcher = {
         let recorder = Arc::clone(&recorder);
         tokio::spawn(async move {
@@ -3140,7 +3189,14 @@ async fn a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting
             tokio::time::sleep(Duration::from_millis(500)).await;
             for _ in 0..60 {
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                seen.push((progress.changes_read(), progress.waiting_by_index()));
+                seen.push((
+                    progress.changes_read(),
+                    progress.waiting_by_index(),
+                    progress
+                        .lane(&users_lane, crate::Level::Searchable)
+                        .and_then(|landed| landed.covered_seq()),
+                    progress.landed().covered_seq(),
+                ));
             }
             recorder.refused_indexes.lock().unwrap().clear();
             seen
@@ -3154,24 +3210,30 @@ async fn a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting
             .find(|(index, _)| *index == orders())
             .map_or(0, |(_, count)| *count)
     };
-    // Measured on paused time: 16 changes a second, `orders` held at its
-    // share from about the 30th second, one more `orders` document waiting
-    // each second after; the 32nd at second 61.
-    let (read, waiting) = &seen[5];
-    assert_eq!(
-        (*read, orders_waiting(waiting)),
-        (960, 31),
-        "at 60 s the reading goes on: orders has 31 documents waiting"
-    );
-    for (at, (read, waiting)) in seen.iter().enumerate().skip(6) {
+    for (at, (read, waiting, users_through, _)) in seen.iter().enumerate() {
+        let second = 10 * (at as u64 + 1);
         assert_eq!(
-            (*read, orders_waiting(waiting)),
-            (976, 32),
-            "from 61 s, with 2 × max_changes orders documents waiting, the reading stopped for \
-             every index ({} s)",
-            10 * (at + 1)
+            *read,
+            (16 * second).min(total),
+            "the reading goes on at {second} s ({} orders documents waiting)",
+            orders_waiting(waiting)
+        );
+        assert!(
+            users_through.is_some_and(|through| through + 32 >= *read),
+            "users' fence passes what was read at {second} s: {users_through:?} of {read}"
         );
     }
+    let (_, waiting, _, pinned) = seen.last().unwrap();
+    assert_eq!(
+        orders_waiting(waiting),
+        50,
+        "each of orders' fifty documents waits once"
+    );
+    let first_pinned = seen.get(6).unwrap().3;
+    assert_eq!(
+        *pinned, first_pinned,
+        "confirmation stays before orders' first unbuilt change: the slot holds"
+    );
     let state = deployment.recorder.state();
     for (id, version) in db
         .expected()

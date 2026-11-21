@@ -1,4 +1,7 @@
-use super::{ConfigPlan, lay_backoff, lay_index_budget_share, lay_max_waiting, plan_config};
+use super::{
+    ConfigPlan, lay_backoff, lay_index_budget_share, lay_max_pending_documents, lay_max_waiting,
+    plan_config,
+};
 use std::path::{Path, PathBuf};
 
 const DEFAULT: &str = "flusso.toml";
@@ -409,5 +412,70 @@ fn an_unset_waiting_bound_follows_the_one_set() {
             total: 4000
         },
         "each keeps its default while the other leaves room"
+    );
+}
+
+fn pending_laid(
+    table: &str,
+    flag: Option<u64>,
+    env: &[(&str, &str)],
+) -> anyhow::Result<Option<(u64, config::Origin)>> {
+    let mut config = with_concurrency(table);
+    lay_max_pending_documents(&mut config, flag, vars(env))?;
+    Ok(config
+        .concurrency
+        .max_pending_documents
+        .map(|value| (value.count, value.origin)))
+}
+
+/// `max_pending_documents` (6b-2): the flag over the variable over the file,
+/// 1,000,000 unset.
+#[test]
+fn max_pending_documents_takes_the_flag_over_the_variable_over_the_file() {
+    use config::Origin::{Env, File, Flag};
+    let file = "max_pending_documents = 5000";
+    let env = [("FLUSSO_MAX_PENDING_DOCUMENTS", "6000")];
+    assert_eq!(pending_laid(file, None, &[]).unwrap(), Some((5000, File)));
+    assert_eq!(pending_laid(file, None, &env).unwrap(), Some((6000, Env)));
+    assert_eq!(
+        pending_laid(file, Some(7000), &env).unwrap(),
+        Some((7000, Flag))
+    );
+    let config = with_concurrency("");
+    assert_eq!(daemon::max_pending_documents(&config).unwrap(), 1_000_000);
+}
+
+/// 0 is refused, naming where it came from; a word is no number.
+#[test]
+fn max_pending_documents_of_zero_is_refused_naming_where_it_came_from() {
+    for (table, flag, env, said) in [
+        (
+            "max_pending_documents = 0",
+            None,
+            &[][..],
+            "max_pending_documents = 0 (set in flusso.toml's [concurrency] max_pending_documents)",
+        ),
+        (
+            "",
+            Some(0),
+            &[][..],
+            "max_pending_documents = 0 (set by --max-pending-documents)",
+        ),
+        (
+            "",
+            None,
+            &[("FLUSSO_MAX_PENDING_DOCUMENTS", "0")][..],
+            "max_pending_documents = 0 (set by FLUSSO_MAX_PENDING_DOCUMENTS)",
+        ),
+    ] {
+        let refused = pending_laid(table, flag, env).unwrap_err();
+        assert!(refused.to_string().contains(said), "{refused}");
+    }
+    let refused = pending_laid("", None, &[("FLUSSO_MAX_PENDING_DOCUMENTS", "lots")]).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("FLUSSO_MAX_PENDING_DOCUMENTS: `lots` is not a whole number"),
+        "{refused}"
     );
 }

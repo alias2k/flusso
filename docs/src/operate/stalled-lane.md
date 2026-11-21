@@ -9,6 +9,7 @@ A **lane** is one index flowing into one sink. Open this page when any of these 
 - `FlussoLaneParked` fired: flusso stopped writing a lane on purpose.
 - `FlussoLaneStalled` fired: a lane has landed nothing for 10 minutes.
 - The log says `the lane is parked`, `the index's target is gone`, or `a lane has landed nothing for …s`.
+- The log says `index held at max_waiting_per_index: exempt, …`, `exempt index frozen: …` or `reading stopped for every index: …`: an index is stuck and its changes are piling up. See [When one index is stuck beside others](#when-one-index-is-stuck-beside-others).
 - [`/status`](../reference/http.md#get-status) shows a lane whose `health` isn't `open`, or whose `stall_seconds` keeps climbing.
 - `pinned_by` names an index with `"sink": null` and keeps naming it: no lane is stuck, the index's backlog is. See [When an index's backlog holds the slot](#when-an-indexs-backlog-holds-the-slot).
 
@@ -16,8 +17,8 @@ A lane that keeps writing is not stalled, however long its backlog. For a whole 
 
 ## What it costs while it lasts
 
-- **WAL on the Postgres server.** The replication slot is confirmed only as far as the slowest lane has written, so one stuck lane keeps the WAL of **every** index. Past `max_slot_wal_keep_size`, Postgres invalidates the slot and every index on every sink is rebuilt from a backfill ([Recover from a dropped slot](dropped-slot.md)).
-- **Memory, eventually.** The other indexes keep being written, but documents queued behind the stuck lane hold part of the [memory budget](../reference/config-toml.md#concurrency). With two or more indexes, the stuck index's live documents fill only its share (`index_budget_share`, half by default) and the others keep building. Once it has [`max_waiting_per_index`](../reference/config-toml.md#reading-ahead) distinct documents waiting (512 by default), reading stops and the other indexes stall too. Raising that setting keeps the others going longer, at the cost of more documents for the stuck index to build once its lane opens. Meanwhile a healthy index builds one batch per acknowledgement round, since it gets room only while it holds no live documents ([memory budget](../reference/config-toml.md#concurrency)), so its throughput drops though it keeps moving. A stuck index's backfill holds backfill's half of the budget, so a reindex or a new sink's backfill of any other index waits until the lane opens, as before 0.19.
+- **WAL on the Postgres server.** The replication slot is confirmed only as far as the slowest lane has written, so one stuck lane keeps the WAL of **every** index, and it grows for as long as the lane is stuck, even while the other indexes keep up. Past `max_slot_wal_keep_size`, Postgres invalidates the slot and every index on every sink is rebuilt from a backfill ([Recover from a dropped slot](dropped-slot.md)).
+- **Memory.** The other indexes keep being written, but documents queued behind the stuck lane hold part of the [memory budget](../reference/config-toml.md#concurrency). With two or more indexes, the stuck index's live documents fill only its share (`index_budget_share`, half by default) and the others keep building. Its later changes wait as documents to build, about 270 B each, up to a bound ([below](#when-one-index-is-stuck-beside-others)). Meanwhile a healthy index builds one batch per acknowledgement round, since it gets room only while it holds no live documents ([memory budget](../reference/config-toml.md#concurrency)), so its throughput drops though it keeps moving. A stuck index's backfill holds backfill's half of the budget, so a reindex or a new sink's backfill of any other index waits until the lane opens, as before 0.19.
 - **Fences on that index.** A [`/wait`](../reference/http.md#get-waitpositionposition) covering the stuck lane times out (`408`); a wait that names only other indexes (`index=…`) still answers.
 
 Dropping and rebuilding just the stuck index is not available yet ([#394](https://github.com/alias2k/flusso/issues/394)).
@@ -118,6 +119,37 @@ The lane is written but nothing lands. The log has OpenSearch's reason and `sink
 - The log says `the parked lane's probe landed; the lane is open` (or `the index is staged again; the lane is open`), then `a stalled lane is landing again`.
 - `health` is back to `open`, `stall_seconds` drops to 0, the `flusso_lane_parked` series disappears.
 - `pinned_by` moves on and the slot releases the WAL it kept.
+- If the index was exempt, the log says `index no longer exempt: it paces the reading again at max_waiting_per_index` once fewer than `max_waiting_per_index` of its documents wait. While it drains, it may say `exempt index frozen: …` first.
+
+## When one index is stuck beside others
+
+With two or more indexes, a stuck index stops only itself while another index is working. Once it has [`max_waiting_per_index`](../reference/config-toml.md#reading-ahead) documents waiting (512 by default), it becomes [exempt](../reference/config-toml.md#a-stuck-index), and the log says so:
+
+```text
+WARN index held at max_waiting_per_index: exempt, so reading goes on for the other indexes; its changes are kept as documents waiting, up to max_pending_documents for every exempt index, and the replication slot stays pinned by it, so WAL grows index=users waiting=512
+```
+
+What that means:
+
+- **Still working:** the other indexes are read, built and written, and a `/wait` naming only them answers.
+- **Growing:** the stuck index's documents waiting to be built (each once, however often it changes), and the WAL the slot keeps. `flusso_replication_slot_lag_bytes` climbs while `pinned_by` names the stuck index.
+- **Only in the log:** `/status` and the metrics have no per-index view of it yet. Each line repeats at most once a minute, and the last one names the current state ([the log lines](../reference/config-toml.md#a-stuck-index)).
+- **`exempt index frozen: …`** means the index stopped growing: its lane recovered, or no other index is working any more. It builds its backlog down, and reading stops for every index while it has that many documents waiting.
+- **With one index** there is nothing to read on for: reading stops at its waiting bound.
+
+**At the cap, everything stops.** When the exempt indexes together have [`max_pending_documents`](../reference/config-toml.md#a-stuck-index) documents waiting (a million by default), reading stops for every index:
+
+```text
+WARN reading stopped for every index: the exempt indexes have max_pending_documents documents waiting to be built; it reads on as they are built documents=1000000 max_pending_documents=1000000
+```
+
+**A whole sink down** (every index stuck at once) stops the reading within about 5 seconds, at `max_waiting_per_index` or `max_waiting`. One case reads on: an index that gets no changes during the outage counts as working, so the stuck ones become exempt and read on up to `max_pending_documents`. flusso can't tell that from one stuck index beside a healthy, quiet one. The first document that index sends and the sink doesn't acknowledge within 5 seconds stops the reading ([details](../reference/config-toml.md#a-stuck-index)). Either way, fix the sink ([The sink itself](#the-sink-itself-health-open)).
+
+**What to do.**
+
+1. **Fix the stuck lane** ([steps above](#steps)). Once it lands, the index builds its waiting documents oldest first, beside the others ([Watch it recover](#4-watch-it-recover)). If reading had stopped at the cap, the log says `the exempt indexes are below max_pending_documents: reading on`.
+2. **Watch the WAL** against `max_slot_wal_keep_size` while it lasts: the other indexes keeping up doesn't release any of it.
+3. **One index stuck while others keep working, and the cap is near?** Raise `max_pending_documents` if memory allows (about 270 B a document). It is read at start, so it takes a restart, and the restart reads again all the WAL the slot kept. Don't raise it for a whole sink down: it only takes more memory before the reading stops.
 
 ## When an index's backlog holds the slot
 
@@ -141,7 +173,7 @@ Find which side is slow:
 - **`/readyz` stays ready.** A parked lane doesn't make flusso unready: the other indexes are written and served, and a restart wouldn't help. Alert on the lane, not on readiness.
 - **A slow lane isn't stalled.** A lane that lands, just slowly, fires neither alert; `flusso:backlog_drain_eta_seconds` shows how long it will take. flusso logs a warning once a lane passes 10 minutes without landing, and every 10 minutes after.
 - **A backfill that stops making progress** shows as the index staying `backfilling` in `/status` while `flusso.documents.built` stops moving. A live change queued behind it on the same lane does age, and alerts.
-- **A stop with a parked lane.** A stop probes every parked lane once more at once. If one still can't land, the drain waits for `--shutdown-timeout-secs`, then flusso exits `1` naming the lane: `primary: 3 changes in flight, lane users blocked since 2026-11-19T12:03:11Z (blocked: …)`. The next start writes those batches again first. See [Stopping](../reference/cli.md#stopping).
+- **A stop with a parked lane.** A stop probes every parked lane once more at once. If one still can't land, the drain waits for `--shutdown-timeout-secs`, then flusso exits `1` naming the lane: `primary: 3 changes in flight, lane users blocked since 2026-11-19T12:03:11Z (blocked: …)`. Documents it read for that index and couldn't build are named too: `users: 1200 documents read and not built`. The next start writes those batches again first and reads the rest again. See [Stopping](../reference/cli.md#stopping).
 - **A process restart resets the stall age.** The age is kept in memory, so a process that crash-loops never ages a lane into `FlussoLaneStalled`. Alert on the process too: `up{job="<flusso's scrape job>"} == 0` for a few minutes, or under Kubernetes `increase(kube_pod_container_status_restarts_total{container="flusso"}[15m]) > 2`.
 
 ## Related

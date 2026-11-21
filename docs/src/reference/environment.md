@@ -63,6 +63,7 @@ Every flag reads a `FLUSSO_*` variable. **The flag wins** when both are set. `fl
 | `FLUSSO_INDEX_BUDGET_SHARE` | `--index-budget-share` | `run` |
 | `FLUSSO_MAX_WAITING_PER_INDEX` | `--max-waiting-per-index` | `run` |
 | `FLUSSO_MAX_WAITING` | `--max-waiting` | `run` |
+| `FLUSSO_MAX_PENDING_DOCUMENTS` | `--max-pending-documents` | `run` |
 | `FLUSSO_BACKOFF_INITIAL_MS` | `--backoff-initial-ms` | `run` |
 | `FLUSSO_BACKOFF_MAX_MS` | `--backoff-max-ms` | `run` |
 | `FLUSSO_SHUTDOWN_TIMEOUT_SECS` | `--shutdown-timeout-secs` | `run` |

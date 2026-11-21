@@ -32,6 +32,7 @@
 //!   registration ────┘  └────────── tick, stop, end ────┘
 //! ```
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
@@ -44,6 +45,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::builder::BuilderEnd;
 use super::confirm::CONFIRM_TICK;
+use super::reader::Lead;
 use super::reader::{self, ReaderEnd};
 use super::snapshot::ClosedConsumer;
 use super::{Ended, IngestEngine};
@@ -168,6 +170,7 @@ impl IngestEngine {
         builders: Vec<Builder<'_>>,
         reports: &Reports,
         mut reader: ReaderEnd,
+        lead: Arc<Lead>,
     ) -> Result<Ended> {
         let mut last_confirmed: Option<Landed> = None;
         let mut tick = tokio::time::interval(CONFIRM_TICK);
@@ -194,6 +197,18 @@ impl IngestEngine {
                 }
             }
             if reader_end.is_some() && ends.iter().all(Option::is_some) {
+                // Every builder built what it was handed, an exempt backlog
+                // included (O3): a document still waiting is a read change
+                // unbuilt, never an `Ok` end.
+                let left = self.progress.waiting_by_index();
+                if !left.is_empty() {
+                    return Err(EngineError::DocumentsLeft(
+                        left.iter()
+                            .map(|(index, count)| format!("{index}: {count}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ));
+                }
                 let stopped = ends.iter().flatten().any(|end| end.stopped);
                 if let Some(ended) = reader_end.take() {
                     return self.finish(stopped, ended, &mut last_confirmed).await;
@@ -245,6 +260,9 @@ impl IngestEngine {
                 }
                 _ = tick.tick() => {
                     self.confirm(&mut last_confirmed, true);
+                    // A reader stopped because no index was free re-checks
+                    // once a second, and the exemption's lines are checked.
+                    lead.tick(&self.progress);
                     for builder in &signals {
                         builder.tick.store(true, Ordering::Release);
                         builder.builder.wake();

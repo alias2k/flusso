@@ -223,6 +223,27 @@ pub fn max_waiting(config: &Config) -> anyhow::Result<MaxWaiting> {
     }
 }
 
+/// How many documents held indexes together may have waiting before reading
+/// stops for every index (ADR 0012 stage 8a, slice 6b-2): `[concurrency]
+/// max_pending_documents` as set (flag > env > file), else
+/// [`engine::DEFAULT_MAX_PENDING_DOCUMENTS`]. Refused at 0, naming where it
+/// came from and how to change it. The one judge `run`, `check`, `build` and
+/// [`Daemon::start`] share.
+pub fn max_pending_documents(config: &Config) -> anyhow::Result<usize> {
+    match config.concurrency.max_pending_documents {
+        Some(value) if value.count == 0 => anyhow::bail!(
+            "[concurrency] max_pending_documents = 0 ({}) would stop the reading as soon as an \
+             index is held: it is how many documents held indexes together may have waiting \
+             before flusso stops reading changes for every index. Set at least 1 with {}; a flag \
+             wins over its variable, a variable over the file",
+            waiting_origin(value, "max_pending_documents"),
+            waiting_ways("max_pending_documents"),
+        ),
+        Some(value) => Ok(count(value.count)),
+        None => Ok(engine::DEFAULT_MAX_PENDING_DOCUMENTS),
+    }
+}
+
 /// A count as the engine takes it (a larger one than memory could ever hold
 /// is the same as no bound).
 fn count(value: u64) -> usize {
@@ -363,6 +384,7 @@ impl Daemon {
         let backoff = backoff(&config)?;
         let index_share = index_budget_share(&config)?;
         let max_waiting = max_waiting(&config)?;
+        let max_pending_documents = max_pending_documents(&config)?;
         tracing::info!(
             source = %config.source.kind,
             stream = %config.stream.kind,
@@ -452,6 +474,7 @@ impl Daemon {
         .with_batch(batch_policy(&config))
         .with_builds(builds(&config))
         .with_max_waiting(max_waiting)
+        .with_max_pending_documents(max_pending_documents)
         .with_budget(Arc::clone(&budget))
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())

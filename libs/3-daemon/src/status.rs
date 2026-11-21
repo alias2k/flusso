@@ -579,6 +579,15 @@ impl Status {
             .map_or(0, |progress| progress.committed(sink))
     }
 
+    /// Each index with documents read and not yet built, and how many,
+    /// oldest waiting first: what a stop cut short by its deadline leaves
+    /// for the restart (ADR 0012 stage 8a, O3). Empty without a progress.
+    pub fn waiting_by_index(&self) -> Vec<(IndexName, usize)> {
+        self.progress
+            .as_ref()
+            .map_or_else(Vec::new, |progress| progress.waiting_by_index())
+    }
+
     /// Changes captured but not yet committed by the slowest sink.
     pub fn in_flight(&self) -> u64 {
         // Committed first: a change read in between only adds to captured,

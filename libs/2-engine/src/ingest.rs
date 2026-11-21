@@ -48,6 +48,7 @@ mod confirm;
 mod dispatcher;
 mod gate;
 mod live;
+mod outstanding;
 mod reader;
 mod snapshot;
 #[cfg(test)]
@@ -97,6 +98,18 @@ type Lanes = BTreeMap<LaneKey, Box<dyn Producer<LaneItem>>>;
 /// The source's live change stream.
 type LiveStream = BoxStream<'static, source::Result<LiveChange>>;
 
+/// How many documents held indexes together may have waiting, by default,
+/// before reading stops for every index (`[concurrency]
+/// max_pending_documents`).
+pub const DEFAULT_MAX_PENDING_DOCUMENTS: usize = 1_000_000;
+
+/// What the exemption keeps for the life of the ingest engine (6b-2).
+#[derive(Debug)]
+struct Exemption {
+    outstanding: Arc<outstanding::Outstanding>,
+    log: Arc<reader::ExemptionLog>,
+}
+
 /// The ingest engine over one source, one document builder, and one stream.
 #[derive(Debug)]
 pub struct IngestEngine {
@@ -112,6 +125,14 @@ pub struct IngestEngine {
     /// How far the reader may read ahead; derived from `batch` and `builds`
     /// when unset.
     max_waiting: Option<MaxWaiting>,
+    /// How many documents the exempt indexes together may have waiting
+    /// before the reader stops for every index (6b-2).
+    max_pending_documents: usize,
+    /// With several indexes, what the exemption keeps across engine runs:
+    /// what each index has waiting on lanes unacknowledged (as the items on
+    /// lanes are kept), and its log lines. `None` with one index, which has
+    /// no exemption and pays nothing for it.
+    exemption: Option<Exemption>,
     budget: Option<Arc<Budget>>,
     /// The budget waits open across engine runs (see [`Builds::with_waits`]).
     budget_waits: Arc<std::sync::Mutex<builds::Waits>>,
@@ -148,6 +169,11 @@ impl IngestEngine {
         sinks: Vec<SinkName>,
         progress: Arc<Progress>,
     ) -> Self {
+        let indexes: Vec<IndexName> = progress.indexes().cloned().collect();
+        let exemption = (indexes.len() > 1).then(|| Exemption {
+            outstanding: Arc::new(outstanding::Outstanding::new(indexes.iter().cloned())),
+            log: Arc::new(reader::ExemptionLog::new(indexes)),
+        });
         Self {
             source,
             resolver: Arc::clone(&documents),
@@ -157,6 +183,8 @@ impl IngestEngine {
             batch: BatchPolicy::default(),
             builds: 1,
             max_waiting: None,
+            max_pending_documents: DEFAULT_MAX_PENDING_DOCUMENTS,
+            exemption,
             budget: None,
             budget_waits: Arc::default(),
             key_reads: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -250,6 +278,16 @@ impl IngestEngine {
             per_index: max.per_index.max(1),
             total: max.total.max(1),
         });
+        self
+    }
+
+    /// With two or more indexes, an index held by the budget or a full lane
+    /// with `max_waiting_per_index` documents waiting stops no other index's
+    /// reading: its documents keep waiting, up to `max` for every such index
+    /// together, where the reading stops for all (at least one; default
+    /// [`DEFAULT_MAX_PENDING_DOCUMENTS`]).
+    pub fn with_max_pending_documents(mut self, max: usize) -> Self {
+        self.max_pending_documents = max.max(1);
         self
     }
 
@@ -371,11 +409,27 @@ impl IngestEngine {
         // before this run's reader marks anything (R10): confirmation stayed
         // before all of it, so this run's stream replays it.
         self.progress.forget_all();
-        let lead = Lead::over(
-            self.max_waiting(),
-            self.progress.changes_read(),
-            builds.len(),
-        );
+        // With two or more builders a held index at its cap is exempt
+        // (6b-2); one builder keeps 6b-1b's lead.
+        let lead = if let (true, Some(exemption)) = (builds.len() > 1, &self.exemption) {
+            Lead::exempting(
+                self.max_waiting(),
+                self.progress.changes_read(),
+                builds
+                    .iter()
+                    .filter_map(|builds| builds.index().cloned())
+                    .collect(),
+                self.max_pending_documents,
+                Arc::clone(&exemption.outstanding),
+                Arc::clone(&exemption.log),
+            )
+        } else {
+            Lead::over(
+                self.max_waiting(),
+                self.progress.changes_read(),
+                builds.len(),
+            )
+        };
         // Each builder's slice channel, request inbox, signals and result,
         // in the lead's queue order.
         let signals: Vec<Signals> = builds.iter().map(|_| Signals::default()).collect();
@@ -429,6 +483,7 @@ impl IngestEngine {
                 result,
             });
         }
+        let lead_for_ticks = Arc::clone(&lead);
         let (reading, reader) = reader::reading(
             Reader {
                 resolver: Arc::clone(&self.resolver),
@@ -445,7 +500,7 @@ impl IngestEngine {
             },
             live,
         );
-        let dispatching = self.dispatch(requests, dispatched, &reports, reader);
+        let dispatching = self.dispatch(requests, dispatched, &reports, reader, lead_for_ticks);
         // One task: the reader, the dispatcher and a builder per index
         // (§3.9 I1). The run ends with the dispatcher; returning drops the
         // reader and the builders in place (R9), so nothing of them outlives

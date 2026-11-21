@@ -31,6 +31,8 @@ pub(crate) fn execute(args: BuildArgs) -> anyhow::Result<()> {
         .with_context(|| format!("validating {}", args.config.display()))?;
     daemon::max_waiting(&compiled.config)
         .with_context(|| format!("validating {}", args.config.display()))?;
+    daemon::max_pending_documents(&compiled.config)
+        .with_context(|| format!("validating {}", args.config.display()))?;
     crate::backends::compile_scripts(&compiled.config)
         .with_context(|| format!("compiling the scripts of {}", args.config.display()))?;
     config::write(&compiled, &args.out)

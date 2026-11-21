@@ -715,9 +715,51 @@ is the one concrete piece.
   `[concurrency]` keys, `--max-waiting-per-index`/`--max-waiting` + `FLUSSO_MAX_WAITING*`, never in the
   lock, defaults `2 × max_changes` and `2 × builds × max_changes`, an unset one following the other
   as `[backoff]`'s pair does, judged by `daemon::max_waiting` in `check`/`build`/`run`/`Daemon::start`:
-  0, or both set with the total below the per-index bound, refused naming each origin). **The stop**: the reader hands over
+  0, or both set with the total below the per-index bound, refused naming each origin). **The exemption
+  (6b-2)**: with two or more builders, an index whose builder is **held** (`Lead::hold`, written by the
+  builder: its live batch refused by the budget, or a publish pending on a full lane, until its next live
+  grant or the publish going through) with `max_waiting_per_index` documents or more waiting is latched
+  **exempt** by the reader in `Lead::reached` (cleared when fewer wait); its documents count toward no
+  per-index or total bound, only toward `max_pending_documents` over every exempt index
+  (`IngestEngine::with_max_pending_documents`, `[concurrency] max_pending_documents`,
+  `--max-pending-documents` + `FLUSSO_MAX_PENDING_DOCUMENTS`, default 1,000,000, never in the lock,
+  judged by `daemon::max_pending_documents`), where the reading stops for every index. **An exempt index
+  grows only while it is held and some other index is free** (the exemption is there so others keep
+  going; `Lead::someone_free`, read only while some index is held). **Free** = not held
+  and nothing of it waiting on a lane unacknowledged for `STUCK_AFTER` (5 s) with none acknowledged
+  (`ingest/outstanding.rs`: a `Published` guard in every item's `Hold`, live and backfill, counts it from
+  publish until every lane let go of it, one guard per item shared by its lanes, so a healthy sink's
+  acknowledgement doesn't free an index another sink holds; an index that publishes nothing is free). Latched but not
+  growing (its hold ended, or no other index is free, e.g. a whole sink down within about 5 s) it is frozen
+  at the count it stopped growing at and may only drain; with no index free none becomes exempt. A truly
+  silent index stays free, so beside it the held ones read on to `max_pending_documents` (the slice's own
+  case, which this cannot be told from). Either edge of a hold wakes the reader (D4), and the dispatcher's
+  1 s tick wakes a waiting reader whenever there are two or more builders (`Lead::tick`: what lets it read
+  on once an index is acknowledged again). **The exemption's log lines** (per index: not exempt, exempt and
+  growing, exempt and frozen; and the pending cap's) are logged **only from that tick**, for every index
+  and the cap whatever the reader is doing (`Lead::deciding`: the latch's rule without its writes, so the
+  check changes nothing the reader reads), one line a minute per index and one for the cap, the current
+  state logged at the next tick once the minute is over; their state is the engine's
+  (`reader::ExemptionLog`, kept across engine runs like `Outstanding`), so within a minute and a second of
+  any change the last line names the current state, except while no engine run is live (a restart's
+  backoff). Guards: `ingest::tests::exemption`'s `on_an_idle_stream_the_last_lines_name_the_state_within_a_minute`,
+  `across_an_ingest_restart_the_last_line_names_the_state_within_a_minute`, `reader::tests`'
+  `an_index_after_one_over_its_bound_still_logs_its_state`; with one index the engine keeps neither record
+  (`IngestEngine.exemption` is `None`) and `Lead::hold` does nothing. The slot stays pinned by the exempt index (its oldest unbuilt document is its
+  lanes' backlog), so WAL grows. One builder keeps
+  6b-1b's lead. A pending document costs 266 B held, 314 B at the peak (`tests/pending_memory.rs`, a
+  counting allocator). Guards: `reader::tests`' `an_index_at_its_cap_is_exempt_only_while_its_builder_is_held`
+  and siblings, `ingest::tests`' `a_parked_index_changing_many_documents_does_not_stop_the_reading` (slice
+  4's acceptance test turned around), `ingest::tests::builders`' `reading_stops_for_every_index_at_max_pending_documents`,
+  `an_index_reaches_its_exemption_with_nothing_else_in_flight`, `the_stream_end_builds_an_exempt_backlog`,
+  `a_stop_builds_and_lands_an_exempt_backlog_under_the_deadline`, `a_stop_with_an_exempt_index_still_stuck_does_not_end`;
+  the random schedules hold `orders` stuck for a random stretch in every third two-index seed. **The stop**: the reader hands over
   its cut run, ends and returns the stream; the builder waits for that (the barrier), builds and
-  publishes every run handed over and hands its end to the dispatcher, which drains, then `close_live`.
+  publishes every run handed over, an exempt backlog included (O3), and hands its end to the dispatcher,
+  which drains, then `close_live`. A run never ends `Ok` with a document waiting
+  (`EngineError::DocumentsLeft`); a stop cut short by `--shutdown-timeout-secs` exits 1 and the CLI's log
+  names each index left with documents read and not built (`shutdown::unbuilt_indexes`,
+  `daemon::Status::waiting_by_index`).
   A reader error (through the builder, which joins the reader) or a builder error reaches the
   dispatcher over the builder's one-shot and ends the run; a panic in any of the three unwinds the run's
   task, as `main`'s did; returning drops the reader and the builder in place (nothing spawned, nothing
@@ -1396,7 +1438,7 @@ is the one concrete piece.
   `a_batch_redelivered_after_a_failed_write_gives_its_bytes_back_once_written`,
   `one_bursting_index_of_three_holds_its_share_and_the_others_build`,
   `a_deferred_index_is_never_counted_committed_before_its_documents_land`,
-  `an_index_past_its_waiting_bound_holds_the_live_batch_whole`,
+  `an_index_held_past_its_waiting_bound_is_exempt_and_the_reading_goes_on`,
   `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` (sink stalled for a
   second; each index's live bytes ≤ its share plus one batch at every write, which fails with the share off),
   `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`,

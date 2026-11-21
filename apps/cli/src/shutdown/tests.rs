@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use super::{Drained, Progress, StopSignal, within};
+use super::{Drained, Progress, StopSignal, unbuilt_indexes, within};
 
 const DEADLINE: Duration = Duration::from_secs(5);
 
@@ -327,4 +327,16 @@ fn a_parked_lane_is_named_in_the_deadline_message() {
         ..lane(daemon::LaneHealthState::Open)
     };
     assert_eq!(super::lane_note("users", &open), None);
+}
+
+/// O3 (6b-2): a stop cut short by its deadline names each index with
+/// documents read and not built.
+#[test]
+fn a_stop_cut_short_names_each_index_left_with_documents_read() {
+    let index = |name: &str| kernel::IndexName::try_new(name).unwrap();
+    assert_eq!(unbuilt_indexes(&[]), "");
+    assert_eq!(
+        unbuilt_indexes(&[(index("orders"), 1200), (index("users"), 3)]),
+        "orders: 1200 documents read and not built; users: 3 documents read and not built"
+    );
 }

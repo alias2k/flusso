@@ -713,6 +713,7 @@ mod tests {
             index_budget_share = 0.25
             max_waiting_per_index = 300
             max_waiting = 900
+            max_pending_documents = 50000
 
             [backoff]
             initial_ms = 200
@@ -730,6 +731,7 @@ mod tests {
         assert_eq!(reparsed.concurrency.index_budget_share, Some(0.25));
         assert_eq!(reparsed.concurrency.max_waiting_per_index, Some(300));
         assert_eq!(reparsed.concurrency.max_waiting, Some(900));
+        assert_eq!(reparsed.concurrency.max_pending_documents, Some(50_000));
         assert!(regenerated.contains("[concurrency]"), "{regenerated}");
         assert_eq!(
             reparsed.backoff.initial_ms,
