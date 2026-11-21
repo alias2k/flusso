@@ -244,6 +244,28 @@ export function ConfigPanel({
           </Field>
         </div>
         <div className="w-28">
+          <Field label="concurrency.max_waiting_per_index">
+            <Num
+              value={config.concurrency?.max_waiting_per_index}
+              onChange={(v) =>
+                onChange({ ...config, concurrency: { ...config.concurrency, max_waiting_per_index: v } })
+              }
+              placeholder="512"
+              min={1}
+            />
+          </Field>
+        </div>
+        <div className="w-28">
+          <Field label="concurrency.max_waiting">
+            <Num
+              value={config.concurrency?.max_waiting}
+              onChange={(v) => onChange({ ...config, concurrency: { ...config.concurrency, max_waiting: v } })}
+              placeholder="2048"
+              min={1}
+            />
+          </Field>
+        </div>
+        <div className="w-28">
           <Field label="backoff.initial_ms">
             <Num
               value={config.backoff?.initial_ms}

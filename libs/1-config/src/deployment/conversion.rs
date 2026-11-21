@@ -16,8 +16,8 @@ use kernel::PortEntry;
 use crate::toml::ConfigToml;
 
 use super::{
-    BackoffConfig, BackoffValue, BatchConfig, ConcurrencyConfig, Config, DEFAULT_STREAM_KIND,
-    Origin, ServerConfig, ShareValue,
+    BackoffConfig, BackoffValue, BatchConfig, ConcurrencyConfig, Config, CountValue,
+    DEFAULT_STREAM_KIND, Origin, ServerConfig, ShareValue,
 };
 
 /// Infallible (nothing is resolved or interpreted here), so this is a `From`;
@@ -44,6 +44,11 @@ impl From<ConfigToml> for Config {
                     share,
                     origin: Origin::File,
                 }),
+                max_waiting_per_index: toml
+                    .concurrency
+                    .max_waiting_per_index
+                    .map(CountValue::from_file),
+                max_waiting: toml.concurrency.max_waiting.map(CountValue::from_file),
             },
             backoff: BackoffConfig {
                 initial_ms: toml.backoff.initial_ms.map(BackoffValue::from_file),

@@ -10,7 +10,7 @@ pub mod status;
 mod supervise;
 
 pub use backends::{Backends, SinkParts, SourceParts};
-pub use engine::{Backoff, Budget, Held, Pin, Progress};
+pub use engine::{Backoff, Budget, Held, MaxWaiting, Pin, Progress};
 pub use fence::{
     Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
     LanePositions, SinkPositions, Unserved,
@@ -159,6 +159,80 @@ pub fn index_budget_share(config: &Config) -> anyhow::Result<f64> {
     )
 }
 
+/// How far the ingest engine's reader may read ahead of its builds (ADR 0012
+/// stage 8a, slice 6a), resolved and checked: `[concurrency]
+/// max_waiting_per_index` and `max_waiting` as set (flag > env > file), each
+/// unset one derived from `[batch] max_changes` and `builds`
+/// ([`MaxWaiting::derived`]: 512 and 2,048 at the defaults). Refused: either
+/// at 0, or `max_waiting` below `max_waiting_per_index`; the message says
+/// where each value came from and how to change it. The one judge `run`,
+/// `check`, `build` and [`Daemon::start`] share.
+pub fn max_waiting(config: &Config) -> anyhow::Result<MaxWaiting> {
+    let derived = MaxWaiting::derived(batch_policy(config), builds(config));
+    let per_index = config.concurrency.max_waiting_per_index;
+    let total = config.concurrency.max_waiting;
+    for (value, key) in [(per_index, "max_waiting_per_index"), (total, "max_waiting")] {
+        if let Some(value) = value
+            && value.count == 0
+        {
+            anyhow::bail!(
+                "[concurrency] {key} = 0 ({}) would stop the reading for good: it is how many \
+                 documents may wait to be built before flusso stops reading changes. Set at \
+                 least 1 with {}; a flag wins over its variable, a variable over the file",
+                waiting_origin(Some(value), key),
+                waiting_ways(key),
+            );
+        }
+    }
+    let resolved = MaxWaiting {
+        per_index: per_index.map_or(derived.per_index, |value| count(value.count)),
+        total: total.map_or(derived.total, |value| count(value.count)),
+    };
+    if resolved.total < resolved.per_index {
+        anyhow::bail!(
+            "[concurrency] max_waiting = {} ({}) is below max_waiting_per_index = {} ({}): the \
+             documents every index together may have waiting can't be fewer than one index's. \
+             Raise max_waiting with {} or lower max_waiting_per_index with {}; a flag wins over \
+             its variable, a variable over the file",
+            resolved.total,
+            waiting_origin(total, "max_waiting"),
+            resolved.per_index,
+            waiting_origin(per_index, "max_waiting_per_index"),
+            waiting_ways("max_waiting"),
+            waiting_ways("max_waiting_per_index"),
+        );
+    }
+    Ok(resolved)
+}
+
+/// A count as the engine takes it (a larger one than memory could ever hold
+/// is the same as no bound).
+fn count(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+/// Where a `[concurrency]` count came from, in the words a user set it with.
+fn waiting_origin(value: Option<config::CountValue>, key: &str) -> String {
+    match value.map(|value| value.origin) {
+        None => match key {
+            "max_waiting" => "the default, 2 × builds × [batch] max_changes".to_owned(),
+            _ => "the default, 2 × [batch] max_changes".to_owned(),
+        },
+        Some(config::Origin::File) => format!("set in flusso.toml's [concurrency] {key}"),
+        Some(config::Origin::Flag) => format!("set by --{}", key.replace('_', "-")),
+        Some(config::Origin::Env) => format!("set by FLUSSO_{}", key.to_ascii_uppercase()),
+    }
+}
+
+/// Every way to set a `[concurrency]` count.
+fn waiting_ways(key: &str) -> String {
+    format!(
+        "flusso.toml's [concurrency] {key}, --{} or FLUSSO_{}",
+        key.replace('_', "-"),
+        key.to_ascii_uppercase()
+    )
+}
+
 /// Every way to set a `[backoff]` key.
 fn ways(key: &str) -> String {
     format!(
@@ -274,6 +348,7 @@ impl Daemon {
         backends.validate(&config)?;
         let backoff = backoff(&config)?;
         let index_share = index_budget_share(&config)?;
+        let max_waiting = max_waiting(&config)?;
         tracing::info!(
             source = %config.source.kind,
             stream = %config.stream.kind,
@@ -362,6 +437,7 @@ impl Daemon {
         .with_resolver(resolver)
         .with_batch(batch_policy(&config))
         .with_builds(builds(&config))
+        .with_max_waiting(max_waiting)
         .with_budget(Arc::clone(&budget))
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())

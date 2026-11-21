@@ -179,6 +179,24 @@ pub(crate) struct RunArgs {
     #[arg(long, value_parser = config::parse_index_budget_share)]
     index_budget_share: Option<f64>,
 
+    /// Documents one index may have waiting to be built before flusso stops
+    /// reading changes: how far reading runs ahead of the builds, per index,
+    /// and what a stop may have to build. Overrides
+    /// `[concurrency].max_waiting_per_index` from config; defaults to twice
+    /// `--batch-max-changes` (512). At least 1. Never written into the lock.
+    /// [env: FLUSSO_MAX_WAITING_PER_INDEX]
+    #[arg(long, value_parser = config::parse_max_waiting)]
+    max_waiting_per_index: Option<u64>,
+
+    /// Documents every index together may have waiting to be built, and
+    /// changes read ahead of the builds, before flusso stops reading.
+    /// Overrides `[concurrency].max_waiting` from config; defaults to
+    /// `2 × --builds × --batch-max-changes` (2,048). At least
+    /// `--max-waiting-per-index`. Never written into the lock.
+    /// [env: FLUSSO_MAX_WAITING]
+    #[arg(long, value_parser = config::parse_max_waiting)]
+    max_waiting: Option<u64>,
+
     /// The first wait before trying again, in milliseconds: a failed engine's
     /// restart, a parked lane's probe, a re-staged lane's next staging. Each
     /// wait doubles up to `--backoff-max-ms`. Overrides `[backoff].initial_ms`
@@ -256,6 +274,12 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     lay_index_budget_share(&mut config, args.index_budget_share, |name| {
         std::env::var(name).ok()
     })?;
+    lay_max_waiting(
+        &mut config,
+        args.max_waiting_per_index,
+        args.max_waiting,
+        |name| std::env::var(name).ok(),
+    )?;
 
     // Adapter knobs given as flags/env are laid over the file's entries, then
     // every entry is validated against its adapter before anything connects.
@@ -647,6 +671,47 @@ fn lay_index_budget_share(
     };
     config.concurrency.index_budget_share = laid;
     daemon::index_budget_share(config)?;
+    Ok(())
+}
+
+/// Lay `--max-waiting-per-index` and `--max-waiting` over their variables
+/// over `[concurrency]`, keeping where each was set, then check the pair
+/// with the daemon's judge, so a bad bound fails before anything connects.
+/// The variables are read here, not by clap, so a refusal can tell a flag
+/// from its variable.
+fn lay_max_waiting(
+    config: &mut config::Config,
+    per_index: Option<u64>,
+    total: Option<u64>,
+    env: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<()> {
+    let layer = |flag: Option<u64>,
+                 name: &str,
+                 file: Option<config::CountValue>|
+     -> anyhow::Result<Option<config::CountValue>> {
+        if let Some(count) = flag {
+            return Ok(Some(config::CountValue {
+                count,
+                origin: config::Origin::Flag,
+            }));
+        }
+        match env(name).filter(|text| !text.is_empty()) {
+            Some(text) => Ok(Some(config::CountValue {
+                count: config::parse_max_waiting(&text)
+                    .map_err(|why| anyhow::anyhow!("{name}: {why}"))?,
+                origin: config::Origin::Env,
+            })),
+            None => Ok(file),
+        }
+    };
+    config.concurrency.max_waiting_per_index = layer(
+        per_index,
+        "FLUSSO_MAX_WAITING_PER_INDEX",
+        config.concurrency.max_waiting_per_index,
+    )?;
+    config.concurrency.max_waiting =
+        layer(total, "FLUSSO_MAX_WAITING", config.concurrency.max_waiting)?;
+    daemon::max_waiting(config)?;
     Ok(())
 }
 

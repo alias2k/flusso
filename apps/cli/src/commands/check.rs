@@ -80,6 +80,8 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     daemon::backoff(&config).with_context(|| format!("validating {}", args.config.display()))?;
     daemon::index_budget_share(&config)
         .with_context(|| format!("validating {}", args.config.display()))?;
+    daemon::max_waiting(&config)
+        .with_context(|| format!("validating {}", args.config.display()))?;
     crate::backends::compile_scripts(&config)
         .with_context(|| format!("compiling the scripts of {}", args.config.display()))?;
     let config = Arc::new(config);

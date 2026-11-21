@@ -14,14 +14,14 @@ pub use compiled::{
     write_if_changed,
 };
 pub use deployment::{
-    BackoffConfig, BackoffValue, Config, DEFAULT_STREAM_KIND, Index, Origin, ServerConfig,
-    ShareValue,
+    BackoffConfig, BackoffValue, Config, CountValue, DEFAULT_STREAM_KIND, Index, Origin,
+    ServerConfig, ShareValue,
 };
 pub use loader::{LoadError, load};
 pub use toml::SinkEntry;
 pub use toml::entities::{
     MAX_BUILDS, MAX_BUILT_MIB, MAX_WRITES, MIN_BUILT_MIB, parse_backoff_ms, parse_builds,
-    parse_index_budget_share, parse_max_built_mib, parse_writes,
+    parse_index_budget_share, parse_max_built_mib, parse_max_waiting, parse_writes,
 };
 
 // Re-export the kernel vocabulary so downstream crates depend only on `config`

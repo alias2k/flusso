@@ -1,4 +1,4 @@
-use super::{ConfigPlan, lay_backoff, lay_index_budget_share, plan_config};
+use super::{ConfigPlan, lay_backoff, lay_index_budget_share, lay_max_waiting, plan_config};
 use std::path::{Path, PathBuf};
 
 const DEFAULT: &str = "flusso.toml";
@@ -272,5 +272,111 @@ fn an_index_budget_share_outside_zero_to_one_is_refused_naming_where_it_came_fro
     assert!(
         error.contains("FLUSSO_INDEX_BUDGET_SHARE: `half` is not a number"),
         "{error}"
+    );
+}
+
+fn waiting_laid(
+    table: &str,
+    per_index: Option<u64>,
+    total: Option<u64>,
+    env: &[(&str, &str)],
+) -> anyhow::Result<config::Config> {
+    let mut config = with_concurrency(table);
+    lay_max_waiting(&mut config, per_index, total, vars(env))?;
+    Ok(config)
+}
+
+fn waiting(
+    config: &config::Config,
+) -> (Option<(u64, config::Origin)>, Option<(u64, config::Origin)>) {
+    let pair = |value: Option<config::CountValue>| value.map(|value| (value.count, value.origin));
+    (
+        pair(config.concurrency.max_waiting_per_index),
+        pair(config.concurrency.max_waiting),
+    )
+}
+
+#[test]
+fn the_waiting_bounds_take_the_flag_over_the_variable_over_the_file() {
+    use config::Origin::{Env, File, Flag};
+    let file = "max_waiting_per_index = 100\nmax_waiting = 400";
+    assert_eq!(
+        waiting(&waiting_laid(file, None, None, &[]).unwrap()),
+        (Some((100, File)), Some((400, File)))
+    );
+    let vars = [
+        ("FLUSSO_MAX_WAITING_PER_INDEX", "200"),
+        ("FLUSSO_MAX_WAITING", "800"),
+    ];
+    assert_eq!(
+        waiting(&waiting_laid(file, None, None, &vars).unwrap()),
+        (Some((200, Env)), Some((800, Env)))
+    );
+    assert_eq!(
+        waiting(&waiting_laid(file, Some(300), Some(900), &vars).unwrap()),
+        (Some((300, Flag)), Some((900, Flag)))
+    );
+    let config = waiting_laid("", None, None, &[]).unwrap();
+    assert_eq!(waiting(&config), (None, None));
+    assert_eq!(
+        daemon::max_waiting(&config).unwrap(),
+        daemon::MaxWaiting {
+            per_index: 512,
+            total: 2048
+        },
+        "derived from the batch and the builds"
+    );
+}
+
+#[test]
+fn a_waiting_bound_of_zero_or_a_total_below_one_index_is_refused_naming_where_each_came_from() {
+    for (table, per_index, total, env, said) in [
+        (
+            "max_waiting_per_index = 0",
+            None,
+            None,
+            &[][..],
+            "max_waiting_per_index = 0 (set in flusso.toml's [concurrency] max_waiting_per_index)",
+        ),
+        (
+            "",
+            None,
+            Some(0),
+            &[][..],
+            "max_waiting = 0 (set by --max-waiting)",
+        ),
+        (
+            "",
+            None,
+            None,
+            &[("FLUSSO_MAX_WAITING_PER_INDEX", "0")][..],
+            "max_waiting_per_index = 0 (set by FLUSSO_MAX_WAITING_PER_INDEX)",
+        ),
+        (
+            "max_waiting = 100",
+            Some(200),
+            None,
+            &[][..],
+            "max_waiting = 100 (set in flusso.toml's [concurrency] max_waiting) is below \
+             max_waiting_per_index = 200 (set by --max-waiting-per-index)",
+        ),
+        (
+            "",
+            Some(4096),
+            None,
+            &[][..],
+            "max_waiting = 2048 (the default, 2 × builds × [batch] max_changes) is below \
+             max_waiting_per_index = 4096",
+        ),
+    ] {
+        let refused = waiting_laid(table, per_index, total, env).unwrap_err();
+        assert!(refused.to_string().contains(said), "{refused}");
+    }
+    let refused = waiting_laid("", None, None, &[("FLUSSO_MAX_WAITING", "many")]).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("FLUSSO_MAX_WAITING: `many` is not a whole number"),
+        "{refused}"
     );
 }
