@@ -80,12 +80,12 @@ End to end on the `reference` benchmark, 2 and 4 writes backfilled about 1.4× f
 
 Several builds run at once, but never two holding the same document, and each sink gets one index's built batches in the order they were started, so a document's later version still lands after its earlier one. Indexes don't wait for each other: one index's batch can land before an older batch of another. Live batches go before backfill batches, except every fourth build slot both could take. A second live build of an index starts only while the batch waiting behind its first is full, so a trickle of changes still batches itself. A backfill gains while building is what holds it back. On the `reference` benchmark, 2 and 4 builds backfilled about 15% faster than one; past that the sink's writes bound it. Peak memory rose there, from about 120 to 300–400 MiB, because built batches wait in the sink's lane. Each build holds a Postgres connection; behind PgBouncer count `builds` + 2 server connections in transaction mode. Up to `2 × builds` built batches of an index wait behind a slow one before that index starts nothing more.
 
-**The memory budget.** A built batch is counted from its build until the last sink acknowledges it, in heap bytes (a document holds about 8–10× its JSON), at least 1 KiB a batch. A backfill holds at most half of `max_built_mib` (past the one batch a backfill holding nothing is always granted), so live changes always have room beside it. A batch larger than the whole budget still builds: a backfill batch once no backfill is held, a live batch once its own index holds no live documents. A sink that stops acknowledging fills the budget, and then ingest waits: the slowest sink paces ingest, as a full queue did before 0.18. The budget can be passed by the batches being built at the moment it fills, each by what it really built: up to `2 × builds` batches, plus one live batch per index and one backfill batch, since an index holding no live documents, and a backfill holding nothing, always get one. A live batch holds at most `[batch] max_changes` documents of one index (256 at the defaults), however many documents its changes touched: a change touching more is built as several batches, each counted here like any other. It doesn't count a sink's request bodies (`writes` × one rendered `_bulk` per sink), the source's read-ahead (`[batch] max_changes` × 16 changes with their row images), or the documents [waiting to be built](#reading-ahead) (an id and a position each, not a document). Plan the process's memory as `max_built_mib` + `2 × builds` batches + one live batch per index + one backfill batch + those two + about 100 MiB, plus 10–20% for the allocator. With two or more indexes, add what a [stuck index](#a-stuck-index) keeps waiting: about 270 B a document (320 B while the set grows, measured with a one-column integer key; a wider key costs more), so up to 270–320 MB at the default `max_pending_documents`. On Linux, `run` warns at start when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one. `/status` reports what is held (`memory`) and `flusso.memory.built` plots it ([Metrics](metrics.md)).
+**The memory budget.** A built batch is counted from its build until the last sink acknowledges it, in heap bytes (a document holds about 8–10× its JSON), at least 1 KiB a batch. A backfill holds at most half of `max_built_mib` (past the one batch a backfill holding nothing is always granted), so live changes always have room beside it. A batch larger than the whole budget still builds: a backfill batch once no backfill is held, a live batch once its own index holds no live documents. A sink that stops acknowledging fills the budget, and then ingest waits: the slowest sink paces ingest, as a full queue did before 0.18. The budget can be passed by the batches being built at the moment it fills, each by what it really built: up to `2 × builds` batches, plus one live batch per index and one backfill batch, since an index holding no live documents, and a backfill holding nothing, always get one. A live batch holds at most `[batch] max_changes` documents of one index (256 at the defaults), however many documents its changes touched: a change touching more is built as several batches, each counted here like any other. It doesn't count a sink's request bodies (`writes` × one rendered `_bulk` per sink), the source's read-ahead (`[batch] max_changes` × 16 changes with their row images), or the documents [waiting to be built](#reading-ahead) (an id and a position each, not a document). Plan the process's memory as `max_built_mib` + `2 × builds` batches + one live batch per index + one backfill batch + those two + about 100 MiB, plus 10–20% for the allocator. With two or more indexes, add what a [stuck index](#a-stuck-index) keeps waiting while another index flows: about 270 B a document (320 B while the set grows, measured with a one-column integer key; a wider key costs more), so up to 270–320 MB at the default `max_pending_documents`. On Linux, `run` warns at start when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one. `/status` reports what is held (`memory`) and `flusso.memory.built` plots it ([Metrics](metrics.md)).
 
 **One index's share.** With two or more indexes, one index's live documents hold at most `index_budget_share` of the budget: 256 MiB of the default 512. An index whose sink falls behind in a burst stops at its share, and the other indexes keep building in the rest. Its backfill counts with every other backfill against half the budget, not against its share, so an index being backfilled or reindexed keeps building its live changes beside it, as in 0.18. An index holding no live documents always gets one live batch, even with the budget full, so one index stuck at its share (a lane parked for hours) leaves the others building and reading.
 
 - **While it waits at its share**, that index's documents wait to be built, and the stream keeps being read for the others.
-- **At its waiting bound it becomes exempt.** Once the held index has [`max_waiting_per_index`](#reading-ahead) distinct documents to build (512 by default), it stops pacing the reading. Its changes are kept as documents to build, and the other indexes keep being read and written, up to `max_pending_documents` over every such index ([A stuck index](#a-stuck-index)).
+- **At its waiting bound it becomes exempt.** Once the held index has [`max_waiting_per_index`](#reading-ahead) distinct documents to build (512 by default), and some other index isn't held, it stops pacing the reading. Its changes are kept as documents to build, and the other indexes keep being read and written, up to `max_pending_documents` over every such index ([A stuck index](#a-stuck-index)).
 - **A full lane holds an index the same way.** Each lane has a [backstop](stream-channel.md) of items, which can bind only when `max_built_mib` is past 1,024. With two or more indexes, an index whose lane on any sink reaches it is held as if at its share: its own builds wait for the lane, the other indexes keep building and reading, and at `max_waiting_per_index` documents waiting it becomes exempt too.
 - **With one index** it holds the whole budget, whatever the share says.
 
@@ -131,7 +131,7 @@ That bound is the **lead**. A run of changes read at once can pass it by its own
 
 **When to change it.** The defaults leave room for two batches per index and two per build, so the next batch is read while one builds.
 
-- **Raise `max_waiting_per_index` when one index builds slowly but keeps up.** A slow index paces the reading at this many documents waiting; a larger bound lets the others run further ahead of it. The cost: a stop has more to build. Past 2,048 the total rises with it unless `max_waiting` is set too. A stuck index stops nobody here: it becomes [exempt](#a-stuck-index).
+- **Raise `max_waiting_per_index` when one index builds slowly but keeps up.** A slow index paces the reading at this many documents waiting; a larger bound lets the others run further ahead of it. The cost: a stop has more to build. Past 2,048 the total rises with it unless `max_waiting` is set too. A stuck index beside one that flows stops nobody here: it becomes [exempt](#a-stuck-index).
 - **Raise `max_waiting` when many indexes change at once.** At the defaults, four indexes with 512 documents waiting each reach it, and reading pauses for all of them.
 - **Lower both to bound a stop's work**, when builds are slow and `--shutdown-timeout-secs` is short. A smaller lead leaves less overlap between reading and building. A stuck index's documents count apart, under `max_pending_documents`.
 
@@ -159,16 +159,23 @@ That bound is the **lead**. A run of changes read at once can pass it by its own
 
 ### A stuck index
 
-With two or more indexes, one stuck index no longer stops the others. It becomes **exempt**: the others keep being read and written while its changes wait.
+With two or more indexes, one stuck index doesn't stop the others. It becomes **exempt**: the others keep being read and written while its changes wait. The exemption is there so the others keep going, so it applies only while some other index isn't stuck.
 
-**When.** An index is **held** while the memory budget refuses its live batch (its [share](#concurrency) or the whole limit), or while a batch of it waits on a full lane. A held index with `max_waiting_per_index` documents waiting becomes exempt. It stays exempt until fewer than `max_waiting_per_index` of its documents wait.
+**When.** An index is **held** while the memory budget refuses its live batch (its [share](#concurrency) or the whole limit), or while a batch of it waits on a full lane. A held index becomes exempt once it has `max_waiting_per_index` documents waiting **and** at least one other index isn't held. It stays exempt until fewer than `max_waiting_per_index` of its documents wait.
 
-**While it lasts.**
+**While it is held.**
 
 - **The other indexes go on.** They are read, built and written as usual, and a [`/wait`](http.md#get-waitpositionposition) that names only them passes.
 - **The stuck index's changes are kept as documents to build.** A document changed many times is still built once. Its documents count only toward `max_pending_documents`.
 - **At `max_pending_documents`** documents waiting over every exempt index, reading stops for every index. It goes on as they're built.
-- **When it recovers**, it builds its waiting documents oldest first, `[batch] max_changes` at a time, taking turns with the other indexes.
+
+**When it recovers.** Its hold ends once its lane or its share of the budget has room again. It builds its waiting documents oldest first, `[batch] max_changes` at a time, taking turns with the other indexes. It no longer adds to its backlog: it paces the reading at the count it held when its hold ended, as any index paces it at `max_waiting_per_index`. Once fewer than `max_waiting_per_index` wait, it is no longer exempt. Held again before then, while another index flows, it grows again.
+
+**When every index is held at once**, typically a whole sink down, no index is exempt:
+
+- **Reading stops at `max_waiting_per_index` / `max_waiting`**, as for an index that is only slow. Nothing is read on toward `max_pending_documents`, so it takes no more memory and sends Postgres no queries while it waits.
+- **An index already exempt** when the others got stuck keeps what it has waiting, adds nothing, and stops the reading at that count.
+- **Reading goes on as soon as any index's hold ends.**
 
 **What it doesn't change.**
 
@@ -176,14 +183,14 @@ With two or more indexes, one stuck index no longer stops the others. It becomes
 - **A slow index isn't held.** An index whose builds and writes keep up, however slowly, still paces the reading at `max_waiting_per_index`.
 - **With one index**, nothing changes: there is no other index to read on for.
 - **A `/wait` covering the stuck index**, by naming it or by naming none, waits for it.
-- **No per-index view yet.** `/status` and the metrics show no exemption; the log does ([A lane is stalled](../operate/stalled-lane.md)).
+- **No per-index view yet.** `/status` and the metrics show no exemption; the log does ([A lane is stalled](../operate/stalled-lane.md)). An index becoming exempt, and no longer exempt, is logged at most once a minute per index; reading stopping at `max_pending_documents`, and going on below it, at most once a minute. The first of each is always logged, so a missing line doesn't mean nothing changed.
 
 **A stop** builds and writes every exempt index's documents too, within `--shutdown-timeout-secs`. When it can't, flusso exits `1` and names each index left with documents read and not built; the next start reads them again ([Stopping](cli.md#stopping)).
 
 **When to change `max_pending_documents`.**
 
 - **Lower it on a memory-constrained host.** Each waiting document costs about 270 B.
-- **Raise it to keep the others running longer beside a stuck index**, when memory allows. The WAL the slot keeps grows either way.
+- **Raise it to keep the others running longer beside a stuck index**, when memory allows. The WAL the slot keeps grows either way. It does nothing for a whole sink down: nothing is read toward it then.
 
 ## backoff
 

@@ -119,11 +119,11 @@ The lane is written but nothing lands. The log has OpenSearch's reason and `sink
 - The log says `the parked lane's probe landed; the lane is open` (or `the index is staged again; the lane is open`), then `a stalled lane is landing again`.
 - `health` is back to `open`, `stall_seconds` drops to 0, the `flusso_lane_parked` series disappears.
 - `pinned_by` moves on and the slot releases the WAL it kept.
-- If the index was exempt, the log says `index below max_waiting_per_index: no longer exempt; it paces the reading again` once its waiting documents are built.
+- If the index was exempt, the log says `index below max_waiting_per_index: no longer exempt; it paces the reading again` once fewer than `max_waiting_per_index` of its documents wait.
 
 ## When one index is stuck beside others
 
-With two or more indexes, a stuck index stops only itself. Once it has [`max_waiting_per_index`](../reference/config-toml.md#reading-ahead) documents waiting (512 by default), it becomes [exempt](../reference/config-toml.md#a-stuck-index), and the log says so once:
+With two or more indexes, a stuck index stops only itself while another index still flows. Once it has [`max_waiting_per_index`](../reference/config-toml.md#reading-ahead) documents waiting (512 by default), it becomes [exempt](../reference/config-toml.md#a-stuck-index), and the log says so:
 
 ```text
 WARN index held at max_waiting_per_index: exempt, so reading goes on for the other indexes; its changes are kept as documents waiting, up to max_pending_documents for every exempt index, and the replication slot stays pinned by it, so WAL grows index=users waiting=512
@@ -133,9 +133,10 @@ What that means:
 
 - **Still working:** the other indexes are read, built and written, and a `/wait` naming only them answers.
 - **Growing:** the stuck index's documents waiting to be built (each once, however often it changes), and the WAL the slot keeps. `flusso_replication_slot_lag_bytes` climbs while `pinned_by` names the stuck index.
-- **Not shown elsewhere:** `/status` and the metrics have no per-index view of it yet, only this log line.
-- **An index that is only slow** (its lane keeps landing) isn't exempt: it paces the reading at `max_waiting_per_index`, as before.
+- **Not shown elsewhere:** `/status` and the metrics have no per-index view of it yet, only the log, which repeats each line at most once a minute ([A stuck index](../reference/config-toml.md#a-stuck-index)).
+- **An index that is only slow** (its lane keeps landing) isn't exempt: it paces the reading at `max_waiting_per_index`, as before. So does a stuck index once it recovers: it builds its backlog down without adding to it.
 - **With one index** there is nothing to read on for: reading stops at its waiting bound.
+- **With a whole sink down** (every index stuck at once), no index is exempt. Reading stops at `max_waiting_per_index` or `max_waiting`, takes no more memory, and goes on once any index recovers. Fix the sink ([The sink itself](#the-sink-itself-health-open)); `max_pending_documents` plays no part.
 
 **At the cap, everything stops.** When the stuck indexes together have [`max_pending_documents`](../reference/config-toml.md#a-stuck-index) documents waiting (a million by default), reading stops for every index:
 
@@ -147,7 +148,7 @@ WARN reading stopped for every index: the exempt indexes have max_pending_docume
 
 1. **Fix the stuck lane** ([steps above](#steps)). Once it lands, the index builds its waiting documents oldest first, beside the others ([Watch it recover](#4-watch-it-recover)). If reading had stopped at the cap, the log says `the exempt indexes are below max_pending_documents: reading on`.
 2. **Watch the WAL** against `max_slot_wal_keep_size` while it lasts: the other indexes keeping up doesn't release any of it.
-3. **Need more time before the cap?** Raise `max_pending_documents` if memory allows (about 270 B a document). It is read at start, so it takes a restart, and the restart reads again all the WAL the slot kept.
+3. **Need more time before the cap, with other indexes still flowing?** Raise `max_pending_documents` if memory allows (about 270 B a document). It is read at start, so it takes a restart, and the restart reads again all the WAL the slot kept.
 
 ## When an index's backlog holds the slot
 
