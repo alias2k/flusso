@@ -105,7 +105,7 @@ a notify each `take` sends. A run may overshoot by its own ids once.
 - **6b: an index held by the budget** (its task waits for a release) stops counting toward the lead.
   Its waiting ids count toward `max_pending_documents` instead (decision (b)3). So the other indexes
   go on, as ADR §5 decided. A stop with such an index builds its backlog under the deadline, or
-  fails (exit 1) naming it, as `main` does with a stalled sink (§3.9, 8; owner's question O3).
+  fails (exit 1) naming it, as `main` does with a stalled sink (§3.9, 8; O3, decided).
   **Acceptance test** (recorded in slice 4): `a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap`
   with the reading **not** stopping: `orders` parked at its share and changing one of fifty documents a
   second for ten minutes, `users` read and landing the whole time. In slice 4 the reading stops at second 61,
@@ -602,7 +602,7 @@ restart rewrites landed documents.
 builds at most the lead (2,048 ids at defaults over every index, 512 per index) plus one run, and
 finishes the slots in flight: a few batches more, well inside `--shutdown-timeout-secs` (30 s) at any
 realistic build rate. From 6b-2 an exempt index's backlog is built too, under the deadline, or the
-stop fails (exit 1) naming what was left (§3.9, 8; owner's question O3).
+stop fails (exit 1) naming what was left (§3.9, 8; O3, decided).
 
 ### 3.8 Slice 6a: one reader, one builder
 
@@ -928,7 +928,7 @@ Each point was checked against `origin/main` before it was taken.
 | R3: independence at awaits, not for CPU | the build's first poll (`builds.rs`'s spawn after one poll) | stated, with what bounds the synchronous work per poll (§1) and in O1's wording |
 | R4: a builder waiting for the walk token | — | it keeps coalescing until it gets the token (§7) |
 | Slice plan | — | the reviewer's: 6b-1a, 6b-1b, 6b-1c, 6b-2 (the exemption), 6b-3 (walks at once) (§11) |
-| O2 | ADR 0012 §1 ("up to `max_changes` per build") | the id cap evaluated beside the change cap; recommended (O2) |
+| O2 | ADR 0012 §1 ("up to `max_changes` per build") | the id cap evaluated beside the change cap; decided: documents (O2) |
 
 #### Design review round 2: what changed
 
@@ -943,7 +943,7 @@ Each point was checked against `origin/main` before it was taken.
 | a shrinking waiter keeps a stale limit refusal | G3/G6 (`gate.rs`) | a shrink clears the refusal, a growth keeps it (§6) |
 | G7″ before measuring | — | **not built first**: G9′ with slice 5's wake-all is the design; a throwaway 24-index measurement with one index parked comes first in 6b-1c; G7″ only if wake-all costs (§6) |
 | "held" missed a lane full at its backstop and a deployment with no budget | `LANE_BACKSTOP`; `Builds`' optional budget | held includes a publish blocked on a full lane (§5) |
-| O2 answered with "changes" | — | stated in O2 |
+| O2 answered with "changes" | — | moot: the owner chose documents (O2, decided) |
 | 6b-1a is not invisible | the catch-up | stated in §3 and §3.6; on 6b-1a's user-visible list |
 | a partial take can only be a `progress` test until 6b-1c; the skeleton's holes | — | §12's skeleton |
 | §4's "unrouted" row, §5's row 2, I1's running mask, the exit-1 message's source, a sink with no lane | the code each names | fixed in place |
@@ -978,7 +978,7 @@ poll of one future:
 
 | Work | Bounded by |
 | --- | --- |
-| a build's first poll (query text, binding the keys) | `max_changes` ids per build (O2's id cap; without it, the documents of `max_changes` changes) |
+| a build's first poll (query text, binding the keys) | `max_changes` documents per build (O2, decided) |
 | a take, under one index's pending lock | `max_changes` ids, oldest first: O(`max_changes` · log n) |
 | a candidate's walk | `max_changes` changes |
 | a publish | one `Arc` send per lane |
@@ -1314,7 +1314,7 @@ granted), `every_fourth_contested_grant_goes_to_another_builders_backfill`,
   builder that went idle earlier stays, so a request arriving late for its index is served
   (`a_request_queued_for_one_index_after_live_ends_is_served`).
 - **The stream's end**: everything read is built and landed, the exempt backlog included; no exception.
-- **A stop** (I12, the owner is asked to confirm, O3): the reader reads nothing more and hands over its
+- **A stop** (I12; O3, decided): the reader reads nothing more and hands over its
   cut run (R7); every builder abandons its walk (deliveries redelivered next start), then builds and
   lands **everything read**, the exempt backlog included, under the shutdown deadline; the dispatcher
   runs `drain_lanes` and `close_live`. If that can't finish (a parked lane, or not in time), the stop
@@ -1322,9 +1322,7 @@ granted), `every_fourth_contested_grant_goes_to_another_builders_backfill`,
   how many (`Progress::waiting_by_index`, which the CLI's stop path reads through the daemon's `Status`:
   it holds the `Progress` already, for `changes_committed`), beside the sinks with changes in flight. **No run ends `Ok` with
   a document waiting**: the dispatcher checks `Progress::waiting() == 0` after the builders return, else
-  `Err`. The restart converges by replay. *If the owner chooses otherwise* (leave the exempt backlog at
-  a stop), the stop must still exit 1 whenever a backlog is left, and the restart rewrites every other
-  index's documents from the backlog's oldest change.
+  `Err`. The restart converges by replay.
 - **What a stop builds**: at most `max_waiting` documents plus one run for the non-exempt indexes, plus
   every exempt backlog (at most `max_pending_documents`), under the deadline.
 - **Failure**: a builder's error ends the run with it (the dispatcher reads its cell and returns it);
@@ -1512,8 +1510,9 @@ confirmation read waits that long once per restart.
 
 What 6b-1b builds, against the code after 6b-1a (`dafa4990`), with one builder over every index:
 
-- **Nothing depends on O1–O3.** No ADR wording is used (O1); no take is capped per index, the one
-  builder takes as 6a (O2); there is no exemption, so no exempt backlog at a stop (O3).
+- **Nothing depends on O1–O3** (decided since, as recommended). No ADR wording is used (O1); no take
+  is capped per index, the one builder takes as 6a (O2, which 6b-1c builds); there is no exemption, so
+  no exempt backlog at a stop (O3, 6b-2's).
 - **The futures**: the reader (6a's), the dispatcher, one builder; the stop's watch beside them.
 - **The builder** is 6a's builder loop without the request lane, confirmation and the wind-down's
   `drain_lanes`/`close_live`: it owns `Runs`, `Builds`, the snapshot, the lanes' producers, its request
@@ -1679,38 +1678,37 @@ Every existing row of §3.5's and §3.8's tables is re-run on 6b-1c's code.
 
 If one index loses to `main` on the gate, it is a regression of that slice to fix before it merges.
 
-#### Open questions for the owner
+#### The owner's questions, decided
+
+All three as recommended (issue #386, the owner's answer of 2026-11-21).
 
 - **O1. "A task per index" becomes "a builder per index, each a future of the ingest engine's task".**
-  Proposed ADR wording (Decision and §1): *"One builder per index, each a future of the ingest engine's
-  task; its builds and key reads run on tasks of their own. Independence holds at every await (a lane,
-  the budget, a permit, a key page, a build), not for CPU: a build's first poll and each future's
-  bookkeeping run on the shared task, bounded per poll (at most 64 future polls, each build at most
-  `max_changes` ids). Until slice 8, a failure or a panic in one builder still ends the run for every
-  index."* Recommended, for 6a's measured reason.
-- **O2. What `[batch] max_changes` bounds per index.** Two options:
+  Asked why not its own task, the owner accepted the answer: 6a measured +54% for a cross-thread
+  hand-over per change, and builds, sinks and key reads already run on tasks of their own. What comes
+  with it:
+  - independence holds wherever a builder waits (a lane, the budget, a permit, a key page, a build),
+    not for CPU work on the shared task, which is bounded per poll (at most 64 future polls, each build
+    at most `max_changes` documents);
+  - until slice 8 a failure or a panic in one builder ends the run for every index;
+  - builders keep separate state, so they can move to tasks of their own later, if a measurement with
+    many indexes shows the coordination is the bottleneck.
 
-  | | Cap a build at `max_changes` **ids** per index (ADR 0012 §1's wording) | `max_changes` **changes** per index |
-  | --- | --- | --- |
-  | when to cut | R3: `max_changes` changes, `max_delay` | the same |
-  | what a build takes | at most `max_changes` documents, oldest first; the rest a standing candidate | every document of those changes |
-  | lane item size | ≤ `max_changes` documents | unbounded: a change fanning out to many documents makes one large item |
-  | the budget's headroom ("one live batch per index", rule 5) | ≤ `max_changes` × the index's average document | the documents of `max_changes` changes, unbounded |
-  | normal, backlog and exempt takes | one rule | two (the backlog needs the id cap anyway, F2) |
-  | against `main` with one index | a change touching more than `max_changes` documents is built in several builds where `main` built one | as `main` |
-  | the manual's `[batch] max_changes` | "a batch groups at most this many changes, and one index's build takes at most this many documents" | "a batch groups at most this many changes of one index" |
-
-  **Recommended: the id cap.** It bounds every build's estimate, makes one rule for every take, and is
-  the ADR's own wording; the price is more builds for fan-out changes. **If the answer is "changes"**: a
-  normal take takes every document of its changes, while the backlog and an exempt drain keep the id cap
-  (they have no changes to count, F2): two rules; lane items and rule 5's headroom stay unbounded for
-  fan-out changes; the manual's wording becomes "a batch groups at most this many changes of one index".
-- **O3. A stop with an exempt backlog** (F3, the reviewer's recommendation, taken to the owner),
-  plainly: a stop must build and land up to `max_pending_documents` (1,000,000 by default) documents of an
-  exempt index under `--shutdown-timeout-secs` (30 s by default), or exit 1 naming the index and how many
-  were left. Where `main` exits 0 after one batch for a sink that is slow but moving, 6b-2 exits 1 there
-  whenever that backlog doesn't land in time. Decision (b)1's cap at the lead is lifted for that backlog,
-  since leaving it unbuilt makes the restart rewrite every other index's documents. Designed for (§8).
+  The ADR 0012 text (Decision and §1) changes in 6b-1c's PR, where it becomes true: *"One builder per
+  index, each a future of the ingest engine's task; its builds and key reads run on tasks of their own.
+  Independence holds wherever a builder waits, not for CPU work on the shared task, which is bounded per
+  poll. Until slice 8, a failure or a panic in one builder still ends the run for every index."*
+- **O2. What `[batch] max_changes` bounds per index: one index's build takes at most `max_changes`
+  documents.** A batch still closes after `max_changes` changes or `max_delay`; one setting, no separate
+  `max_documents`. A take takes at most `max_changes` documents, oldest first; the rest are a standing
+  candidate. Every take (normal, backlog, exempt) follows the one rule. Against `main` with one index, a
+  change touching more than `max_changes` documents is built in several builds where `main` built one.
+  The manual's `[batch] max_changes`: "a batch groups at most this many changes, and one index's build
+  takes at most this many documents".
+- **O3. A stop with an exempt backlog.** A stop tries to build and land everything read, an exempt
+  backlog included, within `--shutdown-timeout-secs`; if it cannot, it exits 1 naming the index and how
+  much was left; it never exits 0 with read changes unbuilt. Decision (b)1's cap at the lead is lifted
+  for that backlog only, since leaving it unbuilt makes the restart rewrite every other index's
+  documents. Designed for in §8.
 
 ## 4. Guarantees
 
