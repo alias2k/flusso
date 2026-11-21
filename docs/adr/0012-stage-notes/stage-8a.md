@@ -1215,8 +1215,37 @@ index would stop it. In the slice-4 scenario at second 61 the reader marks `orde
 `orders` held at the cap, latches it exempt and reads on; exemption as builder state could not be decided
 there, since the held builder is polled only after a budget change and none comes. **For a busy index**:
 below the cap it counts toward the lead again even while it still folds; held again at the cap it is
-latched again. An index whose builds keep up drains below the cap and paces the reader as before; one
-that can't is held again and stays exempt up to `max_pending_documents`.
+latched again. An index whose builds keep up drains below the cap and paces the reader as before.
+
+**Exempt grows only while held, and while another index isn't (review of #452).** The exemption is
+there so that other indexes keep going. An exempt index's documents grow only while its builder is held
+**and** some other index's builder is not held; that is also the only state in which an index becomes
+exempt. Latched but not growing (its hold ended, or every index is held), it is **frozen** at the count it
+had when it stopped growing: it may drain, and the reader stops whenever it has that many waiting (at
+least its cap), so it never grows past it; below its cap the latch clears and it paces the reading like
+any index. So an index held once and then **merely slow** (its builds refuse nothing, so it is never held
+again) reads ahead no further than it was when its hold ended, and paces the reading once it drains: the
+6b-2 as first built kept it exempt and read ahead to `max_pending_documents` (the review's
+`a_slow_index_once_held_paces_the_reading_again`: 17 waiting at the hold, 65 later). Either edge of a
+hold wakes the reader: becoming held may turn a cap into an exemption, a hold ending may let a frozen
+index grow again (some index is free again) or may be the moment nobody is held. One predicate decides
+it (`Lead::documents_reached`'s `someone_free`), so the owner can change the rule in one place.
+
+**A whole sink down** (two or more indexes, every lane of the one sink stalled: every builder is held,
+by its full lane or by the budget its unacknowledged items keep). No index benefits from reading on, so
+none becomes exempt, and an index already exempt is frozen. The reader stops at the non-exempt bounds,
+as before 6b-2: `max_waiting_per_index` per index and `max_waiting` together, at most one run past them,
+plus whatever an exempt index had when the last other index was held (that backlog stays as it is). So
+what is read during the outage is what `2e5e598e` read, the memory is the lead's, and the reader runs no
+reverse-resolution queries against Postgres while it waits. As first built, 6b-2 latched every index
+exempt and read on to `max_pending_documents` (1,000,000 by default, about 300 MB), resolving every
+change it read: the review's `with_a_whole_sink_down_*` read 106 changes of 600 with 100 waiting where
+the exemption off read 13 with 7. When any index's hold ends the reader is woken, and the others' backlogs
+grow again, exempt, while that index flows. One index is unchanged (it is never exempt).
+
+**The log** (review of #452): each kind of line (an index latched, an index cleared, the pending cap
+reached, reading on) is logged at most once a minute per index, the first always, so an index hovering
+at its cap doesn't flood the log.
 
 **The lead (I6).** Before each run the reader waits while:
 
@@ -1230,8 +1259,7 @@ that can't is held again and stays exempt up to `max_pending_documents`.
 **The slice-4 scenario** (`orders` held at its share, changing one of fifty documents a second, cap 32):
 `orders` folds, so its changes count toward no bound; its documents reach 32 at second 61. In 6b-1c the
 reader stops there, as in 6a. In 6b-2 the reader latches `orders` exempt at that moment and the reading
-goes on (the acceptance test turned around). Tests: `a_held_index_rewriting_few_documents_stops_the_reading_no_earlier_than_6a`
-(6b-1c), `a_parked_index_changing_many_documents_does_not_stop_the_reading` (6b-2),
+goes on (the acceptance test turned around). Tests: `a_parked_index_changing_many_documents_does_not_stop_the_reading` (6b-2),
 `an_index_reaches_its_exemption_with_nothing_else_in_flight` (6b-2, D4: no other index writes, so no
 budget change ever wakes the held builder), and the repeat-heavy case
 `a_held_index_rewriting_one_document_holds_no_bound_and_no_memory_per_change`.
@@ -2033,7 +2061,7 @@ it.
 | per budget refusal seen by the fold check, per blocked publish | an atomic swap, and a reader wake when it turns held |
 | per run end | one `waiting_by_index` (a lock per index) |
 | per exempt document | about 266 B, up to `max_pending_documents` (default 1,000,000: about 266 MB, 314 MB while the map grows), outside `max_built_mib` |
-| one builder | nothing: its lead keeps 6b-1b's check |
+| one builder | its lead keeps 6b-1b's check; `hold` returns before its swap (one branch per live grant and per blocked publish), so one index costs a branch where 6b-1c had nothing (corrected in the review of #452: as first built it swapped at every live grant, and a blocked publish swapped twice and ran a fence) |
 
 **User-visible** (for the documentation agent; the 0.19 upgrade page):
 
@@ -2049,7 +2077,8 @@ it.
   the reading stops at the cap; an info line when it ends.
 - **What it does not do**: the slot stays pinned by the stuck index (confirmation never passes its
   oldest unbuilt change), so WAL grows for as long as it is stuck (`flusso.replication.slot_lag`,
-  `flusso.slot.pinned_by`). An index that is merely slow, not held, still paces the reading at its cap.
+  `flusso.slot.pinned_by`). An index that is merely slow, not held, still paces the reading at its cap
+  (made true after a hold too in fix round 1, below; and see the whole-sink rule there).
   With one index nothing changes. Per-index status and metrics come later (slice 7).
 - **The stop**: a stop builds and lands everything read, a stuck index's documents included, within
   `--shutdown-timeout-secs`; if it can't (the index still stuck), it exits 1 and the log names each
@@ -2057,6 +2086,50 @@ it.
   next start reads them again from the slot.
 - **Memory**: plan for up to about 266 B per document a stuck index keeps (314 B at the peak), on top of
   `max_built_mib`: about 270–320 MB at the default cap.
+
+#### 6b-2, fix round 1 (the review of `a27affb7`)
+
+| Finding | Fix | Tests (fail before the fix) |
+| --- | --- | --- |
+| 1: an index held once and then merely slow stayed exempt and read ahead to `max_pending_documents` (the latch never looked at "held" again) | latched but not growing, an index is frozen at the count it stopped growing at: it may drain, not grow (§5) | `a_slow_index_once_held_paces_the_reading_again` (the reviewer's: 17 waiting at the hold, 65 later on the first build; now at most one more), `an_exempt_index_whose_hold_ends_may_drain_but_not_grow` (lead unit) |
+| 2: a whole sink down exempted every index and read on to `max_pending_documents` | an index grows exempt only while some other index is not held; with every index held none becomes exempt and exempt ones freeze (§5, "A whole sink down") | the five `with_a_whole_sink_down_*` (two and three indexes: at most 20 read and 12 waiting, where the first build read 106 with 100 waiting; one index unchanged), `no_index_grows_exempt_while_every_index_is_held` (lead unit), `the_exemption_lasts_while_some_index_flows_and_stops_when_none_does` (three indexes: two stuck exempt while `users` flows, then `users` held too and the reading stops, then everything lands) |
+| 3: M7 had no test | — | `a_live_grant_ends_the_hold` (the reviewer's), still failing with `start_live`'s clear removed after the fix |
+| 5: one builder paid for `hold` | `hold` returns at once without an exemption | (a cost: the table above) |
+| 6: the total bound line | corrected in §12's bounds | — |
+| 7: the log could flap | each kind of line at most once a minute per index, the first always (`LogEdge`) | `an_index_hovering_at_its_cap_logs_each_kind_of_line_at_most_once_a_minute` (paused time, a capturing subscriber) |
+| 8: release, the other direction | — | `a_released_backlog_drains_in_parts_beside_another_indexs_changes` also asserts the backlog drains within a second beside `users`' steady load |
+
+A hold ending now wakes the reader too (`a_hold_ending_wakes_a_reader_waiting_at_a_cap`): with every
+index held and the reader stopped, the first index let go is what lets the exemption apply again, so no
+wake is lost. The latch keeps its hysteresis: it sets at the cap only while growing, clears only below
+the cap, and a frozen index's ceiling is taken once, when it stops growing, and kept until the latch
+clears or it grows again (a ceiling following the count down would stop the reading for as long as the
+index has its cap, which the mutation shows).
+
+**Mutations** (round 1):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| I8 | a frozen index treated as growing | `an_exempt_index_whose_hold_ends_may_drain_but_not_grow`, `an_exemption_ends_below_max_waiting_per_index`, `no_index_grows_exempt_while_every_index_is_held`, `a_slow_index_once_held_paces_the_reading_again` |
+| I8 | exempt with every index held (`someone_free` always true) | `no_index_grows_exempt_while_every_index_is_held`, `the_exemption_lasts_while_some_index_flows_and_stops_when_none_does`, the three `with_a_whole_sink_down_*` of two and three indexes |
+| I7 | a hold ending wakes nobody | `a_hold_ending_wakes_a_reader_waiting_at_a_cap` |
+| I8 | the frozen ceiling follows the count down | `an_exempt_index_whose_hold_ends_may_drain_but_not_grow`, `a_released_backlog_drains_in_parts_beside_another_indexs_changes` |
+| log | no throttle | `an_index_hovering_at_its_cap_logs_each_kind_of_line_at_most_once_a_minute` |
+| I7 (M7) | a live grant ends no hold | `a_live_grant_ends_the_hold` |
+
+**User-visible, changed by the round** (for the documentation agent; replaces the matching lines above):
+
+- **"An index that is merely slow still paces the reading at its cap" is now true after a hold too**: once
+  a stuck index's hold ends (its lane or budget recovers), it may drain its backlog but no longer grow
+  it; once it drains below `max_waiting_per_index` it paces the reading like any index.
+- **The exemption is there so other indexes keep going**: an index is exempt only while some other index
+  is not stuck. **With a whole sink down** (every index of two or more stuck at once), no index is
+  exempt: the reading stops at `max_waiting_per_index` / `max_waiting`, as before 0.19 (no reading on
+  to `max_pending_documents`, no extra memory, no resolution queries against Postgres while it waits),
+  and goes on as soon as any index recovers. With one index nothing changes.
+- **The log lines are throttled**: an index becoming exempt, no longer exempt, and the reading stopping
+  at or going on below `max_pending_documents` each log at most once a minute per index (the first
+  always).
 
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
@@ -2079,7 +2152,10 @@ it.
 **Bounds, from the rules:**
 
 - Documents waiting, non-exempt: per index ≤ `max_waiting_per_index` + one run's; together ≤
-  `max_waiting` + one run's. Exempt, together: ≤ `max_pending_documents` + one run's.
+  `max_waiting` + one run's, except briefly when an exempt index's latch clears and it rejoins the total
+  with up to `max_waiting_per_index − 1` documents: then ≤ `max_waiting + max_waiting_per_index − 2` +
+  one run's, until it drains (review of #452). Exempt, together: ≤ `max_pending_documents` + one run's.
+  A frozen exempt index: ≤ the count it stopped growing at + one run's.
 - Changes queued on builders: read ahead ≤ `max_waiting` + one run (the global bound); none on a
   folding builder.
 - A build: ≤ `max_changes` ids of one index (O2). Builds at once ≤ `builds` (G1); live builds of one
@@ -2149,7 +2225,7 @@ it.
 | I5 (routed) | an index that never had a live item answers `Idle` | `a_quiet_index_pins_no_confirmation_while_another_index_builds` |
 | I5 (routed) | routed raised before the run's marks | `routed_moves_only_after_the_runs_marks` (a listener that checks the marks when it fires) |
 | I5 (routed) | routed kept across `forget_all` | `a_forgotten_run_answers_through_nothing_it_routed` |
-| I6 | a per-index changes bound (F1) | `a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap`, `a_held_index_rewriting_one_document_holds_no_bound_and_no_memory_per_change` |
+| I6 | a per-index changes bound (F1) | `a_parked_index_changing_many_documents_does_not_stop_the_reading`, `a_held_index_rewriting_one_document_holds_no_bound_and_no_memory_per_change` |
 | I6 | an exempt index counted in `max_waiting` (6b-2) | `exempt_documents_count_toward_no_other_bound`, `a_parked_index_changing_many_documents_does_not_stop_the_reading` |
 | I6 | no bound on exempt documents (6b-2) | `reading_stops_for_every_index_at_max_pending_documents`, `exempt_documents_stop_the_reading_only_at_max_pending_documents` |
 | I7 | the queued slices kept on entering the fold | none: the mutation survives (at most one empty build later; see "6b-1c as built") |
@@ -2241,12 +2317,12 @@ All three as recommended (issue #386, the owner's answer of 2026-11-21).
 | Tickets and cut backfills (#435) | per-lane greatest ticket per walk; a mid-walk request waits for the walk | `one_walk_answers_a_lanes_two_requests_under_the_later_ticket`, `a_completion_answering_an_older_request_seeds_nothing`, `a_resumed_request_and_a_fresh_one_of_a_lane_are_walked_once_from_the_first_key` | `a_cut_request_mid_walk_gets_its_own_walk_after_it` |
 | A live stream that ends drains queued requests | tasks return after the reader's signal, with nothing pending or queued | `an_unseeded_sink_requests_a_snapshot_then_marks_seeded` | `a_request_queued_for_one_index_after_live_ends_is_served` |
 | Graceful stop (#371) | the barrier; the reader returns the stream; pending built, bounded by the lead | `tests::stop`, daemon `tests::stop`, `shutdown` e2e incl. `…a_restart_rewrites_none_of_it` and `random_stops_under_writes_converge_after_a_restart` | `a_stop_mid_run_builds_what_the_reader_marked_last`, `a_stop_with_many_pending_ids_finishes_within_the_deadline`, `a_stop_with_one_index_stalled_lands_the_others` |
-| Pacing | the lead bound (6a); the held-index exemption and `max_pending_documents` (6b) | `a_stalled_sink_paces_builds_and_they_resume_when_it_does` | `the_reader_waits_at_the_lead_and_resumes`, `a_parked_lane_bounds_pending_memory`, `an_index_held_by_the_budget_does_not_stop_the_reader` (6b; its acceptance case is `a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap` with the reading going on) |
+| Pacing | the lead bound (6a); the held-index exemption and `max_pending_documents` (6b) | `a_stalled_sink_paces_builds_and_they_resume_when_it_does` | `the_reader_waits_at_the_lead_and_resumes`, `a_parked_lane_bounds_pending_memory`, `an_index_held_by_the_budget_does_not_stop_the_reader` (6b; its acceptance case is `a_parked_index_changing_many_documents_does_not_stop_the_reading`) |
 | #120 staging order | unchanged | `fresh_source_*`, daemon `fresh_source_rebuilds_seeded_sinks_before_preparing`, `every_index_of_every_sink_is_staged_before_the_source_prepares` | — |
 | A lone change commits at once (#135) | `main`'s run cut; a waiting id is taken once a slot is free | `a_lone_change_on_a_quiet_stream_commits_without_waiting`, `max_delay_caps_a_batch_while_changes_keep_arriving` | — (rerun on the reader) |
 | Script failures on the ingest side (#198) | in the index task | `skip_policy_leaves_a_failed_document_out_and_keeps_going`, `stop_policy_fails_the_ingest_engine_on_a_failed_document` | slice 8: `a_stop_failure_on_one_index_lets_the_others_land` |
 | Item-level vs flush-wide; lane parking | sink side unchanged | `tests::parking`, `tests::merge`, daemon `a_stop_rejection_halts_its_lane_writing_several_items_at_once` | `a_parked_lane_fills_only_its_index_half_and_other_backfills_go_one_batch_at_a_time` |
-| Memory budget | many reservers; rules 1–5 per §3.5 (slice 4) | `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`, `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds` | `budget::tests` (`concurrent_reservations_never_pass_the_limit`, `a_release_wakes_every_waiting_task`, `a_release_between_the_refusal_and_the_wait_is_not_lost`, `an_index_holding_no_live_bytes_gets_one_live_batch_past_the_limit`, `the_oldest_index_refused_by_the_limit_holds_younger_ones_back`, `every_index_gets_every_byte_back_once`), `one_bursting_index_of_three_holds_its_share_and_the_others_build`, `a_deferred_index_is_never_counted_committed_before_its_documents_land`, `an_index_past_its_waiting_bound_holds_the_live_batch_whole`, `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` (binds: fails with the share off), `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`, `an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building`, `an_index_backfilling_keeps_the_live_room_main_gave_it`, `four_indexes_pass_the_limit_by_at_most_a_live_batch_each_and_a_backfill_batch`, `a_hold_across_an_engine_restart_is_one_wait`, `a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment`, `a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minutes`, `a_parked_index_at_its_share_beside_its_backfill_leaves_a_healthy_index_its_batch`, `a_large_batch_and_a_small_one_both_build_beside_a_parked_index` |
+| Memory budget | many reservers; rules 1–5 per §3.5 (slice 4) | `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`, `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds` | `budget::tests` (`concurrent_reservations_never_pass_the_limit`, `a_release_wakes_every_waiting_task`, `a_release_between_the_refusal_and_the_wait_is_not_lost`, `an_index_holding_no_live_bytes_gets_one_live_batch_past_the_limit`, `the_oldest_index_refused_by_the_limit_holds_younger_ones_back`, `every_index_gets_every_byte_back_once`), `one_bursting_index_of_three_holds_its_share_and_the_others_build`, `a_deferred_index_is_never_counted_committed_before_its_documents_land`, `an_index_held_past_its_waiting_bound_is_exempt_and_the_reading_goes_on`, `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` (binds: fails with the share off), `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`, `an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building`, `an_index_backfilling_keeps_the_live_room_main_gave_it`, `four_indexes_pass_the_limit_by_at_most_a_live_batch_each_and_a_backfill_batch`, `a_hold_across_an_engine_restart_is_one_wait`, `a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment`, `a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minutes`, `a_parked_index_at_its_share_beside_its_backfill_leaves_a_healthy_index_its_batch`, `a_large_batch_and_a_small_one_both_build_beside_a_parked_index` |
 | Gate fairness | lines per kind; budget asked at grant (G1–G9, slice 5) | `gate::tests`, the ingest gate tests | `gate::tests` (FIFO per kind, every fourth contested grant, a refused waiter keeps its place and the permit goes on, behind a limit refusal takes no limit room, a share refusal holds no one back, a waiter's standing read at the budget's current generation (after a release and after a settle larger than its estimate), cancel-safety, many waiters never past the permits and every one granted, the one task never ahead of an eligible waiter), `snapshot::tests`' walks reading one key page at a time; 6a: `a_task_blocked_on_a_full_lane_holds_no_permit` (two indexes, one lane full, `builds = 1`) |
 | `changes_committed` | computed from `Progress` (§3.6) | daemon status tests | daemon `tests::committed`, `progress::tests::committed` |
 | Resume checkpoints (8b), reindex per sink | the walk and its marks move as they are | `tests::resume`, `a_killed_backfill_resumes_…` e2e, `reindex_control_stages_and_requests_a_snapshot_without_restarting`, `reindex_operation_targets_one_sink` | — |

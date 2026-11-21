@@ -723,8 +723,13 @@ is the one concrete piece.
   per-index or total bound, only toward `max_pending_documents` over every exempt index
   (`IngestEngine::with_max_pending_documents`, `[concurrency] max_pending_documents`,
   `--max-pending-documents` + `FLUSSO_MAX_PENDING_DOCUMENTS`, default 1,000,000, never in the lock,
-  judged by `daemon::max_pending_documents`), where the reading stops for every index. Becoming held
-  wakes the reader (D4). The slot stays pinned by the exempt index (its oldest unbuilt document is its
+  judged by `daemon::max_pending_documents`), where the reading stops for every index. **An exempt index
+  grows only while it is held and some other index isn't** (the exemption is there so others keep going;
+  `documents_reached`'s `someone_free`): latched but not growing (its hold ended, or every index is held,
+  e.g. a whole sink down) it is frozen at the count it stopped growing at and may only drain; with every
+  index held none becomes exempt, so a whole sink down stops the reading at `max_waiting` as before 6b-2.
+  Either edge of a hold wakes the reader (D4). Each kind of exemption log line is throttled to one a
+  minute per index (`LogEdge`); with one builder `Lead::hold` does nothing. The slot stays pinned by the exempt index (its oldest unbuilt document is its
   lanes' backlog), so WAL grows; the reader logs each latch edge and the pending cap. One builder keeps
   6b-1b's lead. A pending document costs 266 B held, 314 B at the peak (`tests/pending_memory.rs`, a
   counting allocator). Guards: `reader::tests`' `an_index_at_its_cap_is_exempt_only_while_its_builder_is_held`
@@ -1417,7 +1422,7 @@ is the one concrete piece.
   `a_batch_redelivered_after_a_failed_write_gives_its_bytes_back_once_written`,
   `one_bursting_index_of_three_holds_its_share_and_the_others_build`,
   `a_deferred_index_is_never_counted_committed_before_its_documents_land`,
-  `an_index_past_its_waiting_bound_holds_the_live_batch_whole`,
+  `an_index_held_past_its_waiting_bound_is_exempt_and_the_reading_goes_on`,
   `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` (sink stalled for a
   second; each index's live bytes ≤ its share plus one batch at every write, which fails with the share off),
   `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`,
