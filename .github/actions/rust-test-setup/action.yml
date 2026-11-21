@@ -1,14 +1,10 @@
 name: Rust test setup
 description: >-
-  The toolchain, cargo-nextest and the build cache, shared by `ci.yml`'s
+  The pinned toolchain, cargo-nextest and the build cache, shared by `ci.yml`'s
   `clippy + tests` jobs and the `postgres-matrix` legs so they cannot drift.
   Runs after `actions/checkout` (a local action needs the checkout first).
 
 inputs:
-  components:
-    description: Extra rustup components (e.g. `clippy`).
-    required: false
-    default: ""
   shared-key:
     description: >-
       rust-cache's `shared-key`: one cache for several jobs. Empty keeps
@@ -16,9 +12,12 @@ inputs:
     required: false
     default: ""
   save-if:
-    description: rust-cache's `save-if`, as a string (`"true"` saves).
+    description: >-
+      rust-cache's `save-if`, as a string (`"true"` saves). Saves from `main`
+      only unless the caller says otherwise: a cache saved per pull request
+      fills the repository's 10 GB quota (issue #444).
     required: false
-    default: "true"
+    default: ${{ github.ref == 'refs/heads/main' }}
   cache:
     description: >-
       `"false"` skips the build cache, for a job that builds nothing (the
@@ -29,10 +28,10 @@ inputs:
 runs:
   using: composite
   steps:
+    # rust-toolchain.toml names the toolchain and its components (clippy and
+    # rustfmt among them); nothing here runs another.
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: ${{ inputs.components }}
+      uses: ./.github/actions/pinned-rust
 
     - name: Install cargo-nextest
       uses: taiki-e/install-action@nextest

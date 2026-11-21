@@ -1,0 +1,36 @@
+name: Pinned Rust
+description: >-
+  Installs the toolchain `rust-toolchain.toml` names, with its components, and
+  removes every other toolchain on the runner (the image's own stable
+  included). The pin decides what compiles; another toolchain installed beside
+  it would compile nothing, yet rust-cache hashes every installed toolchain
+  into its key, so a stable release or a runner image update would make every
+  cache miss. Sets what `dtolnay/rust-toolchain` set: `CARGO_HOME`, its `bin`
+  on the PATH, and `CARGO_INCREMENTAL=0`. Runs after `actions/checkout`.
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned toolchain only
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" = Windows ]; then
+          cargo_home=${CARGO_HOME:-$USERPROFILE\.cargo}
+          echo "$cargo_home\bin" >>"$GITHUB_PATH"
+        else
+          cargo_home=${CARGO_HOME:-$HOME/.cargo}
+          echo "$cargo_home/bin" >>"$GITHUB_PATH"
+        fi
+        echo "CARGO_HOME=$cargo_home" >>"$GITHUB_ENV"
+        if [ -z "${CARGO_INCREMENTAL:-}" ]; then echo "CARGO_INCREMENTAL=0" >>"$GITHUB_ENV"; fi
+        # rustup 1.28 installs the toolchain file's toolchain on `toolchain
+        # install` with no name; earlier ones did it on `show`.
+        rustup toolchain install || rustup show >/dev/null
+        pinned=$(rustup show active-toolchain | cut -d' ' -f1)
+        rustup default "$pinned"
+        for toolchain in $(rustup toolchain list --quiet | tr -d '\r'); do
+          if [ "$toolchain" != "$pinned" ]; then rustup toolchain uninstall "$toolchain"; fi
+        done
+        rustup toolchain list
+        rustc --version
