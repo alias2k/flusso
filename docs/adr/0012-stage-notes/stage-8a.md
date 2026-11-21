@@ -553,8 +553,8 @@ stop's deadline message and `dev/bench`'s `wait_drained`.
 | a redelivered item that had landed | credited again | once | `a_redelivered_item_that_had_landed_counts_once` |
 | an engine run ends with reads never published; the source replays them | never credited | both reads count once the replay lands | `every_change_read_counts_once_per_sink_across_a_replay` |
 
-**As built (slices 3 and 6a).** `Progress` counts every live change read and closes a **`Step`** at
-each live grant, through the candidate's read count (6a's `close_step_through`). Every lane of the
+**As built (slices 3 and 6a; 6b-1a below).** `Progress` counts every live change read and closes a **`Step`** at
+each live grant, through the candidate's read count (6a's `close_step_through`, gone in 6b-1a). Every lane of the
 deployment is registered with every step, with an item (`published_build`) or without
 (`skipped_build`). A lane keeps the steps that can still answer, at most `k + 2` for `k` unlanded
 items (`progress::tests::parked`); a sink's count is the read total at the oldest step its lanes have
@@ -896,7 +896,7 @@ second send), a self-wake (≈ 0).
 ### 3.9 Slice 6b: a builder per index (design, not built)
 
 **Status:** design, revised after design review rounds 1 (of `1ce6f24d`) and 2 (of `828fc333`).
-6b-1a is built from this design (§3.6); the rest is not. Against
+6b-1a is built from this design (§3.6; as built in §11); the rest is not. Against
 `main` at `7e10c43c` (6a merged). The structure (one task, N futures) is endorsed. The rules (I1–I13)
 are written to be built and tested as stated. The owner's open questions are at the end.
 
@@ -1346,6 +1346,77 @@ its steps do today. 6b-1b needs nothing of 6b-1c. 6b-1c's lead needs the fold (F
 exemption. 6b-2's stop rule (F3) needs only the backlog of 6b-1c. 6b-3's K1 task is needed only once
 walks overlap. No order constraint makes the cut wrong.
 
+#### 6b-1a as built
+
+Built as §3 states, with today's one builder. Where the code sits:
+
+- **Marks carry read numbers.** `Progress::mark_reads(id, position, read)`. `Pending.waiting` keeps
+  `(position, counter, read)`, and a build keeps the least read it took (`Build.least_read`). The reader
+  numbers each change `counted + its place in the run`, marks, counts (`read_changes`, release), then
+  raises `routed` (`Progress::routed`, under the registry lock, then the listener).
+  - `Progress::mark` (embedders, tests) marks as the next read.
+  - The run's guard counts a run cut before its marks through `read_unmarked`, which records the least
+    such read for the restart cap.
+- **Frontiers.** A take records its index's frontier under the pending lock it already holds
+  (`Taken::frontier`, the read count loaded before the lock). `start_live` adds `Progress::frontier`
+  for every other index with lanes that isn't deferred, then `close_steps`: one step number, a
+  `Step { number, read: frontier }` per index. `publish_live` registers each lane with its index's step.
+  `close_step_through` is gone. `close_step` (every read, every index) stays for embedders and tests
+  where nothing waits.
+- **`committed`.** It loads the read count first, then takes the registry lock, and each lane's pending
+  lock for `is_idle`. Per lane: the max of the landed step's frontier, the catch-up (the read count,
+  capped while `restart` is set), and the lane's high-water. A sink with no lane answers the read count.
+- **`forget_all`.** It unsets `routed`. It sets `restart` to the least of its cap and one below the least
+  read among the waiting documents, the builds never released and the unmarked reads. `next_step`
+  clears it.
+- **Deferred indexes** (slice 4) get no frontier and no registration at a grant, as they got no step
+  before: their lanes keep their last entry, and their waiting documents keep their backlog answer.
+
+**Mutations** (`progress.rs`, `pending.rs`, `reader.rs`, `commit.rs`; every `flusso-engine` and
+`flusso-daemon` unit test under a 5 s slow timeout, terminate after 2; no test hung):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| D1 | a lane with nothing outstanding answers through `newest` only | 6: `a_fence_on_a_quiet_index_passes_while_another_index_builds`, `a_quiet_index_answers_through_what_the_reader_routed`, `a_quiet_index_pins_no_confirmation_while_another_index_builds`, `changes_that_build_nothing_still_count_toward_the_lead`, `routed_moves_only_after_the_runs_marks`, `routed_never_moves_back` |
+| D1 | `routed` raised before the run's marks and count | `routed_moves_only_after_the_runs_marks` |
+| D1 | `routed` kept across `forget_all` | `a_forgotten_run_answers_through_nothing_it_routed` |
+| D1 | `routed` may move back | `routed_never_moves_back` |
+| I5 | a take's frontier at the read count with documents left | `a_partial_take_counts_committed_only_through_its_oldest_document_left`, `a_batch_ending_inside_a_run_closes_its_step_at_its_own_last_change`, the model test |
+| I5 | an index not taken registered at the read count (`Progress::frontier`) | `a_skipped_index_counts_through_its_frontier_not_the_read_count`, `a_change_read_ahead_is_not_counted_committed_before_its_build_lands` |
+| I5 | the same, in `start_live` (`changes_read` instead of `frontier`) | `a_change_read_ahead_is_not_counted_committed_before_its_build_lands` |
+| I5 | the catch-up while a build is unreleased (`is_idle` ignores builds) | `a_build_taken_and_not_released_holds_its_lanes_count`, `a_change_read_ahead_is_not_counted_committed_before_its_build_lands`, `a_batch_ending_inside_a_run_closes_its_step_at_its_own_last_change` |
+| D2a | no high-water | `a_lanes_count_never_goes_down_when_its_index_marks_again`, `compaction_changes_no_count`, the model test |
+| D2 | no restart cap | 6: `an_ended_runs_reads_count_only_with_the_first_grant_after_the_restart`, `a_replay_from_before_the_committed_point_credits_nothing_before_the_first_grant`, `a_build_in_flight_at_the_restart_caps_the_count`, `reads_cut_before_their_marks_count_no_sooner_than_the_first_grant`, `a_run_cut_before_its_marks_counts_no_sooner_than_the_first_grant`, the model test |
+| D2 | the cap never lifted | `after_the_first_grant_a_change_that_builds_nothing_counts_once_read` (written after the first run: nothing failed, because with one builder every grant registers every lane, so only a catch-up between grants shows it) |
+| D2 | the cap over the whole ended run | `reads_that_built_nothing_count_across_a_restart_with_no_replay`, `compaction_changes_no_count` |
+| D2 | builds in flight left out of the cap | `a_build_in_flight_at_the_restart_caps_the_count`, `forgetting_leaves_nothing_waiting_or_building` |
+| D2 | reads counted without marks left out of the cap | `reads_cut_before_their_marks_count_no_sooner_than_the_first_grant`, `a_run_cut_before_its_marks_counts_no_sooner_than_the_first_grant`, the model test |
+| D2 | the reader's guard counts its cut run as marked | `a_run_cut_before_its_marks_counts_no_sooner_than_the_first_grant` |
+| I5 | a sink with no lane answers 0 | `a_sink_with_no_lane_has_every_read` |
+| I5 | a skip appended instead of replacing the newest entry | 7: `progress::tests::parked` (3), the daemon's three `*_holds_its_sinks_count_and_a_sibling_counts_on`, `compaction_changes_no_count` |
+| I5 | the read count loaded after the pending state | not testable single-threaded; argued in §3 (release after the marks, acquire first) |
+
+The `a_sinks_count_never_goes_down_across_a_restart` test passes under "no high-water": its two sinks
+never see an older entry answer again. The high-water is pinned by the three tests in its row.
+
+**Hot-path costs against `main`** (measured nothing):
+
+- **Per change:** the read number (one add), and 8 more bytes per waiting document (`Pending.waiting`'s
+  value).
+- **Per run:**
+  - `routed`: one registry lock and one listener call (the fence's wake check);
+  - the read count's `fetch_add` is release (it was relaxed; no instruction changes on x86-64).
+- **Per take:** the least read over the ids taken (they are walked already), and the frontier: one
+  `BTreeMap::first_key_value` and one `HashMap` lookup under the lock held.
+- **Per grant:**
+  - one pending lock and one atomic load per index the grant didn't take (`Progress::frontier`);
+  - a `Vec` and a `BTreeMap<IndexName, Step>` with one `IndexName` clone per index;
+  - one map lookup per lane at publish.
+- **Per `/status` or `/metrics` read of `changes_committed`:** one pending lock per lane of the sink
+  (`is_idle`), under the registry lock. Confirmation and fences (`least_of`) add one `Option<Position>`
+  read.
+- **Per engine restart:** a walk of every waiting document and build for the least read.
+
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
 | Rule | |
@@ -1425,7 +1496,7 @@ walks overlap. No order constraint makes the cut wrong.
 | I5 | the catch-up without the idle check (a build unreleased) | `a_build_taken_and_not_released_holds_its_lanes_count` |
 | I5 | no high-water | `a_lanes_count_never_goes_down_when_its_index_marks_again`, `a_sinks_count_never_goes_down_across_a_restart` |
 | I5 | no restart cap | `an_ended_runs_reads_count_only_with_the_first_grant_after_the_restart`, `a_replay_from_before_the_committed_point_credits_nothing_before_the_first_grant` |
-| I5 | the cap never lifted | `a_short_replay_and_a_quiet_index_count_everything_once_landed` |
+| I5 | the cap never lifted | `after_the_first_grant_a_change_that_builds_nothing_counts_once_read` |
 | I5 | the cap over the whole ended run | `reads_that_built_nothing_count_across_a_restart_with_no_replay` |
 | I5 | builds in flight left out of the cap | `a_build_in_flight_at_the_restart_caps_the_count` |
 | I5 | reads counted without marks left out of the cap | `reads_cut_before_their_marks_count_no_sooner_than_the_first_grant` |
