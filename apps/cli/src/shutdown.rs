@@ -503,6 +503,17 @@ pub(crate) fn unfinished_sinks(status: &daemon::StatusSnapshot) -> String {
         .join("; ")
 }
 
+/// The indexes a stop cut short leaves documents read and not built on, for
+/// the log line: `orders: 1200 documents read and not built`. Empty when
+/// every document read was built (ADR 0012 stage 8a, O3).
+pub(crate) fn unbuilt_indexes(waiting: &[(kernel::IndexName, usize)]) -> String {
+    waiting
+        .iter()
+        .map(|(index, count)| format!("{index}: {count} documents read and not built"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// `lane users refused since … (refused: id 42 …)` for a lane that is not
 /// written; `None` for an open one.
 fn lane_note(index: &str, lane: &daemon::LaneSnapshot) -> Option<String> {

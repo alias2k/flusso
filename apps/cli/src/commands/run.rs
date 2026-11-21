@@ -503,6 +503,14 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         Drained::Done(result) => result,
         Drained::TimedOut { step } => {
             let unfinished = shutdown::unfinished_sinks(&status.snapshot());
+            let unbuilt = shutdown::unbuilt_indexes(&status.waiting_by_index());
+            if !unbuilt.is_empty() {
+                tracing::error!(
+                    unbuilt = %unbuilt,
+                    "the stop could not build everything it read ({unbuilt}); the next start reads \
+                     it again"
+                );
+            }
             tracing::error!(
                 step,
                 unfinished = %unfinished,
