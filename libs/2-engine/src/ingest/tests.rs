@@ -330,6 +330,8 @@ struct Behaviour {
     resolve_fails: Mutex<HashSet<i64>>,
     /// Resolving the first id releases the builds holding the second.
     release_on_resolve: Option<(i64, i64)>,
+    /// Resolving this id panics.
+    resolve_panics: Option<i64>,
 }
 
 /// Builds documents from the [`Database`], reading each version when the
@@ -524,6 +526,10 @@ impl DocumentBuilder for Builder {
         {
             stop.request();
         }
+        assert!(
+            self.behaviour.resolve_panics != Some(id),
+            "resolving {id} panicked"
+        );
         if let Some((at, held)) = self.behaviour.release_on_resolve
             && at == id
         {

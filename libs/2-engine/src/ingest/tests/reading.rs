@@ -1013,6 +1013,35 @@ async fn a_grant_takes_the_runs_handed_over_beside_the_landing_that_wakes_it() {
     }
 }
 
+/// R9 with one task: a panic in the reader unwinds the engine run's task,
+/// as a panic of `main`'s one task did, and the run reports nothing else.
+#[tokio::test(start_paused = true)]
+async fn a_reader_panic_unwinds_the_engine_run() {
+    let db = Database::new(0, (0..3).map(Change::upsert).collect());
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            resolve_panics: Some(1),
+            ..Behaviour::default()
+        },
+    );
+    let mut deployment = Deployment::new(Feed::new(&db).open(), builder, Recorder::seeded(true));
+    let sink = deployment.start_sink().await;
+    let ingest = deployment.ingest;
+    let ended = tokio::time::timeout(LIMIT, tokio::spawn(async move { ingest.run().await }))
+        .await
+        .expect("the run ends");
+    sink.abort();
+    let panicked = ended.expect_err("the run panicked");
+    assert!(panicked.is_panic());
+    let message = panicked.into_panic();
+    let text = message
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .unwrap_or_default();
+    assert_eq!(text, "resolving 1 panicked");
+}
+
 /// R3 with resolving that takes time, which `main_batches` doesn't model: a
 /// backlog of 600 changes ready at once, each taking 1 ms to resolve, builds
 /// of 20 ms, `max_changes = 256`. `main` read one change a millisecond into

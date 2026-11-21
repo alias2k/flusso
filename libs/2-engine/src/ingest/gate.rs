@@ -430,7 +430,14 @@ impl Gate {
                 Work::Backfill => backfill.take(),
             }
             .unwrap_or_default();
-            match self.budget.reserve_behind(work, &parts, false) {
+            // Nothing to reserve (no budget counts these documents) is
+            // always admitted and adds nothing: no budget lock for it.
+            let reserved = if parts.is_empty() {
+                Ok(Vec::new())
+            } else {
+                self.budget.reserve_behind(work, &parts, false)
+            };
+            match reserved {
                 Ok(reserved) => {
                     if contested {
                         state.contested += 1;

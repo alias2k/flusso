@@ -13,6 +13,7 @@ use source::document::Document;
 use stream::LaneKey;
 
 use super::*;
+use crate::ingest::together::together;
 use crate::observer::NoopObserver;
 
 const LIMIT: Duration = Duration::from_secs(5);
@@ -137,6 +138,39 @@ fn stream_of(ids: &[i64], open: bool) -> LiveStream {
     }
 }
 
+/// The reader run as the engine runs it (§3.8, review round 3): its future
+/// beside a builder that only waits for its end, the stop watched once
+/// ([`together`]), all on a task of its own so a test drives it from outside.
+/// Dropped, the task is aborted.
+struct ReaderTask(tokio::task::JoinHandle<Result<Ended>>);
+
+impl ReaderTask {
+    fn spawn(reader: Reader, live: LiveStream) -> Self {
+        let stop = reader.stop.clone();
+        let (reading, mut end) = reading(reader, live);
+        Self(tokio::spawn(async move {
+            together(reading, async move { end.join().await }, async move {
+                stop.requested().await;
+            })
+            .await
+        }))
+    }
+
+    /// The reader's end, or its panic resumed here.
+    async fn join(&mut self) -> Result<Ended> {
+        match (&mut self.0).await {
+            Ok(ended) => ended,
+            Err(error) => std::panic::resume_unwind(error.into_panic()),
+        }
+    }
+}
+
+impl Drop for ReaderTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 struct Started {
     task: ReaderTask,
     runs: mpsc::UnboundedReceiver<Run>,
@@ -154,25 +188,8 @@ fn start(
     handing: Option<Box<dyn Fn(&Run) + Send + Sync>>,
     progress: Arc<Progress>,
 ) -> Started {
-    let (sender, runs) = mpsc::unbounded_channel();
-    let lead = Lead::new(max, progress.changes_read());
-    let task = ReaderTask::spawn(
-        Reader {
-            resolver: Arc::new(resolver),
-            progress: Arc::clone(&progress),
-            observer: Arc::new(NoopObserver),
-            stop: stop.clone(),
-            batch: BatchPolicy {
-                max_changes,
-                max_delay: Duration::from_secs(60),
-            },
-            lead: Arc::clone(&lead),
-            runs: sender,
-            handing,
-            checked: None,
-        },
-        live,
-    );
+    let (reader, runs, lead) = reader(resolver, max_changes, max, &stop, handing, &progress);
+    let task = ReaderTask::spawn(reader, live);
     Started {
         task,
         runs,
@@ -180,6 +197,35 @@ fn start(
         lead,
         stop,
     }
+}
+
+/// A reader of `max_changes` per run under `max`, and the receiving end of
+/// its runs.
+fn reader(
+    resolver: Resolver,
+    max_changes: usize,
+    max: MaxWaiting,
+    stop: &Stop,
+    handing: Option<Box<dyn Fn(&Run) + Send + Sync>>,
+    progress: &Arc<Progress>,
+) -> (Reader, mpsc::UnboundedReceiver<Run>, Arc<Lead>) {
+    let (sender, runs) = mpsc::unbounded_channel();
+    let lead = Lead::new(max, progress.changes_read());
+    let reader = Reader {
+        resolver: Arc::new(resolver),
+        progress: Arc::clone(progress),
+        observer: Arc::new(NoopObserver),
+        stop: stop.clone(),
+        batch: BatchPolicy {
+            max_changes,
+            max_delay: Duration::from_secs(60),
+        },
+        lead: Arc::clone(&lead),
+        runs: sender,
+        handing,
+        checked: None,
+    };
+    (reader, runs, lead)
 }
 
 fn plenty() -> MaxWaiting {
@@ -424,10 +470,11 @@ async fn a_resolve_error_ends_the_reader_with_it() {
     assert!(received(&mut started.runs).is_empty());
 }
 
-/// R9: a panic in the reader is resumed where it is joined.
+/// R9: a panic in the reader unwinds the task polling it (the engine run's,
+/// in production).
 #[tokio::test(start_paused = true)]
 #[should_panic(expected = "resolve panicked")]
-async fn a_reader_panic_is_resumed_where_it_is_joined() {
+async fn a_reader_panic_unwinds_the_task_that_polls_it() {
     let mut started = start(
         stream_of(&[0, 2], true),
         Resolver {
@@ -452,11 +499,11 @@ impl Drop for Watched {
     }
 }
 
-/// R9: dropping the reader's task (the engine run dropped, or ended on the
-/// builder's error) aborts it: its stream is dropped and it reads nothing
-/// more.
+/// R9: the reader is a future of the engine run, nothing spawned for it:
+/// dropping the run's future drops the reader and its stream at once, with
+/// nothing left to wait for.
 #[tokio::test(start_paused = true)]
-async fn dropping_the_reader_task_aborts_it() {
+async fn dropping_the_run_drops_the_reader_and_its_stream_at_once() {
     let dropped = Arc::new(AtomicBool::new(false));
     let polled = Arc::new(AtomicUsize::new(0));
     let watched = Watched(Arc::clone(&dropped));
@@ -467,25 +514,43 @@ async fn dropping_the_reader_task_aborts_it() {
             counter.fetch_add(1, Ordering::SeqCst);
             std::task::Poll::Pending
         }));
-    let started = start(
-        live,
-        Resolver::default(),
-        1,
-        plenty(),
-        Stop::new(),
-        None,
-        progress(),
+    let stop = Stop::new();
+    let (reader, _runs, _lead) = reader(Resolver::default(), 1, plenty(), &stop, None, &progress());
+    let (reading, mut end) = reading(reader, live);
+    let mut run = Box::pin(together(
+        reading,
+        async move {
+            let _ = end.join().await;
+        },
+        std::future::pending::<()>(),
+    ));
+    assert!(futures::poll!(run.as_mut()).is_pending());
+    assert!(polled.load(Ordering::SeqCst) > 0, "the reader read");
+    assert!(!dropped.load(Ordering::SeqCst));
+    drop(run);
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the stream went with the run's future"
     );
-    settle().await;
-    drop(started.task);
-    settle().await;
-    assert!(dropped.load(Ordering::SeqCst), "the stream was dropped");
 }
 
 /// R2 without a lost wake-up: a take landing between the reader finding its
 /// lead reached and its wait still wakes it.
 #[tokio::test(start_paused = true)]
 async fn a_take_between_the_check_and_the_wait_still_wakes_the_reader() {
+    a_take_at(Check::BeforeWaiting).await;
+}
+
+/// R2 without a lost wake-up on the fast path: a take landing after the
+/// first check found the lead reached, before the wake-up is registered, is
+/// seen by the check made once it is.
+#[tokio::test(start_paused = true)]
+async fn a_take_before_the_wake_up_is_registered_is_seen_by_the_check_after_it() {
+    a_take_at(Check::BeforeRegistering).await;
+}
+
+/// One take, at `point`, then the stream's end: the reader must read on.
+async fn a_take_at(point: Check) {
     let progress = progress();
     let (sender, mut runs) = mpsc::unbounded_channel();
     let lead = Lead::new(
@@ -499,15 +564,15 @@ async fn a_take_between_the_check_and_the_wait_still_wakes_the_reader() {
         let progress = Arc::clone(&progress);
         let lead = Arc::clone(&lead);
         let once = AtomicBool::new(false);
-        Box::new(move || {
-            if !once.swap(true, Ordering::SeqCst) {
+        Box::new(move |at: Check| {
+            if at == point && !once.swap(true, Ordering::SeqCst) {
                 let taken = progress
                     .take_through(&users(), Position::new(0), &|_| false)
                     .unwrap();
                 assert_eq!(taken.ids.len(), 1);
                 lead.granted(1);
             }
-        }) as Box<dyn Fn() + Send + Sync>
+        }) as Box<dyn Fn(Check) + Send + Sync>
     };
     let mut task = ReaderTask::spawn(
         Reader {

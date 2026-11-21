@@ -50,6 +50,7 @@ mod reader;
 mod snapshot;
 #[cfg(test)]
 mod tests;
+mod together;
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -76,9 +77,10 @@ use crate::stop::{Stop, drain_lanes};
 use builds::Builds;
 use confirm::{CONFIRM_TICK, Furthest};
 use live::Runs;
-use reader::{Lead, Reader, ReaderTask};
+use reader::{Lead, Reader, ReaderEnd};
 pub use snapshot::KEY_PAGE;
 use snapshot::{ClosedConsumer, Snapshot, Step, next_snapshot_step};
+use together::together;
 
 /// The longest a stopping engine polls the live stream for its end after
 /// asking the source to close it. Past it the stream is dropped. Longer than
@@ -330,7 +332,8 @@ impl IngestEngine {
     }
 
     /// The run's loop, from an open live stream to its end or a stop: the
-    /// builder, with the reader on its own task (ADR 0012 stage 8a, §3.8).
+    /// builder and the reader, two futures of this task (ADR 0012 stage 8a,
+    /// §3.8).
     async fn follow(
         &self,
         lanes: &Lanes,
@@ -345,7 +348,7 @@ impl IngestEngine {
         self.progress.forget_all();
         let lead = Lead::new(self.max_waiting(), self.progress.changes_read());
         let (sender, mut handed) = tokio::sync::mpsc::unbounded_channel();
-        let mut reader = ReaderTask::spawn(
+        let (reading, mut reader) = reader::reading(
             Reader {
                 resolver: Arc::clone(&self.resolver),
                 progress: Arc::clone(&self.progress),
@@ -362,10 +365,7 @@ impl IngestEngine {
             live,
         );
         let mut runs = Runs::new(self.batch.max_changes, self.batch.max_delay, lead);
-        // On an error the reader is aborted and awaited before the run returns
-        // (R9): nothing it does, a mark, a count, its stream, outlives the
-        // engine run, so the next run's `forget_all` never meets it.
-        let result: Result<Ended> = async {
+        let building = async {
             let mut snapshot: Option<Snapshot> = None;
             let mut last_confirmed: Option<Landed> = None;
             let mut confirm_tick = tokio::time::interval(CONFIRM_TICK);
@@ -510,12 +510,13 @@ impl IngestEngine {
                     }
                 }
             }
-        }
-        .await;
-        if result.is_err() {
-            reader.abort_and_wait().await;
-        }
-        result
+        };
+        // One task, two futures (§3.8, review round 3): the reader first on
+        // every wake, so a run it read is handed over before the builder
+        // looks. The run ends with the builder; returning drops the reader in
+        // place (R9), so nothing of it outlives the run, the next run's
+        // `forget_all` included.
+        together(reading, building, self.stop.requested()).await
     }
 
     /// Queue every run the reader handed over and this loop hasn't taken
@@ -538,7 +539,7 @@ impl IngestEngine {
     /// on the way queued, then its join (R7).
     async fn reader_end(
         &self,
-        reader: &mut ReaderTask,
+        reader: &mut ReaderEnd,
         handed: &mut tokio::sync::mpsc::UnboundedReceiver<reader::Run>,
         runs: &mut Runs,
     ) -> Result<reader::Ended> {

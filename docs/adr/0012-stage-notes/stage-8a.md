@@ -527,40 +527,64 @@ holds it back.
 
 ### 3.8 Slice 6a: one reader, one builder
 
-**Status:** rules written before the code (slice 6a). One reader task reads and resolves; one builder
-(the engine's own task) does everything else `main`'s one task did. No index task yet (6b).
+**Status:** rules written before the code (slice 6a). One reader reads and resolves; one builder does
+everything else `main`'s one task did. Both are futures of the engine run's one task (review round 3,
+below); no index task yet (6b).
 
 **Who owns what.**
 
 | Task | Owns | Never does |
 | --- | --- | --- |
-| **Reader** (spawned per engine run) | the live stream, the resolver, the run being read | build, publish, confirm, wait on a lane, touch a request |
-| **Builder** (the engine's task) | `Builds` (slots, gate waiters, budget waits), the lanes' producers, the request consumer, snapshots, the queue of handed-over runs, confirmation and the 1 s tick | read the stream, resolve |
+| **Reader** (a future of the engine run, polled first) | the live stream, the resolver, the run being read | build, publish, confirm, wait on a lane, touch a request |
+| **Builder** (the engine run's other future) | `Builds` (slots, gate waiters, budget waits), the lanes' producers, the request consumer, snapshots, the queue of handed-over runs, confirmation and the 1 s tick | read the stream, resolve |
 | `Progress` (shared) | pending sets (the reader marks, the builder takes), the read count, steps | — |
 
 **What crosses between them, and how.**
 
 - Reader → builder: one `Run` per run over an **unbounded channel** (each change's position and the
   instant the reader read it, the read count through its last). The channel closing is the reader's
-  end; its join handle returns the live stream (or the reader's error).
-- Builder → reader: after every live grant, a `notify_waiters` when the reader waits (a flag the
-  reader raises before it reads the lead, with a `SeqCst` fence on each side: either the reader sees
-  the grant's take, or the grant sees it waiting; its `Notified` is created before the check).
+  end; a one-shot then carries the live stream (or the reader's error) to the builder.
+- Builder → reader: after every live grant, a wake of the reader's one registration (`AtomicWaker`;
+  `Notify` until review round 3) when it waits (a flag the reader raises before it reads the lead
+  again, with a `SeqCst` fence on each side: either the reader sees the grant's take, or the grant
+  sees it waiting; its waker is registered before that check).
 - Both: `Progress`. The reader writes marks and the read count; the builder takes and closes steps.
+
+**One task, two futures (review round 3).** The measurement of round 2 found every live batch about
+1.5 µs dearer than `main` locally (8 µs on CI) at `max_changes = 1`, and nothing else: with the lead
+unbounded the same bench ran in a third of the time, so the cost was the round trip between two
+tasks, a hand-over waking the builder on another worker and a grant waking the reader back. So the
+reader is not spawned. The engine run polls the reader's future and the builder's in its own task
+(`ingest/together.rs`), each with a waker of its own: woken while the task is being polled, a waker
+raises its future's flag and the poll goes on with that future, the reader first on every pass;
+woken from elsewhere, it also wakes the task. So a hand-over or a grant costs a flag, not a trip
+through the scheduler. A poll ends when no flag was raised during its last pass (read after the
+"being polled" mark drops, so a wake from another thread mid-pass is never lost), or after 32
+passes, when it yields to the worker and is woken again at once. Concurrency between the two is
+interleaving at their awaits, which is what `main`'s one task had: the reader's waits (the stream, a
+resolve, the lead) overlap the builder's (a build, a lane, the budget, a page), and neither runs while
+the other computes. The reader runs without yielding only while the stream has changes ready and the
+lead has room, so the builder waits at most for a lead's worth of resolving (R2), and no longer than
+32 passes before the worker's other tasks run. **The stop is watched once per run**: `together` polls
+`Stop::requested` only when it fires and then wakes the reader, which reads the stop flag on every
+poll and registers nothing for it (registering it at each wait at the lead took the stop's lock
+twice per wait, every second batch at `max_changes = 1`). Nothing is spawned for the reader, so
+nothing of it outlives its run, and dropping the run drops it in place (R9). 6b spawns one task per
+index; the reader stays a future of the dispatcher's task.
 
 **The rules.**
 
 | Rule | |
 | --- | --- |
 | R1 | **A run** is what `main`'s `drain_ready` buffered: the changes the stream has ready, cut at `max_changes` changes, at `max_delay` from the run's first change, when the stream would block, or at the stop. The reader resolves each change, then **marks** every id of the run (`Progress::mark`, one lock per touched index; ids of an index with no lane are dropped there), then **counts** the run's changes read (`Progress::read_changes`), then **hands the run over**, each change with the instant it was read. Marks, count, hand-over, in that order. |
-| R2 | **The lead.** Before reading a run the reader waits while one index has `max_waiting_per_index` ids waiting (marked, not taken), or every index together has `max_waiting`, or `max_waiting` changes are read and not yet in a granted batch. It waits on the builder's take notification and the stop, nothing else, and creates its wake-up before it reads the lead, so a take between the two still wakes it. A run may overshoot by its own ids and changes, once. |
+| R2 | **The lead.** Before reading a run the reader waits while one index has `max_waiting_per_index` ids waiting (marked, not taken), or every index together has `max_waiting`, or `max_waiting` changes are read and not yet in a granted batch. It waits on the builder's take and the stop, nothing else. Finding the lead reached, it registers its wake-up, says it waits, and reads the lead again, so a take after the first read is seen by the second and one after the second wakes it (review round 3: with room, the first read is all it costs). The stop is read on every poll; the engine run's watch wakes it (above). A run may overshoot by its own ids and changes, once. |
 | R3 | **Batches as `main` cut them** (review round 1). `main` stopped reading once a batch closed and read the backlog the moment the next grant reopened it, so its batch's deadline ran from the later of its first change's read and the previous live grant. The builder's live candidate is, from the oldest change not yet granted, every change read before `max(that change's read, the last live grant) + max_delay`, up to `max_changes`, cut inside a run where needed (the reader's runs end where the stream would block, not where `main`'s batch closed), plus what an earlier grant left waiting for the budget. It is **full** at `max_changes` changes. Every arm of the builder's loop that grants first takes the runs already handed over (`take_handed`; review round 2): `select!` picks among ready arms at random, and a landing taken before a run waiting in the channel would otherwise grant without changes read before it. Beside a running live build only a full candidate may start, so a hand-over there walks nothing while fewer than `max_changes` changes are queued, nor once the candidate is known to be cut by its deadline, which only a grant moves (`Runs::full_candidate`; review round 2). A trickle read while a live build runs is one batch after it, a backlog read while builds outlast `max_delay` is taken whole, up to `max_changes`, and a second live build starts only beside a full candidate. At the end (`settle`) the deadline is ignored: everything read is built in batches of `max_changes`. Checked against a model of `main`'s loop over the same arrivals (`main_batches` in `ingest::tests::reading`). |
 | R4 | **A take never reaches past its candidate.** A live build takes, from each index the budget admits, only the ids waiting at or before the candidate's last position (`take_through`), closes the step through the candidate's read count (`close_step_through`), and carries the candidate's last position. A newer run's id waits for the next grant. The candidate is offered only while none of those ids is in a running build (`main`'s admission). |
 | R5 | **Every build goes through the lines.** `Gate::choose` is gone. A grant pass (`Gate::pass`) puts each batch the builder has ready, with a slot to run it, in its kind's line, asks once (G4 between its two batches, G5–G6 under the gate's lock), and leaves before the pass ends. So it waits in a line only while it can use a permit now, and every reservation obeys G6. With no waiter in either line (one task, today) the pass is one hold of the gate's lock: its batches stand at the front of empty lines, nothing joins, watches or wakes (review round 1, for the hot path). |
 | R6 | **Confirmation and fences** move as on `main`: a marked id holds its index's lanes (the pending minimum); a change read but not yet routed by a build (a queued run, or the reader's run in progress) is never confirmed or fenced, by the source's own `next_seq` test, as `main`'s buffered run was. The builder confirms after every grant and landing, and on the tick. |
-| R7 | **The stop.** The reader checks the stop before every read; once it is requested it reads nothing more, marks and hands over what it read (its run cut short), closes the channel and returns the stream. The builder, seeing the stop, abandons a snapshot as `main` does, then **waits for the reader's end** (the barrier), takes every run handed over, builds, publishes and drains them (`settle`, then `drain_lanes`), and closes the stream with `close_live`. A stop while the reader waits at its lead ends that wait at once. |
+| R7 | **The stop.** The reader checks the stop before every read and on every poll (it registers nothing for it: the engine run watches the stop once and wakes the reader, review round 3); once it is requested it reads nothing more, marks and hands over what it read (its run cut short), closes the channel and returns the stream. The builder, seeing the stop, abandons a snapshot as `main` does, then **waits for the reader's end** (the barrier), takes every run handed over, builds, publishes and drains them (`settle`, then `drain_lanes`), and closes the stream with `close_live`. A stop while the reader waits at its lead ends that wait at once. |
 | R8 | **The stream's end** is R7 without `close_live`: the reader hands over its last run and returns; the builder serves queued requests, then settles. |
-| R9 | **Errors and panics.** A reader error (the stream's or a resolve's) ends the reader, its run not handed over; the builder, at the channel's end, joins it, abandons its builds and returns that error. A builder error ends the run, and the reader is **aborted and awaited before the run returns** (review round 1): nothing it does (a mark, a count, its stream) outlives the run, so the next run's `forget_all` and `live()` never meet it. A reader panic is resumed in the builder, as a panic of `main`'s one task was. On every path a change read counts read: the run being read is a guard that counts what wasn't handed over when it is dropped (an error, the abort), so `changes_captured` and the read count move together as on `main` (review round 1). Dropping the run's future (the supervisor's abort, the stop's deadline) can only abort the reader: it stops at its next poll. |
+| R9 | **Errors and panics.** A reader error (the stream's or a resolve's) ends the reader, its run not handed over; the builder, at the channel's end, takes its result, abandons its builds and returns that error. A builder error ends the run's future, which **drops the reader in place** before the run returns (review round 3; round 1 aborted and awaited a spawned task): nothing it does (a mark, a count, its stream) outlives the run, so the next run's `forget_all` and `live()` never meet it. A reader panic unwinds the engine run's task, as a panic of `main`'s one task did. On every path a change read counts read: the run being read is a guard that counts what wasn't handed over when it is dropped (an error, the run dropped), so `changes_captured` and the read count move together as on `main` (review round 1). Dropping the run's future (the supervisor's abort, the stop's deadline) drops the reader with it, at once. |
 | R10 | **An engine restart** forgets what the ended run marked (`forget_all`) **before** the new reader starts; confirmation never passed it, so the replay marks it again. |
 
 **Bounds, from the rules.**
@@ -615,6 +639,7 @@ batch take the permit in the same pass (G5) where `main` granted nothing until t
 | Only indexes with lanes | `Progress::mark` drops ids of an index with no lane, so they never wait, pin or count toward the lead |
 
 **Mutations of the reader's and the builder's rules** (re-run in review round 1, on the code as pushed;
+the rows review round 3 touched, R1, R2, R5, R7–R9 and `together`, re-run on round 3's code;
 each compiles; run over the engine's unit tests with nextest's 10 s per-test limit; "hang" marks a test
 the limit ended). `tests::concurrent::a_document_is_never_written_twice_at_once_and_its_versions_never_go_down`
 takes about 25 s on the unchanged code (28 s before this slice) and is left out of these runs.
@@ -626,8 +651,9 @@ takes about 25 s on the unchanged code (28 s before this slice) and is left out 
 | R2: no lead per index | 6 tests, `the_reader_waits_at_the_lead_per_index_and_resumes_after_a_take` and `a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap` among them |
 | R2: no lead over every index | `the_reader_waits_at_the_lead_over_every_index` |
 | R2: no lead in changes | `changes_that_build_nothing_still_count_toward_the_lead` |
-| R2: the wake-up created after the lead is read | `a_take_between_the_check_and_the_wait_still_wakes_the_reader` |
-| R2: the wake-up `enable`d before the lead is read (as round 1 had it) | **equivalent**: a `Notified` counts `notify_waiters` from its creation, polled or not; review round 2 removed the call |
+| R2: the wake-up registered after the lead is read (round 3: after the second read) | `a_take_between_the_check_and_the_wait_still_wakes_the_reader` |
+| R2: the lead not read again once the wake-up is registered (round 3: the fast path's first read trusted) | `a_take_before_the_wake_up_is_registered_is_seen_by_the_check_after_it` |
+| R2: the wake-up `enable`d before the lead is read (round 1's `Notify`, gone in round 3) | **equivalent**: a `Notified` counts `notify_waiters` from its creation, polled or not; review round 2 removed the call |
 | R2: a grant skips the wake-up of a waiting reader | 36 tests (most hang) |
 | R2: the reader never says it waits | 36 tests (most hang) |
 | R2: a grant never lets the reader on | 37 tests (most hang) |
@@ -650,15 +676,25 @@ takes about 25 s on the unchanged code (28 s before this slice) and is left out 
 | R5: a pass beside waiters skips the lines | `no_build_takes_room_by_the_limit_ahead_of_a_waiter_the_limit_refused` |
 | R5: a pass alone moves the count uncontested | `a_pass_alone_hands_the_permit_to_the_other_kind_when_its_turn_is_refused`, `every_fourth_contested_grant_goes_to_the_backfill` |
 | R5: a pass alone keeps the permit from the other kind after a refusal | `a_pass_alone_hands_the_permit_to_the_other_kind_when_its_turn_is_refused` |
-| R7: no barrier (runs still in the channel at the stop dropped) | `a_stop_while_the_builder_waits_on_a_full_lane_builds_every_run_handed_over`, `a_stop_raised_mid_burst_ends_the_batch_there_and_lands_what_was_read` |
+| R7: no barrier (runs still in the channel at the stop dropped) | `a_stop_while_the_builder_waits_on_a_full_lane_builds_every_run_handed_over`, `a_stop_raised_mid_burst_ends_the_batch_there_and_lands_what_was_read`, `a_stop_mid_run_builds_what_the_reader_marked_last` |
 | R7: the barrier reports no resolve | `a_stop_while_the_builder_waits_on_a_full_lane_builds_every_run_handed_over` |
 | R7: the reader drops the run the stop cut | 4 tests, `a_stop_mid_run_builds_what_the_reader_marked_last` among them |
-| R7: a stop doesn't end a wait at the lead | `a_stop_while_the_reader_waits_at_its_lead_ends_it`, `a_stop_with_a_full_lead_behind_slow_builds_builds_batches_of_max_changes`, a random schedule (hang) |
-| R8: the stream's end drops the last run | 36 tests |
-| R9: a dropped reader task not aborted | `dropping_the_reader_task_aborts_it` |
-| R9: the error path doesn't wait for the reader | `a_build_error_leaves_every_change_captured_counted_read_when_the_run_returns` |
-| R9: the run being read counts nothing when dropped | the same, `a_run_cut_by_an_error_still_counts_its_changes_read` |
-| R9: a reader panic not resumed | `a_reader_panic_is_resumed_where_it_is_joined` |
+| R7: the reader at its lead never reads the stop (round 3) | `a_stop_while_the_reader_waits_at_its_lead_ends_it`, `a_stop_with_a_full_lead_behind_slow_builds_builds_batches_of_max_changes` |
+| R7: the stop not watched by the engine run (round 3) | 19 tests, `the_reader_waits_at_the_lead_and_resumes` and the stop tests among them (3 hang) |
+| R7: the stop not read before the stream (round 3) | 20 tests, `nothing_is_read_from_the_live_stream_once_the_stop_is_requested` among them |
+| R8: the stream's end drops the last run | 35 tests |
+| R9: the reader spawned (detached), not polled in the run's task (round 3; replaces round 1's "not aborted" and "not awaited" rows) | 23 tests, `a_build_error_leaves_every_change_captured_counted_read_when_the_run_returns`, `a_build_error_ends_the_run_and_the_reader_with_it`, `a_reader_panic_unwinds_the_engine_run` among them |
+| R9: the run being read counts nothing when dropped | `a_build_error_leaves_every_change_captured_counted_read_when_the_run_returns`, `a_run_cut_by_an_error_still_counts_its_changes_read` |
+| R1: a full run reads on (round 3: the count checked before the clock) | 7 tests, the lead's among them |
+| R1: no deadline for a run | `a_backlog_resolved_a_change_a_millisecond_is_batched_as_main_batched_it` |
+| R5: nothing reserved whatever the parts (round 3) | 12 tests, the budget's |
+| R5: the budget asked with nothing to reserve (round 2's form) | **equivalent**: an empty reservation is always admitted and adds nothing; a lock, nothing else |
+| `together`: the flags read before the "being polled" mark drops | `a_wake_at_the_end_of_a_pass_is_not_lost` |
+| `together`: a wake from outside never wakes the task | 74 tests (most hang) |
+| `together`: a wake while polled also wakes the task | `wakes_between_the_two_are_served_in_the_same_poll`, `a_wake_from_another_thread_during_a_pass_is_not_lost`, `a_poll_yields_to_the_worker_after_its_passes` |
+| `together`: no cap on the passes | `a_poll_yields_to_the_worker_after_its_passes` |
+| `together`: the watch ending wakes no one | 21 tests, `the_watch_is_polled_when_it_fires_and_its_end_wakes_the_first` among them |
+| `together`: the watch polled on every pass | `the_watch_is_polled_when_it_fires_and_its_end_wakes_the_first` |
 | R10: nothing forgotten as a run starts | the random schedules, the tiny-budget and three-index schedules (some hang) |
 | `Idle` ends where the builder woke | `the_builders_idle_ends_where_the_reader_began_the_run` |
 
@@ -682,6 +718,12 @@ the run is pinned by `a_resolve_error_ends_the_reader_with_it` and `a_reader_err
   tick is immediate and races the reader's task to the builder, so its idle wait lands before the first
   run or after its batch (deduplicating only adjacent ones still failed about 1 run in 15; 40 runs of the
   checked form passed).
+- `reader::tests` (review round 3) run the reader as the engine runs it: `reading` beside a builder
+  that only waits for its end, the stop watched once (`together`), on a spawned task so the test drives
+  it from outside. `dropping_the_reader_task_aborts_it` → `dropping_the_run_drops_the_reader_and_its_stream_at_once`
+  (the reader is a future: dropping the run's future drops the stream with no wait);
+  `a_reader_panic_is_resumed_where_it_is_joined` → `a_reader_panic_unwinds_the_task_that_polls_it`, and
+  `a_reader_panic_unwinds_the_engine_run` checks it on the engine.
 - `a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap`: samples half a second off
   the bursts. On a burst's own instant the watcher raced the reader's task (now separate) for it; the
   values asserted are unchanged (960 and 31 at 60 s, 976 and 32 after).
@@ -694,15 +736,19 @@ the run is pinned by `a_resolve_error_ends_the_reader_with_it` and `a_reader_err
 **Not in this slice.** `a_stop_with_one_index_stalled_lands_the_others` (§4) needs 6b: with one builder a
 publish blocked on a full lane holds every index, as on `main`. `flusso.reader.waits{bound}` is slice 7's.
 
-**Hot-path costs added** (for the measurement; review round 1 cut the grant pass down):
+**Hot-path costs added** (for the measurement; review round 1 cut the grant pass down, review round 3
+put the reader in the engine run's task):
 
 - **Per change:** nothing `main` didn't do: the reader reads the clock once per change for the run's
-  deadline, as `main`'s `is_open` did, and keeps that instant beside the change's position.
-- **Per run:** one `Vec` of `(position, instant)` handed over (one allocation), one channel send and one
-  wake of the builder (cross-task, cross-thread on a multi-thread runtime), one atomic add for the read
-  count (`main` did one per change), one atomic load per index and a fence for the lead. **A trickle pays
-  this per change**: each change is its own run, so one small allocation, one channel send and one
-  cross-task wake per change (review round 2).
+  deadline, as `main`'s `is_open` did (none once the run is full), and keeps that instant beside the
+  change's position.
+- **Per run:** one `Vec` of `(position, instant)` handed over (one allocation), one channel send, the
+  builder's flag raised (a wake inside the task, no scheduler), one atomic add for the read count
+  (`main` did one per change), one read of the lead (an atomic load per index). **A trickle pays this
+  per change**: each change is its own run (review round 2).
+- **Per wait at the lead:** the waker registered (`AtomicWaker`, no lock), a flag, a `SeqCst` fence and
+  the lead read again; nothing for the stop. At `max_changes = 1` with the default lead (two changes)
+  the reader waits once every second change.
 - **Per hand-over beside a running live build:** O(1) until `max_changes` changes are queued (a count
   kept as runs come and go), then one walk, and none after it while the deadline is known to cut the
   candidate (`Runs::full_candidate`, review round 2). Without a live build running, the candidate's walk
@@ -710,14 +756,45 @@ publish blocked on a full lane holds every index, as on `main`. `flusso.reader.w
 - **Per wake of an arm that grants:** one `try_recv` on the hand-over channel (`take_handed`).
 - **Per batch (a live grant):** two budget locks and one gate lock, as `main` took: `affordable` admits
   (`Budget::admit`, the first budget lock), then the pass reserves under the gate's lock (the gate lock,
-  and `reserve_behind`, the second budget lock); review round 2 corrects round 1's count, an atomic `fetch_max` and a fence for the reader (a `notify_waiters` only while it
-  waits), and the candidate's walk over the queued changes it takes.
+  and `reserve_behind`, the second budget lock, skipped when nothing is reserved: no budget counts the
+  documents, as `main` skipped it; review round 3), an atomic `fetch_max` and a fence for the reader (a
+  wake only while it waits), one clock read for the deadline of the next batch, and the candidate's
+  walk over the queued changes it takes.
 - **Per grant pass (every wake of the builder):** one lock and at most one walk per index
   (`Progress::waiting_through`: the count through the candidate and the held check in one), where
   `main` took two locks per index (the count, then the held check, which walked too while builds ran).
   The walk is skipped while nothing builds and the candidate covers everything waiting; it covers only
   the candidate's documents otherwise.
+- **Per poll of the engine run's task:** the task's waker registered, and a "being polled" mark set and
+  cleared once per pass (two `SeqCst` stores, three flag reads).
 - **Beside real waiters (6b):** joining, asking and leaving the lines cost what slice 5's waiters cost.
+
+**Review round 3's A/B** (`engine` bench, `taskset -c 0-3,12-15`, three rounds of `main` 637c2ab3 then
+this, the method of round 2's measurement; raw in `target/ab-446-r3/`):
+
+| bench | round 2 head | round 3, rounds 1 / 2 / 3 |
+| --- | ---: | ---: |
+| `live_drain_held/sinks1/1` | +21.6% | +2.5% / +3.6% / +4.5% |
+| `live_drain_held/sinks2/1` | +13.1% | +12.1% / +11.0% / +12.5% |
+| `live_drain_held/sinks1/64` | −15.5% | −0.9% / +0.4% / +0.9% |
+| `live_drain_held/sinks2/64` | −15.6% | +0.6% / +0.3% / +0.9% |
+| `live_drain_held/sinks1/256` | −30.3% | −24.0% / −23.3% / −21.8% |
+| `live_drain_held/sinks2/256` | −26.1% | −22.0% / −22.0% / −21.6% |
+| `snapshot/rows` | −0.3% | −1.7% / +0.9% / +0.3% |
+
+At 64 the reader no longer resolves on another worker while builds run, so round 2's gain there is
+gone (equal to `main`); at 256 most of it stays.
+
+**Where `main`'s one-change batches still win (review round 3, measured).** `live_drain_held/sinks1/1`
+on this machine, per 10,000 changes: `main` reads and resolves in 2.0 ms and marks in 1.6 ms (inside its
+grant), 3.6 ms in all; the reader takes 6.65 ms for the same work plus the per-run and per-wait costs
+above, about 0.3 µs a change. The grant path (`pre` the candidate and its waiting set, `choose`) costs
+the same on both; building and publishing take about 0.35 µs a batch more, because with the reader
+two changes ahead the builder grants two one-change batches back to back, so the bench's sink frees
+batch *n* exactly while build *n + 1* runs (its stated contended upper bound) where `main` read a change
+in between (a lead of one change was 2 ms faster). No other per-batch cost measured above noise
+(±1.5 ms between runs): the run's `Vec` (≈ 0), the channel (≈ 1 ms in all, measured by adding a
+second send), a self-wake (≈ 0).
 
 ## 4. Guarantees
 

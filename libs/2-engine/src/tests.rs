@@ -1303,8 +1303,8 @@ async fn reports_lifecycle_and_progress_to_the_observer() {
     harness.ingest = harness.ingest.with_observer(Arc::clone(&observer_dyn));
     let harness = harness.map_sinks(move |engine| engine.with_observer(Arc::clone(&observer_dyn)));
     harness.run(Continuity::Resumed).await;
-    // The confirm tick's first tick is immediate and races the reader, on
-    // its own task, to the builder: it may close an idle wait of its own
+    // The confirm tick's first tick is immediate and races the reader's
+    // first run to the builder: it may close an idle wait of its own
     // before the first run or after its batch. So the ingest side's idle
     // waits are checked apart: one comes before the first resolve; the
     // rest of the events are `main`'s, in `main`'s order.

@@ -1,6 +1,10 @@
-//! The reader: the task that reads the live stream, resolves each change to
+//! The reader: the future that reads the live stream, resolves each change to
 //! the documents it touches, and marks them pending, ahead of the builds (ADR
 //! 0012 stage 8a, slice 6a; the rules R1–R10 are in the stage note, §3.8).
+//! The engine run polls it beside the builder in its own task, the reader
+//! first on every wake ([`reading`]): a hand-over or a grant wakes one task,
+//! never another worker, and the two interleave at their awaits as `main`'s
+//! one task did.
 //!
 //! **A run** is what one read takes: every change the stream has ready, cut
 //! at `max_changes` changes, at `max_delay` from its first change, when the
@@ -26,8 +30,8 @@
 //! reading, closes the channel by ending, and returns the live stream, which
 //! the builder closes. An error (the stream's, a resolve's) ends it the same
 //! way, without handing over the run in progress. On every path its changes
-//! count as read, the abort included (the run's guard counts them when it is
-//! dropped), as each change did when `main` read it.
+//! count as read, the run dropped included (the run's guard counts them when
+//! it is dropped), as each change did when `main` read it.
 //!
 //! ```text
 //! stream ─▶ resolve ─▶ mark ─▶ count ─▶ Run ──channel──▶ builder
@@ -37,12 +41,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
+use std::task::Poll;
 
+use futures::task::AtomicWaker;
 use futures::{FutureExt, StreamExt};
 use kernel::Position;
 use source::cdc::{ChangeEvent, LiveChange};
 use source::document::{DocumentBuilder, DocumentId};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant};
 
 use super::LiveStream;
@@ -78,8 +84,9 @@ impl Run {
 #[derive(Debug)]
 pub(super) struct Lead {
     max: MaxWaiting,
-    /// Notified after every live take: the lead may have room.
-    taken: Notify,
+    /// The reader's wake-up, woken after a live take while it waits: the
+    /// lead may have room. One waiter, so no list and no lock.
+    taken: AtomicWaker,
     /// How many changes had been read through the last granted batch.
     granted: AtomicU64,
     /// The reader waits, or is about to: a grant wakes it only then, so a
@@ -92,7 +99,7 @@ impl Lead {
     pub(super) fn new(max: MaxWaiting, read: u64) -> Arc<Self> {
         Arc::new(Self {
             max,
-            taken: Notify::new(),
+            taken: AtomicWaker::new(),
             granted: AtomicU64::new(read),
             waiting: AtomicBool::new(false),
         })
@@ -106,7 +113,7 @@ impl Lead {
         // this grant's take when it reads the lead, or this sees it waiting.
         fence(Ordering::SeqCst);
         if self.waiting.load(Ordering::Relaxed) {
-            self.taken.notify_waiters();
+            self.taken.wake();
         }
     }
 
@@ -121,6 +128,17 @@ impl Lead {
     }
 }
 
+/// Where a test's hook in [`Reader::room`] runs, once the lead was found
+/// reached.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Check {
+    /// After the first check, before the wake-up is registered.
+    BeforeRegistering,
+    /// After the check made once it is registered, just before waiting.
+    BeforeWaiting,
+}
+
 /// How the reader ended without an error.
 pub(super) struct Ended {
     /// The live stream, for the builder to close.
@@ -132,8 +150,8 @@ pub(super) struct Ended {
     pub(super) waiting: bool,
 }
 
-/// The reader of one engine run (its stream is handed to [`ReaderTask::spawn`]
-/// apart: a stream is `Send`, not `Sync`).
+/// The reader of one engine run (its stream is handed to [`reading`] apart:
+/// a stream is `Send`, not `Sync`).
 pub(super) struct Reader {
     pub(super) resolver: Arc<dyn DocumentBuilder>,
     pub(super) progress: Arc<Progress>,
@@ -145,15 +163,16 @@ pub(super) struct Reader {
     /// A test's look at each run just before it is handed over.
     #[cfg(test)]
     pub(super) handing: Option<Box<dyn Fn(&Run) + Send + Sync>>,
-    /// A test's hook between finding the lead reached and waiting.
+    /// A test's hook where the lead was found reached: before the wake-up
+    /// is registered, and after, just before waiting.
     #[cfg(test)]
-    pub(super) checked: Option<Box<dyn Fn() + Send + Sync>>,
+    pub(super) checked: Option<Box<dyn Fn(Check) + Send + Sync>>,
 }
 
 /// The run being read: its documents with their changes' positions, each
 /// change with when it was read, and how many changes were read and not yet
-/// counted. Dropped with changes still uncounted (an error, the task aborted
-/// with its engine run), it counts them read, so `changes_captured` and the
+/// counted. Dropped with changes still uncounted (an error, the engine run
+/// dropped), it counts them read, so `changes_captured` and the
 /// read count move together on every path, as `main` counted each change as
 /// it read it.
 struct Reading<'a> {
@@ -162,12 +181,6 @@ struct Reading<'a> {
     changes: Vec<(Position, Instant)>,
     uncounted: usize,
     deadline: Instant,
-}
-
-impl Reading<'_> {
-    fn is_open(&self, max_changes: usize, now: Instant) -> bool {
-        self.changes.len() < max_changes && now < self.deadline
-    }
 }
 
 impl Drop for Reading<'_> {
@@ -211,29 +224,34 @@ impl Reader {
     }
 
     /// Wait while the lead is reached. `false` when the stop came first.
-    /// The wake-up is registered before the lead is read, so a take between
-    /// the two still wakes it.
+    /// The wake-up is registered before the lead is read again, so a take
+    /// between the two still wakes it. The stop is read on every poll; what
+    /// wakes a reader waiting here for it is the engine run's watch
+    /// ([`together`](mod@super::together)).
     async fn room(&self) -> bool {
-        loop {
-            // Created before the lead is read: `notify_waiters` wakes a
-            // `Notified` from its creation, polled or not.
-            let taken = self.lead.taken.notified();
-            tokio::pin!(taken);
+        // Room now: nothing to register.
+        if !self.lead.reached(&self.progress) {
+            return !self.stop.is_requested();
+        }
+        #[cfg(test)]
+        if let Some(checked) = &self.checked {
+            checked(Check::BeforeRegistering);
+        }
+        std::future::poll_fn(|cx| {
+            self.lead.taken.register(cx.waker());
             self.lead.waiting.store(true, Ordering::Relaxed);
             fence(Ordering::SeqCst);
             if self.stop.is_requested() || !self.lead.reached(&self.progress) {
                 self.lead.waiting.store(false, Ordering::Relaxed);
-                return !self.stop.is_requested();
+                return Poll::Ready(!self.stop.is_requested());
             }
             #[cfg(test)]
             if let Some(checked) = &self.checked {
-                checked();
+                checked(Check::BeforeWaiting);
             }
-            tokio::select! {
-                () = self.stop.requested() => return false,
-                () = &mut taken => {}
-            }
-        }
+            Poll::Pending
+        })
+        .await
     }
 
     /// Read every change the stream has ready right now into the run, until
@@ -241,8 +259,12 @@ impl Reader {
     /// requested. Returns whether the stream ended.
     async fn drain_ready(&self, live: &mut LiveStream, reading: &mut Reading<'_>) -> Result<bool> {
         loop {
+            // A full run reads no clock.
+            if reading.changes.len() >= self.batch.max_changes || self.stop.is_requested() {
+                return Ok(false);
+            }
             let now = Instant::now();
-            if !reading.is_open(self.batch.max_changes, now) || self.stop.is_requested() {
+            if now >= reading.deadline {
                 return Ok(false);
             }
             match live.next().now_or_never() {
@@ -297,8 +319,8 @@ impl Reader {
         if let Some(handing) = &self.handing {
             handing(&run);
         }
-        // The builder is gone only when the engine run ended: this task is
-        // aborted with it.
+        // The builder is gone only when the engine run ended, which drops
+        // this reader with it.
         let _ = self.runs.send(run);
     }
 }
@@ -323,77 +345,58 @@ pub(super) enum Next {
 
 /// The next live change, unless the stop is requested first: checked before
 /// the stream on every poll, so a stop is never raced by a ready change. The
-/// check is an atomic load; the stop's waker is registered only when the
-/// stream would wait, so a busy stream pays nothing more.
+/// check is an atomic load and nothing is registered for the stop: the
+/// engine run's watch wakes the reader when it is requested
+/// ([`together`](mod@super::together)).
 pub(super) async fn next_live(live: &mut LiveStream, stop: &Stop) -> Next {
-    let notified = stop.notified();
-    tokio::pin!(notified);
     std::future::poll_fn(|cx| {
         if stop.is_requested() {
-            return std::task::Poll::Ready(Next::Stopped);
+            return Poll::Ready(Next::Stopped);
         }
-        if let std::task::Poll::Ready(change) = live.poll_next_unpin(cx) {
-            return std::task::Poll::Ready(Next::Change(change));
-        }
-        match notified.as_mut().poll(cx) {
-            std::task::Poll::Ready(()) => std::task::Poll::Ready(Next::Stopped),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
+        live.poll_next_unpin(cx).map(Next::Change)
     })
     .await
 }
 
-/// The reader running on its own task, aborted when dropped, so it never
-/// outlives its engine run (R9).
-pub(super) struct ReaderTask(Option<tokio::task::JoinHandle<Result<Ended>>>);
+/// The reader as a future for the engine run to poll beside the builder in
+/// its own task (§3.8, review round 3), and the builder's handle on its end.
+/// The future hands the reader's result to the handle when the reader
+/// returns, then stays pending: the run ends with the builder. Nothing is
+/// spawned, so dropping the run drops the reader in place (R9), and a panic
+/// of the reader unwinds the run's task, as a panic of `main`'s one task did.
+pub(super) fn reading(
+    reader: Reader,
+    live: LiveStream,
+) -> (impl Future<Output = ()> + Send, ReaderEnd) {
+    let (sender, receiver) = oneshot::channel();
+    let reading = async move {
+        // The builder may already have ended on its own error: then nobody
+        // asks for the reader's end.
+        let _ = sender.send(reader.run(live).await);
+        std::future::pending::<()>().await;
+    };
+    (reading, ReaderEnd(Some(receiver)))
+}
 
-impl ReaderTask {
-    pub(super) fn spawn(reader: Reader, live: LiveStream) -> Self {
-        use tracing::Instrument;
-        Self(Some(tokio::spawn(reader.run(live).in_current_span())))
-    }
+/// The builder's handle on the reader's end: the live stream to close, or
+/// the reader's error.
+pub(super) struct ReaderEnd(Option<oneshot::Receiver<Result<Ended>>>);
 
-    /// Wait for the reader's end: its result, or its panic resumed here, as
-    /// a panic of the engine's one task was before the reader had its own.
+impl ReaderEnd {
+    /// Wait for the reader's end. Its channel closes just before, so the
+    /// builder asks only once the reader returned.
     pub(super) async fn join(&mut self) -> Result<Ended> {
-        let Some(handle) = self.0.as_mut() else {
-            return Err(EngineError::Source(source::SourceError::Connection(
-                "the live reader was already joined".to_owned(),
-            )));
+        let gone = || {
+            EngineError::Source(source::SourceError::Connection(
+                "the live reader ended without an answer".to_owned(),
+            ))
         };
-        let joined = handle.await;
+        let Some(receiver) = self.0.as_mut() else {
+            return Err(gone());
+        };
+        let ended = receiver.await;
         self.0 = None;
-        match joined {
-            Ok(ended) => ended,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(_) => Err(EngineError::Source(source::SourceError::Connection(
-                "the live reader was cancelled".to_owned(),
-            ))),
-        }
-    }
-}
-
-impl ReaderTask {
-    /// Abort the reader and wait until it is gone, so nothing it does (a
-    /// mark, a count, its stream) outlives the engine run that ends here.
-    /// Whatever it returned, or a panic of its, is dropped: the run ends on
-    /// its own error.
-    pub(super) async fn abort_and_wait(&mut self) {
-        if let Some(handle) = self.0.take() {
-            handle.abort();
-            let _ = handle.await;
-        }
-    }
-}
-
-/// Dropped without [`ReaderTask::abort_and_wait`] (the engine run's future
-/// dropped: a supervisor's abort, a stop's deadline), the reader is only
-/// aborted: it stops at its next poll.
-impl Drop for ReaderTask {
-    fn drop(&mut self) {
-        if let Some(handle) = self.0.take() {
-            handle.abort();
-        }
+        ended.unwrap_or_else(|_| Err(gone()))
     }
 }
 
