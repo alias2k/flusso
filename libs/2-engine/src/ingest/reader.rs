@@ -170,16 +170,18 @@ pub(super) struct Reader {
     pub(super) checked: Option<Box<dyn Fn(Check) + Send + Sync>>,
 }
 
-/// The run being read: its documents with their changes' positions, each
-/// change with when it was read, and how many changes were read and not yet
-/// counted. Dropped with changes still uncounted (an error, the engine run
-/// dropped), it counts them read, so `changes_captured` and the
-/// read count move together on every path, as `main` counted each change as
-/// it read it.
+/// The run being read: its documents with their changes' positions and
+/// read numbers, each change with when it was read, how many changes were
+/// counted before the run and how many were read and not yet counted.
+/// Dropped with changes still uncounted (an error, the engine run dropped),
+/// it counts them read, so `changes_captured` and the read count move
+/// together on every path, as `main` counted each change as it read it; as
+/// read and never marked, so their replay is waited for (§3.9 D2).
 struct Reading<'a> {
     progress: &'a Progress,
-    marks: Vec<(DocumentId, Position)>,
+    marks: Vec<(DocumentId, Position, u64)>,
     changes: Vec<(Position, Instant)>,
+    counted: u64,
     uncounted: usize,
     deadline: Instant,
 }
@@ -187,7 +189,7 @@ struct Reading<'a> {
 impl Drop for Reading<'_> {
     fn drop(&mut self) {
         if self.uncounted > 0 {
-            self.progress.read_changes(self.uncounted as u64);
+            self.progress.read_unmarked(self.uncounted as u64);
         }
     }
 }
@@ -198,6 +200,7 @@ impl Reader {
         let mut reading = Reading {
             progress: &self.progress,
             marks: Vec::with_capacity(self.batch.max_changes),
+            counted: self.progress.changes_read(),
             changes: Vec::new(),
             uncounted: 0,
             deadline: Instant::now(),
@@ -290,6 +293,7 @@ impl Reader {
     ) -> Result<()> {
         self.observer.on_change_captured();
         reading.uncounted += 1;
+        let read = reading.counted + reading.uncounted as u64;
         let affected = self
             .resolver
             .resolve(event.table(), event.key(), event.before(), event.after())
@@ -297,20 +301,23 @@ impl Reader {
         tracing::trace!(documents = affected.len(), "change resolved to documents");
         reading
             .marks
-            .extend(affected.into_iter().map(|id| (id, position)));
+            .extend(affected.into_iter().map(|id| (id, position, read)));
         reading.changes.push((position, at));
         Ok(())
     }
 
-    /// Mark the run's documents, count its changes, then hand it over (R1).
+    /// Mark the run's documents, count its changes, route its last, then
+    /// hand it over (R1; routed after the marks, §3.9 D1).
     fn hand_over(&self, reading: &mut Reading<'_>, started: Instant) {
-        if reading.changes.is_empty() {
+        let Some(&(last, _)) = reading.changes.last() else {
             return;
-        }
-        self.progress.mark(reading.marks.drain(..));
+        };
+        self.progress.mark_reads(reading.marks.drain(..));
         let read = self
             .progress
             .read_changes(std::mem::take(&mut reading.uncounted) as u64);
+        reading.counted = read;
+        self.progress.routed(last);
         let run = Run {
             changes: std::mem::take(&mut reading.changes),
             read,

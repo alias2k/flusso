@@ -58,12 +58,21 @@ pub struct Taken {
     pub ids: Vec<DocumentId>,
     /// The oldest change among them.
     pub oldest: Position,
+    /// How many changes had been read through the one before the oldest
+    /// document the take left waiting, or, with none left, every change read
+    /// when it was taken: every document of the index touched by a change
+    /// through it is in this build or an earlier one (ADR 0012 stage 8a,
+    /// §3.9 I5). What the build's step carries.
+    pub frontier: u64,
 }
 
 /// One index's waiting and building ids.
 #[derive(Debug, Default)]
 pub(crate) struct Pending {
-    waiting: HashMap<Arc<RowKey>, (Position, u64)>,
+    /// Each waiting id: its oldest change not yet built, the order counter,
+    /// and how many changes had been read through that change (its read
+    /// number).
+    waiting: HashMap<Arc<RowKey>, (Position, u64, u64)>,
     /// The waiting ids by `(seq, counter)`: oldest first; ids sharing a seq
     /// stay apart by the counter.
     order: BTreeMap<(u64, u64), Arc<RowKey>>,
@@ -77,6 +86,9 @@ pub(crate) struct Pending {
 struct Build {
     token: Token,
     oldest: Position,
+    /// The least read number among its ids: what a run ending before it is
+    /// released leaves unbuilt.
+    least_read: u64,
     ids: Vec<(Arc<RowKey>, Position)>,
     /// The sinks whose lane of the index has the build's item registered,
     /// or was told the batch had nothing for it.
@@ -88,29 +100,45 @@ struct Build {
 }
 
 impl Pending {
-    /// Mark `key` as touched by the change at `at`. Returns whether it
-    /// started waiting (it wasn't already).
-    pub(crate) fn mark(&mut self, key: RowKey, at: Position) -> bool {
+    /// Mark `key` as touched by the change at `at`, the `read`th read.
+    /// Returns whether it started waiting (it wasn't already).
+    pub(crate) fn mark(&mut self, key: RowKey, at: Position, read: u64) -> bool {
         match self.waiting.get(&key) {
-            Some((held, _)) if held.seq <= at.seq => false,
-            Some(&(held, counter)) => {
+            Some((held, _, _)) if held.seq <= at.seq => false,
+            Some(&(held, counter, _)) => {
                 if let Some(arc) = self.order.remove(&(held.seq, counter)) {
-                    self.insert(arc, at);
+                    self.insert(arc, at, read);
                 }
                 false
             }
             None => {
-                self.insert(Arc::new(key), at);
+                self.insert(Arc::new(key), at, read);
                 true
             }
         }
     }
 
-    fn insert(&mut self, key: Arc<RowKey>, at: Position) {
+    fn insert(&mut self, key: Arc<RowKey>, at: Position, read: u64) {
         let counter = self.counter;
         self.counter += 1;
         self.order.insert((at.seq, counter), Arc::clone(&key));
-        self.waiting.insert(key, (at, counter));
+        self.waiting.insert(key, (at, counter, read));
+    }
+
+    /// The read number of the oldest waiting id; `None` while none waits.
+    /// Within one engine run read numbers follow positions, so the oldest by
+    /// position is the least.
+    pub(crate) fn least_waiting_read(&self) -> Option<u64> {
+        self.order
+            .first_key_value()
+            .and_then(|(_, key)| self.waiting.get(key))
+            .map(|(_, _, read)| *read)
+    }
+
+    /// Nothing waits and no build is taken and not yet released: every
+    /// document marked is on its lanes.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.waiting.is_empty() && self.builds.is_empty()
     }
 
     /// Move up to `max` waiting ids of `index`, oldest first, to a new build,
@@ -136,13 +164,15 @@ impl Pending {
         let mut ids = Vec::with_capacity(chosen.len());
         let mut taken = Vec::with_capacity(chosen.len());
         let mut oldest: Option<Position> = None;
+        let mut least_read = u64::MAX;
         for at in chosen {
             let Some(key) = self.order.remove(&at) else {
                 continue;
             };
-            let Some((position, _)) = self.waiting.remove(&key) else {
+            let Some((position, _, read)) = self.waiting.remove(&key) else {
                 continue;
             };
+            least_read = least_read.min(read);
             oldest = Some(oldest.map_or(position, |o| o.min(position)));
             ids.push(DocumentId {
                 index: index.clone(),
@@ -157,12 +187,18 @@ impl Pending {
         self.builds.push(Build {
             token,
             oldest,
+            least_read,
             ids: taken,
             registered: Vec::new(),
             landed: false,
             sending: false,
         });
-        Some(Taken { token, ids, oldest })
+        Some(Taken {
+            token,
+            ids,
+            oldest,
+            frontier: 0,
+        })
     }
 
     /// The build under `token` returned: its ids leave admission, so a later
@@ -205,14 +241,21 @@ impl Pending {
     /// Forget everything: the run that marked and took it ended before
     /// publishing it. Confirmation never passed any of it, so the next run's
     /// stream replays every change and marks the documents again. Returns how
-    /// many ids were waiting.
-    pub(crate) fn forget(&mut self) -> usize {
+    /// many ids were waiting, and the least read number left unbuilt (waiting
+    /// or in a build never released).
+    pub(crate) fn forget(&mut self) -> (usize, Option<u64>) {
         let waiting = self.waiting.len();
+        let least = self
+            .waiting
+            .values()
+            .map(|(_, _, read)| *read)
+            .chain(self.builds.iter().map(|build| build.least_read))
+            .min();
         self.waiting.clear();
         self.order.clear();
         self.building.clear();
         self.builds.clear();
-        waiting
+        (waiting, least)
     }
 
     fn remove_build(&mut self, token: Token) -> Option<Build> {
@@ -237,7 +280,7 @@ impl Pending {
             .order
             .first_key_value()
             .and_then(|(_, key)| self.waiting.get(key))
-            .map(|(position, _)| *position);
+            .map(|(position, _, _)| *position);
         self.builds
             .iter()
             .filter(|build| !build.sending && !build.registered.contains(sink))
@@ -263,7 +306,7 @@ impl Pending {
             .order
             .first_key_value()
             .and_then(|(_, key)| self.waiting.get(key))
-            .map(|(position, _)| *position);
+            .map(|(position, _, _)| *position);
         self.builds
             .iter()
             .map(|build| build.oldest)
@@ -340,7 +383,7 @@ impl Pending {
         self.order
             .first_key_value()
             .and_then(|(_, key)| self.waiting.get(key))
-            .map(|(position, _)| *position)
+            .map(|(position, _, _)| *position)
     }
 }
 
@@ -377,8 +420,8 @@ mod tests {
     #[test]
     fn a_document_marked_twice_keeps_its_oldest_position() {
         let mut pending = Pending::default();
-        assert!(pending.mark(key(1), p(3)));
-        assert!(!pending.mark(key(1), p(5)));
+        assert!(pending.mark(key(1), p(3), 3));
+        assert!(!pending.mark(key(1), p(5), 5));
         assert_eq!(pending.waiting(), 1);
         assert_eq!(pending.minimum(), Some(p(3)));
         let taken = pending.take(&index(), usize::MAX, None, &none).unwrap();
@@ -389,9 +432,9 @@ mod tests {
     #[test]
     fn ids_are_taken_oldest_first_and_ids_sharing_a_change_are_both_kept() {
         let mut pending = Pending::default();
-        pending.mark(key(2), p(4));
-        pending.mark(key(1), p(1));
-        pending.mark(key(3), p(1));
+        pending.mark(key(2), p(4), 4);
+        pending.mark(key(1), p(1), 1);
+        pending.mark(key(3), p(1), 1);
         let taken = pending.take(&index(), 2, None, &none).unwrap();
         assert_eq!(ids(&taken), [key(1), key(3)]);
         assert_eq!(pending.waiting(), 1);
@@ -404,9 +447,9 @@ mod tests {
     #[test]
     fn a_mark_while_its_document_builds_waits_for_the_next_build() {
         let mut pending = Pending::default();
-        pending.mark(key(1), p(1));
+        pending.mark(key(1), p(1), 1);
         let first = pending.take(&index(), usize::MAX, None, &none).unwrap();
-        assert!(pending.mark(key(1), p(3)));
+        assert!(pending.mark(key(1), p(3), 3));
         assert!(
             pending.take(&index(), usize::MAX, None, &none).is_none(),
             "never built twice at once"
@@ -421,8 +464,8 @@ mod tests {
     #[test]
     fn a_take_skips_what_a_running_build_holds() {
         let mut pending = Pending::default();
-        pending.mark(key(1), p(1));
-        pending.mark(key(2), p(2));
+        pending.mark(key(1), p(1), 1);
+        pending.mark(key(2), p(2), 2);
         let held = |key_: &RowKey| *key_ == key(1);
         let taken = pending.take(&index(), usize::MAX, None, &held).unwrap();
         assert_eq!(ids(&taken), [key(2)]);
@@ -432,13 +475,17 @@ mod tests {
     #[test]
     fn forgetting_leaves_nothing_waiting_or_building() {
         let mut pending = Pending::default();
-        pending.mark(key(1), p(1));
+        pending.mark(key(1), p(1), 1);
         let taken = pending.take(&index(), usize::MAX, None, &none).unwrap();
-        pending.mark(key(2), p(2));
-        assert_eq!(pending.forget(), 1);
+        pending.mark(key(2), p(2), 2);
+        assert_eq!(
+            pending.forget(),
+            (1, Some(1)),
+            "the build of read 1 never landed"
+        );
         assert_eq!(pending.minimum(), None);
         assert_eq!(pending.release(taken.token), 0, "the build is gone");
-        pending.mark(key(1), p(3));
+        pending.mark(key(1), p(3), 3);
         let again = pending.take(&index(), usize::MAX, None, &none).unwrap();
         assert_eq!(again.oldest, p(3), "marked afresh by the replay");
         assert_ne!(again.token, taken.token);
@@ -449,9 +496,9 @@ mod tests {
     #[test]
     fn a_landed_build_lets_its_documents_be_taken_again() {
         let mut pending = Pending::default();
-        pending.mark(key(1), p(1));
+        pending.mark(key(1), p(1), 1);
         let first = pending.take(&index(), usize::MAX, None, &none).unwrap();
-        pending.mark(key(1), p(2));
+        pending.mark(key(1), p(2), 2);
         assert!(pending.take(&index(), usize::MAX, None, &none).is_none());
         pending.land(first.token);
         let second = pending.take(&index(), usize::MAX, None, &none).unwrap();
@@ -472,9 +519,9 @@ mod tests {
     fn the_minimum_follows_waiting_and_building_ids_and_clears() {
         let mut pending = Pending::default();
         assert_eq!(pending.minimum(), None);
-        pending.mark(key(1), p(4));
+        pending.mark(key(1), p(4), 4);
         let taken = pending.take(&index(), usize::MAX, None, &none).unwrap();
-        pending.mark(key(2), p(6));
+        pending.mark(key(2), p(6), 6);
         assert_eq!(pending.minimum(), Some(p(4)));
         pending.release(taken.token);
         assert_eq!(pending.minimum(), Some(p(6)));
@@ -491,10 +538,10 @@ mod tests {
     #[test]
     fn a_take_through_a_position_leaves_newer_marks_waiting() {
         let mut pending = Pending::default();
-        pending.mark(key(1), p(1));
-        pending.mark(key(2), p(2));
-        pending.mark(key(3), p(5));
-        pending.mark(key(1), p(6));
+        pending.mark(key(1), p(1), 1);
+        pending.mark(key(2), p(2), 2);
+        pending.mark(key(3), p(5), 5);
+        pending.mark(key(1), p(6), 6);
         assert_eq!(pending.waiting_through(Some(p(2))), 2);
         assert_eq!(pending.waiting_through(Some(p(5))), 3);
         assert_eq!(pending.waiting_through(None), 3);
@@ -519,16 +566,16 @@ mod tests {
     #[test]
     fn a_scan_counts_through_a_position_and_stops_at_a_held_id() {
         let mut pending = Pending::default();
-        pending.mark(key(1), p(1));
-        pending.mark(key(2), p(2));
-        pending.mark(key(3), p(5));
+        pending.mark(key(1), p(1), 1);
+        pending.mark(key(2), p(2), 2);
+        pending.mark(key(3), p(5), 5);
         assert_eq!(pending.scan(p(2), None), Some(2));
         assert_eq!(pending.scan(p(9), None), Some(3));
         let three = |k: &RowKey| *k == key(3);
         assert_eq!(pending.scan(p(2), Some(&three)), Some(2), "3 is past it");
         assert_eq!(pending.scan(p(5), Some(&three)), None);
         let taken = pending.take(&index(), 1, None, &none).unwrap();
-        pending.mark(key(1), p(6));
+        pending.mark(key(1), p(6), 6);
         assert_eq!(pending.scan(p(9), None), None, "1 builds and waits again");
         pending.release(taken.token);
         assert_eq!(pending.scan(p(9), None), Some(3));

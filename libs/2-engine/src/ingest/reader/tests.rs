@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel::{ColumnName, GenericValue, IndexName, SinkName, TableName};
 use source::RowKey;
+use source::cdc::Landed;
 use source::document::Document;
 use stream::LaneKey;
 
@@ -362,6 +363,7 @@ async fn the_reader_waits_at_the_lead_over_every_index() {
 /// R2 for changes that build nothing: documents of an index with no lane
 /// never wait and pin nothing, but the changes read ahead of the grants
 /// still stop the reading at the total bound, until a grant moves past them.
+/// Routed, they need nothing more to be confirmed (stage 8a slice 6b-1a).
 #[tokio::test(start_paused = true)]
 async fn changes_that_build_nothing_still_count_toward_the_lead() {
     let mut started = start(
@@ -379,7 +381,11 @@ async fn changes_that_build_nothing_still_count_toward_the_lead() {
     settle().await;
     assert_eq!(started.progress.changes_read(), 2);
     assert_eq!(started.progress.waiting(), 0, "no lane, nothing waits");
-    assert_eq!(started.progress.landed(), source::cdc::Landed::Idle);
+    assert_eq!(
+        started.progress.landed(),
+        source::cdc::Landed::Through(Position::new(1001)),
+        "routed, and nothing to build"
+    );
     let runs = received(&mut started.runs);
     started.lead.granted(runs[1].read);
     settle().await;
@@ -622,4 +628,79 @@ async fn a_run_cut_by_an_error_still_counts_its_changes_read() {
     assert!(ended.is_err());
     assert_eq!(started.progress.changes_read(), 3);
     assert_eq!(started.progress.waiting(), 0, "nothing marked");
+}
+
+/// D1 (stage 8a slice 6b-1a): the reader raises what it routed only after
+/// the run's marks and its count, so a lane that answers through a routed
+/// change never misses one of its documents. A listener runs as `routed`
+/// moves; each time it sees the run's three documents waiting and counted.
+#[tokio::test(start_paused = true)]
+async fn routed_moves_only_after_the_runs_marks() {
+    let progress = progress();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    {
+        let watched = Arc::clone(&progress);
+        let seen = Arc::clone(&seen);
+        progress.on_registered(Arc::new(move || {
+            let orders = LaneKey::new(orders(), SinkName::try_new("primary").unwrap());
+            seen.lock().unwrap().push((
+                watched.waiting(),
+                watched.changes_read(),
+                watched.lane(&orders, crate::Level::Applied),
+            ));
+        }));
+    }
+    let mut started = start(
+        stream_of(&[0, 2, 4], false),
+        Resolver::default(),
+        10,
+        plenty(),
+        Stop::new(),
+        None,
+        Arc::clone(&progress),
+    );
+    let ended = tokio::time::timeout(LIMIT, started.task.join())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(ended.stream_ended);
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty(), "routed moved");
+    for (waiting, read, orders) in seen.iter() {
+        assert_eq!((*waiting, *read), (3, 3), "{seen:?}");
+        assert_eq!(*orders, Some(Landed::Through(Position::new(4))));
+    }
+}
+
+/// D2 (stage 8a slice 6b-1a): a run cut by an error before its marks is
+/// counted as read and never marked, so no sink counts it before the next
+/// run's first live grant: not while the engine waits to restart, nor after.
+#[tokio::test(start_paused = true)]
+async fn a_run_cut_before_its_marks_counts_no_sooner_than_the_first_grant() {
+    let progress = progress();
+    let mut started = start(
+        stream_of(&[0, 2, 4], true),
+        Resolver {
+            fail_at: Some(4),
+            ..Resolver::default()
+        },
+        100,
+        plenty(),
+        Stop::new(),
+        None,
+        Arc::clone(&progress),
+    );
+    let ended = tokio::time::timeout(LIMIT, started.task.join())
+        .await
+        .unwrap();
+    assert!(ended.is_err());
+    assert_eq!(progress.changes_read(), 3);
+    let sink = SinkName::try_new("primary").unwrap();
+    assert_eq!(
+        progress.committed(&sink),
+        0,
+        "the engine restarts after a backoff: none of the three counts meanwhile"
+    );
+    progress.forget_all();
+    assert_eq!(progress.committed(&sink), 0, "none of the three was built");
 }

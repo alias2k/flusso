@@ -647,7 +647,10 @@ is the one concrete piece.
   is watched once per run (the reader reads the flag and registers nothing for it). It
   owns the live stream and the resolver, reads a run as `main`'s `drain_ready` did (cut at
   `max_changes`, `max_delay`, would-block, the stop), resolves it, **marks** its documents
-  (`Progress::mark`), **counts** it (`Progress::read_changes`), then **hands it over** (`Run`, unbounded
+  (`Progress::mark_reads`, each id with its read number), **counts** it (`Progress::read_changes`), raises
+  **`routed`** to the run's last position (`Progress::routed`: a lane with nothing outstanding answers
+  `Through(max(newest, routed))`, so a quiet index pins neither confirmation nor a fence; unset by
+  `forget_all`; ADR 0012 stage 8a §3.9 D1), then **hands it over** (`Run`, unbounded
   channel, each change with the instant it was read), in that order. The builder owns everything else: it cuts the live batch from the queued changes as `main` cut one
   (`ingest/live.rs`'s `Runs::candidate`: every change read before `max(the first one's read, the last
   live grant) + max_delay`, up to `max_changes`, cut inside a run where needed; full at `max_changes`;
@@ -656,8 +659,8 @@ is the one concrete piece.
   the hand-over's receiver and drains it before forming any candidate, so no wake of the builder forms a
   batch without a change already read; beside a running live build, where only
   a full batch may start, a hand-over walks nothing until `max_changes` are queued and stops walking once
-  the deadline is known to cut the batch, `Runs::full_candidate`), takes only documents marked through the batch's last change (`Progress::take_through`) and
-  closes its step there (`close_step_through`), so no step claims a newer run's change. **The lead**:
+  the deadline is known to cut the batch, `Runs::full_candidate`), takes only documents marked through the batch's last change (`Progress::take_through`), and
+  each index's lanes are registered with that index's frontier (below), so no step claims a newer run's change. **The lead**:
   before each run the reader waits while one index has `max_waiting_per_index` documents waiting, all
   indexes `max_waiting`, or `max_waiting` changes are read and not granted (`engine::MaxWaiting`;
   `[concurrency]` keys, `--max-waiting-per-index`/`--max-waiting` + `FLUSSO_MAX_WAITING*`, never in the
@@ -695,16 +698,26 @@ is the one concrete piece.
   8a slice 1), not by its position, since two items of a lane may end on the same change; the item
   still carries the batch's last position (envelopes, ordered sinks); a lane with no item is
   `Progress::skipped`, so a quiet index pins nothing. **A sink's `changes_committed` is `Progress::committed`**
-  (stage 8a slice 3, §3.6 of its note): each read (`Progress::change_read`) falls in the `Step` closed at its
-  live grant (`close_step`), every lane is registered with the step (`published_build`/`skipped_build`, an
-  empty build too), and a sink has committed the reads through the oldest step all its lanes have landed
-  or skipped; counted per read, so a replayed change counts once per read and a redelivered item once;
-  reads of a run that ended before its grant close a step at the next run's `forget_all` and count with
-  the next routed one. Computed when read (`Status::with_progress`, the observable `flusso.changes.committed`);
-  nothing listens. A step carries its read total; a lane keeps at most `k + 2` steps (`k` its unlanded
-  items: a skip replaces the lane's newest entry), so a parked lane
-  holds no growing record (`Progress::steps_kept`). Guards: `daemon` `tests::committed`,
-  `progress::tests::{committed,parked,compaction_changes_no_count}`. Snapshots and `SnapshotComplete { index }` go to
+  (stage 8a slices 3 and 6b-1a, §3.6 and §3.9 §3 of its note): every mark carries its change's read
+  number; a live grant closes one `Step` number and registers each index's lanes with that index's
+  **frontier** (`Progress::close_steps`: a take's `Taken::frontier`, else `Progress::frontier`; one below
+  the oldest read still waiting, else the read count), with an item or without (`published_build`/`skipped_build`);
+  a lane has committed the frontier of the newest step it landed through, or, with nothing unlanded and
+  its index idle (nothing waiting, no build unreleased: `Pending::is_idle`), the read count (the
+  catch-up: a change that builds nothing counts once read and everything before it landed); each lane
+  keeps a high-water, so a sink's count (the least over its lanes; every read with no lane) never goes
+  down. Reads the reader's guard counts without marks (a run cut by an error, `Progress::read_unmarked`)
+  stop every frontier and catch-up at once (`readable`), until the next run. `forget_all` caps each
+  lane's catch-up one below the least read the ended run left unbuilt (waiting, in a build never
+  released, or cut) until a step is registered on that lane, so a lane the first grant defers keeps
+  it; it runs under the registry lock throughout, so a reader sees the run whole or forgotten, never
+  its documents gone while `routed` still answers. The read count is written with release after the marks and read with
+  acquire first. Computed when read (`Status::with_progress`, the observable `flusso.changes.committed`);
+  nothing listens. A lane keeps at most `k + 2` steps (`k` its unlanded items: a skip replaces the
+  lane's newest entry), so a parked lane holds no growing record (`Progress::steps_kept`). Guards:
+  `daemon` `tests::committed`, `progress::tests::{committed,frontier,routed,restart,model,parked,compaction_changes_no_count,forgetting,cut}`,
+  `reader::tests`' `routed_moves_only_after_the_runs_marks` and `a_run_cut_before_its_marks_counts_no_sooner_than_the_first_grant`,
+  `ingest::tests::reading`'s `a_fence_on_a_quiet_index_passes_while_another_index_builds`. Snapshots and `SnapshotComplete { index }` go to
   `(index, s)` of each requesting sink; requests are one per index and coalesce by sink set. The sink
   engine (`writes.rs`'s `Run`) keeps per lane a consumer, its window, counts and barrier; admission is per
   lane (two lanes never share a document); `pick` takes live first, every fourth contested grant to

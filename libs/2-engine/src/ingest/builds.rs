@@ -71,9 +71,11 @@ pub(super) enum Job {
         taken: Vec<(IndexName, Token, Position)>,
         position: Position,
         changes: usize,
-        step: Step,
+        /// Each index's step at the grant, with its own frontier: its lanes
+        /// are registered with it.
+        steps: BTreeMap<IndexName, Step>,
         /// The indexes with documents waiting that the budget left out:
-        /// their lanes get nothing from this build, not even its step.
+        /// their lanes get nothing from this build, not even a step.
         deferred: Vec<IndexName>,
     },
     /// A snapshot batch, to each lane the slice it asked for, each index's
@@ -902,7 +904,7 @@ mod tests {
             taken: Vec::new(),
             position: Position::new(0),
             changes: 0,
-            step: crate::Progress::new(std::iter::empty()).close_step(),
+            steps: BTreeMap::new(),
             deferred: Vec::new(),
         };
         run.start(&documents, Vec::new(), job, &|_| false).await;

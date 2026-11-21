@@ -188,14 +188,22 @@ impl IngestEngine {
         deferred: Vec<IndexName>,
     ) {
         let position = candidate.position;
-        let (ids, taken) = self.take_all(builds, admitted, position);
+        let (ids, taken, mut frontiers) = self.take_all(builds, admitted, position);
         runs.granted(candidate, !deferred.is_empty());
-        let step = self.progress.close_step_through(candidate.read);
+        // Every other index with lanes is registered with its frontier now,
+        // at the grant: computed at publish, it could cover documents a
+        // later grant takes, whose item comes after this one (§3.9 I5).
+        for index in self.progress.indexes() {
+            if !deferred.contains(index) && !frontiers.iter().any(|(taken, _)| taken == index) {
+                frontiers.push((index.clone(), self.progress.frontier(index)));
+            }
+        }
+        let steps = self.progress.close_steps(frontiers);
         let job = Job::Live {
             taken,
             position,
             changes: candidate.changes,
-            step,
+            steps,
             deferred,
         };
         builds
@@ -203,16 +211,22 @@ impl IngestEngine {
             .await;
     }
 
-    /// The waiting documents of each index in `admitted`: the ids, and each
-    /// index's build.
+    /// The waiting documents of each index in `admitted`: the ids, each
+    /// index's build, and each index's frontier after its take.
+    #[allow(clippy::type_complexity)]
     fn take_all(
         &self,
         builds: &mut Builds,
         admitted: &[IndexName],
         through: Position,
-    ) -> (Vec<DocumentId>, Vec<(IndexName, Token, Position)>) {
+    ) -> (
+        Vec<DocumentId>,
+        Vec<(IndexName, Token, Position)>,
+        Vec<(IndexName, u64)>,
+    ) {
         let mut ids = builds.spare(self.batch.max_changes);
         let mut taken = Vec::new();
+        let mut frontiers = Vec::new();
         for index in self
             .progress
             .indexes()
@@ -224,9 +238,10 @@ impl IngestEngine {
             {
                 ids.extend(take.ids);
                 taken.push((index.clone(), take.token, take.oldest));
+                frontiers.push((index.clone(), take.frontier));
             }
         }
-        (ids, taken)
+        (ids, taken, frontiers)
     }
 
     async fn start_backfill(&self, snapshot: &mut Snapshot, builds: &mut Builds) {
@@ -324,7 +339,7 @@ impl IngestEngine {
                         taken,
                         position,
                         changes,
-                        step,
+                        steps,
                         deferred,
                     },
                     Some(built),
@@ -332,7 +347,7 @@ impl IngestEngine {
                     let granted = Granted {
                         position,
                         changes,
-                        step,
+                        steps,
                     };
                     self.publish_live(built, &taken, &deferred, granted, &holds, lanes)
                         .await?;
@@ -364,7 +379,7 @@ impl IngestEngine {
         let Granted {
             position,
             changes,
-            step,
+            steps,
         } = granted;
         let (envelopes, by_index) = self.envelopes(built.documents?, Some(position))?;
         self.observer
@@ -384,16 +399,19 @@ impl IngestEngine {
         // envelopes of that index, in build order, under the index's next key
         // (the same on each of its lanes; lanes are ordered by index, so an
         // index's lanes are adjacent). Every lane, with an item or not, is
-        // registered with the batch's step (what a sink's committed count
+        // registered with its index's step (what a sink's committed count
         // follows), except a deferred index's: its documents still wait.
         let mut by_lane: Vec<Item<'_>> = Vec::new();
-        let mut skipped: Vec<&LaneKey> = Vec::new();
+        let mut skipped: Vec<(&LaneKey, Step)> = Vec::new();
         let mut keyed: Option<(&IndexName, ItemKey)> = None;
         let groups = group_by_index(envelopes);
         for (lane, producer) in lanes {
             if deferred.contains(&lane.index) {
                 continue;
             }
+            let Some(step) = steps.get(&lane.index).copied() else {
+                continue;
+            };
             match groups.get(&lane.index) {
                 Some(envelopes) => {
                     let item_key = match keyed {
@@ -429,7 +447,7 @@ impl IngestEngine {
                         }),
                     ));
                 }
-                None => skipped.push(lane),
+                None => skipped.push((lane, step)),
             }
         }
         // Each lane is registered as its own send succeeds, so a full lane
@@ -437,12 +455,12 @@ impl IngestEngine {
         // of the index has it, the index's pending build holds all of them
         // back. A lane that lands the item first leaves its mark for the
         // registration to find.
-        for key in &skipped {
+        for (key, step) in &skipped {
             let token = taken
                 .iter()
                 .find(|(index, _, _)| *index == key.index)
                 .map(|(_, token, _)| *token);
-            self.progress.skipped_build(key, position, token, step);
+            self.progress.skipped_build(key, position, token, *step);
         }
         self.publish(by_lane, Work::Live, started).await?;
         // Registered on every lane of each index: the builds no longer hold
@@ -592,12 +610,12 @@ impl IngestEngine {
 }
 
 /// A live build's grant: its live run's newest position, how many changes
-/// the run read, and the step they fall in.
-#[derive(Debug, Clone, Copy)]
+/// the run read, and each index's step.
+#[derive(Debug, Clone)]
 struct Granted {
     position: Position,
     changes: usize,
-    step: Step,
+    steps: BTreeMap<IndexName, Step>,
 }
 
 /// One lane's item of a batch, with its lane, its producer and, for a live
