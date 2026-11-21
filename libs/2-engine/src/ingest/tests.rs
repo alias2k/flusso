@@ -328,6 +328,8 @@ struct Behaviour {
     stop_on_resolve: Mutex<Option<(i64, Stop)>>,
     /// Resolving one of these ids fails.
     resolve_fails: Mutex<HashSet<i64>>,
+    /// Resolving the first id releases the builds holding the second.
+    release_on_resolve: Option<(i64, i64)>,
 }
 
 /// Builds documents from the [`Database`], reading each version when the
@@ -521,6 +523,11 @@ impl DocumentBuilder for Builder {
             && *at == id
         {
             stop.request();
+        }
+        if let Some((at, held)) = self.behaviour.release_on_resolve
+            && at == id
+        {
+            self.release(held);
         }
         if self.behaviour.resolve_fails.lock().unwrap().contains(&id) {
             return Err(SourceError::Connection(format!("resolving {id} failed")));

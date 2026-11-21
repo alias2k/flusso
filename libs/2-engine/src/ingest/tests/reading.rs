@@ -34,11 +34,23 @@ async fn run_beside(
     stop: &Stop,
     driver: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
-    let driver = tokio::spawn(driver);
-    tokio::time::timeout(LIMIT, deployment.run_until_landed(db, stop, 0))
-        .await
-        .expect("the run ends");
-    driver.await.unwrap();
+    let mut driver = tokio::spawn(driver);
+    let run = tokio::time::timeout(LIMIT, deployment.run_until_landed(db, stop, 0));
+    tokio::pin!(run);
+    tokio::select! {
+        ended = &mut driver => {
+            // A driver that failed holds builds the run waits on: its panic
+            // is the failure, not the run's timeout.
+            if let Err(failed) = ended {
+                std::panic::resume_unwind(failed.into_panic());
+            }
+            run.await.expect("the run ends");
+        }
+        ran = &mut run => {
+            ran.expect("the run ends");
+            driver.await.unwrap();
+        }
+    }
 }
 
 /// R2 and R3: behind a held build the reader reads up to its lead (two
@@ -123,6 +135,63 @@ async fn a_trickle_read_while_a_live_build_runs_is_one_batch_after_it() {
     };
     run_beside(&mut deployment, &db, &stop, driver).await;
     assert_eq!(builder.grants(), [vec![0], vec![2, 4, 6]]);
+}
+
+/// R3 beside a running live build, where a hand-over that can't start a
+/// build walks nothing (`Runs::full_candidate`): changes 1 and 2 at 10 ms,
+/// 3 and 4 at 70 ms, past the batch's 60 ms deadline, so four are queued but
+/// the batch is cut at two and nothing starts beside the held build of 0.
+/// Once 0 lands, `[1, 2]` is granted (held too); 5 at 110 ms leaves `[3, 4,
+/// 5]` short of four and 6 at 120 ms fills it, so it starts beside `[1, 2]`.
+/// Kept "cut by its deadline" past the grant, or counting a granted change
+/// as still queued, misses the full batch until `[1, 2]` lands.
+#[tokio::test(start_paused = true)]
+async fn a_full_batch_starts_beside_a_running_build_after_one_its_deadline_cut() {
+    let db = Database::new(0, (0..7).map(Change::upsert).collect());
+    let builder = Builder::new(&db, held([0, 1]));
+    let stop = Stop::new();
+    let arrivals = [0, 10, 10, 70, 70, 110, 120]
+        .map(Duration::from_millis)
+        .to_vec();
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_arrivals(arrivals).open(),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(2)
+            .with_stop(stop.clone())
+    });
+    let driver = {
+        let builder = Arc::clone(&builder);
+        let db = Arc::clone(&db);
+        async move {
+            until("3 and 4 are read", || {
+                db.visible.load(Ordering::SeqCst) == 5
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                builder.grants(),
+                [vec![0]],
+                "four queued, but the deadline cut the batch at two"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            builder.release(0);
+            until("6 is read", || db.visible.load(Ordering::SeqCst) == 7).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                builder.grants(),
+                [vec![0], vec![1, 2], vec![3, 4, 5, 6]],
+                "the full batch starts beside the held build of 1 and 2"
+            );
+            builder.release(1);
+        }
+    };
+    run_beside(&mut deployment, &db, &stop, driver).await;
+    assert_eq!(builder.grants(), [vec![0], vec![1, 2], vec![3, 4, 5, 6]]);
 }
 
 /// R4: a change read ahead is never counted committed before its build
@@ -647,12 +716,24 @@ async fn batches_of(
     max_changes: usize,
     builds: usize,
 ) -> Vec<usize> {
+    resolved_batches_of(arrivals, None, build, max_changes, builds).await
+}
+
+/// [`batches_of`], each change taking `resolve` to resolve.
+async fn resolved_batches_of(
+    arrivals: Vec<Duration>,
+    resolve: Option<Duration>,
+    build: Duration,
+    max_changes: usize,
+    builds: usize,
+) -> Vec<usize> {
     let count = arrivals.len() as i64;
     let db = Database::new(0, (0..count).map(Change::upsert).collect());
     let builder = Builder::new(
         &db,
         Behaviour {
             delay: Some(build),
+            resolve_delay: resolve,
             ..Behaviour::default()
         },
     );
@@ -836,4 +917,118 @@ async fn a_batch_ends_inside_a_run_where_main_closed_it() {
         "the model cuts inside a burst: {expected:?}"
     );
     assert_eq!(batches_of(arrivals, build, 256, 4).await, expected);
+}
+
+/// R4 when a batch ends inside a run: nine changes in three runs of three
+/// (at 10, 20 and 30 ms), `max_changes = 4`, one build at a time, the builds
+/// of 0 and of 7 held. The second batch takes run two and the first change of
+/// run three; its step closes at that change, so once 6 lands the sink has
+/// committed seven changes, not the whole third run's nine.
+#[tokio::test(start_paused = true)]
+async fn a_batch_ending_inside_a_run_closes_its_step_at_its_own_last_change() {
+    let db = Database::new(0, (0..9).map(Change::upsert).collect());
+    let builder = Builder::new(&db, held([0, 7]));
+    let stop = Stop::new();
+    let arrivals = (0..9)
+        .map(|n| Duration::from_millis(10 * (1 + n / 3)))
+        .collect();
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_arrivals(arrivals).open(),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(1)
+            .with_stop(stop.clone())
+    });
+    let progress = deployment.ingest.progress();
+    let recorder = Arc::clone(&deployment.recorder);
+    let driver = {
+        let builder = Arc::clone(&builder);
+        let db = Arc::clone(&db);
+        async move {
+            until("every change is read", || {
+                db.visible.load(Ordering::SeqCst) == 9
+            })
+            .await;
+            builder.release(0);
+            until("6 lands", || recorder.state().contains_key(&6)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                progress.committed(&sink_name()),
+                7,
+                "7 and 8 are read, not built: their changes aren't committed"
+            );
+            builder.release(7);
+        }
+    };
+    run_beside(&mut deployment, &db, &stop, driver).await;
+    assert_eq!(
+        builder.grants(),
+        [vec![0, 1, 2], vec![3, 4, 5, 6], vec![7, 8]]
+    );
+}
+
+/// R3 when a build lands with a run already handed over: resolving the
+/// last change releases the held build of 0, so the builder wakes with both
+/// the landing and the third run ready, and `select!` takes either first.
+/// The grant after the landing sees every change read before it, so it takes
+/// run two and the first change of run three whichever arm ran first. Each
+/// round leaves that choice to `select!` again: dropping the hand-over taken
+/// before a grant fails about one round in two.
+#[tokio::test(start_paused = true)]
+async fn a_grant_takes_the_runs_handed_over_beside_the_landing_that_wakes_it() {
+    for round in 0..16 {
+        let db = Database::new(0, (0..9).map(Change::upsert).collect());
+        let builder = Builder::new(
+            &db,
+            Behaviour {
+                release_on_resolve: Some((8, 0)),
+                ..held([0])
+            },
+        );
+        let stop = Stop::new();
+        let arrivals = (0..9)
+            .map(|n| Duration::from_millis(10 * (1 + n / 3)))
+            .collect();
+        let mut deployment = Deployment::new(
+            Feed::new(&db).with_arrivals(arrivals).open(),
+            Arc::clone(&builder),
+            Recorder::seeded(true),
+        )
+        .ingest(|ingest| {
+            ingest
+                .with_batch(batch(4))
+                .with_builds(1)
+                .with_stop(stop.clone())
+        });
+        run_beside(&mut deployment, &db, &stop, async {}).await;
+        assert_eq!(
+            builder.grants(),
+            [vec![0, 1, 2], vec![3, 4, 5, 6], vec![7, 8]],
+            "round {round}"
+        );
+    }
+}
+
+/// R3 with resolving that takes time, which `main_batches` doesn't model: a
+/// backlog of 600 changes ready at once, each taking 1 ms to resolve, builds
+/// of 20 ms, `max_changes = 256`. `main` read one change a millisecond into
+/// its open batch until the batch's 50 ms deadline, then granted it, so its
+/// batches were 50 changes, twelve of them; the reader reads at the same
+/// pace and the builder cuts the same batches, none later.
+#[tokio::test(start_paused = true)]
+async fn a_backlog_resolved_a_change_a_millisecond_is_batched_as_main_batched_it() {
+    let arrivals = vec![Duration::from_millis(1); 600];
+    let batches = resolved_batches_of(
+        arrivals,
+        Some(Duration::from_millis(1)),
+        Duration::from_millis(20),
+        256,
+        4,
+    )
+    .await;
+    assert_eq!(batches, [50; 12]);
 }

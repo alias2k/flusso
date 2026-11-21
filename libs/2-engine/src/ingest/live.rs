@@ -19,6 +19,11 @@ pub(super) struct Runs {
     queue: VecDeque<Run>,
     /// How many changes of the front run earlier grants took.
     taken: usize,
+    /// How many changes are queued and not yet granted.
+    queued: usize,
+    /// The batch is known not to fill: its deadline cut it short of
+    /// `max_changes`, and only a grant changes that.
+    short: bool,
     /// When the last live batch was granted: the next batch's deadline counts
     /// from here when its first change was read before it.
     last_grant: Option<Instant>,
@@ -52,6 +57,8 @@ impl Runs {
         Self {
             queue: VecDeque::new(),
             taken: 0,
+            queued: 0,
+            short: false,
             last_grant: None,
             kept: None,
             max_changes: max_changes.max(1),
@@ -61,16 +68,29 @@ impl Runs {
     }
 
     pub(super) fn push(&mut self, run: Run) {
+        self.queued += run.changes.len();
         self.queue.push_back(run);
     }
 
     /// The changes handed over and not yet granted.
     pub(super) fn changes(&self) -> usize {
-        self.queue
-            .iter()
-            .map(|run| run.changes.len())
-            .sum::<usize>()
-            .saturating_sub(self.taken)
+        self.queued
+    }
+
+    /// [`candidate`](Self::candidate) when it is full, for a grant beside a
+    /// running live build, which only a full batch may start. `None` at once
+    /// while fewer than `max_changes` changes are queued, or while the
+    /// batch's deadline is known to cut it short: a hand-over that can't
+    /// start a build costs no walk.
+    pub(super) fn full_candidate(&mut self) -> Option<Candidate> {
+        if self.short || self.queued < self.max_changes {
+            return None;
+        }
+        let candidate = self.candidate(true).filter(|candidate| candidate.full);
+        // With `max_changes` queued, a batch that isn't full was cut by its
+        // deadline, which later changes can't move.
+        self.short = candidate.is_none();
+        candidate
     }
 
     /// The batch a grant would take now, as `main` formed one (R3): from the
@@ -123,6 +143,8 @@ impl Runs {
     /// the queue, the reader may read on, and when the budget left some of
     /// its documents `waiting`, it is kept for them.
     pub(super) fn granted(&mut self, candidate: Candidate, waiting: bool) {
+        self.queued -= candidate.changes;
+        self.short = false;
         if let Some((at_run, at_change)) = candidate.end {
             for _ in 0..at_run {
                 self.queue.pop_front();

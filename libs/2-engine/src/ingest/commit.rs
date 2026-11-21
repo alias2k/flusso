@@ -60,7 +60,14 @@ impl IngestEngine {
             // candidate's last change, offered only once none of them is in
             // a running build: `main`'s admission, checked before a permit is
             // taken. Its estimate counts distinct documents.
-            let live = runs.candidate(true).and_then(|candidate| {
+            // Beside a running live build only a full batch may start, so a
+            // hand-over that can't fill one costs no walk.
+            let candidate = if builds.live_running() {
+                runs.full_candidate()
+            } else {
+                runs.candidate(true)
+            };
+            let live = candidate.and_then(|candidate| {
                 Some(LiveCandidate {
                     live: candidate,
                     documents: self.waiting(builds, candidate.position)?,

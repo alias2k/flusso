@@ -632,7 +632,10 @@ is the one concrete piece.
   (`ingest/live.rs`'s `Runs::candidate`: every change read before `max(the first one's read, the last
   live grant) + max_delay`, up to `max_changes`, cut inside a run where needed; full at `max_changes`;
   no deadline in `settle`; checked against `main_batches`, a model of `main`'s loop, in
-  `ingest::tests::reading`), takes only documents marked through the batch's last change (`Progress::take_through`) and
+  `ingest::tests::reading`; every arm that grants first takes the runs already handed over
+  (`take_handed`), since `select!` picks a ready arm at random; beside a running live build, where only
+  a full batch may start, a hand-over walks nothing until `max_changes` are queued and stops walking once
+  the deadline is known to cut the batch, `Runs::full_candidate`), takes only documents marked through the batch's last change (`Progress::take_through`) and
   closes its step there (`close_step_through`), so no step claims a newer run's change. **The lead**:
   before each run the reader waits while one index has `max_waiting_per_index` documents waiting, all
   indexes `max_waiting`, or `max_waiting` changes are read and not granted (`engine::MaxWaiting`;
@@ -650,7 +653,9 @@ is the one concrete piece.
   builder; the run's `Resolve` is reported by the builder after it. Guards: `reader::tests` (marked
   and counted before the hand-over, the lead per index, in all and in changes, the stop in a run and at
   the lead, an error, a panic, the abort), `ingest::tests::reading` (batches as `main` cut them, a
-  paced trickle and bursts behind slow builds against `main_batches`, a stop's batches of
+  paced trickle and bursts behind slow builds against `main_batches`, a backlog resolved a change a
+  millisecond, a batch ending inside a run closing its step there, a grant beside a landing taking the
+  runs handed over, a full batch beside a running build after one its deadline cut, a stop's batches of
   `max_changes`, captured equal to read when a build error aborts the reader, a trickle beside a
   running build, nothing committed ahead, confirmation pinned, the stop mid-run and
   far ahead, both errors, the idle/resolve split, a parked lane bounding pending memory), the CLI's

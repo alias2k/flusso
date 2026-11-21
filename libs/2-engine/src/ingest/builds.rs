@@ -433,6 +433,12 @@ impl Builds {
         Some(work)
     }
 
+    /// Whether a live build runs: only a full live batch may start beside
+    /// it.
+    pub(super) fn live_running(&self) -> bool {
+        !self.live_running.is_empty()
+    }
+
     /// Builds running on their own tasks.
     pub(super) fn running(&self) -> usize {
         self.flights.len()

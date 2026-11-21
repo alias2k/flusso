@@ -1309,13 +1309,26 @@ async fn reports_lifecycle_and_progress_to_the_observer() {
     // waits are checked apart: one comes before the first resolve; the
     // rest of the events are `main`'s, in `main`'s order.
     let events = observer.events.lock().unwrap().clone();
-    let first_resolve = events
+    let at = |name: &str| events.iter().position(|event| event == name);
+    let (first_resolve, publish) = (at("stage resolve live"), at("stage publish live"));
+    let idles: Vec<usize> = events
         .iter()
-        .position(|event| event == "stage resolve live");
-    let first_idle = events.iter().position(|event| event == "stage idle");
+        .enumerate()
+        .filter(|(_, event)| *event == "stage idle")
+        .map(|(position, _)| position)
+        .collect();
     assert!(
-        first_idle.is_some() && first_idle < first_resolve,
+        idles
+            .first()
+            .is_some_and(|first| Some(*first) < first_resolve),
         "an idle wait before the first resolve: {events:?}"
+    );
+    assert!(
+        idles.len() <= 2
+            && idles
+                .iter()
+                .all(|idle| Some(*idle) < first_resolve || Some(*idle) > publish),
+        "at most the wait before the run and the tick's: {events:?}"
     );
     let events: Vec<String> = events
         .into_iter()

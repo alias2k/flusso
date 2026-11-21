@@ -215,9 +215,10 @@ impl Reader {
     /// the two still wakes it.
     async fn room(&self) -> bool {
         loop {
+            // Created before the lead is read: `notify_waiters` wakes a
+            // `Notified` from its creation, polled or not.
             let taken = self.lead.taken.notified();
             tokio::pin!(taken);
-            taken.as_mut().enable();
             self.lead.waiting.store(true, Ordering::Relaxed);
             fence(Ordering::SeqCst);
             if self.stop.is_requested() || !self.lead.reached(&self.progress) {

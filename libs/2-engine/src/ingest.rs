@@ -436,12 +436,7 @@ impl IngestEngine {
                                 StageTiming::new(Stage::Resolve, run.resolved).work(Work::Live),
                             );
                             runs.push(run);
-                            while let Ok(run) = handed.try_recv() {
-                                self.observer.on_stage(
-                                    StageTiming::new(Stage::Resolve, run.resolved).work(Work::Live),
-                                );
-                                runs.push(run);
-                            }
+                            self.take_handed(&mut handed, &mut runs);
                             builds.woke(Wake::Change);
                             self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                             self.confirm(&mut last_confirmed, false);
@@ -452,12 +447,14 @@ impl IngestEngine {
                         if builds.refused().is_some() =>
                     {
                         builds.woke(Wake::Released);
+                        self.take_handed(&mut handed, &mut runs);
                         self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                         self.confirm(&mut last_confirmed, false);
                         mark = Instant::now();
                     }
                     landed = builds.next(), if building => {
                         builds.woke(Wake::Landed);
+                        self.take_handed(&mut handed, &mut runs);
                         self.landed(landed, &mut runs, &mut snapshot, builds, lanes).await?;
                         self.confirm(&mut last_confirmed, false);
                         mark = Instant::now();
@@ -477,6 +474,7 @@ impl IngestEngine {
                             Ok(Step::Done) => active.done = true,
                         }
                         builds.woke(Wake::Page);
+                        self.take_handed(&mut handed, &mut runs);
                         self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                         mark = Instant::now();
                     },
@@ -504,6 +502,7 @@ impl IngestEngine {
                         // so it costs a second, never the run.
                         if builds.refused().is_some() {
                             builds.woke(Wake::Tick);
+                            self.take_handed(&mut handed, &mut runs);
                             self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                             mark = Instant::now();
                         }
@@ -517,6 +516,22 @@ impl IngestEngine {
             reader.abort_and_wait().await;
         }
         result
+    }
+
+    /// Queue every run the reader handed over and this loop hasn't taken
+    /// yet. Every arm that grants takes them first: `select!` picks among
+    /// ready arms at random, and a grant must see every change read before
+    /// it (R3), not only those an earlier arm happened to take.
+    fn take_handed(
+        &self,
+        handed: &mut tokio::sync::mpsc::UnboundedReceiver<reader::Run>,
+        runs: &mut Runs,
+    ) {
+        while let Ok(run) = handed.try_recv() {
+            self.observer
+                .on_stage(StageTiming::new(Stage::Resolve, run.resolved).work(Work::Live));
+            runs.push(run);
+        }
     }
 
     /// The reader's end once the stop is requested: every run it hands over
