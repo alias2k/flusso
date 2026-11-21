@@ -194,7 +194,7 @@ The share has a flag and a variable, like the table's other keys:
 | `[concurrency] max_waiting` | `--max-waiting` | `FLUSSO_MAX_WAITING` | `2 × builds × [batch] max_changes` (2,048) |
 
 - **A stop builds what was read.** 0.18 landed the batch being built and the builds in flight. 0.19 builds and lands everything already read, up to the lead plus the run being read, so a stop under a backlog can take a little longer, within `--shutdown-timeout-secs`.
-- **An index held at its share, or behind a full lane, stops nobody at `max_waiting_per_index`** while another index flows: it becomes exempt ([below](#a-stuck-index-stops-only-itself)).
+- **An index stuck at its share, or behind a full lane, stops nobody at `max_waiting_per_index`** while another index is working: it becomes exempt ([below](#a-stuck-index-stops-only-itself)).
 
 **Who is affected.** Nobody needs to change a deployment that sets neither key: the defaults follow `[batch] max_changes` and `builds`. A short `--shutdown-timeout-secs` with slow builds may now pass its deadline under a backlog.
 
@@ -239,7 +239,7 @@ The share has a flag and a variable, like the table's other keys:
 
 ## A stuck index stops only itself
 
-**What changed.** In 0.18 a stuck index stopped every index once the memory budget filled. In 0.19, with two or more indexes, an index that is **held** (the budget refuses its live batch, or a batch of it waits on a full lane) and has `max_waiting_per_index` documents waiting becomes **exempt**, as long as some other index isn't held. It stops pacing the reading: its changes are kept as documents to build, each once, and the other indexes keep being read, built and written. One new key bounds what the exempt indexes keep together ([A stuck index](../reference/config-toml.md#a-stuck-index)):
+**What changed.** In 0.18 a stuck index stopped every index once the memory budget filled. In 0.19, with two or more indexes, an index that is **stuck** (the budget refuses its live batch, or a batch of it waits on a full lane) and has `max_waiting_per_index` documents waiting becomes **exempt**, as long as another index is **working**: not stuck, and not waiting 5 seconds on an acknowledgement. It stops pacing the reading: its changes are kept as documents to build, each once, and the other indexes keep being read, built and written. One new key bounds what the exempt indexes keep together ([A stuck index](../reference/config-toml.md#a-stuck-index)):
 
 | `flusso.toml` | Flag | Variable | Default |
 | --- | --- | --- | --- |
@@ -250,9 +250,9 @@ The share has a flag and a variable, like the table's other keys:
 | One index's lane parked for hours, beside other indexes | every index stops once the budget fills | the others keep being read and written |
 | A `/wait` naming only the other indexes | times out once reading stops | answers |
 | The WAL the slot keeps | grows | grows, unchanged: the slot waits for the stuck index |
-| An index that is slow but keeps landing | paces ingest | paces the reading at `max_waiting_per_index` |
+| An index that is slow but keeps landing | paces ingest | paces the reading at `max_waiting_per_index`, as does a stuck index once it recovers and drains |
 | The exempt indexes reach `max_pending_documents` | — | reading stops for every index until some are built |
-| Every index stuck at once (a whole sink down) | every index stops once the budget fills | no index is exempt: reading stops at `max_waiting_per_index` / `max_waiting`, nothing is read on toward `max_pending_documents` |
+| Every index stuck at once (a whole sink down) | every index stops once the budget fills | reading stops within about 5 seconds at `max_waiting_per_index` / `max_waiting`; an index that gets no changes meanwhile counts as working, so the others read on toward `max_pending_documents` until it sends something the sink doesn't acknowledge |
 | One index | — | unchanged |
 
 **Who is affected.** Deployments running two or more indexes, when one of them gets stuck: a parked lane, or an index whose sink stops acknowledging. A single index sees no change.
@@ -261,11 +261,12 @@ The share has a flag and a variable, like the table's other keys:
 
 1. **Nothing, usually.**
 2. **Keep alerting on the WAL.** The other indexes looking healthy doesn't mean the slot moves: watch `flusso_replication_slot_lag_bytes` and `pinned_by` as before ([When one index is stuck beside others](stalled-lane.md#when-one-index-is-stuck-beside-others)).
-3. **Plan memory for the backlog**: about 270 B a waiting document, 270–320 MB at the default. Lower `max_pending_documents` on a tight host ([sizing](../reference/config-toml.md#concurrency)).
+3. **Plan memory for the backlog**: about 270 B a waiting document, 270–320 MB at the default, only while an index is exempt. Lower `max_pending_documents` on a tight host ([A stuck index](../reference/config-toml.md#a-stuck-index)).
 
 **What to know.**
 
-- **The log is the only sign yet.** A warning names the index when it becomes exempt, another says when reading stops at the cap; each repeats at most once a minute ([A stuck index](../reference/config-toml.md#a-stuck-index)). `/status` and the metrics have no per-index view of it.
+- **The log is the only sign yet.** A warning names the index when it becomes exempt, another when it may drain but not grow, an info line when it is no longer exempt; a warning says when reading stops at the cap. At most one line a minute per index, and the last one names the current state ([the log lines](../reference/config-toml.md#a-stuck-index)). `/status` and the metrics have no per-index view of it.
+- **A slow acknowledgement pauses it for a while.** A healthy sink taking more than 5 seconds over one write (a large backfill or reindex bulk), or a sink engine restart whose failing write runs to its timeout, makes its index count as not working for that long: an exempt neighbour stops growing, and reading may stop, until that write is acknowledged ([details](../reference/config-toml.md#a-stuck-index)). Never worse than 0.18.
 - **A stop builds the backlog too**, within `--shutdown-timeout-secs`. When it can't, flusso exits `1` naming each index left with documents read and not built (`orders: 1200 documents read and not built`), and the next start reads them again ([Stopping](../reference/cli.md#stopping)).
 - **Refused at start.** `check`, `build` and `run` refuse `0`, and a flag or variable that isn't a whole number, naming where the value came from. A value below `max_waiting_per_index` is accepted. Like the rest of `[concurrency]`, it is never written into `flusso.lock`. The designer's config form sets it.
 
