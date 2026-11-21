@@ -240,7 +240,9 @@ struct Registry {
 struct Registered {
     unlanded: VecDeque<(ItemKey, Position, Option<Step>)>,
     unsearchable: VecDeque<(ItemKey, Position)>,
-    /// Every change through it that the lane needs is registered on it.
+    /// Every change through it that the lane needs is registered on it:
+    /// raised only by an item (or skip) whose index had every document
+    /// marked through it taken by then (see [`Progress::register`]).
     newest: Option<Position>,
     /// The steps routed to the lane that can still answer what it has
     /// committed, in order: the front is the newest it has committed, once
@@ -357,7 +359,7 @@ impl Progress {
     /// It counts toward no [`Step`]: a live build's item is registered with
     /// its step ([`published_build`](Self::published_build)).
     pub fn published(&self, lane: &LaneKey, key: ItemKey, oldest: Position, last: Position) {
-        self.register(lane, Some((key, oldest)), last, None);
+        self.register(lane, Some((key, oldest)), last, None, None);
         self.registered();
     }
 
@@ -371,21 +373,21 @@ impl Progress {
         last: Position,
         step: Step,
     ) {
-        self.register(lane, Some((key, oldest)), last, Some(step));
+        self.register(lane, Some((key, oldest)), last, Some(step), None);
         self.registered();
     }
 
     /// A batch through `last` had nothing for `lane`: the lane has every
     /// change through `last` it needs, once its earlier items are registered.
     pub fn skipped(&self, lane: &LaneKey, last: Position) {
-        self.register(lane, None, last, None);
+        self.register(lane, None, last, None, None);
         self.registered();
     }
 
     /// [`skipped`](Self::skipped), for the live build of `step`: the lane has
     /// every change of the step it needs, once its earlier items are.
     pub fn skipped_step(&self, lane: &LaneKey, last: Position, step: Step) {
-        self.register(lane, None, last, Some(step));
+        self.register(lane, None, last, Some(step), None);
         self.registered();
     }
 
@@ -403,7 +405,7 @@ impl Progress {
         token: Token,
         step: Step,
     ) {
-        self.register(lane, Some((key, oldest)), last, Some(step));
+        self.register(lane, Some((key, oldest)), last, Some(step), Some(token));
         self.settle_build(lane, token);
         self.registered();
     }
@@ -414,21 +416,35 @@ impl Progress {
     /// pending build `token`, if it took one, no longer holds that lane
     /// back, before the one notification.
     pub fn skipped_build(&self, lane: &LaneKey, last: Position, token: Option<Token>, step: Step) {
-        self.register(lane, None, last, Some(step));
+        self.register(lane, None, last, Some(step), token);
         if let Some(token) = token {
             self.settle_build(lane, token);
         }
         self.registered();
     }
 
+    /// Register `item` (or a skip) through `last` on `lane`, the item of
+    /// the pending build `token` if any. The lane's `newest` moves to `last`
+    /// only while its index has nothing marked at or before `last` that
+    /// waits or is in another build: a take cut by the cap (O2) or the
+    /// fold's backlog take leaves some of `last`'s documents behind, and
+    /// after a restart forgets them a lane answering through `last` would
+    /// let confirmation and a fence pass documents never written (the
+    /// invariant: a lane's `newest` names only positions whose every
+    /// document of the index has been taken).
     fn register(
         &self,
         lane: &LaneKey,
         item: Option<(ItemKey, Position)>,
         last: Position,
         step: Option<Step>,
+        token: Option<Token>,
     ) {
         let mut registry = lock(&self.registry);
+        let whole = self
+            .pending
+            .get(&lane.index)
+            .is_none_or(|pending| lock(pending).all_taken_through(last, token));
         if let (Some(registered), Some(marks)) =
             (registry.lanes.get_mut(lane), self.marks.get(lane))
         {
@@ -441,7 +457,9 @@ impl Progress {
                 registered.unlanded.push_back((key, oldest, step));
                 registered.unsearchable.push_back((key, oldest));
             }
-            registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
+            if whole {
+                registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
+            }
         }
     }
 
@@ -559,6 +577,7 @@ impl Progress {
                     let pending = lock(pending);
                     (pending.sent_to(&lane.sink), pending.backlog_for(&lane.sink))
                 });
+
             let own = registered
                 .outstanding(marks, level)
                 .into_iter()
@@ -831,9 +850,9 @@ impl Progress {
             read => Some(read),
         };
         for (index, pending) in &self.pending {
-            let (forgotten, unbuilt) = lock(pending).forget();
-            self.stopped_waiting(index, forgotten);
-            least = least.into_iter().chain(unbuilt).min();
+            let forgotten = lock(pending).forget();
+            self.stopped_waiting(index, forgotten.waiting);
+            least = least.into_iter().chain(forgotten.least_read).min();
         }
         #[cfg(test)]
         tests::while_forgetting();

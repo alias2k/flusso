@@ -66,6 +66,15 @@ pub struct Taken {
     pub frontier: u64,
 }
 
+/// What [`Pending::forget`] dropped.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Forgotten {
+    /// How many ids were waiting.
+    pub(crate) waiting: usize,
+    /// The least read number left unbuilt.
+    pub(crate) least_read: Option<u64>,
+}
+
 /// One index's waiting and building ids.
 #[derive(Debug, Default)]
 pub(crate) struct Pending {
@@ -125,9 +134,6 @@ impl Pending {
         self.waiting.insert(key, (at, counter, read));
     }
 
-    /// The read number of the oldest waiting id; `None` while none waits.
-    /// Within one engine run read numbers follow positions, so the oldest by
-    /// position is the least.
     /// The newest position among the documents waiting.
     pub(crate) fn newest_waiting(&self) -> Option<Position> {
         self.order
@@ -136,6 +142,9 @@ impl Pending {
             .map(|(position, _, _)| *position)
     }
 
+    /// The read number of the oldest waiting id; `None` while none waits.
+    /// Within one engine run read numbers follow positions, so the oldest by
+    /// position is the least.
     pub(crate) fn least_waiting_read(&self) -> Option<u64> {
         self.order
             .first_key_value()
@@ -143,8 +152,6 @@ impl Pending {
             .map(|(_, _, read)| *read)
     }
 
-    /// Nothing waits and no build is taken and not yet released: every
-    /// document marked is on its lanes.
     /// The least read number of what is not yet on its lanes: a document
     /// waiting, or one in a build taken and not yet released.
     pub(crate) fn least_unbuilt(&self) -> Option<u64> {
@@ -157,6 +164,21 @@ impl Pending {
             .min()
     }
 
+    /// Whether every document marked at or before `last` has been taken
+    /// into `token`'s build or one already published: none waits, and no
+    /// other build not yet released holds one.
+    pub(crate) fn all_taken_through(&self, last: Position, token: Option<Token>) -> bool {
+        self.oldest_waiting()
+            .is_none_or(|oldest| oldest.seq > last.seq)
+            && self
+                .builds
+                .iter()
+                .filter(|build| Some(build.token) != token)
+                .all(|build| build.oldest.seq > last.seq)
+    }
+
+    /// Nothing waits and no build is taken and not yet released: every
+    /// document marked is on its lanes.
     pub(crate) fn is_idle(&self) -> bool {
         self.waiting.is_empty() && self.builds.is_empty()
     }
@@ -261,21 +283,23 @@ impl Pending {
     /// Forget everything: the run that marked and took it ended before
     /// publishing it. Confirmation never passed any of it, so the next run's
     /// stream replays every change and marks the documents again. Returns how
-    /// many ids were waiting, and the least read number left unbuilt (waiting
-    /// or in a build never released).
-    pub(crate) fn forget(&mut self) -> (usize, Option<u64>) {
-        let waiting = self.waiting.len();
-        let least = self
-            .waiting
-            .values()
-            .map(|(_, _, read)| *read)
-            .chain(self.builds.iter().map(|build| build.least_read))
-            .min();
+    /// many ids were waiting, and the least read number left unbuilt
+    /// (waiting or in a build never released).
+    pub(crate) fn forget(&mut self) -> Forgotten {
+        let forgotten = Forgotten {
+            waiting: self.waiting.len(),
+            least_read: self
+                .waiting
+                .values()
+                .map(|(_, _, read)| *read)
+                .chain(self.builds.iter().map(|build| build.least_read))
+                .min(),
+        };
         self.waiting.clear();
         self.order.clear();
         self.building.clear();
         self.builds.clear();
-        (waiting, least)
+        forgotten
     }
 
     fn remove_build(&mut self, token: Token) -> Option<Build> {
@@ -500,7 +524,10 @@ mod tests {
         pending.mark(key(2), p(2), 2);
         assert_eq!(
             pending.forget(),
-            (1, Some(1)),
+            Forgotten {
+                waiting: 1,
+                least_read: Some(1),
+            },
             "the build of read 1 never landed"
         );
         assert_eq!(pending.minimum(), None);

@@ -1544,6 +1544,97 @@ mod restart {
         );
     }
 
+    /// Take at most `most` of `users`' documents (through `through`, or its
+    /// backlog with `None`), publish and land the item with `last`.
+    fn land_part(
+        progress: &Progress,
+        users: &LaneKey,
+        through: Option<Position>,
+        most: usize,
+        last: Position,
+    ) {
+        let taken = match through {
+            Some(through) => {
+                progress.take_through_at_most(&users.index, through, most, &nothing_held)
+            }
+            None => progress.take(&users.index, most, &nothing_held),
+        }
+        .unwrap();
+        let steps = progress.close_steps([(users.index.clone(), taken.frontier)]);
+        let key = progress.next_key(&users.index).unwrap();
+        progress.published_build(
+            users,
+            key,
+            taken.oldest,
+            last,
+            taken.token,
+            steps[&users.index],
+        );
+        progress.release(&users.index, taken.token);
+        progress.applied(users, key);
+    }
+
+    /// A lane's `newest` names only positions whose every document of the
+    /// index was taken. A capped take (O2) registers its item at the
+    /// change's position while six of its ten documents wait: a restart
+    /// forgets them, and a lane answering through the change would let
+    /// confirmation and a fence pass documents never written. Once the last
+    /// part lands, the lane answers through it.
+    #[test]
+    fn a_capped_take_lets_no_restart_answer_through_what_it_left_waiting() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        progress.mark_reads((0..10).map(|n| (id("users", 100 + n), p(7), 1)));
+        read_through(&progress, 1);
+        progress.routed(p(7));
+        land_part(&progress, &users, Some(p(7)), 4, p(7));
+        assert_eq!(progress.landed(), Landed::Before(p(7)));
+        progress.forget_all();
+        assert_eq!(
+            progress.landed(),
+            Landed::Idle,
+            "six documents of change 7 were never written"
+        );
+        assert!(
+            !matches!(
+                progress.lane(&users, Level::Searchable),
+                Some(Landed::Through(_))
+            ),
+            "nor a searchable fence"
+        );
+
+        progress.mark_reads((0..10).map(|n| (id("users", 100 + n), p(7), 2)));
+        read_through(&progress, 2);
+        for _ in 0..3 {
+            land_part(&progress, &users, Some(p(7)), 4, p(7));
+        }
+        progress.forget_all();
+        assert_eq!(
+            progress.landed(),
+            Landed::Through(p(7)),
+            "every part of change 7 landed"
+        );
+    }
+
+    /// The fold's backlog take (§3.9 I7) carries the newest position waiting
+    /// while it takes only the oldest `max_changes`: no restart answers
+    /// through what it left.
+    #[test]
+    fn a_backlog_take_lets_no_restart_answer_through_what_it_left_waiting() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        progress.mark_reads((0..3).map(|n| (id("users", n), p(n as u64 + 1), n as u64 + 1)));
+        read_through(&progress, 3);
+        let newest = progress.newest_waiting(&users.index).unwrap();
+        land_part(&progress, &users, None, 2, newest);
+        progress.forget_all();
+        assert_eq!(
+            progress.landed(),
+            Landed::Idle,
+            "change 3's document was never written"
+        );
+    }
+
     /// The intermediate count: an ended run's unbuilt read counts no sooner
     /// than the new run's first live grant, through the replay's marks.
     #[test]
@@ -1984,19 +2075,27 @@ fn a_frontier_never_passes_the_read_count() {
     );
 }
 
-/// The frontier against a model kept apart from the code: seeded reads
-/// marking documents of three indexes, grants of the one builder (each
-/// index taken whole, capped, around a held document, or deferred; every
-/// lane of a taken index registered with an item or as an empty build
-/// under its token, every other lane with a skip), landings in lane order
+/// The frontier and the landing point against a model kept apart from the
+/// code: seeded reads marking documents of three indexes, grants of one
+/// index's builder at a time (its index taken whole, capped at one, or
+/// around a held document; its lanes registered with an item or as an empty
+/// build under its token, no other index's lanes), landings in lane order
 /// and redelivered landings, reads cut before their marks (checked until
 /// the run ends), and ended runs (with a build taken and never published),
-/// on two sinks. The model knows, per read and index, whether
-/// its documents wait, which step took them, or that its run ended; a read
-/// is done for a lane once each of its takes landed there, and an ended
-/// run's read once the lane landed an entry of a step closed after the
-/// restart (slice 3's moment). At every step a sink's count never passes
-/// the model's and never goes down; once everything landed they are equal.
+/// each followed by a replay from what the progress let the source confirm,
+/// on two sinks.
+///
+/// The model knows, per read and index, whether its documents wait, which
+/// step took them, or that its run ended. For the count, a read is done for
+/// a lane once each of its takes landed there, and an ended run's read once
+/// the lane landed an entry of a step closed after the restart, or a step
+/// was closed after it while the lane's index had nothing waiting (the
+/// quiet-index lift). At every step a sink's count never passes the model's
+/// and never goes down; once everything landed they are equal. For
+/// confirmation, a read is landed on a lane only once its take's entry
+/// landed there: an ended run's read never is, until a replay reads its
+/// position again. At every step, across every restart, what every lane
+/// landed covers no position a read needs and a lane hasn't landed.
 mod model {
     use std::collections::{BTreeMap, HashMap};
 
@@ -2018,7 +2117,7 @@ mod model {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Need {
-        /// The document `doc` waits.
+        /// The document `doc` waits (`-1`: a read cut before its marks).
         Waiting(i64),
         /// The step numbered so took it.
         Taken(u64),
@@ -2026,43 +2125,64 @@ mod model {
         Ended(u64),
     }
 
+    struct Read {
+        /// Its position; `None` for a read cut before its marks.
+        seq: Option<u64>,
+        needs: Vec<(usize, Need)>,
+    }
+
     #[derive(Default)]
     struct Model {
-        /// Per read (from 1): what each index needs of it.
-        reads: Vec<Vec<(usize, Need)>>,
+        /// Per read (from 1).
+        reads: Vec<Read>,
         /// Per lane: its entries in order, each a step and its item key.
         entries: BTreeMap<LaneKey, Vec<(u64, Option<ItemKey>)>>,
         /// Per lane: how many of its items landed.
         landed: BTreeMap<LaneKey, usize>,
+        /// Per lane: the newest step closed while its index had nothing
+        /// waiting or building.
+        lifted: BTreeMap<LaneKey, u64>,
         steps: u64,
     }
 
     impl Model {
-        fn entry_landed(&self, lane: &LaneKey, wanted: impl Fn(u64) -> bool) -> bool {
-            let mut items = 0;
+        /// The steps of the lane's entries it has landed in order: every
+        /// entry up to its first item not landed.
+        fn landed_in_order(&self, lane: &LaneKey) -> (std::collections::HashSet<u64>, Option<u64>) {
             let landed = self.landed.get(lane).copied().unwrap_or(0);
+            let mut items = 0;
+            let mut steps = std::collections::HashSet::new();
             for (step, key) in self.entries.get(lane).into_iter().flatten() {
                 if key.is_some() {
                     items += 1;
                 }
                 if items > landed {
-                    return false;
+                    break;
                 }
-                if wanted(*step) {
-                    return true;
-                }
+                steps.insert(*step);
             }
-            false
+            let newest = steps.iter().max().copied();
+            (steps, newest)
         }
 
-        fn done(&self, read: usize, lane: &LaneKey, index: usize) -> bool {
+        fn done(
+            &self,
+            read: usize,
+            lane: &LaneKey,
+            index: usize,
+            (landed, newest): &(std::collections::HashSet<u64>, Option<u64>),
+        ) -> bool {
             self.reads[read]
+                .needs
                 .iter()
                 .filter(|(of, _)| *of == index)
                 .all(|(_, need)| match need {
                     Need::Waiting(_) => false,
-                    Need::Taken(step) => self.entry_landed(lane, |s| s == *step),
-                    Need::Ended(from) => self.entry_landed(lane, |s| s >= *from),
+                    Need::Taken(step) => landed.contains(step),
+                    Need::Ended(from) => {
+                        newest.is_some_and(|newest| newest >= *from)
+                            || self.lifted.get(lane).is_some_and(|lifted| lifted >= from)
+                    }
                 })
         }
 
@@ -2070,12 +2190,13 @@ mod model {
             let mine: Vec<_> = lanes
                 .iter()
                 .filter(|(lane, _)| lane.sink.as_ref() == sink)
+                .map(|(lane, index)| (lane, *index, self.landed_in_order(lane)))
                 .collect();
             let mut done = 0;
             for read in 0..self.reads.len() {
                 if mine
                     .iter()
-                    .all(|(lane, index)| self.done(read, lane, *index))
+                    .all(|(lane, index, landed)| self.done(read, lane, *index, landed))
                 {
                     done = read as u64 + 1;
                 } else {
@@ -2083,6 +2204,77 @@ mod model {
                 }
             }
             done
+        }
+
+        /// The steps whose entry the lane has: a skip at once (the build had
+        /// nothing for it), an item once it landed.
+        fn steps_landed(&self, lane: &LaneKey) -> std::collections::HashSet<u64> {
+            let landed = self.landed.get(lane).copied().unwrap_or(0);
+            let mut items = 0;
+            let mut steps = std::collections::HashSet::new();
+            for (step, key) in self.entries.get(lane).into_iter().flatten() {
+                if key.is_none() || items < landed {
+                    steps.insert(*step);
+                }
+                if key.is_some() {
+                    items += 1;
+                }
+            }
+            steps
+        }
+
+        /// The oldest position some lane needs and hasn't landed. A replay
+        /// reads a position's changes again: it is landed on a lane once one
+        /// of its reads has every document of the lane's index taken by a
+        /// step the lane has.
+        fn unlanded(&self, lanes: &[(LaneKey, usize)]) -> Option<u64> {
+            let has: BTreeMap<&LaneKey, std::collections::HashSet<u64>> = lanes
+                .iter()
+                .map(|(lane, _)| (lane, self.steps_landed(lane)))
+                .collect();
+            let landed_by = |read: &Read, lane: &LaneKey, index: usize| {
+                read.needs
+                    .iter()
+                    .filter(|(of, _)| *of == index)
+                    .all(|(_, need)| matches!(need, Need::Taken(step) if has[lane].contains(step)))
+            };
+            let mut by_seq: BTreeMap<u64, Vec<&Read>> = BTreeMap::new();
+            for read in &self.reads {
+                if let Some(seq) = read.seq {
+                    by_seq.entry(seq).or_default().push(read);
+                }
+            }
+            by_seq.into_iter().find_map(|(seq, reads)| {
+                let landed = reads.iter().all(|read| {
+                    read.needs.iter().all(|(index, _)| {
+                        lanes.iter().filter(|(_, of)| of == index).all(|(lane, _)| {
+                            reads.iter().any(|other| landed_by(other, lane, *index))
+                        })
+                    })
+                });
+                (!landed).then_some(seq)
+            })
+        }
+
+        /// Whether `index` has a document waiting.
+        fn waits(&self, index: usize) -> bool {
+            self.reads.iter().any(|read| {
+                read.needs.iter().any(|(of, need)| {
+                    *of == index && matches!(need, Need::Waiting(doc) if *doc >= 0)
+                })
+            })
+        }
+
+        /// The run ended: what waits is forgotten.
+        fn restart(&mut self) {
+            let from = self.steps;
+            for read in &mut self.reads {
+                for (_, need) in read.needs.iter_mut() {
+                    if matches!(need, Need::Waiting(_)) {
+                        *need = Need::Ended(from);
+                    }
+                }
+            }
         }
     }
 
@@ -2121,46 +2313,52 @@ mod model {
                     "seed {seed}: {sink} went from {before} to {ours}"
                 );
             }
-        };
-        let grant = |progress: &Progress, model: &mut Model, rng: &mut Rng, seq: u64| {
-            let mut taken: BTreeMap<IndexName, Taken> = BTreeMap::new();
-            let mut frontiers = Vec::new();
-            let mut deferred: Vec<IndexName> = Vec::new();
-            for index in INDEXES {
-                let index = IndexName::try_new(index).unwrap();
-                let waits = progress
-                    .waiting_by_index()
-                    .iter()
-                    .any(|(of, count)| *of == index && *count > 0);
-                if waits && rng.below(4) == 0 {
-                    deferred.push(index);
-                    continue;
-                }
-                let max = if rng.below(3) == 0 { 1 } else { usize::MAX };
-                let held = rng.below(6) as i64;
-                let hold = rng.below(3) == 0;
-                let held = move |key: &source::RowKey| {
-                    hold && matches!(
-                        key.0.first(),
-                        Some((_, kernel::GenericValue::BigInt(n))) if *n == held
-                    )
-                };
-                match progress.take(&index, max, &held) {
-                    Some(take) => {
-                        frontiers.push((index.clone(), take.frontier));
-                        taken.insert(index, take);
-                    }
-                    None => frontiers.push((index.clone(), progress.frontier(&index))),
-                }
+            let landed = progress.landed();
+            if let (Some(covered), Some(unlanded)) = (landed.covered_seq(), model.unlanded(&lanes))
+            {
+                assert!(
+                    covered < unlanded,
+                    "seed {seed}: the lanes answer {landed:?}, but position {unlanded} isn't landed"
+                );
             }
-            let steps = progress.close_steps(frontiers);
+        };
+        let grant = |progress: &Progress, model: &mut Model, rng: &mut Rng, seq: u64, at: usize| {
+            let index = IndexName::try_new(INDEXES[at]).unwrap();
+            let max = if rng.below(3) == 0 { 1 } else { usize::MAX };
+            let held = rng.below(6) as i64;
+            let hold = rng.below(3) == 0;
+            // A running build holds a waiting document: the engine grants
+            // nothing (`waiting_of` answers `None`), so a take never leaves
+            // a document older than one it takes.
+            if hold
+                && model.reads.iter().any(|read| {
+                    read.needs
+                        .iter()
+                        .any(|(of, need)| *of == at && *need == Need::Waiting(held))
+                })
+            {
+                return;
+            }
+            let taken = progress.take_through_at_most(&index, p(seq), max, &nothing_held);
+            let frontier = taken
+                .as_ref()
+                .map_or_else(|| progress.frontier(&index), |take| take.frontier);
+            let steps = progress.close_steps([(index.clone(), frontier)]);
             let step = model.steps;
             model.steps += 1;
-            for (at, index) in INDEXES.iter().enumerate() {
-                let index = IndexName::try_new(*index).unwrap();
-                let Some(take) = taken.get(&index) else {
-                    continue;
-                };
+            // The quiet-index lift: every other index with nothing waiting,
+            // and this one when it took nothing and nothing waits.
+            for (of, name) in INDEXES.iter().enumerate() {
+                if (of != at || taken.is_none()) && !model.waits(of) {
+                    for (lane, _) in lanes
+                        .iter()
+                        .filter(|(lane, _)| lane.index.as_ref() == *name)
+                    {
+                        model.lifted.insert(lane.clone(), step);
+                    }
+                }
+            }
+            if let Some(take) = &taken {
                 let docs: Vec<i64> = take
                     .ids
                     .iter()
@@ -2170,39 +2368,34 @@ mod model {
                     })
                     .collect();
                 for read in &mut model.reads {
-                    for (of, need) in read.iter_mut() {
+                    for (of, need) in read.needs.iter_mut() {
                         if *of == at && matches!(need, Need::Waiting(doc) if docs.contains(doc)) {
                             *need = Need::Taken(step);
                         }
                     }
                 }
             }
-            let mut keys: BTreeMap<IndexName, ItemKey> = BTreeMap::new();
-            for (lane, _) in &lanes {
-                if deferred.contains(&lane.index) {
-                    continue;
-                }
-                let entry = match taken.get(&lane.index) {
+            let mut key: Option<ItemKey> = None;
+            for (lane, _) in lanes.iter().filter(|(lane, _)| lane.index == index) {
+                let entry = match &taken {
                     Some(take) if rng.below(4) == 0 => {
-                        progress.skipped_build(lane, p(seq), Some(take.token), steps[&lane.index]);
+                        progress.skipped_build(lane, p(seq), Some(take.token), steps[&index]);
                         None
                     }
                     Some(take) => {
-                        let key = *keys
-                            .entry(lane.index.clone())
-                            .or_insert_with(|| progress.next_key(&lane.index).unwrap());
+                        let key = *key.get_or_insert_with(|| progress.next_key(&index).unwrap());
                         progress.published_build(
                             lane,
                             key,
                             take.oldest,
                             p(seq),
                             take.token,
-                            steps[&lane.index],
+                            steps[&index],
                         );
                         Some(key)
                     }
                     None => {
-                        progress.skipped_step(lane, p(seq), steps[&lane.index]);
+                        progress.skipped_step(lane, p(seq), steps[&index]);
                         None
                     }
                 };
@@ -2212,30 +2405,56 @@ mod model {
                     .or_default()
                     .push((step, entry));
             }
-            for (index, take) in &taken {
-                progress.release(index, take.token);
+            if let Some(take) = taken {
+                progress.release(&index, take.token);
             }
         };
+        // The engine run ended: forget, then replay every position after
+        // what the lanes landed, as the source resumes after what it was
+        // confirmed.
+        let restart = |progress: &Progress, model: &mut Model, seq: &mut u64| {
+            progress.forget_all();
+            model.restart();
+            *seq = progress.landed().covered_seq().unwrap_or(0);
+        };
+        // Each position's changes, as (index, document): a replay reads them
+        // again.
+        let mut log: Vec<Vec<(usize, i64)>> = Vec::new();
         let mut cut = false;
         for _ in 0..400 {
             match rng.below(12) {
                 0..=3 if !cut => {
                     seq += 1;
                     let read = progress.changes_read() + 1;
-                    let mut needs = Vec::new();
-                    let mut marks = Vec::new();
-                    for _ in 0..rng.below(3) {
-                        let at = rng.below(3) as usize;
-                        let doc = rng.below(6) as i64;
-                        marks.push((id(INDEXES[at], doc), p(seq), read));
-                        needs.push((at, Need::Waiting(doc)));
-                    }
+                    let changes = match log.get(seq as usize - 1) {
+                        Some(changes) => changes.clone(),
+                        None => {
+                            let changes: Vec<(usize, i64)> = (0..rng.below(3))
+                                .map(|_| (rng.below(3) as usize, rng.below(6) as i64))
+                                .collect();
+                            log.push(changes.clone());
+                            changes
+                        }
+                    };
+                    let marks = changes
+                        .iter()
+                        .map(|(at, doc)| (id(INDEXES[*at], *doc), p(seq), read));
                     progress.mark_reads(marks);
+                    let needs = changes
+                        .iter()
+                        .map(|(at, doc)| (*at, Need::Waiting(*doc)))
+                        .collect();
                     progress.change_read();
                     progress.routed(p(seq));
-                    model.reads.push(needs);
+                    model.reads.push(Read {
+                        seq: Some(seq),
+                        needs,
+                    });
                 }
-                0..=5 => grant(&progress, &mut model, &mut rng, seq),
+                0..=5 => {
+                    let at = rng.below(3) as usize;
+                    grant(&progress, &mut model, &mut rng, seq, at);
+                }
                 6..=8 => {
                     let (lane, _) = &lanes[rng.below(lanes.len() as u64) as usize];
                     let registered = model.entries.get(lane).map_or(0, |entries| {
@@ -2267,11 +2486,12 @@ mod model {
                     let reads = 1 + rng.below(2);
                     progress.read_unmarked(reads);
                     for _ in 0..reads {
-                        model.reads.push(
-                            (0..INDEXES.len())
+                        model.reads.push(Read {
+                            seq: None,
+                            needs: (0..INDEXES.len())
                                 .map(|at| (at, Need::Waiting(-1)))
                                 .collect(),
-                        );
+                        });
                     }
                     cut = true;
                 }
@@ -2284,15 +2504,7 @@ mod model {
                         check(&progress, &model, &mut last);
                     }
                     cut = false;
-                    progress.forget_all();
-                    let from = model.steps;
-                    for read in &mut model.reads {
-                        for (_, need) in read.iter_mut() {
-                            if matches!(need, Need::Waiting(_)) {
-                                *need = Need::Ended(from);
-                            }
-                        }
-                    }
+                    restart(&progress, &mut model, &mut seq);
                 }
             }
             check(&progress, &model, &mut last);
@@ -2300,19 +2512,14 @@ mod model {
         // Restart a cut run, build what waits, land everything: every read
         // counts.
         if cut {
-            progress.forget_all();
-            let from = model.steps;
-            for read in &mut model.reads {
-                for (_, need) in read.iter_mut() {
-                    if matches!(need, Need::Waiting(_)) {
-                        *need = Need::Ended(from);
-                    }
-                }
-            }
+            restart(&progress, &mut model, &mut seq);
         }
-        grant(&progress, &mut model, &mut rng, seq);
+        for at in 0..INDEXES.len() {
+            grant(&progress, &mut model, &mut rng, seq, at);
+        }
         while progress.waiting() > 0 {
-            grant(&progress, &mut model, &mut rng, seq);
+            let at = rng.below(3) as usize;
+            grant(&progress, &mut model, &mut rng, seq, at);
         }
         for (lane, _) in &lanes {
             let keys: Vec<ItemKey> = model.entries[lane]

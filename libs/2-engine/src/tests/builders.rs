@@ -55,6 +55,8 @@ fn index_mapping(index: IndexName) -> IndexMapping {
 struct Fanning {
     fan: i64,
     builds: Mutex<Vec<usize>>,
+    /// A build holding this document fails, once.
+    fails_once: Mutex<Option<i64>>,
 }
 
 impl Fanning {
@@ -62,7 +64,14 @@ impl Fanning {
         Arc::new(Self {
             fan,
             builds: Mutex::default(),
+            fails_once: Mutex::default(),
         })
+    }
+
+    fn failing_once_on(fan: i64, document: i64) -> Arc<Self> {
+        let fanning = Self::new(fan);
+        *fanning.fails_once.lock().unwrap() = Some(document);
+        fanning
     }
 }
 
@@ -98,6 +107,15 @@ impl DocumentBuilder for Fanning {
 
     async fn build_many(&self, ids: &[DocumentId]) -> source::Result<Vec<Document>> {
         self.builds.lock().unwrap().push(ids.len());
+        {
+            let mut fails = self.fails_once.lock().unwrap();
+            if fails.is_some_and(|document| ids.iter().any(|id| id.key == row(document))) {
+                *fails = None;
+                return Err(source::SourceError::Connection(
+                    "the build failed".to_owned(),
+                ));
+            }
+        }
         let mut documents = Vec::with_capacity(ids.len());
         for id in ids {
             documents.push(self.build(id).await?);
@@ -663,5 +681,84 @@ async fn a_request_queued_for_one_index_after_live_ends_is_served() {
     let mut seeded = sink.0.lock().unwrap().clone();
     seeded.sort();
     assert_eq!(seeded, ["orders", "users"]);
+    sink_task.abort();
+}
+
+/// Blocker 1 of the 6b-1c review: a change split by the document cap whose
+/// last part failed. Run 1 lands documents 100..=107 of `users` 1 and fails
+/// building 108 and 109; run 2, on the same progress, has read nothing yet
+/// (its replay is still to come). Nothing may confirm change 0, nor a fence
+/// pass it: its last two documents were never written, and a second failure
+/// before the replay would lose them.
+#[tokio::test(start_paused = true)]
+async fn after_a_failed_part_no_run_confirms_the_change_before_its_replay() {
+    let primary = primary();
+    let stream = Arc::new(ChannelStream::over(64, vec![users()], [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(vec![users()], [primary.clone()]));
+    let sink = Gated::holding_id("none");
+    let engine = SinkEngine::new(
+        primary.clone(),
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![index_mapping(users())],
+        Arc::clone(&progress),
+    );
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .unwrap();
+    let sink_task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    let documents = Fanning::failing_once_on(10, 108);
+    let engine_over = |source: MockSource, stop: &Stop| {
+        IngestEngine::new(
+            Arc::new(source) as Arc<dyn ChangeCapture>,
+            Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            vec![primary.clone()],
+            Arc::clone(&progress),
+        )
+        .with_batch(BatchPolicy {
+            max_changes: 4,
+            max_delay: Duration::from_millis(10),
+        })
+        .with_stop(stop.clone())
+    };
+
+    let (first, feed) = MockSource::fed();
+    feed.send(change("users", 1)).await.unwrap();
+    let first = engine_over(first, &Stop::new());
+    let failed = tokio::time::timeout(Duration::from_secs(5), first.run())
+        .await
+        .unwrap();
+    assert!(failed.is_err(), "the part holding 108 failed");
+    wait_for(|| sink.written("users").len() == 8).await;
+
+    let (second, _replay) = MockSource::fed();
+    let confirmed = Arc::clone(&second.confirmed);
+    let stop = Stop::new();
+    let second = engine_over(second, &stop);
+    let run = tokio::spawn(async move { second.run().await });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        *confirmed.lock().unwrap(),
+        Vec::<Position>::new(),
+        "change 0 was confirmed with two of its documents never written"
+    );
+    for level in [crate::Level::Applied, crate::Level::Searchable] {
+        let lane = stream::LaneKey::new(users(), primary.clone());
+        assert!(
+            !matches!(progress.lane(&lane, level), Some(Landed::Through(_))),
+            "a {level:?} fence passes change 0"
+        );
+    }
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     sink_task.abort();
 }
