@@ -57,6 +57,10 @@ struct Fanning {
     builds: Mutex<Vec<usize>>,
     /// A build holding this document fails, once.
     fails_once: Mutex<Option<i64>>,
+    /// How long each build takes, and how many ran at once at most.
+    delay: Duration,
+    now: std::sync::atomic::AtomicUsize,
+    most: std::sync::atomic::AtomicUsize,
 }
 
 impl Fanning {
@@ -65,7 +69,17 @@ impl Fanning {
             fan,
             builds: Mutex::default(),
             fails_once: Mutex::default(),
+            delay: Duration::ZERO,
+            now: Default::default(),
+            most: Default::default(),
         })
+    }
+
+    /// Each build takes `delay`.
+    fn slow(fan: i64, delay: Duration) -> Arc<Self> {
+        let mut fanning = Arc::into_inner(Self::new(fan)).unwrap();
+        fanning.delay = delay;
+        Arc::new(fanning)
     }
 
     fn failing_once_on(fan: i64, document: i64) -> Arc<Self> {
@@ -115,6 +129,13 @@ impl DocumentBuilder for Fanning {
                     "the build failed".to_owned(),
                 ));
             }
+        }
+        if !self.delay.is_zero() {
+            use std::sync::atomic::Ordering;
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.now.fetch_sub(1, Ordering::SeqCst);
         }
         let mut documents = Vec::with_capacity(ids.len());
         for id in ids {
@@ -240,6 +261,7 @@ async fn start(
         sink,
         stop,
         Arc::new(crate::NoopObserver),
+        1,
     )
     .await
 }
@@ -253,6 +275,7 @@ async fn start_observed(
     sink: Arc<dyn Sink>,
     stop: &Stop,
     observer: Arc<dyn crate::Observer>,
+    builds: usize,
 ) -> Running {
     let primary = sink_name("primary");
     let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [primary.clone()]));
@@ -291,6 +314,7 @@ async fn start_observed(
         max_delay: Duration::from_millis(10),
     })
     .with_stop(stop.clone())
+    .with_builds(builds)
     .with_observer(observer);
     let run = tokio::spawn(async move { ingest.run().await });
     Running {
@@ -539,6 +563,7 @@ async fn indexes_walk_one_at_a_time() {
         Arc::new(Unseeded) as Arc<dyn Sink>,
         &stop,
         Arc::clone(&started) as Arc<dyn crate::Observer>,
+        1,
     )
     .await;
     wait_for(|| walks.in_flight.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
@@ -865,4 +890,41 @@ fn a_stop_beside_a_backfill_waiting_for_a_permit_ends() {
             running.sink.abort();
         });
     }
+}
+
+/// Finding 5 of the 6b-1c review (F2): what a capped take leaves is a full
+/// candidate while `max_changes` or more of its documents are left, so its
+/// parts build at once, up to `builds`. A change touching sixteen documents
+/// with `max_changes` 4 and four permits builds as four builds running
+/// together, not one after another.
+#[tokio::test(start_paused = true)]
+async fn a_capped_takes_leftovers_build_at_once_up_to_builds() {
+    let documents = Fanning::slow(16, Duration::from_millis(50));
+    let sink = Gated::holding_id("none");
+    let stop = Stop::new();
+    let running = start_observed(
+        vec![users()],
+        vec![change("users", 1)],
+        4,
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        &stop,
+        Arc::new(crate::NoopObserver),
+        4,
+    )
+    .await;
+    wait_for(|| sink.written("users").len() == 16).await;
+    assert_eq!(
+        documents.most.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "the parts of one change built one at a time: {:?}",
+        documents.builds.lock().unwrap()
+    );
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(5), running.run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    running.sink.abort();
 }

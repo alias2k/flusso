@@ -67,6 +67,7 @@ impl IngestEngine {
                 self.backlog(builds)
             } else if builds.live_running() {
                 runs.full_candidate()
+                    .or_else(|| self.full_leftover(runs, builds))
             } else {
                 runs.candidate(true)
             };
@@ -189,6 +190,22 @@ impl IngestEngine {
             }
         }
         Some(waiting)
+    }
+
+    /// What the last grant's cap left waiting, as a full candidate while
+    /// `max_changes` or more of its documents are left (F2): its parts
+    /// build beside one another, up to `builds`. `None` with no leftover,
+    /// for a builder of every index (it takes all), or while fewer wait.
+    fn full_leftover(&self, runs: &Runs, builds: &Builds) -> Option<Candidate> {
+        let kept = runs.kept()?;
+        let index = builds.index()?;
+        let left: usize = self
+            .progress
+            .waiting_of(Some(index), kept.position, None)?
+            .iter()
+            .map(|(_, count)| count)
+            .sum();
+        (left >= self.batch.max_changes).then(|| kept.filled())
     }
 
     /// While the builder folds (§3.9 I7), its standing candidate: the

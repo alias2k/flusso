@@ -61,6 +61,11 @@ pub(super) struct Candidate {
 }
 
 impl Candidate {
+    /// The same batch, full: a build of it may start beside a running one.
+    pub(super) fn filled(self) -> Self {
+        Self { full: true, ..self }
+    }
+
     /// A folding builder's standing candidate: its backlog, through
     /// `position`, settling no change of a queue (§3.9 I7).
     pub(super) fn backlog(position: Position, full: bool) -> Self {
@@ -224,6 +229,18 @@ impl Runs {
             }
         }
         candidate
+    }
+
+    /// What the last grant kept for documents its cap or the budget left
+    /// waiting, whatever is queued: a later grant takes them through it,
+    /// settling no change.
+    pub(super) fn kept(&self) -> Option<Candidate> {
+        self.kept.map(|kept| Candidate {
+            changes: 0,
+            full: false,
+            end: None,
+            ..kept
+        })
     }
 
     /// `candidate` was granted and its documents taken: its changes leave
