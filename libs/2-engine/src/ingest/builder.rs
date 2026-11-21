@@ -103,6 +103,9 @@ impl IngestEngine {
             scopes,
             builds,
         } = building;
+        // Out of every line however the builder ends (§3.9 G9′): a waiter
+        // left behind would be offered permits nobody asks for again.
+        let mut builds = LeavesLines(builds);
         // The walk token while this builder's walk runs, and its wait for it
         // (kept across polls: dropping it would lose its place).
         let mut walk: Option<OwnedSemaphorePermit> = None;
@@ -121,7 +124,7 @@ impl IngestEngine {
             // still gets those served; the builder settles once the
             // dispatcher saw nothing left to forward either.
             if several {
-                self.fold(&mut runs, builds);
+                self.fold(&mut runs, &mut builds);
             }
             if snapshot.is_none() {
                 walk = None;
@@ -133,7 +136,7 @@ impl IngestEngine {
                 && inbox.is_empty()
             {
                 if signals.ended() {
-                    self.settle(&mut runs, builds, lanes).await?;
+                    self.settle(&mut runs, &mut builds, lanes).await?;
                     return Ok(BuilderEnd { stopped: false });
                 }
                 signals.report_idle(reports);
@@ -155,6 +158,9 @@ impl IngestEngine {
                          again on the next start"
                     );
                 }
+                // The snapshot batch and the requests are gone: so is their
+                // place in the backfill line.
+                builds.leave_lines();
                 // The barrier (R7): the reader hands over what it read and
                 // ends (this builder's channel closes) before anything is
                 // settled.
@@ -165,7 +171,7 @@ impl IngestEngine {
                     buffered = runs.changes(),
                     "stop requested: reading no further changes; landing what is in flight"
                 );
-                self.settle(&mut runs, builds, lanes).await?;
+                self.settle(&mut runs, &mut builds, lanes).await?;
                 return Ok(BuilderEnd { stopped: true });
             }
             let building = builds.running() > 0;
@@ -189,7 +195,7 @@ impl IngestEngine {
                     }
                 }, if builds.in_line() => {
                     builds.woke(Wake::Landed);
-                    self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
+                    self.grant(&mut runs, &mut snapshot, &mut builds, lanes).await?;
                     mark = Instant::now();
                 }
                 run = runs.next(), if !reader_done => match run {
@@ -205,7 +211,7 @@ impl IngestEngine {
                         self.waited(mark, run.started(), &mut snapshot, quiet, clock);
                         runs.push(run);
                         builds.woke(Wake::Change);
-                        self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
+                        self.grant(&mut runs, &mut snapshot, &mut builds, lanes).await?;
                         mark = Instant::now();
                     }
                 },
@@ -213,12 +219,12 @@ impl IngestEngine {
                     if builds.refused().is_some() =>
                 {
                     builds.woke(Wake::Released);
-                    self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
+                    self.grant(&mut runs, &mut snapshot, &mut builds, lanes).await?;
                     mark = Instant::now();
                 }
                 landed = builds.next(), if building => {
                     builds.woke(Wake::Landed);
-                    self.landed(landed, &mut runs, &mut snapshot, builds, lanes).await?;
+                    self.landed(landed, &mut runs, &mut snapshot, &mut builds, lanes).await?;
                     mark = Instant::now();
                 }
                 step = next_snapshot_step(&mut snapshot),
@@ -236,7 +242,7 @@ impl IngestEngine {
                         Ok(Step::Done) => active.done = true,
                     }
                     builds.woke(Wake::Page);
-                    self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
+                    self.grant(&mut runs, &mut snapshot, &mut builds, lanes).await?;
                     mark = Instant::now();
                 },
                 delivery = inbox.recv(), if snapshot.is_none() => {
@@ -291,7 +297,7 @@ impl IngestEngine {
                     // so it costs a second, never the run.
                     if signal == Signal::Tick && builds.refused().is_some() {
                         builds.woke(Wake::Tick);
-                        self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
+                        self.grant(&mut runs, &mut snapshot, &mut builds, lanes).await?;
                         mark = Instant::now();
                     }
                 }
@@ -375,6 +381,29 @@ fn everyone_asked(deliveries: &[Delivery<Request>], lanes: &Lanes) -> bool {
         })
         .collect();
     lanes.keys().all(|lane| asked.contains(&lane.sink))
+}
+
+/// A builder's builds, out of every gate line once the builder ends.
+struct LeavesLines<'a>(&'a mut Builds);
+
+impl Drop for LeavesLines<'_> {
+    fn drop(&mut self) {
+        self.0.leave_lines();
+    }
+}
+
+impl std::ops::Deref for LeavesLines<'_> {
+    type Target = Builds;
+
+    fn deref(&self) -> &Builds {
+        self.0
+    }
+}
+
+impl std::ops::DerefMut for LeavesLines<'_> {
+    fn deref_mut(&mut self) -> &mut Builds {
+        self.0
+    }
 }
 
 /// A builder's wait for the walk token.

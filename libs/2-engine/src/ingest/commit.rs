@@ -155,9 +155,10 @@ impl IngestEngine {
                         continue;
                     }
                     // Another builder holds the permits: its turn comes when
-                    // one is freed (G9′).
+                    // one is freed (G9′). The tick is a backstop should a
+                    // change of the gate ever go unheard.
                     (true, _, _) if builds.in_line() => {
-                        builds.turn().await;
+                        let _ = tokio::time::timeout(CONFIRM_TICK, builds.turn()).await;
                         continue;
                     }
                     _ => return Ok(()),

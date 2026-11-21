@@ -762,3 +762,107 @@ async fn after_a_failed_part_no_run_confirms_the_change_before_its_replay() {
         .unwrap();
     sink_task.abort();
 }
+
+/// `users` backfills its rows (walked from a hundred keys), `orders` builds
+/// live; every build takes 10 ms.
+#[derive(Debug)]
+struct BackfillBesideLive;
+
+#[async_trait]
+impl DocumentBuilder for BackfillBesideLive {
+    async fn resolve(
+        &self,
+        _: &TableName,
+        key: &RowKey,
+        _: Option<&source::RowImage>,
+        _: Option<&source::RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        Ok(vec![DocumentId {
+            index: orders(),
+            key: key.clone(),
+        }])
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        Ok(Document::Upsert {
+            id: id.clone(),
+            body: GenericValue::Null,
+        })
+    }
+
+    async fn build_many(&self, ids: &[DocumentId]) -> source::Result<Vec<Document>> {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let mut documents = Vec::with_capacity(ids.len());
+        for id in ids {
+            documents.push(self.build(id).await?);
+        }
+        Ok(documents)
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![users()]
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(Some(row(99)))
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        after: Option<&RowKey>,
+        _: &RowKey,
+        limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        let from = match after.and_then(|key| key.0.first()) {
+            Some((_, GenericValue::BigInt(after))) => after + 1,
+            _ => 0,
+        };
+        Ok((from..100).take(limit).map(row).collect())
+    }
+}
+
+/// `users` unseeded, `orders` seeded.
+#[derive(Debug)]
+struct UsersUnseeded;
+
+#[async_trait]
+impl Sink for UsersUnseeded {
+    async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        Ok(WriteReport::clean())
+    }
+
+    async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {
+        Ok(*index != users())
+    }
+}
+
+/// Blocker 2 of the 6b-1c review: one permit, `users`' backfill batch
+/// waiting for it in the backfill line, `orders` building live changes one
+/// at a time. A stop drops `users`' snapshot: its waiter must leave the line
+/// as its builder ends, or G4's every fourth turn hands the permit to a
+/// waiter nobody will ever ask again and `orders`' last batch waits for it
+/// forever. At each of forty stop times the stop ends.
+#[test]
+fn a_stop_beside_a_backfill_waiting_for_a_permit_ends() {
+    for at in 0..40u64 {
+        crate::tests::paused_runtime().block_on(async move {
+            let stop = Stop::new();
+            let running = start(
+                vec![orders(), users()],
+                (0..15).map(|id| change("orders", id)).collect(),
+                1,
+                Arc::new(BackfillBesideLive) as Arc<dyn DocumentBuilder>,
+                Arc::new(UsersUnseeded) as Arc<dyn Sink>,
+                &stop,
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(5 * at)).await;
+            stop.request();
+            let ended = tokio::time::timeout(Duration::from_secs(30), running.run).await;
+            assert!(ended.is_ok(), "the stop at {} ms never ended", 5 * at);
+            ended.unwrap().unwrap().unwrap();
+            running.sink.abort();
+        });
+    }
+}
