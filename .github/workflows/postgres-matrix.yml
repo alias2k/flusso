@@ -14,7 +14,7 @@ name: postgres-matrix
 #           closed by a passing nightly (.github/scripts/postgres-matrix.py).
 #
 # Not a required check, and no `pull_request` trigger: a leg runs its suites
-# in one job, about 40 minutes. For a PR, dispatch it on the PR's branch
+# in one job, about 25 minutes. For a PR, dispatch it on the PR's branch
 # (`gh workflow run postgres-matrix.yml --ref <branch>`); its checks attach to
 # the head commit (its checks page, the Actions tab), not to the PR's checks list.
 

@@ -20,27 +20,31 @@ cargo +nightly fuzz run pgoutput_decode             # from libs/2-adapters/sourc
 
 The required check `clippy + tests` is a verdict over several jobs, so the test suite runs in parallel. Match this before assuming green.
 
-`tests: lint (fmt, clippy, checks, docs)` runs:
+`tests: lint (fmt, clippy, checks, doc links)` runs:
 
 1. `cargo fmt --all --check`
 2. `cargo clippy --workspace`
 3. `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench` (compiles benches and examples, which clippy and nextest skip; the features unlock the three feature-gated in-process bench targets)
 4. `cargo check -p flusso-cli --no-default-features` (the server-only image build)
 5. `.github/scripts/check-ahash-seed.py` (the binary keeps a per-process hash seed)
-6. `cargo test --workspace --doc`
-7. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`
+6. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`
 
-Beside it, the tests:
+Beside it, `tests: doctests` runs `cargo test --workspace --doc` on the test build's cache, and the tests:
 
 - **`tests: build (archive)`** builds every test binary once (`cargo nextest archive --workspace`), checks that the parts hold each test of the run exactly once, and uploads the archive.
 - **One job per part** runs its share of the archive: `cargo nextest run --archive-file … --profile ci --run-ignored all -E <part>`. The `opensearch` group is split over three jobs by measured time; the derive's `boundary` test has a job to itself; `rest` takes everything else (unit and integration tests, the `docker` group, the trybuild `ui` harnesses, `consumer_lints`). Each job keeps the group caps of `.config/nextest.toml`, so a runner still runs one OpenSearch at a time. Each uploads its JUnit report as `nextest-junit-<part>`.
-- **`clippy + tests`** is green only when every job succeeded and the parts' JUnit reports hold as many tests as the build listed. A failed, cancelled or skipped job turns it red; only a [docs-only](#docs-only-pull-requests) run may skip the lint and test jobs.
+- **`clippy + tests`** is green only when every job succeeded and the parts' JUnit reports hold as many tests as the build listed. A failed, cancelled or skipped job turns it red; only a [docs-only](#docs-only-pull-requests) run may skip the lint, doctest and test jobs.
 
 The parts and their filtersets live in `.github/scripts/test-parts.py`.
 
 On a PR confined to the query train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`), every part skips the integration-test binaries of `source-postgres`, `engine` and `sink-opensearch`, which those paths can't break; everything else, the query train's own e2e included, still runs. Pushes to `main` run everything.
 
-Rust build caches are saved from `main` only, one per job kind (the test build, the lint job, the bench, fuzz and other-platform jobs); a pull request restores them and saves none, which keeps the repository under GitHub's 10 GB cache quota. The test parts restore no cache: they run the archive.
+Rust build caches are saved from `main` only, one per job kind (the test build, the lint job, the bench, fuzz and other-platform jobs); a pull request restores them and saves none, which keeps the repository under GitHub's 10 GB cache quota. Every job installs only the toolchain `rust-toolchain.toml` pins (`.github/actions/pinned-rust`), since rust-cache keys on every installed toolchain and a floating stable would miss each cache on its release. The test parts restore no build cache: they run the archive. The `boundary` part restores the boundary test's results (`target/tests/flusso-boundary/cache`, a few MB), so on an unchanged derive it compiles nothing; any change to what it hashes compiles every case again.
+
+### When a part fails
+
+- **A part flaked.** Press **Re-run failed jobs** on the run. The part runs again from the same archive, replaces its JUnit report, and `clippy + tests` reruns over the latest attempt of each part, still holding the reports to the full count.
+- **The archive expired.** It's kept 7 days; after that a re-run part fails at "Download the archive". Press **Re-run all jobs**, which builds a new one, or push.
 
 ### Adding a test binary to a part
 
@@ -127,7 +131,7 @@ The full source-to-sink e2e lives in `engine`, not in a source crate: a leaf sou
 
 flusso supports Postgres 14 or newer. CI tests three majors: the oldest supported, `14-alpine`; the default, `16-alpine`; and the newest, `18-alpine`. They're `TESTED_TAGS` in `dev/test-postgres`, beside the default. The test parts of the [CI order](#ci-order) run the default on every PR. The `postgres-matrix` workflow runs each of the others as one leg:
 
-- **What a leg runs.** The test suites of every crate that starts Postgres, with `FLUSSO_TEST_PG_TAG` set: `cargo nextest run --profile ci --workspace --run-ignored all -E 'rdeps(flusso-test-postgres)'`. It uses the same `ci` profile as the test parts and the same setup steps (the composite action `.github/actions/rust-test-setup`). It doesn't run the Docker-backed benches (`postgres`, `pipeline`, `cases`) or `just review-ab`, which takes its image from `--pg`. A leg runs in one job, so it takes about 40 minutes.
+- **What a leg runs.** The test suites of every crate that starts Postgres, with `FLUSSO_TEST_PG_TAG` set: `cargo nextest run --profile ci --workspace --run-ignored all -E 'rdeps(flusso-test-postgres)'`. It uses the same `ci` profile as the test parts and the same setup steps (the composite action `.github/actions/rust-test-setup`). It doesn't run the Docker-backed benches (`postgres`, `pipeline`, `cases`) or `just review-ab`, which takes its image from `--pg`. A leg runs in one job, about 25 minutes.
 - **When.** Nightly and on demand (`workflow_dispatch`). Never on a PR by itself, never a required check. To run it for a PR, dispatch it on the PR's branch. Its checks attach to the branch's head commit (the commit's checks page and the Actions tab), not to the PR's checks list:
 
   ```sh

@@ -367,7 +367,7 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   flusso-cli --no-default-features` (the server-only image build) → `.github/scripts/check-ahash-seed.py`
   (`cargo tree --offline`: `ahash` keeps `runtime-rng` beside `compile-time-rng`, issue #355) → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
   --workspace --no-deps --document-private-items` (broken/ambiguous/redundant intra-doc links fail
-  the build). `build` runs `cargo nextest archive --workspace` once, and `test-parts.py check` lists the run
+  the build); `doctests` runs `cargo test --doc` on the build job's `test` cache. `build` runs `cargo nextest archive --workspace` once, and `test-parts.py check` lists the run
   and each part (`--run-ignored all`) and fails on a test in no part or in two; then one `tests` job per part
   runs `cargo nextest run --archive-file … --profile ci --run-ignored all -E <part>` (extracted into the
   checkout, so `CARGO_BIN_EXE_*`/`CARGO_TARGET_TMPDIR` paths hold). The parts are
@@ -376,9 +376,13 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   `rest` the complement (unit, `docker` group, the trybuild `ui` harnesses, `consumer_lints`); the group caps
   in `.config/nextest.toml` still hold per runner. `verdict` (named `clippy + tests`, `if: always()`) is green
   only when every job succeeded (a docs-only run may skip `lint`/`tests`) and the parts' JUnit artifacts
-  (`nextest-junit-<part>`) sum to the build's listed count. Rust caches are saved from `main` only
+  (`nextest-junit-<part>`, uploaded with `overwrite`, so after "Re-run failed jobs" it reads each part's latest
+  attempt; the archive is kept 7 days) sum to the build's listed count. Rust caches are saved from `main` only
   (`build`: `test`, `lint`: `lint`, `bench`'s `scenarios` + `in-process`: `bench`, fuzz, other-platforms,
-  postgres-matrix); pull requests restore and never save (the 10 GB quota). Match these before assuming green. A `CLI on <os> (check)` job runs `cargo check -p
+  postgres-matrix; `rust-test-setup`'s `save-if` defaults to `main`); pull requests restore and never save (the
+  10 GB quota). `.github/actions/pinned-rust` installs only the `rust-toolchain.toml` toolchain and removes
+  every other (rust-cache keys on each installed toolchain). The `boundary` part restores
+  `target/tests/flusso-boundary/cache` (its content-addressed results). Match these before assuming green. A `CLI on <os> (check)` job runs `cargo check -p
   flusso-cli --locked` on `windows-latest` and `macos-latest`, the release targets beside Linux
   (`dist-workspace.toml`): a cross check from Linux can't build `ring`, and code that compiles only on
   Unix (`#[cfg(unix)]` the signal and `/proc` items) would otherwise fail only at a release tag. One scope note: on PRs confined to the query
@@ -2281,8 +2285,9 @@ join verb, an unindexed join, `subfields: false`; required kinds bare, nullable 
 generated shapes skip the `NAMED_ONLY` kinds, a time-budget cut) on a root, then in a fragment for
 shapes that compile at some root field other than `custom` (at `custom` alone otherwise), ~12,100
 cases (`ct`/`kns`/`bt`/`mm` share another field's mapping and are not placed). Cold it takes ~232 s
-here and ~550 s on CI; nextest marks it SLOW at 300 s and kills it at 900 s
-(`slow-timeout = { period = "300s", terminate-after = 3 }`), so keep CI under ~600 s when widening. It compiles them in ≤60-module files
+here and ~330 s on CI (alone on the `derive boundary` part's runner; CI restores its results cache, so an
+unchanged derive takes seconds); nextest marks it SLOW at 300 s and kills it at 900 s
+(`slow-timeout = { period = "300s", terminate-after = 3 }`), so keep a cold CI run under ~600 s when widening. It compiles them in ≤60-module files
 in its own crate and target dir (`target/tests/flusso-boundary/`, so the `ui` harness never waits on
 its lock; nextest group `boundary`, one at a time): the first round runs `cargo check`, later rounds
 `cargo build`; each file is named after a hash of its text and of every input (derive, `flusso-query`,
