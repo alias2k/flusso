@@ -192,7 +192,9 @@ impl Lead {
         }
     }
 
-    fn wake(&self) {
+    /// The reader may have room again: a folding builder took some of its
+    /// backlog, so its index waits on fewer documents.
+    pub(super) fn wake(&self) {
         // Pairs with the fence in `Reader::room`: either the reader sees
         // this grant's take when it reads the lead, or this sees it waiting.
         fence(Ordering::SeqCst);

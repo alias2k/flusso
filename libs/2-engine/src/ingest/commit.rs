@@ -232,6 +232,10 @@ impl IngestEngine {
                 .waiting_of(builds.index(), position, None)
                 .is_some_and(|waiting| !waiting.is_empty());
             runs.granted(candidate, left);
+        } else {
+            // Fewer documents wait on the index: the reader may be waiting
+            // at its cap.
+            runs.lead().wake();
         }
         // Every other index this builder builds is registered with its
         // frontier now, at the grant: computed at publish, it could cover

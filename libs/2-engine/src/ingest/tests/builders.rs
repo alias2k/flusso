@@ -318,3 +318,80 @@ async fn an_index_parked_at_its_lane_backstop_folds() {
     );
     assert_eq!(deployment.recorder.state(), db.expected());
 }
+
+/// Finding 4 of the 6b-1c review: a folding builder's backlog take wakes
+/// the reader. `orders` folds behind its parked lane (two items, one in
+/// flight) with two documents waiting, `orders`' cap, so the reader waits.
+/// Once the lane drains, `orders` takes the oldest of them into a build
+/// that stays held: one document waits, the cap has room, and the reader
+/// reads `users`' changes at once, without waiting for the backlog to
+/// drain.
+#[tokio::test(start_paused = true)]
+async fn a_backlog_take_wakes_the_reader() {
+    let log: Vec<Change> = [1, 3, 5, 7, 9, 0, 2].map(Change::upsert).to_vec();
+    let db = Database::new(0, log);
+    let builder = Builder::two(&db, held([7]));
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let stop = Stop::new();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_delay(Duration::from_millis(1)).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        1,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(1)
+            .with_max_waiting(crate::MaxWaiting {
+                per_index: 2,
+                total: 100,
+            })
+            .with_stop(stop.clone())
+    });
+    let progress = deployment.ingest.progress();
+    let driver = {
+        let (builder, recorder) = (Arc::clone(&builder), Arc::clone(&recorder));
+        async move {
+            until("orders' five changes are read", || {
+                progress.changes_read() == 5
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert_eq!(
+                progress.changes_read(),
+                5,
+                "the reader waits at orders' cap"
+            );
+            recorder.refused_indexes.lock().unwrap().clear();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while progress.changes_read() < 7 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the backlog take made room, and the reader read on");
+            builder.release(7);
+        }
+    };
+    let mut driver = tokio::spawn(driver);
+    let run = tokio::time::timeout(LIMIT, deployment.run_until_landed(&db, &stop, 0));
+    tokio::pin!(run);
+    tokio::select! {
+        ended = &mut driver => {
+            if let Err(failed) = ended {
+                std::panic::resume_unwind(failed.into_panic());
+            }
+            run.await.expect("the run ends");
+        }
+        ran = &mut run => {
+            ran.expect("the run ends");
+            driver.await.unwrap();
+        }
+    }
+}
