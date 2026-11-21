@@ -67,6 +67,14 @@ slow-timeout = { period = "300s", terminate-after = 3 }
 filter = 'package(flusso-engine) & kind(lib) & test(/^ingest::gate::tests::/)'
 slow-timeout = { period = "10s", terminate-after = 3 }
 
+# The rest of the engine's unit tests also run on paused time, where a loop
+# that never yields stops tokio's timeouts: end any after 3 minutes. The
+# slowest that passes, `tests::concurrent::a_document_is_never_written_twice_
+# at_once_and_its_versions_never_go_down`, takes about 25 s here.
+[[profile.default.overrides]]
+filter = 'package(flusso-engine) & kind(lib)'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
 # CI: don't stop at the first failure, and emit JUnit for the runner to surface.
 [profile.ci]
 retries = 0
@@ -81,6 +89,14 @@ path = "junit.xml"
 [[profile.ci.overrides]]
 filter = 'package(flusso-engine) & kind(lib) & test(/^ingest::gate::tests::/)'
 slow-timeout = { period = "10s", terminate-after = 3 }
+
+# The rest of the engine's unit tests also run on paused time, where a loop
+# that never yields stops tokio's timeouts: end any after 3 minutes. The
+# slowest that passes, `tests::concurrent::a_document_is_never_written_twice_
+# at_once_and_its_versions_never_go_down`, takes about 25 s here.
+[[profile.ci.overrides]]
+filter = 'package(flusso-engine) & kind(lib)'
+slow-timeout = { period = "60s", terminate-after = 3 }
 
 # Passing tests' output too, for the binaries with a `test_postgres::pinned`
 # test: the postgres-matrix summary finds them by the one line it prints. A
