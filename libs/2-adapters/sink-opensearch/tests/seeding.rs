@@ -1012,3 +1012,8 @@ async fn the_sink_says_when_reads_see_another_generation_than_it_writes() {
     restarted.mark_seeded(index).await.unwrap();
     assert!(!restarted.is_rebuilding(index).await.unwrap(), "swapped");
 }
+
+#[test]
+fn deliberately_failing_to_show_the_required_check_goes_red() {
+    panic!("deliberately failing: issue #444 shows a failing part turns `clippy + tests` red");
+}
