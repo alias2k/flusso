@@ -1789,3 +1789,8 @@ fn the_docs_map_examples_are_the_tested_ones() {
     let manual = std::fs::read_to_string(root.join("docs/src/query/maps.md")).unwrap();
     assert!(manual.contains("docs_map_examples.rs:translation}}"));
 }
+
+#[test]
+fn deliberately_failing_to_try_a_rerun_of_one_part() {
+    panic!("deliberately failing: issue #444 tries `Re-run failed jobs` on one part");
+}
