@@ -94,7 +94,7 @@ pub(super) struct Built {
 /// What [`Builds::start`] hands a build: the ids, given back when it ends,
 /// and the heap its documents hold per index when the budget counts them.
 pub(super) struct Output {
-    ids: Vec<DocumentId>,
+    ids: Arc<Vec<DocumentId>>,
     built: Built,
     bytes: BTreeMap<IndexName, usize>,
 }
@@ -207,6 +207,11 @@ pub(super) struct Builds {
     flights: Flights<'static, (u64, Option<Output>)>,
     /// The sorted id hashes of each running build, by slot number.
     holding: Vec<(u64, Vec<u64>)>,
+    /// The ids of each running backfill build, by slot number, shared with
+    /// the build: a live grant check looks each up in the pending set
+    /// instead of walking what waits (a live build's ids are in the pending
+    /// set already).
+    backfilling: Vec<(u64, Arc<Vec<DocumentId>>)>,
     /// The slot numbers of the live builds running on their own tasks.
     live_running: Vec<u64>,
     /// The permits every build holds while it runs (ADR 0012 §5).
@@ -303,6 +308,7 @@ impl Builds {
             front: 0,
             flights: Flights::new(),
             holding: Vec::new(),
+            backfilling: Vec::new(),
             live_running: Vec::new(),
             gate: Gate::new(
                 limit,
@@ -591,9 +597,25 @@ impl Builds {
             .any(|(_, held)| share_any(held, &hashes))
     }
 
-    /// Whether any running build holds a document.
-    pub(super) fn holds_some(&self) -> bool {
-        !self.holding.is_empty()
+    /// Whether a running backfill build holds a document: then a live
+    /// grant check also looks up what it holds
+    /// ([`held_by_backfill`](Self::held_by_backfill)).
+    pub(super) fn backfill_holds_some(&self) -> bool {
+        !self.backfilling.is_empty()
+    }
+
+    /// Offer `index`'s documents the running backfill builds hold to
+    /// `found` until it answers `true`; whether it did.
+    pub(super) fn held_by_backfill(
+        &self,
+        index: &IndexName,
+        found: &mut dyn FnMut(&source::RowKey) -> bool,
+    ) -> bool {
+        self.backfilling.iter().any(|(_, ids)| {
+            ids.iter()
+                .filter(|id| id.index == *index)
+                .any(|id| found(&id.key))
+        })
     }
 
     /// Whether a running build holds `index`'s document `key`: a live take
@@ -747,6 +769,8 @@ impl Builds {
         // With one build at a time nothing is ever compared, so nothing is
         // hashed.
         let held = (self.limit > 1).then(|| hashes(&ids));
+        let ids = Arc::new(ids);
+        let backfilling = (self.limit > 1 && !live).then(|| Arc::clone(&ids));
         let documents = Arc::clone(documents);
         let mut build: BoxFuture<'static, Output> = Box::pin(async move {
             let started = Instant::now();
@@ -778,6 +802,9 @@ impl Builds {
         if let Some(held) = held {
             self.holding.push((seq, held));
         }
+        if let Some(ids) = backfilling {
+            self.backfilling.push((seq, ids));
+        }
         let handle = tokio::spawn(build);
         self.spawned.push((seq, handle.abort_handle()));
         let landing = Box::pin(async move { (seq, handle.await.ok()) });
@@ -805,6 +832,9 @@ impl Builds {
         if let Some(at) = self.holding.iter().position(|(held, _)| *held == seq) {
             self.holding.swap_remove(at);
         }
+        if let Some(at) = self.backfilling.iter().position(|(held, _)| *held == seq) {
+            self.backfilling.swap_remove(at);
+        }
         if let Some(at) = self.live_running.iter().position(|live| *live == seq) {
             self.live_running.swap_remove(at);
         }
@@ -823,11 +853,7 @@ impl Builds {
             }
         }
         let built = match output {
-            Some(Output {
-                mut ids,
-                built,
-                bytes,
-            }) => {
+            Some(Output { ids, built, bytes }) => {
                 let documents = per_index(&ids);
                 for reservation in std::mem::take(&mut slot.reservations) {
                     let Some(index) = reservation.index().cloned() else {
@@ -843,8 +869,10 @@ impl Builds {
                     slot.charges
                         .insert(index, Arc::new(reservation.settle(landed)));
                 }
-                ids.clear();
-                self.spare.push(ids);
+                if let Ok(mut ids) = Arc::try_unwrap(ids) {
+                    ids.clear();
+                    self.spare.push(ids);
+                }
                 built
             }
             None => Built {
@@ -877,6 +905,7 @@ impl Builds {
         self.halted = true;
         while self.flights.next().await.is_some() {}
         self.holding.clear();
+        self.backfilling.clear();
         self.slots.clear();
     }
 }

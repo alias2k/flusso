@@ -181,15 +181,22 @@ impl IngestEngine {
     /// A builder of one index takes at most `max_changes` of them (O2), so
     /// that is what its grant counts and reserves.
     fn waiting(&self, builds: &Builds, through: Position) -> Option<Vec<(IndexName, usize)>> {
-        let held = |index: &IndexName, key: &source::RowKey| builds.holds(index, key);
-        let held: Option<Holds<'_>> = builds.holds_some().then_some(&held);
-        let mut waiting = self.progress.waiting_of(builds.index(), through, held)?;
+        let held = |index: &IndexName, found: &mut dyn FnMut(&source::RowKey) -> bool| {
+            builds.held_by_backfill(index, found)
+        };
+        let held: Option<Holds<'_>> = builds.backfill_holds_some().then_some(&held);
+        self.progress
+            .waiting_of(builds.index(), through, held, self.most(builds))
+    }
+
+    /// The most documents one of `builds`' takes may take: `max_changes` for
+    /// a builder of one index (O2), all for a lone `Builds` of every index.
+    fn most(&self, builds: &Builds) -> usize {
         if builds.index().is_some() {
-            for (_, count) in &mut waiting {
-                *count = (*count).min(self.batch.max_changes);
-            }
+            self.batch.max_changes
+        } else {
+            usize::MAX
         }
-        Some(waiting)
     }
 
     /// What the last grant's cap left waiting, as a full candidate while
@@ -201,7 +208,7 @@ impl IngestEngine {
         let index = builds.index()?;
         let left: usize = self
             .progress
-            .waiting_of(Some(index), kept.position, None)?
+            .waiting_of(Some(index), kept.position, None, self.batch.max_changes)?
             .iter()
             .map(|(_, count)| count)
             .sum();
@@ -244,10 +251,7 @@ impl IngestEngine {
         if !backlog {
             // Documents a capped take left behind keep the candidate: a later
             // grant takes them whether or not a change comes (F2).
-            let left = self
-                .progress
-                .waiting_of(builds.index(), position, None)
-                .is_some_and(|waiting| !waiting.is_empty());
+            let left = self.progress.waits_through(builds.index(), position);
             runs.granted(candidate, left);
         } else {
             // Fewer documents wait on the index: the reader may be waiting
@@ -300,14 +304,7 @@ impl IngestEngine {
             .filter(|index| admitted.contains(index))
         {
             let held = |key: &source::RowKey| builds.holds(index, key);
-            // One index's build takes at most `max_changes` documents (O2);
-            // a builder of every index (a lone `Builds`) takes them all, as
-            // 6b-1b did.
-            let most = if builds.index().is_some() {
-                self.batch.max_changes
-            } else {
-                usize::MAX
-            };
+            let most = self.most(builds);
             let take = if backlog {
                 self.progress.take(index, most, &held)
             } else {

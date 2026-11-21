@@ -205,9 +205,12 @@ struct Registrations {
     waiter: AtomicWaker,
 }
 
-/// Whether a running build holds an index's document: what a take leaves
-/// waiting.
-pub type Holds<'a> = &'a dyn Fn(&IndexName, &RowKey) -> bool;
+/// The documents of an index running builds hold outside its pending set (a
+/// backfill build's): offered one by one to `found` until it answers
+/// `true`; whether it did. What a take leaves waiting, read from the builds'
+/// side so a check costs one lookup per held document, not a walk of what
+/// waits.
+pub type Holds<'a> = &'a dyn Fn(&IndexName, &mut dyn FnMut(&RowKey) -> bool) -> bool;
 
 /// What [`Progress::on_registered`] calls.
 pub type Listener = Arc<dyn Fn() + Send + Sync>;
@@ -806,11 +809,9 @@ impl Progress {
     /// behind.
     pub fn any_waiting_held(&self, held: Option<Holds<'_>>) -> bool {
         self.pending.iter().any(|(index, pending)| {
-            let held = held.map(|held| move |key: &RowKey| held(index, key));
-            lock(pending).any_held(
-                held.as_ref().map(|held| held as &dyn Fn(&RowKey) -> bool),
-                None,
-            )
+            let held =
+                held.map(|held| move |found: &mut dyn FnMut(&RowKey) -> bool| held(index, found));
+            lock(pending).any_held(held.as_ref().map(|held| held as pending::Held<'_>), None)
         })
     }
 
@@ -1066,16 +1067,20 @@ impl Progress {
         through: Position,
         held: Option<Holds<'_>>,
     ) -> Option<Vec<(IndexName, usize)>> {
-        self.waiting_of(None, through, held)
+        self.waiting_of(None, through, held, usize::MAX)
     }
 
     /// [`waiting_through`](Self::waiting_through) on `index` alone, or on
-    /// every index when `None`: what one index's builder takes.
+    /// every index when `None`, each count stopped at `most`: what one
+    /// index's builder takes. Its work is one lookup per document building
+    /// or held and at most `most` waiting entries per index, never a walk of
+    /// everything waiting.
     pub fn waiting_of(
         &self,
         only: Option<&IndexName>,
         through: Position,
         held: Option<Holds<'_>>,
+        most: usize,
     ) -> Option<Vec<(IndexName, usize)>> {
         let mut waiting: Vec<(Position, IndexName, usize)> = Vec::new();
         for (index, pending) in self
@@ -1083,11 +1088,13 @@ impl Progress {
             .iter()
             .filter(|(index, _)| only.is_none_or(|only| *index == only))
         {
-            let held = held.map(|held| move |key: &RowKey| held(index, key));
+            let held =
+                held.map(|held| move |found: &mut dyn FnMut(&RowKey) -> bool| held(index, found));
             let pending = lock(pending);
             let count = pending.scan(
                 through,
-                held.as_ref().map(|held| held as &dyn Fn(&RowKey) -> bool),
+                held.as_ref().map(|held| held as pending::Held<'_>),
+                most,
             )?;
             if count > 0
                 && let Some(oldest) = pending.oldest_waiting()
@@ -1102,6 +1109,15 @@ impl Progress {
                 .map(|(_, index, count)| (index, count))
                 .collect(),
         )
+    }
+
+    /// Whether `index` (any index for `None`) has a document marked at or
+    /// before `through` waiting: one look at each set's oldest.
+    pub fn waits_through(&self, only: Option<&IndexName>, through: Position) -> bool {
+        self.pending
+            .iter()
+            .filter(|(index, _)| only.is_none_or(|only| *index == only))
+            .any(|(_, pending)| lock(pending).waits_through(through))
     }
 
     /// How many items routed to `lane` it hasn't landed.

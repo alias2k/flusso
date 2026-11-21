@@ -2554,3 +2554,57 @@ mod model {
         }
     }
 }
+
+/// Review round 2 of 6b-1c: a grant check costs work bounded by what builds,
+/// not by what waits. A change touching 20,000 documents is taken four at a
+/// time, sixteen of them building; checking whether the next part may be
+/// granted looks at the building ones and at most `max_changes` waiting
+/// entries, never the whole waiting set (which made a large change cost
+/// time quadratic in its size).
+#[test]
+fn a_grant_check_beside_running_builds_looks_at_no_more_than_builds_and_one_batch() {
+    let users = sink("a");
+    let progress = Progress::new([users.clone()]);
+    progress.mark_reads((0..20_000).map(|n| (id("users", n), p(1), 1)));
+    progress.mark_reads([(id("users", 99_999), p(2), 2)]);
+    read_through_two(&progress);
+    for _ in 0..4 {
+        progress
+            .take_through_at_most(&users.index, p(1), 4, &nothing_held)
+            .unwrap();
+    }
+    pending::LOOKED_AT.with(|looked| looked.set(0));
+    let waiting = progress.waiting_of(Some(&users.index), p(1), None, 4);
+    let looked = pending::LOOKED_AT.with(std::cell::Cell::get);
+    assert!(waiting.is_some(), "nothing waiting through 1 is building");
+    assert!(
+        looked <= 16 + 4,
+        "the check looked at {looked} waiting entries, not 16 building and one batch"
+    );
+
+    // A running backfill build holding four documents of the index costs
+    // four more lookups, and one it holds that waits stops the grant.
+    let held = |_: &IndexName, found: &mut dyn FnMut(&source::RowKey) -> bool| {
+        (30_000..30_004).any(|n| found(&id("users", n).key))
+    };
+    pending::LOOKED_AT.with(|looked| looked.set(0));
+    let waiting = progress.waiting_of(Some(&users.index), p(1), Some(&held), 4);
+    let looked = pending::LOOKED_AT.with(std::cell::Cell::get);
+    assert!(waiting.is_some());
+    assert!(looked <= 16 + 4 + 4, "looked at {looked}");
+    let holding_one = |_: &IndexName, found: &mut dyn FnMut(&source::RowKey) -> bool| {
+        found(&id("users", 19_999).key)
+    };
+    assert!(
+        progress
+            .waiting_of(Some(&users.index), p(1), Some(&holding_one), 4)
+            .is_none(),
+        "a backfill build holds a document waiting through 1"
+    );
+}
+
+fn read_through_two(progress: &Progress) {
+    while progress.changes_read() < 2 {
+        progress.change_read();
+    }
+}

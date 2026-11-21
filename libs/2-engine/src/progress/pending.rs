@@ -43,10 +43,27 @@ use kernel::{IndexName, Position, SinkName};
 use source::RowKey;
 use source::document::DocumentId;
 
+// How many waiting entries this thread's pending sets looked at to answer
+// a grant check (`scan`): what a test bounds, since time can't be.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LOOKED_AT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn looked_at(entries: usize) {
+    LOOKED_AT.with(|looked| looked.set(looked.get() + entries));
+}
+
 /// Names one build of an index's pending documents, from its take to its
 /// release or give-back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Token(u64);
+
+/// The ids a running build holds outside a pending set (a backfill
+/// build's), offered one by one to `found` until it answers `true`;
+/// whether it did.
+pub(crate) type Held<'a> = &'a dyn Fn(&mut dyn FnMut(&RowKey) -> bool) -> bool;
 
 /// What a take moved from waiting to building.
 #[derive(Debug)]
@@ -368,41 +385,38 @@ impl Pending {
         self.order.range(..=(last, u64::MAX))
     }
 
-    /// Whether some waiting id marked at or before `through` is building, or
-    /// `held` says a running build holds it: a take now would leave it
-    /// behind.
-    pub(crate) fn any_held(
-        &self,
-        held: Option<&dyn Fn(&RowKey) -> bool>,
-        through: Option<Position>,
-    ) -> bool {
-        if self.building.is_empty() && held.is_none() {
-            return false;
-        }
-        self.through(through)
-            .any(|(_, key)| self.building.contains(key) || held.is_some_and(|held| held(key)))
+    /// Whether some waiting id marked at or before `through` (any, for
+    /// `None`) is building, or is one `held` names (a running build's ids
+    /// outside this set): a take now would leave it behind. Answered from
+    /// the builds' side, one lookup per id building or held, never a walk
+    /// of what waits: a change touching many documents keeps parts of it
+    /// building while the rest waits.
+    pub(crate) fn any_held(&self, held: Option<Held<'_>>, through: Option<Position>) -> bool {
+        let last = through.map_or(u64::MAX, |position| position.seq);
+        let mut blocks = |key: &RowKey| {
+            #[cfg(test)]
+            looked_at(1);
+            self.waiting
+                .get(key)
+                .is_some_and(|(position, _, _)| position.seq <= last)
+        };
+        self.building.iter().any(|key| blocks(key)) || held.is_some_and(|held| held(&mut blocks))
     }
 
-    /// How many ids wait that were marked at or before `through`, or `None`
-    /// when one of them is building or `held` says a running build holds
-    /// it: one walk for both, none while nothing builds and nothing was
-    /// marked after `through`.
+    /// How many ids wait that were marked at or before `through`, counted up
+    /// to `most`, or `None` when one of them is building or `held` names it
+    /// ([`any_held`](Self::any_held)): work bounded by what builds and
+    /// `most`, not by what waits.
     pub(crate) fn scan(
         &self,
         through: Position,
-        held: Option<&dyn Fn(&RowKey) -> bool>,
+        held: Option<Held<'_>>,
+        most: usize,
     ) -> Option<usize> {
-        if self.building.is_empty() && held.is_none() {
-            return Some(self.waiting_through(Some(through)));
+        if self.any_held(held, Some(through)) {
+            return None;
         }
-        let mut count = 0;
-        for (_, key) in self.through(Some(through)) {
-            if self.building.contains(key) || held.is_some_and(|held| held(key)) {
-                return None;
-            }
-            count += 1;
-        }
-        Some(count)
+        Some(self.waiting_through_at_most(Some(through), most))
     }
 
     /// How many ids wait.
@@ -412,14 +426,29 @@ impl Pending {
 
     /// How many ids wait that were marked at or before `through`: every one,
     /// at no cost, when none was marked after it.
+    #[cfg(test)]
     pub(crate) fn waiting_through(&self, through: Option<Position>) -> usize {
+        self.waiting_through_at_most(through, usize::MAX)
+    }
+
+    /// [`waiting_through`](Self::waiting_through), counted up to `most`.
+    pub(crate) fn waiting_through_at_most(&self, through: Option<Position>, most: usize) -> usize {
         let newest = self.order.last_key_value().map(|((seq, _), _)| *seq);
         match (through, newest) {
             (Some(through), Some(newest)) if newest > through.seq => {
-                self.through(Some(through)).count()
+                let count = self.through(Some(through)).take(most).count();
+                #[cfg(test)]
+                looked_at(count);
+                count
             }
-            _ => self.waiting.len(),
+            _ => self.waiting.len().min(most),
         }
+    }
+
+    /// Whether some id marked at or before `through` waits.
+    pub(crate) fn waits_through(&self, through: Position) -> bool {
+        self.oldest_waiting()
+            .is_some_and(|oldest| oldest.seq <= through.seq)
     }
 
     /// The position of the oldest waiting id; `None` while none waits.
@@ -592,8 +621,9 @@ mod tests {
         assert_eq!(pending.waiting_through(Some(p(2))), 2);
         assert_eq!(pending.waiting_through(Some(p(5))), 3);
         assert_eq!(pending.waiting_through(None), 3);
-        assert!(!pending.any_held(Some(&|k: &RowKey| *k == key(3)), Some(p(2))));
-        assert!(pending.any_held(Some(&|k: &RowKey| *k == key(3)), Some(p(5))));
+        let three = |found: &mut dyn FnMut(&RowKey) -> bool| found(&key(3));
+        assert!(!pending.any_held(Some(&three), Some(p(2))));
+        assert!(pending.any_held(Some(&three), Some(p(5))));
         let taken = pending
             .take(&index(), usize::MAX, Some(p(2)), &none)
             .unwrap();
@@ -616,15 +646,24 @@ mod tests {
         pending.mark(key(1), p(1), 1);
         pending.mark(key(2), p(2), 2);
         pending.mark(key(3), p(5), 5);
-        assert_eq!(pending.scan(p(2), None), Some(2));
-        assert_eq!(pending.scan(p(9), None), Some(3));
-        let three = |k: &RowKey| *k == key(3);
-        assert_eq!(pending.scan(p(2), Some(&three)), Some(2), "3 is past it");
-        assert_eq!(pending.scan(p(5), Some(&three)), None);
+        assert_eq!(pending.scan(p(2), None, usize::MAX), Some(2));
+        assert_eq!(pending.scan(p(9), None, usize::MAX), Some(3));
+        assert_eq!(pending.scan(p(9), None, 2), Some(2), "counted up to 2");
+        let three = |found: &mut dyn FnMut(&RowKey) -> bool| found(&key(3));
+        assert_eq!(
+            pending.scan(p(2), Some(&three), usize::MAX),
+            Some(2),
+            "3 is past it"
+        );
+        assert_eq!(pending.scan(p(5), Some(&three), usize::MAX), None);
         let taken = pending.take(&index(), 1, None, &none).unwrap();
         pending.mark(key(1), p(6), 6);
-        assert_eq!(pending.scan(p(9), None), None, "1 builds and waits again");
+        assert_eq!(
+            pending.scan(p(9), None, usize::MAX),
+            None,
+            "1 builds and waits again"
+        );
         pending.release(taken.token);
-        assert_eq!(pending.scan(p(9), None), Some(3));
+        assert_eq!(pending.scan(p(9), None, usize::MAX), Some(3));
     }
 }
