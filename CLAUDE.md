@@ -669,17 +669,23 @@ is the one concrete piece.
   meanwhile; at the stop it drops its snapshot and coalescing set (served again on the next start),
   waits for its slice channel to close (the reader's end, R7) and settles. **Per index (6b-1c)**: the
   reader hands each builder the changes that touched its index (`Run` slices with each change's read
-  number; with one builder it hands it every change, so one index is 6b-1b's path: same batches,
-  grants and costs); each builder cuts R3's batches over its own queue, and one index's build takes at
-  most `max_changes` documents (O2: `Progress::take_through_at_most`; what a capped take leaves keeps
-  the candidate, F2); builders share one gate (`Builds::with_gate`) and, with two or more, a batch a
-  pass didn't grant keeps a waiter in its kind's line (G9′, `Builds::ask_in_lines`, `Waiter::set_parts`:
-  a growth keeps the refusal, a shrink clears it), woken by any change of the gate past the generation
-  it asked at (`Gate::changed_since`), and left when no batch or slot is ready; one builder keeps G9's
-  pass and never joins a line (`one_index_never_waits_in_a_gate_line`). A builder held by the budget
-  **folds** (only with two or more): its queued slices are dropped (`Runs::clear`), the reader hands it
-  nothing, and it takes its backlog oldest first in takes of at most `max_changes` until nothing waits
-  on its index. Walks are one at a time (the walk token, a FIFO semaphore whose acquire a builder keeps
+  number; with one builder it hands it every change, so one index keeps 6b-1b's grants and gate
+  path, its batches changed only where the document cap splits a change); each builder cuts R3's
+  batches over its own queue, and one index's build takes at most `max_changes` documents (O2:
+  `Progress::take_through_at_most`; a grant counts and reserves at most that many; what a capped take
+  leaves keeps the candidate, full while `max_changes` or more are left, so its parts build at once up
+  to `builds`, F2: `full_leftover`); builders share one gate (`Builds::with_gate`) and, with two or
+  more, a batch a pass didn't grant keeps a waiter in its kind's line (G9′, `Builds::ask_in_lines`,
+  `Waiter::set_parts`: a growth keeps the refusal, a shrink clears it), the budget decided by the gate
+  (G5) so a refused batch keeps its place and younger builders reserve behind it (G6), woken by any
+  change of the gate past the generation it asked at (`Gate::changed_since`), and left when no batch
+  or slot is ready, before an await outside the loop that pends (a publish or `walk_marks`, each polled
+  once first), and on every way out of the builder (`LeavesLines`, a drop guard); a build drops its
+  permit as its task ends, so a builder blocked publishing holds none; one builder keeps G9's pass and
+  never joins a line (`one_index_never_waits_in_a_gate_line`). A builder held by the budget or by a
+  publish blocked on a full lane **folds** (only with two or more): its queued slices are dropped
+  (`Runs::clear`), the reader hands it nothing, and it takes its backlog oldest first in takes of at
+  most `max_changes` (each waking the reader, `Lead::wake`) until nothing waits on its index. Walks are one at a time (the walk token, a FIFO semaphore whose acquire a builder keeps
   across polls while it coalesces on); `Idle` with several builders is one clock (`IdleClock`: reported
   only while every builder is idle). The reader
   owns the live stream and the resolver, reads a run as `main`'s `drain_ready` did (cut at
@@ -850,7 +856,18 @@ is the one concrete piece.
   the position it had). A live item whose index has no pending build is refused
   (`EngineError::UnregisteredLiveItem`), never published unregistered.
   Each lane answers `Before(oldest of its unlanded items and its index's pending documents)` /
-  `Through(the newest position routed to it)` / `Idle`
+  `Through(the newest position routed to it)` / `Idle`. **A lane's `newest` names only positions
+  whose every document of its index was taken** (`Progress::register`: raised only while the index has
+  nothing at or before it waiting or in another unregistered build, `Pending::all_taken_through`): a
+  take cut by the cap or the fold's backlog take registers at a position some of its documents still
+  wait at, and after `forget_all` a lane answering through it would confirm documents never written
+  (6b-1c review, blocker 1; guards: `progress::tests::restart`'s `a_capped_take_…`/`a_backlog_take_lets_no_restart_answer_through_what_it_left_waiting`,
+  `tests::builders`' `after_a_failed_part_no_run_confirms_the_change_before_its_replay`, the seeded
+  model's landing check across restarts with a replay of each position's changes, and the random
+  schedules, whose source resumes after what it was confirmed and fans a third of the seeds' changes
+  out to several documents). It relies on takes being oldest first and never around a held document
+  (`waiting_of` answers `None` while one is held): an item's oldest is then no later than anything its
+  take left
   (`source::cdc::Landed`), and several lanes (`landed()`, `over`) answer as the lane that covers least,
   so a lane that hasn't taken a batch yet holds the others back and a fence on a healthy lane isn't
   held back by a full sibling. Both engines take the one `Arc<Progress>` in their constructors
