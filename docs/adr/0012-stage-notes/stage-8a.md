@@ -1656,6 +1656,62 @@ are paid once per request received or idle report, not per wake.
 **User-visible**: live batches are built and published while backfill requests are gathered (up to
 `max_delay`), where `main` and 6a waited the gathering out. Nothing else.
 
+#### 6b-1c against the code (checked before building)
+
+**The measurement first** (the throwaway of §6; in-process, `taskset -c 0-3,12-15`, nothing else
+running; builders as futures of one task waiting in `Gate::acquire`, the persistent waiter with slice
+5's wake-all; an empty build per grant, so the figures are the gate's and the scheduling's alone):
+
+| `builds` | indexes | ns per grant (median of 5) |
+| --- | --- | --- |
+| 1 | 1 | 668 |
+| 1 | 24 healthy | 3,099 |
+| 1 | 23 healthy + 1 held at its share | 6,390 |
+| 4 | 1 | 675 |
+| 4 | 24 healthy | 1,183 |
+| 4 | 23 healthy + 1 held at its share | 7,043 |
+
+Wake-all costs up to about 6 µs per grant with 24 indexes and one parked: the held builder's poll, a
+budget decision, a refusal and its re-registration after every grant elsewhere. Against a build's
+database round trip that is a few percent of a lone change, and nothing of a burst's (per batch, not
+per change); one index is unchanged. **G7″ is not built**: G9′ with wake-all stays, and G7″ is the
+follow-up if the several-index scenarios show this cost.
+
+**Corrections and the rules made concrete** (where §3–§8 are not implementable as written, or leave a
+choice open):
+
+- **G9′ only with two builders or more (changes an approved gate point, G9′).** With one builder nobody
+  else can stand in a line, so 6b-1b's grant pass (G9: join, ask once, leave, decided in one hold of
+  the lock while the lines are empty) gives exactly what a persistent waiter would, without a join, a
+  budget watch and a wake per wait. One index therefore stays 6b-1b's path, batches, grants and costs
+  (pinned by `one_index_grants_as_6b_1b_did`). With two or more, a builder that a pass didn't grant
+  keeps a persistent waiter per kind it has ready.
+- **"Left before any await outside the loop"** is implemented as: an await that can pend (a publish's
+  lane sends, `walk_marks`, a build's first poll) is polled once; if it pends, the builder leaves its
+  lines before awaiting it. Equivalent to §6's rule for every await that pends, and free for the ones
+  that don't.
+- **`Idle`** is the engine's wall time with no builder busy, kept by a clock the builders share (each
+  marks itself busy when it wakes to work and idle when it goes back to waiting; the span is reported
+  when the first builder wakes). §9's "measured by the dispatcher" can't be: the dispatcher isn't woken
+  by a builder's transitions.
+- **The reader's end goes to the dispatcher** (it closes the live stream); each builder's barrier
+  (R7) is its slice channel closing, which happens when the reader ends, after its last hand-over.
+- **A change touching no index** goes to no builder: it counts toward no changes bound (6a counted it
+  until its empty batch was granted) and its `Resolve` is reported by the reader; a run touching
+  indexes reports its `Resolve` once, with its first slice.
+- **Slices carry each change's read number**, for the changes bound (the oldest read number queued on a
+  builder that doesn't fold; each builder keeps it in an atomic the reader reads at its lead check).
+- **An item's position** is the newest position marked on its index when the batch was taken (decision
+  (b)2): `Pending` keeps it.
+- **The walk token** is a FIFO semaphore of one permit; a builder keeps its acquire across its polls
+  (dropping it would lose its place) and coalesces meanwhile. The permit is held until its walk is
+  done.
+- **The quiet index's cap after a restart** (the rule in `forget_all`'s doc): every step closed after
+  the restart lifts the cap of each lane whose index has nothing waiting or building; a lane whose
+  index waits keeps it until its own step (`after_a_restart_a_quiet_indexs_lanes_catch_up_with_no_step_of_their_own`).
+- **Slice 4's deferral goes**: a build takes one index, and an index the budget refuses holds only its
+  own builder.
+
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
 | Rule | |
