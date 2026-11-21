@@ -501,7 +501,7 @@ impl IngestEngine {
                         // so it costs a second, never the run.
                         if builds.refused().is_some() {
                             builds.woke(Wake::Tick);
-                                self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
+                            self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                             mark = Instant::now();
                         }
                         self.confirm(&mut last_confirmed, true);

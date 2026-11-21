@@ -8,10 +8,14 @@
 //! a flag, not a trip through the scheduler. A poll ends when no running
 //! future was woken during its last pass, or yields to the worker (waking the
 //! task again at once) after [`PASSES`] passes, so the pair keeps the worker
-//! from the tasks beside it no longer than one loop would. A spent
-//! cooperative budget ends a poll by itself: tokio wakes a future it refused
-//! for want of budget only once the task's poll has returned, so no flag is
-//! raised for it meanwhile.
+//! from the tasks beside it no longer than one loop would. On a runtime
+//! worker (where the daemon spawns the engine) and under a current-thread
+//! `block_on`, a spent cooperative budget ends a poll by itself: tokio wakes a
+//! future it refused for want of budget only once the task's poll has
+//! returned, so no flag is raised for it meanwhile. Under a multi-thread
+//! runtime's `block_on` (the in-process `engine` bench) tokio wakes it at
+//! once, the flag is raised and the refused future is polled again until the
+//! [`PASSES`] cap ends the poll: bounded, and never a lost wake.
 //!
 //! **One word.** The flags and the "being polled" mark are bits of one
 //! atomic byte ([`Flags`]): a wake is one `fetch_or` that also tells whether

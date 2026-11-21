@@ -239,12 +239,16 @@ fn a_wake_at_the_end_of_a_pass_is_not_lost() {
 /// Point 2 of review round 4: once `first` has ended, nothing of it keeps a
 /// poll going. The watch ending wakes no ended `first`, and a stale waker of
 /// it raises a flag no pass reads: the poll ends at once, with no pass spent
-/// and no wake of the task.
+/// and no wake of the task. `first` panics if polled after it ended, as an
+/// `async` block would.
 #[test]
 fn an_ended_first_keeps_no_poll_going() {
     let stale: Arc<std::sync::Mutex<Option<Waker>>> = Arc::default();
     let stash = Arc::clone(&stale);
+    let mut ended = false;
     let first = std::future::poll_fn(move |cx| {
+        assert!(!ended, "an ended future is never polled again");
+        ended = true;
         *stash.lock().unwrap() = Some(cx.waker().clone());
         Poll::Ready(())
     });

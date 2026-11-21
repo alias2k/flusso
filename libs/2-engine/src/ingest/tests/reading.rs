@@ -976,8 +976,9 @@ async fn a_batch_ending_inside_a_run_closes_its_step_at_its_own_last_change() {
 /// the landing and the third run ready, and `select!` takes either first.
 /// The grant after the landing sees every change read before it, so it takes
 /// run two and the first change of run three whichever arm ran first. Each
-/// round leaves that choice to `select!` again: dropping the hand-over taken
-/// before a grant fails about one round in two.
+/// round leaves that choice to `select!` again. This is the scenario end to
+/// end; that no batch is formed before the hand-over is drained is pinned in
+/// `live::tests::a_batch_is_formed_only_after_every_run_handed_over_is_queued`.
 #[tokio::test(start_paused = true)]
 async fn a_grant_takes_the_runs_handed_over_beside_the_landing_that_wakes_it() {
     for round in 0..16 {
@@ -1047,7 +1048,8 @@ async fn a_reader_panic_unwinds_the_engine_run() {
 /// through a tokio channel (one unit per change) exhausts it again and again:
 /// the reader's `now_or_never` then sees the ready stream as pending and cuts
 /// its run short, and its next read polls the stream with its own waker,
-/// which the spent budget wakes at once, so the reader is never parked with
+/// which the spent budget wakes (once the poll returns on a worker, at once
+/// under a multi-thread `block_on`), so the reader is never parked with
 /// changes ready. A cut run looks like the stream blocking, so the builder
 /// may grant the batch then, short of `max_changes`, as `main` committed at
 /// its own `now_or_never` cut (measured: 40 runs, 21 batches, the first 128

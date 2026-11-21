@@ -678,7 +678,7 @@ takes about 25 s on the unchanged code (28 s before this slice) and is left out 
 | R3: always full | the paced trickle, `a_batch_ends_inside_a_run_where_main_closed_it`, `a_trickle_read_while_a_live_build_runs_is_one_batch_after_it` |
 | R3: a split run loses its rest | `a_batch_ends_inside_a_run_where_main_closed_it` (hang), the random schedules |
 | R3: a batch ending inside a run closes its step at the run's last change (`read: run.read`, review round 2) | `a_batch_ending_inside_a_run_closes_its_step_at_its_own_last_change` |
-| R3: a landing grants without taking the runs handed over (review round 2) | `a_grant_takes_the_runs_handed_over_beside_the_landing_that_wakes_it` (one round in two fails; sixteen rounds) |
+| R3: a landing grants without taking the runs handed over (review round 2; the per-arm take it mutated is gone since round 4, so the two rows below pin the drain) | `a_grant_takes_the_runs_handed_over_beside_the_landing_that_wakes_it` keeps the scenario end to end |
 | R3: a candidate formed without draining the hand-over (round 4: `Runs` owns the receiver; replaces round 2's per-arm `take_handed`, three of whose five calls were untested) | `a_batch_is_formed_only_after_every_run_handed_over_is_queued` |
 | R3: a full candidate formed without draining the hand-over (round 4) | `a_batch_is_formed_only_after_every_run_handed_over_is_queued` |
 | R3: the hand-over check keeps "cut by its deadline" past a grant | `a_full_batch_starts_beside_a_running_build_after_one_its_deadline_cut` |
@@ -710,6 +710,7 @@ takes about 25 s on the unchanged code (28 s before this slice) and is left out 
 | `together`: a wake while polled also wakes the task | `wakes_between_the_two_are_served_in_the_same_poll`, `a_wake_from_another_thread_during_a_pass_is_not_lost`, `a_wake_at_the_end_of_a_pass_is_not_lost`, `a_poll_yields_to_the_worker_after_its_passes` |
 | `together`: no cap on the passes | `a_poll_yields_to_the_worker_after_its_passes` |
 | `together`: an ended future's flag keeps the poll going | `an_ended_first_keeps_no_poll_going` |
+| `together`: an ended `first` is polled again (the `running & FIRST` guard before its take removed; final re-check) | `an_ended_first_keeps_no_poll_going`, whose `first` panics when polled after it ended |
 | `together`: the watch ending raises an ended first | **equivalent**: the flag of an ended future is masked at the end of a pass (the row above is the mask's) |
 | `together`: the first always polled first | `a_spender_polled_first_starves_nothing` |
 | `together`: the second always polled first | `a_spender_polled_second_starves_nothing` |
