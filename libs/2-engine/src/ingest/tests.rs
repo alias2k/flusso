@@ -1207,6 +1207,7 @@ impl Deployment {
 mod builders;
 mod exemption;
 mod reading;
+mod walks;
 
 fn instant(db: &Arc<Database>) -> Arc<Builder> {
     Builder::new(db, Behaviour::default())
@@ -3022,7 +3023,8 @@ async fn a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment() {
 /// ids) changes in bursts of sixteen a second the whole time: each change is
 /// read and lands,
 /// and the whole never passes the stated bound (the limit, plus one live
-/// batch per index, plus one backfill batch). Then `orders` is let through
+/// batch per index, plus one backfill batch per index walking: `orders`).
+/// Then `orders` is let through
 /// and everything converges.
 #[tokio::test(start_paused = true)]
 async fn a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minutes() {

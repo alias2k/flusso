@@ -11,9 +11,14 @@
 //! **Coalescing on a deadline.** The first request opens a coalescing set
 //! with a deadline at `max_delay`; the set starts its snapshot once every
 //! sink with a lane asked and the inbox is empty, else at the deadline
-//! (`main`'s rule, over every index while there is one builder). Live
-//! batches are granted meanwhile: on `main` and 6a they waited the
-//! coalescing out.
+//! (`main`'s rule, per index). Live batches are granted meanwhile: on `main`
+//! and 6a they waited the coalescing out.
+//!
+//! **Walks at once** (6b-3). Each builder walks its own index as soon as its
+//! requests are gathered, beside every other builder's walk: no walk waits
+//! for another (6b-1c's walk token is gone). With two or more builders each
+//! key read runs on a task of its own (see the snapshot module), so a builder
+//! that stops stepping its walk holds no other walk's key reads.
 //!
 //! **The end and the stop.** Once the reader ended with its stream and
 //! nothing is left to serve, the builder reports itself idle and waits for
@@ -24,11 +29,9 @@
 use std::collections::HashSet;
 
 use kernel::{IndexName, SinkName};
-use std::pin::Pin;
-use std::sync::Arc;
 use stream::{Delivery, Request};
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::builds::Builds;
@@ -48,9 +51,6 @@ pub(super) struct BuilderEnd {
 struct Coalescing {
     deliveries: Vec<Delivery<Request>>,
     deadline: Instant,
-    /// Every sink asked or the deadline passed: it starts once it holds the
-    /// walk token, gathering on meanwhile (§3.9 I11).
-    ready: bool,
     /// When the first request arrived: the snapshot's start is timed from
     /// here, as `main` timed its gathering.
     started: Instant,
@@ -63,12 +63,10 @@ pub(super) struct Building<'a> {
     pub(super) signals: &'a Signals,
     pub(super) reports: &'a Reports,
     /// Other builders run beside it: a builder held by the budget folds, so
-    /// its index doesn't stop the reading for theirs (§3.9 I7). Alone, it
-    /// never folds: it is 6b-1b's builder.
+    /// its index doesn't stop the reading for theirs (§3.9 I7), and its
+    /// walk's key reads run on tasks of their own (6b-3). Alone, it never
+    /// folds and reads inline: it is 6b-1b's builder.
     pub(super) several: bool,
-    /// The walk token: one walk at a time over every builder (`main`'s
-    /// order), a builder waiting for it coalescing on.
-    pub(super) walks: &'a Arc<Semaphore>,
     /// With several builders, the engine's idle clock and this builder's
     /// place on it.
     pub(super) clock: Option<(&'a IdleClock, usize)>,
@@ -97,7 +95,6 @@ impl IngestEngine {
             signals,
             reports,
             several,
-            walks,
             clock,
             lanes,
             scopes,
@@ -106,10 +103,6 @@ impl IngestEngine {
         // Out of every line however the builder ends (§3.9 G9′): a waiter
         // left behind would be offered permits nobody asks for again.
         let mut builds = LeavesLines(builds);
-        // The walk token while this builder's walk runs, and its wait for it
-        // (kept across polls: dropping it would lose its place).
-        let mut walk: Option<OwnedSemaphorePermit> = None;
-        let mut walk_wait: Option<Pin<Box<WalkWait>>> = None;
         let mut snapshot: Option<Snapshot> = None;
         let mut coalescing: Option<Coalescing> = None;
         // The reader ended: every slice of this builder is handed over (its
@@ -125,9 +118,6 @@ impl IngestEngine {
             // dispatcher saw nothing left to forward either.
             if several {
                 self.fold(&mut runs, &mut builds);
-            }
-            if snapshot.is_none() {
-                walk = None;
             }
             if reader_done
                 && !self.stop.is_requested()
@@ -149,8 +139,6 @@ impl IngestEngine {
                          served again on the next start"
                     );
                 }
-                // Out of the token's line: a stop walks nothing more.
-                drop(walk_wait.take());
                 if let Some(gathered) = coalescing.take() {
                     tracing::info!(
                         requests = gathered.deliveries.len(),
@@ -179,10 +167,7 @@ impl IngestEngine {
             if let Some((clock, slot)) = clock {
                 clock.idle(slot, (!quiet && snapshot.is_none()).then_some(mark));
             }
-            let deadline = coalescing
-                .as_ref()
-                .filter(|gathered| !gathered.ready)
-                .map(|gathered| gathered.deadline);
+            let deadline = coalescing.as_ref().map(|gathered| gathered.deadline);
             // Built only while it waits in a line: one builder never does.
             let turn = builds.in_line().then(|| builds.turn());
             tokio::select! {
@@ -252,7 +237,6 @@ impl IngestEngine {
                     let gathered = coalescing.get_or_insert_with(|| Coalescing {
                         deliveries: Vec::new(),
                         deadline: at + self.batch.max_delay,
-                        ready: false,
                         started: at,
                     });
                     gathered.deliveries.push(delivery);
@@ -261,32 +245,16 @@ impl IngestEngine {
                         gathered.deliveries.push(more);
                     }
                     if everyone_asked(&gathered.deliveries, lanes) {
-                        gathered.ready = true;
-                        if walk_wait.is_none() {
-                            snapshot = self
-                                .start_walkable(&mut coalescing, &mut walk, &mut walk_wait, walks, scopes, lanes)
-                                .await?;
-                        }
+                        snapshot = self
+                            .start_coalesced(&mut coalescing, scopes, lanes, several)
+                            .await?;
                     }
                     mark = Instant::now();
                 }
                 () = until(deadline), if deadline.is_some() => {
-                    if let Some(gathered) = coalescing.as_mut() {
-                        gathered.ready = true;
-                    }
                     snapshot = self
-                        .start_walkable(&mut coalescing, &mut walk, &mut walk_wait, walks, scopes, lanes)
+                        .start_coalesced(&mut coalescing, scopes, lanes, several)
                         .await?;
-                    mark = Instant::now();
-                }
-                // Its turn to walk: the gathered requests start.
-                permit = std::future::poll_fn(|cx| match walk_wait.as_mut() {
-                    Some(waiting) => waiting.as_mut().poll(cx),
-                    None => std::task::Poll::Pending,
-                }), if walk_wait.is_some() => {
-                    walk_wait = None;
-                    walk = permit.ok();
-                    snapshot = self.start_coalesced(&mut coalescing, scopes, lanes).await?;
                     mark = Instant::now();
                 }
                 signal = signals.next() => {
@@ -325,45 +293,21 @@ impl IngestEngine {
         }
     }
 
-    /// Start the gathered requests' snapshot once this builder holds the walk
-    /// token: at once when it is free (one builder always finds it so), else
-    /// once its wait for it ends (an arm of the loop; the builder gathers on
-    /// meanwhile).
-    #[allow(clippy::too_many_arguments)]
-    async fn start_walkable(
-        &self,
-        coalescing: &mut Option<Coalescing>,
-        walk: &mut Option<OwnedSemaphorePermit>,
-        walk_wait: &mut Option<Pin<Box<WalkWait>>>,
-        walks: &Arc<Semaphore>,
-        scopes: &HashSet<IndexName>,
-        lanes: &Lanes,
-    ) -> Result<Option<Snapshot>> {
-        if walk.is_none() {
-            match Arc::clone(walks).try_acquire_owned() {
-                Ok(permit) => *walk = Some(permit),
-                Err(_) => {
-                    *walk_wait = Some(Box::pin(Arc::clone(walks).acquire_owned()));
-                    return Ok(None);
-                }
-            }
-        }
-        self.start_coalesced(coalescing, scopes, lanes).await
-    }
-
     /// Start the gathered requests' snapshot, timed from the first request
-    /// as `main` timed its gathering.
+    /// as `main` timed its gathering; with `apart`, its key reads run on
+    /// tasks of their own.
     async fn start_coalesced(
         &self,
         coalescing: &mut Option<Coalescing>,
         scopes: &HashSet<IndexName>,
         lanes: &Lanes,
+        apart: bool,
     ) -> Result<Option<Snapshot>> {
         let Some(gathered) = coalescing.take() else {
             return Ok(None);
         };
         let snapshot = self
-            .start_snapshot(gathered.deliveries, scopes, lanes)
+            .start_snapshot(gathered.deliveries, scopes, lanes, apart)
             .await?;
         self.observer.on_stage(
             StageTiming::new(Stage::Snapshot, gathered.started.elapsed()).work(Work::Backfill),
@@ -419,10 +363,6 @@ impl std::ops::DerefMut for LeavesLines<'_> {
         self.0
     }
 }
-
-/// A builder's wait for the walk token.
-type WalkWait = dyn Future<Output = std::result::Result<OwnedSemaphorePermit, tokio::sync::AcquireError>>
-    + Send;
 
 /// The coalescing deadline; never without one.
 async fn until(deadline: Option<Instant>) {

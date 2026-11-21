@@ -22,6 +22,23 @@
 //! started (its sink engine asked again after its target was created anew)
 //! has both answered by one walk, which started after the second request: it
 //! names the second, and seeds.
+//!
+//! **Key reads with walks at once** (ADR 0012 stage 8a, 6b-3, K1). Every
+//! walk shares one key-read permit, taken inside the read from before its
+//! query until it returns. With two or more builders each index walks on its
+//! own, and a builder may stop stepping its walk mid-read (it awaits a
+//! publish on a full lane, its batch waits on the budget): so each read runs
+//! on a task of its own ([`Walk::reading_apart`]), finishes without its walk
+//! being stepped, gives the permit back, and keeps its page until the walk
+//! takes it. The task is aborted when the walk is dropped (a stop, a failed
+//! or aborted run), so none outlives it. One builder reads inline, as before.
+//! A walk reads no page ahead: per walk at most one page (`KEY_PAGE` keys) is
+//! held, in hand or in a finished read.
+//!
+//! ```text
+//! orders' walk: read ──permit──▶ page (kept on its task)   builder blocked
+//! users' walk:        wait ─────▶ read ──permit──▶ page ──▶ batch ──▶ …
+//! ```
 
 use std::cmp::Ordering as KeyOrder;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -30,8 +47,8 @@ use std::sync::atomic::Ordering;
 
 use futures::future::{BoxFuture, try_join_all};
 use kernel::{IndexName, SinkName};
-use source::RowKey;
 use source::document::{DocumentBuilder, DocumentId};
+use source::{RowKey, SourceError};
 use stream::{AckHandle, Consumer, LaneItem, LaneKey, Request, Ticket};
 use tokio::sync::Semaphore;
 use tokio::time::Duration;
@@ -50,11 +67,15 @@ impl IngestEngine {
     /// indexes, each walked once, remembering which lane asked for which.
     /// Requests for indexes the builder knows nothing about are answered with
     /// an immediate `SnapshotComplete` for whatever *is* known.
+    ///
+    /// With `apart` (two or more builders walk at once) each key read runs
+    /// on a task of its own.
     pub(super) async fn start_snapshot(
         &self,
         deliveries: Vec<stream::Delivery<Request>>,
         scopes: &HashSet<IndexName>,
         lanes: &Lanes,
+        apart: bool,
     ) -> Result<Option<Snapshot>> {
         let mut requested: BTreeMap<SinkName, BTreeMap<IndexName, Ticket>> = BTreeMap::new();
         let mut points: BTreeMap<IndexName, Vec<(SinkName, Option<stream::WalkMark>)>> =
@@ -91,13 +112,14 @@ impl IngestEngine {
             let plan = plan_walk(self.documents.as_ref(), &index, points).await;
             plans.insert(index, plan);
         }
+        let walk = Walk::new(
+            Arc::clone(&self.documents),
+            indexes.iter().cloned(),
+            Arc::clone(&self.key_reads),
+        )
+        .planned(plans);
         let mut snapshot = Snapshot {
-            walk: Walk::new(
-                Arc::clone(&self.documents),
-                indexes.iter().cloned(),
-                Arc::clone(&self.key_reads),
-            )
-            .planned(plans),
+            walk: if apart { walk.reading_apart() } else { walk },
             requested,
             indexes: indexes.iter().cloned().collect(),
             handles,
@@ -233,7 +255,7 @@ pub(super) struct Walk {
     pub(super) last: bool,
     /// The read in flight: the walk's bound, then its pages. It holds the
     /// key-read permit while it runs (K1), so a dropped walk gives it back.
-    pub(super) fetch: Option<BoxFuture<'static, source::Result<Fetched>>>,
+    fetch: Option<Read>,
     /// The one key-read permit every walk shares (ADR 0012 stage 8a, K1):
     /// one page or bound read at a time, as `main` read its one page.
     key_reads: Arc<Semaphore>,
@@ -245,6 +267,9 @@ pub(super) struct Walk {
     /// Lanes whose point the walk has read up to: they join once the keys
     /// still in hand (all at or before their point) are taken.
     joining: BTreeSet<SinkName>,
+    /// Each read runs on a task of its own (two or more builders walk at
+    /// once): K1 with several walks.
+    apart: bool,
 }
 
 /// Where one index's walk starts and which lanes it serves from where.
@@ -257,6 +282,43 @@ pub(super) struct WalkPlan {
     /// The points further lanes join at, in key order: a segment ends at
     /// each, and its lanes are served from there on.
     joins: VecDeque<(RowKey, BTreeSet<SinkName>)>,
+}
+
+/// A walk's read in flight: polled where the walk is stepped, or on a task
+/// of its own.
+enum Read {
+    Inline(BoxFuture<'static, source::Result<Fetched>>),
+    Apart(KeyRead),
+}
+
+/// A read on its own task, aborted when dropped: a walk dropped mid-read
+/// (a stop, a failed or aborted run) leaves no task behind.
+struct KeyRead(tokio::task::JoinHandle<source::Result<Fetched>>);
+
+impl Drop for KeyRead {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl Read {
+    /// What the read brought back. Cancel-safe: dropped before it is ready,
+    /// the read goes on and is asked again. A read that panicked on its own
+    /// task panics here, as one run inline did.
+    async fn result(&mut self) -> source::Result<Fetched> {
+        match self {
+            Read::Inline(read) => read.await,
+            Read::Apart(KeyRead(task)) => match task.await {
+                Ok(fetched) => fetched,
+                Err(error) => match error.try_into_panic() {
+                    Ok(panic) => std::panic::resume_unwind(panic),
+                    Err(error) => Err(SourceError::Query(format!(
+                        "the key read was cancelled: {error}"
+                    ))),
+                },
+            },
+        }
+    }
 }
 
 /// What a walk's read brings back.
@@ -292,7 +354,16 @@ impl Walk {
             plans: HashMap::new(),
             started: false,
             joining: BTreeSet::new(),
+            apart: false,
         }
+    }
+
+    /// The same walk, each read run on a task of its own once it pends, so a
+    /// walk its builder stops stepping still finishes its read and gives the
+    /// key-read permit back (two or more builders walk at once, 6b-3).
+    pub(super) fn reading_apart(mut self) -> Self {
+        self.apart = true;
+        self
     }
 
     /// The same walk, with each index's start and lanes' points.
@@ -356,7 +427,7 @@ impl Walk {
                 let documents = Arc::clone(&self.documents);
                 let index = index.clone();
                 let key_reads = Arc::clone(&self.key_reads);
-                match &self.through {
+                let read: BoxFuture<'static, source::Result<Fetched>> = match &self.through {
                     None => Box::pin(async move {
                         let _read = key_reads.acquire_owned().await;
                         documents.last_key(&index).await.map(Fetched::Through)
@@ -372,9 +443,14 @@ impl Walk {
                                 .map(Fetched::Page)
                         })
                     }
+                };
+                if self.apart {
+                    Read::Apart(KeyRead(tokio::spawn(read)))
+                } else {
+                    Read::Inline(read)
                 }
             });
-            let fetched = fetch.await;
+            let fetched = fetch.result().await;
             self.fetch = None;
             match fetched? {
                 Fetched::Through(None) => self.last = true,
@@ -597,17 +673,24 @@ mod tests {
     }
 
     /// K1: walks sharing the key-read permit read one page or bound at a
-    /// time, as `main` read its one page; both still walk to the end.
+    /// time, as `main` read its one page; both still walk to the end. Read
+    /// inline and each on a task of its own alike.
     #[tokio::test(start_paused = true)]
     async fn walks_read_one_key_page_at_a_time() {
+        walk_two_sharing_one_permit(false).await;
+        walk_two_sharing_one_permit(true).await;
+    }
+
+    async fn walk_two_sharing_one_permit(apart: bool) {
         let documents = Arc::new(Counted::default());
         let key_reads = Arc::new(Semaphore::new(1));
         let walk = |name: &str| {
-            Walk::new(
+            let walk = Walk::new(
                 Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
                 [IndexName::try_new(name).unwrap()],
                 Arc::clone(&key_reads),
-            )
+            );
+            if apart { walk.reading_apart() } else { walk }
         };
         let drive = |mut walk: Walk| async move {
             let mut read = 0;
@@ -625,5 +708,168 @@ mod tests {
         .unwrap();
         assert_eq!((users, orders), (3 * KEY_PAGE + 1, 3 * KEY_PAGE + 1));
         assert_eq!(documents.most.load(Ordering::SeqCst), 1);
+    }
+
+    async fn drive(mut walk: Walk) -> usize {
+        let mut read = 0;
+        loop {
+            match walk.step().await.unwrap() {
+                Step::Keys => read += std::mem::take(&mut walk.keys).len(),
+                Step::Done => return read,
+            }
+        }
+    }
+
+    /// K1 with several walks (6b-3): `orders`' walk is stepped once, its
+    /// first read starting with the key-read permit, then its builder stops
+    /// stepping it (awaiting a publish on a full lane, say). `users`' walk
+    /// still reads every key, and `orders`', stepped again, loses none.
+    #[tokio::test(start_paused = true)]
+    async fn one_index_stuck_mid_walk_does_not_stop_another_indexs_key_reads() {
+        let documents = Arc::new(Counted::default());
+        let key_reads = Arc::new(Semaphore::new(1));
+        let walk = |name: &str| {
+            Walk::new(
+                Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+                [IndexName::try_new(name).unwrap()],
+                Arc::clone(&key_reads),
+            )
+            .reading_apart()
+        };
+        let mut stuck = walk("orders");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), stuck.step())
+                .await
+                .is_err(),
+            "setup: its first read is in progress"
+        );
+        let users = tokio::time::timeout(Duration::from_secs(60), drive(walk("users")))
+            .await
+            .expect("users' key reads go on beside a walk nobody steps");
+        assert_eq!(users, 3 * KEY_PAGE + 1);
+        let orders = tokio::time::timeout(Duration::from_secs(60), drive(stuck))
+            .await
+            .unwrap();
+        assert_eq!(orders, 3 * KEY_PAGE + 1, "stepped again, it loses no key");
+        assert_eq!(
+            documents.most.load(Ordering::SeqCst),
+            1,
+            "one read at a time"
+        );
+    }
+
+    /// Reads that never answer, counted while they run.
+    #[derive(Debug, Default)]
+    struct Hanging {
+        live: Arc<AtomicUsize>,
+    }
+
+    /// Counts one read while it is alive.
+    struct Alive(Arc<AtomicUsize>);
+
+    impl Alive {
+        fn new(live: &Arc<AtomicUsize>) -> Self {
+            live.fetch_add(1, Ordering::SeqCst);
+            Self(Arc::clone(live))
+        }
+    }
+
+    impl Drop for Alive {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl DocumentBuilder for Hanging {
+        async fn resolve(
+            &self,
+            _: &TableName,
+            _: &RowKey,
+            _: Option<&RowImage>,
+            _: Option<&RowImage>,
+        ) -> source::Result<Vec<DocumentId>> {
+            Ok(Vec::new())
+        }
+
+        async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+            Ok(Document::Delete { id: id.clone() })
+        }
+
+        fn backfill_indexes(&self) -> Vec<IndexName> {
+            Vec::new()
+        }
+
+        async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+            let _alive = Alive::new(&self.live);
+            std::future::pending().await
+        }
+
+        async fn keys(
+            &self,
+            _: &IndexName,
+            _: Option<&RowKey>,
+            _: &RowKey,
+            _: usize,
+        ) -> source::Result<Vec<RowKey>> {
+            std::future::pending().await
+        }
+    }
+
+    /// A walk dropped mid-read (a stop, a failed run, an aborted one) ends
+    /// its read: no task outlives it, and the key-read permit comes back.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_walk_ends_its_key_read() {
+        let documents = Arc::new(Hanging::default());
+        let key_reads = Arc::new(Semaphore::new(1));
+        let mut walk = Walk::new(
+            Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+            [IndexName::try_new("users").unwrap()],
+            Arc::clone(&key_reads),
+        )
+        .reading_apart();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), walk.step())
+                .await
+                .is_err()
+        );
+        assert_eq!(documents.live.load(Ordering::SeqCst), 1, "setup: reading");
+        drop(walk);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while documents.live.load(Ordering::SeqCst) != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the read ended with its walk");
+        assert_eq!(key_reads.available_permits(), 1, "the permit came back");
+    }
+
+    /// One builder (one walk at a time) reads inline, as before 6b-3: no
+    /// task is spawned for its reads.
+    #[tokio::test(start_paused = true)]
+    async fn one_index_reads_its_keys_inline() {
+        let documents = Arc::new(Hanging::default());
+        let before = tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks();
+        let mut walk = Walk::new(
+            Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+            [IndexName::try_new("users").unwrap()],
+            Arc::new(Semaphore::new(1)),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), walk.step())
+                .await
+                .is_err()
+        );
+        assert_eq!(documents.live.load(Ordering::SeqCst), 1, "setup: reading");
+        assert_eq!(
+            tokio::runtime::Handle::current()
+                .metrics()
+                .num_alive_tasks(),
+            before,
+            "no task spawned"
+        );
     }
 }

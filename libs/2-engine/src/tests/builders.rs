@@ -472,11 +472,24 @@ async fn a_stop_with_one_index_stalled_lands_the_others() {
 }
 
 /// Walks no key page comes back for, of every index: how many are in
-/// flight at once, and the most ever.
+/// flight at once, and the most ever. A read is counted `alive` until its
+/// future is dropped; `failing` fails its bound read after 100 ms.
 #[derive(Debug, Default)]
 struct HangingWalks {
     in_flight: std::sync::atomic::AtomicUsize,
     most: std::sync::atomic::AtomicUsize,
+    alive: Arc<std::sync::atomic::AtomicUsize>,
+    failing: Option<IndexName>,
+    panicking: Option<IndexName>,
+}
+
+/// Counts one read while its future is alive.
+struct Alive(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Alive {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -502,10 +515,20 @@ impl DocumentBuilder for HangingWalks {
         vec![orders(), users()]
     }
 
-    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+    async fn last_key(&self, index: &IndexName) -> source::Result<Option<RowKey>> {
         use std::sync::atomic::Ordering;
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.most.fetch_max(now, Ordering::SeqCst);
+        self.alive.fetch_add(1, Ordering::SeqCst);
+        let _alive = Alive(Arc::clone(&self.alive));
+        assert!(
+            self.panicking.as_ref() != Some(index),
+            "the key read of {index} panicked"
+        );
+        if self.failing.as_ref() == Some(index) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            return Err(source::SourceError::Query("the key read failed".to_owned()));
+        }
         std::future::pending().await
     }
 
@@ -545,13 +568,12 @@ impl crate::Observer for Snapshots {
     }
 }
 
-/// The walk token (§3.9 I11, 6b-1c): both indexes ask for a backfill and
-/// neither walk ever gets a page; walks are one at a time, as `main`'s one
-/// snapshot walked its indexes, so only one ever starts (the key-read
-/// permit alone would let the second start and wait at its first read).
-/// The stop ends the run, the walk abandoned.
+/// Walks at once (6b-3): both indexes ask for a backfill and neither walk
+/// ever gets a page; each index walks on its own, so both start (6b-1c's
+/// walk token let only one). The stop ends the run, both walks abandoned,
+/// and no key read outlives it.
 #[tokio::test(start_paused = true)]
-async fn indexes_walk_one_at_a_time() {
+async fn indexes_walk_at_once() {
     let walks = Arc::new(HangingWalks::default());
     let started = Arc::new(Snapshots::default());
     let stop = Stop::new();
@@ -566,13 +588,186 @@ async fn indexes_walk_one_at_a_time() {
         1,
     )
     .await;
-    wait_for(|| walks.in_flight.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    wait_for(|| started.0.load(std::sync::atomic::Ordering::SeqCst) == 2).await;
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(5), running.run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    wait_for(|| walks.alive.load(std::sync::atomic::Ordering::SeqCst) == 0).await;
+    running.sink.abort();
+}
+
+/// Records what is marked seeded; nothing is seeded before.
+#[derive(Debug, Default)]
+struct MarksSeeded(Mutex<Vec<String>>);
+
+#[async_trait]
+impl Sink for MarksSeeded {
+    async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        Ok(WriteReport::clean())
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(false)
+    }
+
+    async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
+        self.0.lock().unwrap().push(index.to_string());
+        Ok(())
+    }
+}
+
+/// Every task alive on this runtime now.
+fn tasks() -> usize {
+    tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks()
+}
+
+/// Waits until the tasks alive are back to `base`, five seconds at most.
+async fn tasks_back_to(base: usize) {
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        while tasks() > base {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "{} tasks left past {base}", tasks());
+}
+
+/// The stop with every walk in progress (§3.9 §8, 6b-3): each builder drops
+/// its snapshot unacknowledged and every key read ends with it (none
+/// outlives the run); the next start serves both requests, redelivered.
+#[tokio::test(start_paused = true)]
+async fn a_stop_mid_walks_ends_every_key_read_and_serves_every_request_next_start() {
+    let primary = primary();
+    let indexes = vec![orders(), users()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(indexes.clone(), [primary.clone()]));
+    let sink = Arc::new(MarksSeeded::default());
+    let engine = SinkEngine::new(
+        primary.clone(),
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        indexes.iter().cloned().map(index_mapping).collect(),
+        Arc::clone(&progress),
+    );
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .unwrap();
+    let sink_task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    let base = tasks();
+    let walks = Arc::new(HangingWalks::default());
+    let started = Arc::new(Snapshots::default());
+    let stop = Stop::new();
+    let (source, _feed) = MockSource::fed();
+    let ingest = IngestEngine::new(
+        Arc::new(source) as Arc<dyn ChangeCapture>,
+        Arc::clone(&walks) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![primary.clone()],
+        Arc::clone(&progress),
+    )
+    .with_stop(stop.clone())
+    .with_observer(Arc::clone(&started) as Arc<dyn crate::Observer>);
+    let run = tokio::spawn(async move { ingest.run().await });
+    wait_for(|| started.0.load(std::sync::atomic::Ordering::SeqCst) == 2).await;
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tasks_back_to(base).await;
+    assert_eq!(walks.alive.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(
+        sink.0.lock().unwrap().is_empty(),
+        "nothing seeded by the stop"
+    );
+    let ingest = IngestEngine::new(
+        Arc::new(MockSource::new(Vec::new())) as Arc<dyn ChangeCapture>,
+        Arc::new(SlowOrdersWalk) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![primary],
+        Arc::clone(&progress),
+    );
+    tokio::time::timeout(Duration::from_secs(10), ingest.run())
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for(|| sink.0.lock().unwrap().len() == 2).await;
+    let mut seeded = sink.0.lock().unwrap().clone();
+    seeded.sort();
+    assert_eq!(
+        seeded,
+        ["orders", "users"],
+        "both requests redelivered and served"
+    );
+    sink_task.abort();
+}
+
+/// A failure in one walk ends the run (§3.9 §8; per-index restart is slice
+/// 8): `orders`' bound read fails while `users`' walk is reading; the run
+/// returns the error and `users`' read ends with it.
+#[tokio::test(start_paused = true)]
+async fn a_failed_walk_ends_the_run_and_every_other_key_read() {
+    let walks = Arc::new(HangingWalks {
+        failing: Some(orders()),
+        ..HangingWalks::default()
+    });
+    let started = Arc::new(Snapshots::default());
+    let stop = Stop::new();
+    let base = tasks();
+    let running = start_observed(
+        vec![orders(), users()],
+        Vec::new(),
+        4,
+        Arc::clone(&walks) as Arc<dyn DocumentBuilder>,
+        Arc::new(Unseeded) as Arc<dyn Sink>,
+        &stop,
+        Arc::clone(&started) as Arc<dyn crate::Observer>,
+        1,
+    )
+    .await;
+    let ended = tokio::time::timeout(Duration::from_secs(5), running.run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(ended.is_err(), "the failed walk ends the run");
     assert_eq!(
         started.0.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "a second walk started while the first ran"
+        2,
+        "both walks had started"
     );
+    running.sink.abort();
+    tasks_back_to(base).await;
+    assert_eq!(walks.alive.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// One index (one builder) reads its keys inline, as before 6b-3: its walk
+/// reading spawns no task, so one index costs what it did.
+#[tokio::test(start_paused = true)]
+async fn one_index_spawns_no_task_for_its_key_reads() {
+    let walks = Arc::new(HangingWalks::default());
+    let stop = Stop::new();
+    let running = start(
+        vec![users()],
+        Vec::new(),
+        4,
+        Arc::clone(&walks) as Arc<dyn DocumentBuilder>,
+        Arc::new(Unseeded) as Arc<dyn Sink>,
+        &stop,
+    )
+    .await;
+    let base = tasks();
+    wait_for(|| walks.alive.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
+    assert_eq!(tasks(), base, "its key read runs inline");
     stop.request();
     tokio::time::timeout(Duration::from_secs(5), running.run)
         .await
@@ -580,6 +775,63 @@ async fn indexes_walk_one_at_a_time() {
         .unwrap()
         .unwrap();
     running.sink.abort();
+}
+
+/// A key read that panics on its own task panics the run's task, as a read
+/// run inline did (§3.9 §8: a panic unwinds the task), not an error the run
+/// returns.
+#[tokio::test(start_paused = true)]
+async fn a_key_read_panicking_on_its_own_task_panics_the_run() {
+    let walks = Arc::new(HangingWalks {
+        panicking: Some(orders()),
+        ..HangingWalks::default()
+    });
+    let stop = Stop::new();
+    let running = start(
+        vec![orders(), users()],
+        Vec::new(),
+        4,
+        Arc::clone(&walks) as Arc<dyn DocumentBuilder>,
+        Arc::new(Unseeded) as Arc<dyn Sink>,
+        &stop,
+    )
+    .await;
+    let ended = tokio::time::timeout(Duration::from_secs(5), running.run)
+        .await
+        .unwrap();
+    assert!(
+        ended.as_ref().is_err_and(tokio::task::JoinError::is_panic),
+        "the run's task panicked: {ended:?}"
+    );
+    running.sink.abort();
+}
+
+/// An engine run dropped mid-walk (the supervisor's abort, a shutdown
+/// deadline): every key read ends with it, the one waiting for the
+/// key-read permit included.
+#[tokio::test(start_paused = true)]
+async fn an_aborted_run_leaves_no_key_read_running() {
+    let walks = Arc::new(HangingWalks::default());
+    let started = Arc::new(Snapshots::default());
+    let stop = Stop::new();
+    let base = tasks();
+    let running = start_observed(
+        vec![orders(), users()],
+        Vec::new(),
+        4,
+        Arc::clone(&walks) as Arc<dyn DocumentBuilder>,
+        Arc::new(Unseeded) as Arc<dyn Sink>,
+        &stop,
+        Arc::clone(&started) as Arc<dyn crate::Observer>,
+        1,
+    )
+    .await;
+    wait_for(|| started.0.load(std::sync::atomic::Ordering::SeqCst) == 2).await;
+    wait_for(|| walks.alive.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
+    running.run.abort();
+    running.sink.abort();
+    tasks_back_to(base).await;
+    assert_eq!(walks.alive.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 /// A walk of `orders` takes two seconds to find its bound; `users` has

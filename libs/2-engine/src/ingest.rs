@@ -435,7 +435,6 @@ impl IngestEngine {
         let signals: Vec<Signals> = builds.iter().map(|_| Signals::default()).collect();
         let reports = Reports::default();
         let several = builds.len() > 1;
-        let walks = Arc::new(tokio::sync::Semaphore::new(1));
         let clock = IdleClock::new(builds.len());
         let mut senders = Vec::new();
         let mut futures = Vec::new();
@@ -468,7 +467,6 @@ impl IngestEngine {
                     signals,
                     reports: &reports,
                     several,
-                    walks: &walks,
                     clock: several.then_some((&clock, slot)),
                     lanes,
                     scopes,
