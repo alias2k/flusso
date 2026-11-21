@@ -1196,6 +1196,7 @@ impl Deployment {
 }
 
 mod builders;
+mod exemption;
 mod reading;
 
 fn instant(db: &Arc<Database>) -> Arc<Builder> {

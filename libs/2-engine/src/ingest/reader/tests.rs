@@ -801,8 +801,9 @@ fn an_index_at_its_cap_is_exempt_only_while_its_builder_is_held() {
     assert!(lead.reached(&progress), "users is not exempt");
 }
 
-/// I8: the latch clears when fewer than `max_waiting_per_index` wait, not
-/// when the builder stops being held; then the index paces the reading again.
+/// I8: the latch clears when fewer than `max_waiting_per_index` wait; until
+/// then an index no longer held may drain but not grow, and once cleared it
+/// paces the reading at its cap again.
 #[test]
 fn an_exemption_ends_below_max_waiting_per_index() {
     let progress = progress();
@@ -812,8 +813,8 @@ fn an_exemption_ends_below_max_waiting_per_index() {
     assert!(!lead.reached(&progress));
     lead.hold(0, false);
     assert!(
-        !lead.reached(&progress),
-        "released with three waiting: still exempt until it drains below its cap"
+        lead.reached(&progress),
+        "released with three waiting: still latched, but it may not grow past three"
     );
     progress.take(&orders(), 2, &|_| false).unwrap();
     assert!(!lead.reached(&progress), "one waits: below the cap");
@@ -876,4 +877,140 @@ impl futures::task::ArcWake for Flag {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         arc_self.0.store(true, Ordering::SeqCst);
     }
+}
+
+/// I8 (review of #452): an exempt index whose hold ended may drain but not
+/// grow: frozen at the count it had when it stopped growing, it stops the
+/// reading at that count, lets it go on below it, and paces it at its cap
+/// once it drains there.
+#[test]
+fn an_exempt_index_whose_hold_ends_may_drain_but_not_grow() {
+    let progress = progress();
+    let lead = exempting(1000);
+    mark_docs(&progress, orders(), 0, 5);
+    lead.hold(0, true);
+    assert!(!lead.reached(&progress), "held with five: exempt");
+    lead.hold(0, false);
+    assert!(
+        lead.reached(&progress),
+        "not held: five is as far as it may go"
+    );
+    progress.take(&orders(), 1, &|_| false).unwrap();
+    assert!(
+        !lead.reached(&progress),
+        "four: below where it stopped growing"
+    );
+    mark_docs(&progress, orders(), 10, 1);
+    assert!(lead.reached(&progress), "five again: no further");
+}
+
+/// I8 (review of #452): the exemption is there so other indexes keep going.
+/// With every index held (a whole sink down) no index becomes exempt, and an
+/// exempt one stops growing; once another index is let go, it grows again.
+#[test]
+fn no_index_grows_exempt_while_every_index_is_held() {
+    let progress = progress();
+    let lead = exempting(1000);
+    lead.hold(0, true);
+    lead.hold(1, true);
+    mark_docs(&progress, orders(), 0, 2);
+    assert!(
+        lead.reached(&progress),
+        "every index held: orders at its cap stops the reading"
+    );
+    lead.hold(1, false);
+    assert!(
+        !lead.reached(&progress),
+        "users is let go: orders is exempt"
+    );
+    mark_docs(&progress, orders(), 10, 3);
+    lead.hold(1, true);
+    assert!(
+        lead.reached(&progress),
+        "users held again: orders stops growing at five"
+    );
+    lead.hold(1, false);
+    assert!(
+        !lead.reached(&progress),
+        "and grows again once users is let go"
+    );
+}
+
+/// A hold ending wakes a reader waiting at a cap: with every index held it
+/// may be the moment the exemption applies again.
+#[test]
+fn a_hold_ending_wakes_a_reader_waiting_at_a_cap() {
+    let lead = exempting(1000);
+    lead.hold(1, true);
+    let woken = Arc::new(AtomicBool::new(false));
+    let waker = futures::task::waker(Arc::new(Flag(Arc::clone(&woken))));
+    lead.taken.register(&waker);
+    lead.waiting.store(true, Ordering::Relaxed);
+    lead.hold(1, false);
+    assert!(woken.load(Ordering::SeqCst), "the reader was woken");
+}
+
+/// What a test's subscriber writes, kept.
+#[derive(Clone, Default)]
+struct Lines(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Lines {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Lines {
+    fn count(&self, line: &str) -> usize {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .matches(line)
+            .count()
+    }
+}
+
+/// Review of #452: an index hovering at its cap latches and clears again
+/// and again; each kind of line is logged at most once a minute, the first
+/// always.
+#[tokio::test(start_paused = true)]
+async fn an_index_hovering_at_its_cap_logs_each_kind_of_line_at_most_once_a_minute() {
+    let lines = Lines::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer({
+            let lines = lines.clone();
+            move || lines.clone()
+        })
+        .finish();
+    let _logging = tracing::subscriber::set_default(subscriber);
+    let progress = progress();
+    let lead = exempting(1000);
+    lead.hold(0, true);
+    let flap = |from: usize, times: usize| {
+        for n in from..from + times {
+            mark_docs(&progress, orders(), 100 * n as i64, 2);
+            assert!(!lead.reached(&progress), "held at its cap: exempt");
+            progress.take(&orders(), 2, &|_| false).unwrap();
+            assert!(!lead.reached(&progress), "below its cap: cleared");
+        }
+    };
+    flap(0, 10);
+    assert_eq!(
+        lines.count("exempt, so reading goes on"),
+        1,
+        "latched ten times"
+    );
+    assert_eq!(lines.count("no longer exempt"), 1, "cleared ten times");
+    tokio::time::advance(Duration::from_secs(61)).await;
+    flap(10, 1);
+    assert_eq!(
+        lines.count("exempt, so reading goes on"),
+        2,
+        "a minute later"
+    );
+    assert_eq!(lines.count("no longer exempt"), 2, "a minute later");
 }

@@ -654,7 +654,8 @@ async fn an_index_reaches_its_exemption_with_nothing_else_in_flight() {
 /// every 20 ms throughout; one permit, 10 ms builds. While the backlog
 /// drains, each `users` change still lands within 100 ms of being read (its
 /// 50 ms batch and a turn or two), where a line that let the backlog's takes
-/// go first would leave it waiting for the whole drain.
+/// go first would leave it waiting for the whole drain; and the backlog
+/// still drains within a second beside `users`' load.
 #[tokio::test(start_paused = true)]
 async fn a_released_backlog_drains_in_parts_beside_another_indexs_changes() {
     let users_changes = 1500;
@@ -724,6 +725,14 @@ async fn a_released_backlog_drains_in_parts_beside_another_indexs_changes() {
     assert!(
         drain.1 - drain.0 >= Duration::from_millis(200),
         "the backlog took several turns to drain: {:?}",
+        drain.1 - drain.0
+    );
+    // The other direction: users' steady load doesn't starve the backlog
+    // either. Thirty takes of 10 ms, each beside at most one users build,
+    // finish well within a second.
+    assert!(
+        drain.1 - drain.0 <= Duration::from_secs(1),
+        "the backlog drained beside users' load: {:?}",
         drain.1 - drain.0
     );
     let landings = recorder.landings.lock().unwrap().clone();

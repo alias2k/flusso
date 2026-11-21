@@ -41,7 +41,7 @@
 //! ```
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 use std::task::Poll;
 
 use futures::task::AtomicWaker;
@@ -117,8 +117,51 @@ pub(super) struct Queue {
     /// Written by the builder.
     held: AtomicBool,
     /// The reader latched its index exempt: held with `max_waiting_per_index`
-    /// documents or more waiting, until fewer wait. Written by the reader.
+    /// documents or more waiting while another index wasn't, until fewer
+    /// wait. Written by the reader.
     exempt: AtomicBool,
+    /// While latched and not growing (its hold ended, or every index is
+    /// held), the count it stopped growing at: it may drain, not pass it.
+    /// `usize::MAX` while it grows or isn't latched. Written by the reader.
+    ceiling: AtomicUsize,
+    /// When the latch was last set and last cleared, for the log's throttle.
+    latched_log: LogEdge,
+    cleared_log: LogEdge,
+}
+
+/// What a latched index may do this lead check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exempt {
+    /// Not latched: it paces the reading at its cap.
+    No,
+    /// Held while another index isn't: it counts only toward
+    /// `max_pending_documents`.
+    Growing,
+    /// Latched, but its hold ended or every index is held: it stops the
+    /// reading at this count, and drains.
+    Frozen(usize),
+}
+
+/// One log line's last moment, so an index hovering at its cap logs at most
+/// one line per kind a minute (the first always).
+#[derive(Debug, Default)]
+struct LogEdge(AtomicU64);
+
+/// How often one kind of exemption line may be logged.
+const LOG_EVERY: Duration = Duration::from_secs(60);
+
+impl LogEdge {
+    /// Whether a line may be logged now, `since` the lead began; marks it.
+    fn allow(&self, since: Duration) -> bool {
+        let now = u64::try_from(since.as_millis()).unwrap_or(u64::MAX).max(1);
+        let last = self.0.load(Ordering::Relaxed);
+        let every = LOG_EVERY.as_millis() as u64;
+        if last != 0 && now.saturating_sub(last) < every {
+            return false;
+        }
+        self.0.store(now, Ordering::Relaxed);
+        true
+    }
 }
 
 /// What the reader needs to exempt a held index (6b-2).
@@ -130,6 +173,12 @@ struct Exemption {
     max_pending: usize,
     /// The reader is stopped at `max_pending`: logged once per stretch.
     at_cap: AtomicBool,
+    /// When the pending cap was last reached and last left, for the log's
+    /// throttle.
+    full_log: LogEdge,
+    reading_on_log: LogEdge,
+    /// When the lead began: what the log's throttle measures from.
+    began: Instant,
 }
 
 impl Lead {
@@ -164,6 +213,9 @@ impl Lead {
                 indexes,
                 max_pending: max_pending_documents,
                 at_cap: AtomicBool::new(false),
+                full_log: LogEdge::default(),
+                reading_on_log: LogEdge::default(),
+                began: Instant::now(),
             }),
         ))
     }
@@ -182,19 +234,27 @@ impl Lead {
                     folding: AtomicBool::new(false),
                     held: AtomicBool::new(false),
                     exempt: AtomicBool::new(false),
+                    ceiling: AtomicUsize::new(usize::MAX),
+                    latched_log: LogEdge::default(),
+                    cleared_log: LogEdge::default(),
                 })
                 .collect(),
         }
     }
 
-    /// Builder `queue` is held, or no longer (§3.9 §5). Becoming held wakes
-    /// the reader: it may wait at that index's cap, which only it can turn
-    /// into an exemption (D4).
+    /// Builder `queue` is held, or no longer (§3.9 §5). Either edge wakes
+    /// the reader: becoming held may turn the index's cap into an exemption
+    /// (D4), and a hold ending may let another held index grow again (every
+    /// index held: nobody is exempt). With one builder there is no
+    /// exemption and this does nothing.
     pub(super) fn hold(&self, queue: usize, held: bool) {
+        if self.exemption.is_none() {
+            return;
+        }
         let Some(queue) = self.queues.get(queue) else {
             return;
         };
-        if queue.held.swap(held, Ordering::Relaxed) != held && held {
+        if queue.held.swap(held, Ordering::Relaxed) != held {
             self.wake();
         }
     }
@@ -296,20 +356,37 @@ impl Lead {
 impl Lead {
     /// The documents bounds with exemption (§3.9 §5): each non-exempt index
     /// at `max_waiting_per_index`, the non-exempt indexes together at
-    /// `max_waiting`, the exempt ones together at `max_pending_documents`.
+    /// `max_waiting`, a frozen exempt index at the count it stopped growing
+    /// at, the exempt ones together at `max_pending_documents`.
     fn documents_reached(&self, progress: &Progress, exemption: &Exemption) -> bool {
+        let held = self
+            .queues
+            .iter()
+            .filter(|queue| queue.held.load(Ordering::Relaxed))
+            .count();
+        // The exemption is there so other indexes keep going: it applies
+        // only while some index isn't held (a whole sink down holds all).
+        let someone_free = held < self.queues.len();
+        let since = exemption.began.elapsed();
         let mut others = 0;
         let mut exempt = 0;
         for (queue, index) in self.queues.iter().zip(&exemption.indexes) {
             let waiting = progress.waiting_on(index);
-            if self.latched(queue, index, waiting) {
-                exempt += waiting;
-                continue;
+            match self.latched(queue, index, waiting, someone_free, since) {
+                Exempt::Growing => exempt += waiting,
+                Exempt::Frozen(ceiling) => {
+                    if waiting >= ceiling.max(self.max.per_index) {
+                        return true;
+                    }
+                    exempt += waiting;
+                }
+                Exempt::No => {
+                    if waiting >= self.max.per_index {
+                        return true;
+                    }
+                    others += waiting;
+                }
             }
-            if waiting >= self.max.per_index {
-                return true;
-            }
-            others += waiting;
         }
         if others >= self.max.total {
             return true;
@@ -317,13 +394,15 @@ impl Lead {
         let full = exempt >= exemption.max_pending;
         if exemption.at_cap.swap(full, Ordering::Relaxed) != full {
             if full {
-                tracing::warn!(
-                    documents = exempt,
-                    max_pending_documents = exemption.max_pending,
-                    "reading stopped for every index: the exempt indexes have \
-                     max_pending_documents documents waiting to be built; it reads on as they are built"
-                );
-            } else {
+                if exemption.full_log.allow(since) {
+                    tracing::warn!(
+                        documents = exempt,
+                        max_pending_documents = exemption.max_pending,
+                        "reading stopped for every index: the exempt indexes have \
+                         max_pending_documents documents waiting to be built; it reads on as they are built"
+                    );
+                }
+            } else if exemption.reading_on_log.allow(since) {
                 tracing::info!(
                     documents = exempt,
                     "the exempt indexes are below max_pending_documents: reading on"
@@ -333,21 +412,36 @@ impl Lead {
         full
     }
 
-    /// Whether `queue`'s index, with `waiting` documents, is exempt now:
-    /// latched while its builder is held at the cap, cleared below it.
-    fn latched(&self, queue: &Queue, index: &IndexName, waiting: usize) -> bool {
+    /// What `queue`'s index, with `waiting` documents, may do now: latched
+    /// when its builder is held at the cap while some index isn't held,
+    /// cleared below the cap; latched and not growing (its hold ended, or
+    /// every index is held), frozen at the count it stopped growing at.
+    fn latched(
+        &self,
+        queue: &Queue,
+        index: &IndexName,
+        waiting: usize,
+        someone_free: bool,
+        since: Duration,
+    ) -> Exempt {
         if waiting < self.max.per_index {
-            if queue.exempt.swap(false, Ordering::Relaxed) {
+            queue.ceiling.store(usize::MAX, Ordering::Relaxed);
+            if queue.exempt.swap(false, Ordering::Relaxed) && queue.cleared_log.allow(since) {
                 tracing::info!(
                     %index,
                     waiting,
                     "index below max_waiting_per_index: no longer exempt; it paces the reading again"
                 );
             }
-            return false;
+            return Exempt::No;
         }
-        if queue.held.load(Ordering::Relaxed) {
-            if !queue.exempt.swap(true, Ordering::Relaxed) {
+        let grows = queue.held.load(Ordering::Relaxed) && someone_free;
+        if !queue.exempt.load(Ordering::Relaxed) {
+            if !grows {
+                return Exempt::No;
+            }
+            queue.exempt.store(true, Ordering::Relaxed);
+            if queue.latched_log.allow(since) {
                 tracing::warn!(
                     %index,
                     waiting,
@@ -356,9 +450,17 @@ impl Lead {
                      for every exempt index, and the replication slot stays pinned by it, so WAL grows"
                 );
             }
-            return true;
         }
-        queue.exempt.load(Ordering::Relaxed)
+        if grows {
+            queue.ceiling.store(usize::MAX, Ordering::Relaxed);
+            return Exempt::Growing;
+        }
+        let ceiling = queue.ceiling.load(Ordering::Relaxed);
+        if ceiling != usize::MAX {
+            return Exempt::Frozen(ceiling);
+        }
+        queue.ceiling.store(waiting, Ordering::Relaxed);
+        Exempt::Frozen(waiting)
     }
 }
 
