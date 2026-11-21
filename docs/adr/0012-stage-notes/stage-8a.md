@@ -1886,6 +1886,38 @@ pending (a slow walk mark beside another builder waiting: argued, not run).
   still stops for every index until 6b-2.
 - **A change touching many documents builds its parts at once**, up to `[concurrency] builds`.
 
+#### 6b-1c, fix round 2 (the review of `68987671`)
+
+| Finding | Fix | Test |
+| --- | --- | --- |
+| a change of N documents cost time quadratic in N: with its parts building side by side, every grant check walked every waiting document up to the candidate (a hash lookup each), and `full_leftover` walked them again | "is a waiting document through the candidate building or held" is answered from the builds' side: each id building (`Pending::building`) and each id a running backfill build holds (`Builds::backfilling`, the build's own `Arc` of its ids) is looked up in the waiting set; counts stop at `max_changes` for a builder of one index (`waiting_of`'s `most`); whether a capped take left anything is one look at the oldest waiting (`Progress::waits_through`). `Holds` is now a visitor over the held ids | `a_grant_check_beside_running_builds_looks_at_no_more_than_builds_and_one_batch` (20,000 documents, 16 building: failed at 19,984 entries looked at; now at most 16 + 4, and 4 more with a backfill build holding four; one held and waiting stops the grant), through a test-only counter of entries looked at |
+| in `settle` a builder kept its place in a line while it waited for its own build or a release, holding a freed permit back from the others until then (or the tick) | both waits also end on the builder's turn at the gate, which asks again; a `settle` pass that asks for nothing leaves the lines, as a grant pass does | no test pins the delay: it needs one builder's only running build held while its waiter is ahead of another builder's in the line during `settle`, an interleaving two attempts (log orders, `builds` 2 and 3) didn't produce, and a harness around `settle` alone would be new scaffolding. The second half is pinned: without the leave, `random_schedules_keep_every_document_in_order` spins (a turn wakes the pass to ask for nothing) |
+
+**Mutations** (round 2):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| I4 (cost) | the grant check walks the waiting set (round 1's `scan`) | `a_grant_check_beside_running_builds_looks_at_no_more_than_builds_and_one_batch` |
+| I4 (cost) | counts not stopped at `max_changes` | the same |
+| I9 | a `settle` pass that asks for nothing keeps its waiter | `random_schedules_keep_every_document_in_order` (spins; the nextest limit ends it) |
+
+Still unpinned: M10 (no leave while `walk_marks` pends) and M11 (no tick backstop on `settle`'s turn
+wait), as round 1 said: neither has a deterministic trigger short of a test harness of its own.
+
+**Costs added by fix rounds 1 and 2, against 6b-1c as first built** (nothing measured):
+
+| Where | What it costs |
+| --- | --- |
+| per lane registration | one more pending lock, taken inside the registry lock (it contends with the reader's `mark_reads` on that index), the oldest-waiting lookup and a walk of the index's builds (at most `2 × builds`) |
+| per grant check | one lookup per document building and per document a running backfill build holds (at most `builds × max_changes`), plus at most `max_changes` waiting entries counted, instead of a walk of every waiting document while anything built; while a leftover is kept and a live build runs, one more such check (`full_leftover`) |
+| per take that leaves something | one look at the oldest waiting (`waits_through`) instead of a full `waiting_of` |
+| per ask, several builders | a refusal still standing at the budget's generation takes the `Waits` lock (`refuse`) and arms the release wait; the batch joins the line instead of being refused before it |
+| per build | the permit is dropped on the build's own task, a gate wake when someone waits; ids are held in an `Arc`, cloned for a spawned backfill build (`backfilling`) and unwrapped at landing for reuse |
+| per published slot | one `poll!` before the await; when it pends, leaving the lines and, with several builders, entering the fold |
+| per backlog take | one `Lead::wake` (a fence and an atomic load; a waker only while the reader waits) |
+| per `settle` wait | a turn future selected beside the landing or the release (an `Arc` clone and a `Notify` registration while in a line) |
+| per change in the reader | fewer lookups: one builder search per run of documents of one index, not one per document |
+
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
 | Rule | |

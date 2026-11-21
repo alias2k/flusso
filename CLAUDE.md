@@ -672,7 +672,10 @@ is the one concrete piece.
   number; with one builder it hands it every change, so one index keeps 6b-1b's grants and gate
   path, its batches changed only where the document cap splits a change); each builder cuts R3's
   batches over its own queue, and one index's build takes at most `max_changes` documents (O2:
-  `Progress::take_through_at_most`; a grant counts and reserves at most that many; what a capped take
+  `Progress::take_through_at_most`; a grant counts and reserves at most that many, and checks whether a waiting document through its
+  candidate is building or held from the builds' side (`Pending::any_held` over the building ids and
+  `Builds::held_by_backfill`), so a grant check costs work bounded by `builds × max_changes`, not by
+  what waits: guard `a_grant_check_beside_running_builds_looks_at_no_more_than_builds_and_one_batch`; what a capped take
   leaves keeps the candidate, full while `max_changes` or more are left, so its parts build at once up
   to `builds`, F2: `full_leftover`); builders share one gate (`Builds::with_gate`) and, with two or
   more, a batch a pass didn't grant keeps a waiter in its kind's line (G9′, `Builds::ask_in_lines`,
@@ -681,7 +684,9 @@ is the one concrete piece.
   change of the gate past the generation it asked at (`Gate::changed_since`), and left when no batch
   or slot is ready, before an await outside the loop that pends (a publish or `walk_marks`, each polled
   once first), and on every way out of the builder (`LeavesLines`, a drop guard); a build drops its
-  permit as its task ends, so a builder blocked publishing holds none; one builder keeps G9's pass and
+  permit as its task ends, so a builder blocked publishing holds none; in `settle` the waits on a
+  build or a budget release also end on the builder's turn, and a pass that asks for nothing leaves
+  the lines; one builder keeps G9's pass and
   never joins a line (`one_index_never_waits_in_a_gate_line`). A builder held by the budget or by a
   publish blocked on a full lane **folds** (only with two or more): its queued slices are dropped
   (`Runs::clear`), the reader hands it nothing, and it takes its backlog oldest first in takes of at

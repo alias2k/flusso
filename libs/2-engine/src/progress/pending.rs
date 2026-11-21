@@ -431,7 +431,8 @@ impl Pending {
         self.waiting_through_at_most(through, usize::MAX)
     }
 
-    /// [`waiting_through`](Self::waiting_through), counted up to `most`.
+    /// How many ids wait that were marked at or before `through`, counted up
+    /// to `most`: every one, at no cost, when none was marked after it.
     pub(crate) fn waiting_through_at_most(&self, through: Option<Position>, most: usize) -> usize {
         let newest = self.order.last_key_value().map(|((seq, _), _)| *seq);
         match (through, newest) {
