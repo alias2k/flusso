@@ -103,6 +103,13 @@ type LiveStream = BoxStream<'static, source::Result<LiveChange>>;
 /// max_pending_documents`).
 pub const DEFAULT_MAX_PENDING_DOCUMENTS: usize = 1_000_000;
 
+/// What the exemption keeps for the life of the ingest engine (6b-2).
+#[derive(Debug)]
+struct Exemption {
+    outstanding: Arc<outstanding::Outstanding>,
+    log: Arc<reader::ExemptionLog>,
+}
+
 /// The ingest engine over one source, one document builder, and one stream.
 #[derive(Debug)]
 pub struct IngestEngine {
@@ -121,9 +128,11 @@ pub struct IngestEngine {
     /// How many documents the exempt indexes together may have waiting
     /// before the reader stops for every index (6b-2).
     max_pending_documents: usize,
-    /// What each index has waiting on lanes unacknowledged, for the
-    /// exemption: kept across engine runs, as the items on lanes are.
-    outstanding: Arc<outstanding::Outstanding>,
+    /// With several indexes, what the exemption keeps across engine runs:
+    /// what each index has waiting on lanes unacknowledged (as the items on
+    /// lanes are kept), and its log lines. `None` with one index, which has
+    /// no exemption and pays nothing for it.
+    exemption: Option<Exemption>,
     budget: Option<Arc<Budget>>,
     /// The budget waits open across engine runs (see [`Builds::with_waits`]).
     budget_waits: Arc<std::sync::Mutex<builds::Waits>>,
@@ -160,12 +169,11 @@ impl IngestEngine {
         sinks: Vec<SinkName>,
         progress: Arc<Progress>,
     ) -> Self {
-        // With one index there is no exemption, so no record to keep.
         let indexes: Vec<IndexName> = progress.indexes().cloned().collect();
-        let several = indexes.len() > 1;
-        let outstanding = Arc::new(outstanding::Outstanding::new(
-            indexes.into_iter().filter(|_| several),
-        ));
+        let exemption = (indexes.len() > 1).then(|| Exemption {
+            outstanding: Arc::new(outstanding::Outstanding::new(indexes.iter().cloned())),
+            log: Arc::new(reader::ExemptionLog::new(indexes)),
+        });
         Self {
             source,
             resolver: Arc::clone(&documents),
@@ -176,7 +184,7 @@ impl IngestEngine {
             builds: 1,
             max_waiting: None,
             max_pending_documents: DEFAULT_MAX_PENDING_DOCUMENTS,
-            outstanding,
+            exemption,
             budget: None,
             budget_waits: Arc::default(),
             key_reads: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -403,7 +411,7 @@ impl IngestEngine {
         self.progress.forget_all();
         // With two or more builders a held index at its cap is exempt
         // (6b-2); one builder keeps 6b-1b's lead.
-        let lead = if builds.len() > 1 {
+        let lead = if let (true, Some(exemption)) = (builds.len() > 1, &self.exemption) {
             Lead::exempting(
                 self.max_waiting(),
                 self.progress.changes_read(),
@@ -412,7 +420,8 @@ impl IngestEngine {
                     .filter_map(|builds| builds.index().cloned())
                     .collect(),
                 self.max_pending_documents,
-                Arc::clone(&self.outstanding),
+                Arc::clone(&exemption.outstanding),
+                Arc::clone(&exemption.log),
             )
         } else {
             Lead::over(

@@ -261,8 +261,8 @@ impl IngestEngine {
                 _ = tick.tick() => {
                     self.confirm(&mut last_confirmed, true);
                     // A reader stopped because no index was free re-checks
-                    // once a second (review round 2 of #452).
-                    lead.tick();
+                    // once a second, and the exemption's lines are checked.
+                    lead.tick(&self.progress);
                     for builder in &signals {
                         builder.tick.store(true, Ordering::Release);
                         builder.builder.wake();

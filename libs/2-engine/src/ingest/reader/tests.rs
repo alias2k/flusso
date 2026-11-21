@@ -769,6 +769,7 @@ fn exempting(pending: usize) -> Arc<Lead> {
             orders(),
             users(),
         ])),
+        Arc::new(ExemptionLog::new([orders(), users()])),
     )
 }
 
@@ -859,6 +860,7 @@ fn exempt_documents_count_toward_no_other_bound() {
             orders(),
             users(),
         ])),
+        Arc::new(ExemptionLog::new([orders(), users()])),
     );
     lead.hold(0, true);
     mark_docs(&progress, orders(), 0, 20);
@@ -1012,8 +1014,10 @@ async fn an_index_hovering_at_its_cap_logs_each_kind_of_line_at_most_once_a_minu
         for n in from..from + times {
             mark_docs(&progress, orders(), 100 * n as i64, 2);
             assert!(!lead.reached(&progress), "held at its cap: exempt");
+            lead.tick(&progress);
             progress.take(&orders(), 2, &|_| false).unwrap();
             assert!(!lead.reached(&progress), "below its cap: cleared");
+            lead.tick(&progress);
         }
     };
     let (exempt, cleared) = ("exempt, so reading goes on", "no longer exempt");
@@ -1024,11 +1028,11 @@ async fn an_index_hovering_at_its_cap_logs_each_kind_of_line_at_most_once_a_minu
         "ten flaps in a minute: the first line only"
     );
     tokio::time::advance(Duration::from_secs(61)).await;
-    assert!(!lead.reached(&progress));
+    lead.tick(&progress);
     assert_eq!(
         lines.count(cleared),
         1,
-        "the minute over, the next check logs the current state"
+        "the minute over, the next tick logs the current state"
     );
     flap(10, 1);
     assert_eq!(
@@ -1057,13 +1061,17 @@ async fn the_last_line_logged_names_the_current_state_within_a_minute_of_a_chang
     lead.hold(0, true);
     mark_docs(&progress, orders(), 0, 2);
     assert!(!lead.reached(&progress), "held at its cap: exempt");
+    lead.tick(&progress);
     progress.take(&orders(), 2, &|_| false).unwrap();
     assert!(!lead.reached(&progress), "below its cap: cleared");
+    lead.tick(&progress);
     tokio::time::advance(Duration::from_secs(5)).await;
     mark_docs(&progress, orders(), 100, 2);
     assert!(!lead.reached(&progress), "exempt again");
     for _ in 0..60 {
-        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        lead.tick(&progress);
+        tokio::time::advance(Duration::from_secs(59)).await;
         assert!(!lead.reached(&progress), "still exempt");
     }
     let last = lines.last_of(&["exempt, so reading goes on", "no longer exempt"]);
@@ -1071,5 +1079,75 @@ async fn the_last_line_logged_names_the_current_state_within_a_minute_of_a_chang
         last.as_deref()
             .is_some_and(|line| line.contains("exempt, so reading goes on")),
         "exempt for an hour, the last line logged names it: {last:?}"
+    );
+}
+
+/// Review round 3 of #452, cause (c): the reader stops at the first index
+/// over its bound and decides nothing after it. The tick checks every line
+/// anyway: `users` (after `orders` in queue order) drained below its cap
+/// while `orders` holds the reading, and its last line names that.
+#[tokio::test(start_paused = true)]
+async fn an_index_after_one_over_its_bound_still_logs_its_state() {
+    let lines = Lines::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer({
+            let lines = lines.clone();
+            move || lines.clone()
+        })
+        .finish();
+    let _logging = tracing::subscriber::set_default(subscriber);
+    let progress = progress();
+    let lead = exempting(1000);
+    lead.hold(1, true);
+    mark_docs(&progress, users(), 0, 2);
+    assert!(!lead.reached(&progress), "users held at its cap: exempt");
+    lead.tick(&progress);
+    progress.take(&users(), 2, &|_| false).unwrap();
+    mark_docs(&progress, orders(), 100, 2);
+    assert!(lead.reached(&progress), "orders, not held, at its cap");
+    tokio::time::advance(Duration::from_secs(61)).await;
+    assert!(lead.reached(&progress), "orders still holds the reading");
+    lead.tick(&progress);
+    let last = lines.last_of(&["exempt, so reading goes on", "no longer exempt"]);
+    assert!(
+        last.as_deref()
+            .is_some_and(|line| line.contains("no longer exempt") && line.contains("users")),
+        "users drained a minute ago, its last line names it: {last:?}"
+    );
+}
+
+/// The frozen state has its own line: an exempt index whose hold ends may
+/// drain but not grow, and the line says so, not that reading goes on.
+#[tokio::test(start_paused = true)]
+async fn an_exempt_index_whose_hold_ends_logs_that_it_is_frozen() {
+    let lines = Lines::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer({
+            let lines = lines.clone();
+            move || lines.clone()
+        })
+        .finish();
+    let _logging = tracing::subscriber::set_default(subscriber);
+    let progress = progress();
+    let lead = exempting(1000);
+    lead.hold(0, true);
+    mark_docs(&progress, orders(), 0, 3);
+    assert!(!lead.reached(&progress), "held at its cap: exempt");
+    lead.tick(&progress);
+    lead.hold(0, false);
+    assert!(lead.reached(&progress), "its hold ended: frozen at 3");
+    tokio::time::advance(Duration::from_secs(61)).await;
+    lead.tick(&progress);
+    let last = lines.last_of(&[
+        "exempt, so reading goes on",
+        "exempt index frozen",
+        "no longer exempt",
+    ]);
+    assert!(
+        last.as_deref()
+            .is_some_and(|line| line.contains("exempt index frozen")),
+        "frozen, the last line names it: {last:?}"
     );
 }

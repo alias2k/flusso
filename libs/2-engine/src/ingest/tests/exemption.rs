@@ -732,3 +732,333 @@ async fn the_reading_goes_on_within_half_a_second_of_a_hold_ending() {
     );
     assert_eq!(deployment.recorder.state(), db.expected());
 }
+
+/// Every line logged, to read the last of a kind (review round 3 of #452).
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Captured {
+    fn last_of(&self, needles: &[&str]) -> Option<String> {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .lines()
+            .filter(|line| needles.iter().any(|needle| line.contains(needle)))
+            .next_back()
+            .map(str::to_owned)
+    }
+}
+
+/// `orders` (odd ids) is refused for 4 s and becomes exempt, then reaches
+/// `max_pending_documents` (6); both warnings log. It is let through at 4 s
+/// and drains within the minute, so the opposite lines are throttled. The
+/// stream then stays open and idle. Three minutes later the last line of each
+/// pair must name the current state (§5): the tick checks the lines whether
+/// or not anything is read.
+#[tokio::test(start_paused = true)]
+async fn on_an_idle_stream_the_last_lines_name_the_state_within_a_minute() {
+    let lines = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer({
+            let lines = lines.clone();
+            move || lines.clone()
+        })
+        .finish();
+    let _logging = tracing::subscriber::set_default(subscriber);
+    let changes: i64 = 200;
+    let log: Vec<Change> = (0..changes).map(Change::upsert).collect();
+    let arrivals: Vec<Duration> = (0..changes as u64)
+        .map(|n| Duration::from_millis(10 * n))
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(&db, Behaviour::default());
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let stop = Stop::new();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        2,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(2)
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+            .with_max_pending_documents(6)
+            .with_stop(stop.clone())
+    });
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        let lines = lines.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            let before = (
+                lines.last_of(&["exempt, so reading goes on", "no longer exempt"]),
+                lines.last_of(&["reading stopped for every index", "reading on"]),
+            );
+            recorder.refused_indexes.lock().unwrap().clear();
+            tokio::time::sleep(Duration::from_secs(180)).await;
+            let after = (
+                lines.last_of(&["exempt, so reading goes on", "no longer exempt"]),
+                lines.last_of(&["reading stopped for every index", "reading on"]),
+                progress.changes_read(),
+                waiting_of(&progress, "orders"),
+            );
+            stop.request();
+            (before, after)
+        })
+    };
+    tokio::time::timeout(LIMIT * 4, deployment.run_to_end(0))
+        .await
+        .expect("the run ends at the stop");
+    let (before, (exempt_line, cap_line, read, waiting)) = watcher.await.unwrap();
+    assert!(
+        before
+            .0
+            .as_deref()
+            .is_some_and(|l| l.contains("exempt, so reading goes on"))
+            && before
+                .1
+                .as_deref()
+                .is_some_and(|l| l.contains("reading stopped for every index")),
+        "setup: both warnings logged by 4 s: {before:?}"
+    );
+    assert_eq!(
+        (read, waiting),
+        (changes as u64, 0),
+        "everything read, nothing waits"
+    );
+    let exempt_ok = exempt_line
+        .as_deref()
+        .is_some_and(|l| l.contains("no longer exempt"));
+    let cap_ok = cap_line
+        .as_deref()
+        .is_some_and(|l| l.contains("reading on"));
+    assert!(
+        exempt_ok && cap_ok,
+        "three minutes after orders drained and everything was read, the last lines name the \
+         state before: exempt line ok {exempt_ok}: {exempt_line:?}; cap line ok {cap_ok}: {cap_line:?}"
+    );
+}
+
+/// `orders` (odd ids) is refused for 3 s: exempt, logged. It recovers and
+/// drains within the minute (the "no longer exempt" line throttled). At
+/// 20 s a `users` build fails once: the ingest run fails and restarts. The
+/// log state is the engine's, so the throttled line is still logged. Changes keep arriving every 100 ms to the end, so lead
+/// checks keep coming (not the idle case). Two minutes in, the last line
+/// should name the current state (not exempt).
+#[tokio::test(start_paused = true)]
+async fn across_an_ingest_restart_the_last_line_names_the_state_within_a_minute() {
+    let lines = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer({
+            let lines = lines.clone();
+            move || lines.clone()
+        })
+        .finish();
+    let _logging = tracing::subscriber::set_default(subscriber);
+    let changes: i64 = 1400;
+    let log: Vec<Change> = (0..changes).map(Change::upsert).collect();
+    let arrivals: Vec<Duration> = (0..changes as u64)
+        .map(|n| Duration::from_millis(100 * n))
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            fail_once: Mutex::new(HashSet::from([200])),
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let stop = Stop::new();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        2,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(2)
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+            .with_stop(stop.clone())
+    });
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        let lines = lines.clone();
+        let stop = stop.clone();
+        let db = Arc::clone(&db);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let before = lines.last_of(&["exempt, so reading goes on", "no longer exempt"]);
+            recorder.refused_indexes.lock().unwrap().clear();
+            tokio::time::sleep(Duration::from_secs(117)).await;
+            let after = lines.last_of(&["exempt, so reading goes on", "no longer exempt"]);
+            let waiting = waiting_of(&progress, "orders");
+            while recorder.state() != db.expected() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            stop.request();
+            (before, after, waiting)
+        })
+    };
+    let failed = tokio::time::timeout(LIMIT * 4, deployment.run_to_end(1))
+        .await
+        .expect("the run ends at the stop");
+    let (before, after, waiting) = watcher.await.unwrap();
+    assert!(
+        before
+            .as_deref()
+            .is_some_and(|l| l.contains("exempt, so reading goes on")),
+        "setup: exempt logged by 3 s: {before:?}"
+    );
+    assert_eq!(failed, 1, "setup: the ingest run failed once");
+    assert!(
+        waiting < 4,
+        "setup: orders is below its cap at 2 min ({waiting} waiting)"
+    );
+    assert!(
+        after
+            .as_deref()
+            .is_some_and(|l| l.contains("no longer exempt")),
+        "two minutes in, under steady traffic, after an ingest restart, the last line still \
+         names exempt: {after:?}"
+    );
+}
+
+/// Review round 3 of #452: an item is outstanding until **every** lane lets
+/// go of it, so a healthy sink acknowledging an index's items does not make
+/// it free while another sink holds them. `audit` is dead; `orders` (every
+/// 10 ms) fills its `audit` lane at once and is held; `users` (once a
+/// second) is acknowledged by the healthy sink every second, its `audit`
+/// lane far from full. After five seconds `users` is not free, nobody is,
+/// and the reading stops.
+#[tokio::test(start_paused = true)]
+async fn an_index_one_dead_sink_holds_is_not_free_although_a_healthy_sink_acknowledges_it() {
+    let audit = SinkName::try_new("audit").unwrap();
+    let sinks = [sink_name(), audit.clone()];
+    let indexes = [users(), orders()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), sinks.clone()));
+    let mut log: Vec<Change> = Vec::new();
+    let mut arrivals: Vec<Duration> = Vec::new();
+    for n in 0..3000u32 {
+        let at = Duration::from_millis(10 * u64::from(n));
+        if n % 100 == 0 {
+            log.push(Change::upsert(2 * i64::from(n / 100)));
+            arrivals.push(at);
+        }
+        log.push(Change::upsert(2 * i64::from(n) + 1));
+        arrivals.push(at);
+    }
+    let db = Database::new(0, log);
+    let feed = Arc::new(Feed::new(&db).with_arrivals(arrivals));
+    let progress = Arc::new(crate::Progress::of(indexes.clone(), sinks.clone()));
+    let builder = Builder::two(&db, Behaviour::default());
+    let ingest = IngestEngine::new(
+        Arc::clone(&feed) as Arc<dyn ChangeCapture>,
+        Arc::clone(&builder) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        sinks.to_vec(),
+        Arc::clone(&progress),
+    )
+    .with_batch(batch(1))
+    .with_builds(2)
+    .with_max_waiting(MaxWaiting {
+        per_index: 4,
+        total: 8,
+    })
+    .with_max_pending_documents(100_000);
+    let healthy = Recorder::seeded(true);
+    let dead = Recorder::seeded(true);
+    dead.stall();
+    let mut tasks = Vec::new();
+    for (name, recorder) in [(sink_name(), &healthy), (audit, &dead)] {
+        let mappings = indexes
+            .iter()
+            .map(|index| IndexMapping {
+                index: index.clone(),
+                ..mapping()
+            })
+            .collect();
+        let engine = SinkEngine::new(
+            name,
+            Arc::clone(recorder) as Arc<dyn Sink>,
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            mappings,
+            Arc::clone(&progress),
+        );
+        engine.stage(Continuity::Resumed).await.unwrap();
+        tasks.push(tokio::spawn(async move {
+            let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+            engine.run(&mut rx).await
+        }));
+    }
+    let run = tokio::spawn(async move { ingest.run().await });
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let at_8 = progress.changes_read();
+    let users_landed = healthy
+        .written_ids()
+        .into_iter()
+        .flatten()
+        .filter(|id| id % 2 == 0)
+        .count();
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let at_20 = progress.changes_read();
+    assert!(
+        users_landed >= 5,
+        "setup: the healthy sink acknowledged users every second ({users_landed} by 8 s)"
+    );
+    assert_eq!(
+        at_8, at_20,
+        "users waits on the dead sink: not free, so orders stops growing and the reading stops"
+    );
+    dead.resume();
+    tokio::time::timeout(LIMIT * 4, run)
+        .await
+        .expect("the run ends once the dead sink resumes")
+        .unwrap()
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + LIMIT;
+    while healthy.state() != db.expected() || dead.state() != db.expected() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "everything lands on both sinks"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for task in tasks {
+        task.abort();
+    }
+}
