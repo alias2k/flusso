@@ -985,14 +985,20 @@ poll of one future:
 | a grant pass | one gate lock, two budget locks |
 | confirmation | one `landed()` walk over every lane, once per poll (I10) |
 
-**`together` for N (I1).** One `AtomicU64`: bit 0 the "being polled" mark, bits 1–63 groups; future
-`i` (reader 0, dispatcher 1, builder `k` at `2 + k`) raises group `1 + (i mod 63)`; a raised group
-polls every running future in it (past 61 indexes futures share a group and may be polled unwoken,
-which each tolerates). A poll starts at a rotating future, advanced every poll, and makes **at most 64
-future polls** (6a's 32 passes of two), so a poll holds the worker no longer than 6a's whatever N is.
-Ended futures are masked by a running mask per future, apart from the group bits: a group stays
-live while any future in it runs, and polling a group skips its ended futures. One location, so a
-wake is either taken by a pass or wakes the task on every architecture; the loom model is extended to three waking threads and a shared group.
+**`together` for N (I1).** One `AtomicU64`: bit 0 the "being polled" mark, bit 1 the stop's watch
+(6a's third future, polled only when it fires; its end raises the reader's and the dispatcher's groups),
+bits 2–63 groups; future `i` (reader 0, dispatcher 1, builder `k` at `2 + k`) raises group
+`2 + (i mod 62)`; a raised group polls every running future in it (past 60 indexes futures share a group
+and may be polled unwoken, which each tolerates: every one is an `async` block or a `poll_fn` that
+re-checks its state). A pass starts by **taking every raised bit of a running future or the watch with
+one `fetch_and`** (6a took one flag per future), then polls the raised running futures from a rotating
+start, advanced every poll; a poll makes **at most 64 future polls** (6a's 32 passes of two), so a
+poll holds the worker no longer than 6a's whatever N is. A poll cut by the cap mid-pass raises again,
+with one `fetch_or`, the groups it took and didn't poll, then ends with the task woken (6a's yield), so
+the next poll serves them. Ended futures are masked by a running mask per future, apart from the group
+bits: a group stays live while any future in it runs, and polling a group skips its ended futures. One
+location, so a wake is either taken by a pass or wakes the task on every architecture; the loom model is
+extended to three waking threads, two of them sharing a group, and the cap's re-raise.
 
 **Expected hot-path cost**, in 6a's terms (§3.8):
 
@@ -1027,8 +1033,11 @@ So one index should measure as 6a, which measures as `main` on CI (gate green at
   state (6a's protocol).
 - **Builder → dispatcher**: a builder's result (it returned, or its error) is written to its own cell
   and raises the dispatcher's flag; the dispatcher reads every cell when polled. A registration raises
-  the dispatcher's flag too (the `Progress` listener), so its "confirm once" runs after the builder that
-  registered, in the same poll or the next.
+  the dispatcher's flag too, so its "confirm once" runs after the builder that registered, in the same
+  poll or the next. Not through the `Progress` listener: it has one slot, the fence's (the daemon's
+  `on_registered`). `Progress` keeps a registration signal of its own for the engine run (a flag and an
+  `AtomicWaker`; the flag's swap wakes only on the first registration since the dispatcher last looked),
+  raised wherever the listener fires: a run routed, a build's lanes registered, a build released.
 - **Dispatcher → builder**: a request (the inbox and the flag); the **end signal** (§8); the **stop**:
   `together`'s watch fires once and wakes the reader and the dispatcher; the dispatcher sets each
   builder's stopping flag and raises it, once per builder per run. No builder registers on the stop.
@@ -1499,11 +1508,48 @@ interleavings around it.
 while it forgets every pending set and writes one cap per lane, so a `/status`, `/metrics`, `/wait` or
 confirmation read waits that long once per restart.
 
+#### 6b-1b against the code (checked before building)
+
+What 6b-1b builds, against the code after 6b-1a (`dafa4990`), with one builder over every index:
+
+- **Nothing depends on O1–O3.** No ADR wording is used (O1); no take is capped per index, the one
+  builder takes as 6a (O2); there is no exemption, so no exempt backlog at a stop (O3).
+- **The futures**: the reader (6a's), the dispatcher, one builder; the stop's watch beside them.
+- **The builder** is 6a's builder loop without the request lane, confirmation and the wind-down's
+  `drain_lanes`/`close_live`: it owns `Runs`, `Builds`, the snapshot, the lanes' producers, its request
+  inbox and coalescing deadline, and 6a's idle and page timing (`waited`; §9's "measured by the
+  dispatcher" is 6b-1c's: with one builder "no builder busy" is this builder's own measure). It sends its
+  result (the reader's end with the live stream, or its error) over a one-shot and returns.
+- **Coalescing on a deadline, the one builder's rule**: `main`'s over every sink with a lane (6b-1c makes
+  it per index). The first request opens a coalescing set with a deadline at `max_delay`; the set starts
+  its snapshot once every sink asked and the inbox is empty, else at the deadline. `main`'s "what is
+  already queued still joins" is kept by the dispatcher forwarding every request ready on each poll: a
+  builder that finds its inbox empty has every request the dispatcher had. Live batches are granted
+  meanwhile; on 6a and `main` they waited out the coalescing (up to `max_delay`): the one moment that
+  moves, earlier.
+- **The tick**: the dispatcher's, confirming always, and raising the builder's tick flag; the builder
+  grants on it only while the budget refused it (6a's backstop).
+- **The end**: the builder reports idle (the reader ended with its stream, no snapshot, no coalescing
+  set, inbox empty) and waits; the dispatcher signals the end only when the builder is idle, everything
+  it forwarded was received and its request lane is empty; then the builder settles and returns, and the
+  dispatcher confirms and returns `LiveEnded` (6a's order). A request forwarded after the builder said
+  idle clears it.
+- **The stop**: the watch wakes the reader and the dispatcher; the dispatcher raises the builder, which
+  drops its snapshot and coalescing set (their deliveries unacknowledged, redelivered next start, as 6a
+  dropped the snapshot), waits for the reader's end (R7), settles and returns; the dispatcher runs
+  `drain_lanes` and `close_live` (6a's `wind_down`) and returns `Stopped`.
+- **Errors and panics**: the builder's error reaches the dispatcher through its one-shot, a reader's
+  through the builder (it joins the reader, R7), and the dispatcher's own (the request lane, `drain_lanes`,
+  `close_live`) is the run's; the run's builds are abandoned after `together` returns, as 6a's. Every
+  future is polled inline, so a panic in any of them unwinds the engine run's task, as 6a's.
+- **Writers of shared state** (the list of 6b-1a's round 1): none added; the registration signal is
+  written beside the listener and read only by the dispatcher, in the task.
+
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
 | Rule | |
 | --- | --- |
-| I1 | **One task.** The reader, the dispatcher and a builder per index with lanes are futures of the engine run's task (`together` for N): one `AtomicU64`, a group bit per future, ended futures masked, a rotating start, at most 64 future polls per task poll. Builds and key reads run on tasks of their own, aborted with their futures. |
+| I1 | **One task.** The reader, the dispatcher and a builder per index with lanes are futures of the engine run's task (`together` for N): one `AtomicU64`, the watch's bit, a group bit per future, one `fetch_and` per pass, ended futures masked, a rotating start, at most 64 future polls per task poll, a cut pass's groups raised again. Builds and key reads run on tasks of their own, aborted with their futures. |
 | I2 | **Slices.** Per run the reader resolves, marks (with read numbers), counts (release), then hands each touched builder its slice in read order, or, to a folding builder, a `fetch_max` of its fold. A change touching no index is counted only. |
 | I3 | **Batches per index.** R3 over the builder's slices with its own last live grant; full at `max_changes` changes; the inbox drained first; full candidates start up to `builds` (6a), a partial one only while no live build of the index runs; no deadline at the end. |
 | I4 | **Takes.** Through the candidate's last change, oldest first, at most `max_changes` ids, skipping in-flight and page-held documents; the rest a standing candidate (full at `max_changes`). |
@@ -1512,7 +1558,7 @@ confirmation read waits that long once per restart.
 | I7 | **Hold and fold.** Written by the builder: held from a live refusal or a blocked publish to the next live grant or the publish's end; the fold entered with the hold drops the queued slices and ends when nothing waits; folding takes of at most `max_changes` ids as soon as possible, full ones up to `builds`. |
 | I8 | **Exempt** (6b-2). Written by the reader: latched when it finds the index held with `max_waiting_per_index` or more waiting, cleared when fewer wait; counted only toward `max_pending_documents`. |
 | I9 | **Gate.** G9′: persistent waiters, arms of the builder's loop, one per kind, joined only while a permit could be used, left before any await outside the loop and on a blocked publish; a shrink clears a refusal, a growth keeps it; slice 5's wake-all (G7) until the 24-index measurement says otherwise; G1–G8 otherwise unchanged; G7′ dropped. |
-| I10 | **Dispatcher.** Routes requests without waiting; confirms once per poll after a registration (raised by the `Progress` listener) and on the tick; reads each builder's result cell; sends the stop once per builder; signals the end (reader ended, request lane empty, every builder idle); returns the first error. |
+| I10 | **Dispatcher.** Routes requests without waiting (every request ready, each poll); confirms once per poll after a registration (raised by `Progress`'s registration signal, beside the fence's listener) and on the tick; reads each builder's result cell; sends the stop once per builder; signals the end (reader ended, request lane empty, every builder idle); returns the first error. |
 | I11 | **Backfill.** Coalescing per builder on a deadline; the walk token (6b-1c), coalescing kept while waiting for it; walks at once with K1's key-read task (6b-3). |
 | I12 | **End and stop.** Builders return only after the end signal; the stream's end builds everything; a stop builds and lands everything read under the deadline or fails with exit 1 naming what is left; no run ends `Ok` with a document waiting. |
 | I13 | **Failure.** A builder's error ends the run; the others dropped in place; a panic unwinds the task. |
