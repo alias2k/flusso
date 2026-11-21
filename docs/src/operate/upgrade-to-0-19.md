@@ -139,7 +139,7 @@ The backlog form shows up for a moment during live builds. One that stays means 
 | One stalled or [parked](#one-indexs-failure-parks-its-own-lane) index | the count could keep rising | the sink's count stops there, for all its indexes |
 | A change that gives no document for the sink (an update of a column no document reads) | counted when its empty batch was written | counted as soon as it is read and everything read before it is written |
 | A redelivered batch that had already landed | counted twice | counted once; the count never passes `changes_captured` |
-| After an ingest engine restart | the failed run's change was never counted: `changes_in_flight` stayed above `0` for good | back to `0` once everything lands. A change the ended run read but hadn't written counts no sooner than the restarted engine's first build; one that gave no document counts at once |
+| After an ingest engine restart | the failed run's change was never counted: `changes_in_flight` stayed above `0` for good | back to `0` once everything lands. A change the ended run read but hadn't written counts no sooner than its index's first build after the restart; one that gave no document counts at once |
 | The count going down | possible | never, also across an ingest engine restart |
 | A sink with no index | — | counts every change read |
 
