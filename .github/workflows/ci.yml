@@ -306,7 +306,7 @@ jobs:
             --profile ci --run-ignored all --no-tests=warn -E "$FILTER"
 
       - name: Save the boundary test's results
-        if: matrix.part.id == 'boundary' && (github.ref == 'refs/heads/main' || github.head_ref == 'ci/split-tests') && steps.boundary-cache.outputs.cache-hit != 'true'
+        if: matrix.part.id == 'boundary' && github.ref == 'refs/heads/main' && steps.boundary-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: target/tests/flusso-boundary/cache
