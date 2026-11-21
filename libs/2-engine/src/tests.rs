@@ -1303,11 +1303,24 @@ async fn reports_lifecycle_and_progress_to_the_observer() {
     harness.ingest = harness.ingest.with_observer(Arc::clone(&observer_dyn));
     let harness = harness.map_sinks(move |engine| engine.with_observer(Arc::clone(&observer_dyn)));
     harness.run(Continuity::Resumed).await;
-    // The confirm tick's first tick is immediate: it may close an idle wait
-    // of its own before the reader, on its own task, hands the first run
-    // over. Adjacent idle waits are one wait here.
-    let mut events = observer.events.lock().unwrap().clone();
-    events.dedup();
+    // The confirm tick's first tick is immediate and races the reader, on
+    // its own task, to the builder: it may close an idle wait of its own
+    // before the first run or after its batch. So the ingest side's idle
+    // waits are checked apart: one comes before the first resolve; the
+    // rest of the events are `main`'s, in `main`'s order.
+    let events = observer.events.lock().unwrap().clone();
+    let first_resolve = events
+        .iter()
+        .position(|event| event == "stage resolve live");
+    let first_idle = events.iter().position(|event| event == "stage idle");
+    assert!(
+        first_idle.is_some() && first_idle < first_resolve,
+        "an idle wait before the first resolve: {events:?}"
+    );
+    let events: Vec<String> = events
+        .into_iter()
+        .filter(|event| event != "stage idle")
+        .collect();
     assert_eq!(
         events,
         [
@@ -1316,7 +1329,6 @@ async fn reports_lifecycle_and_progress_to_the_observer() {
             "startup prepare",
             "startup open_live",
             "live",
-            "stage idle",
             "stage resolve live",
             "stage build live",
             "stage lane_wait live primary",

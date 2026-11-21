@@ -187,6 +187,9 @@ struct Feed {
     bursts: Option<(usize, Duration)>,
     open: bool,
     confirmed: Mutex<Vec<Position>>,
+    /// When each change arrives, from the stream's opening, whenever it is
+    /// polled: a source's own clock, not a gap after each poll.
+    arrivals: Option<Arc<Vec<Duration>>>,
 }
 
 impl Feed {
@@ -199,6 +202,7 @@ impl Feed {
             bursts: None,
             open: false,
             confirmed: Mutex::default(),
+            arrivals: None,
         }
     }
 
@@ -214,6 +218,12 @@ impl Feed {
 
     fn with_gaps(mut self, seed: u64) -> Self {
         self.gaps = Some(Arc::new(Mutex::new(Rng::new(seed))));
+        self
+    }
+
+    /// Change `n` arrives `arrivals[n]` after the stream opens.
+    fn with_arrivals(mut self, arrivals: Vec<Duration>) -> Self {
+        self.arrivals = Some(Arc::new(arrivals));
         self
     }
 
@@ -245,10 +255,13 @@ impl ChangeCapture for Feed {
         let delay = self.delay;
         let bursts = self.bursts;
         let open = self.open;
+        let arrivals = self.arrivals.clone();
+        let opened = tokio::time::Instant::now();
         let from = self.from.load(Ordering::SeqCst);
         Ok(Box::pin(futures::stream::unfold(from, move |next| {
             let db = Arc::clone(&db);
             let gaps = gaps.clone();
+            let arrivals = arrivals.clone();
             async move {
                 let Some(change) = db.log.get(next).copied() else {
                     if open {
@@ -258,6 +271,9 @@ impl ChangeCapture for Feed {
                 };
                 if let Some(delay) = delay {
                     tokio::time::sleep(delay).await;
+                }
+                if let Some(at) = arrivals.as_ref().and_then(|arrivals| arrivals.get(next)) {
+                    tokio::time::sleep_until(opened + *at).await;
                 }
                 if let Some((every, pause)) = bursts
                     && next % every == 0

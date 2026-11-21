@@ -515,6 +515,7 @@ async fn a_stop_while_the_builder_waits_on_a_full_lane_builds_every_run_handed_o
     );
     let recorder = Recorder::seeded(true);
     recorder.stall();
+    let stages = Arc::new(Stages::default());
     let mut deployment = Deployment::with_lanes(
         Feed::new(&db).with_delay(Duration::from_millis(1)).open(),
         Arc::clone(&builder),
@@ -530,6 +531,7 @@ async fn a_stop_while_the_builder_waits_on_a_full_lane_builds_every_run_handed_o
                 total: 1000,
             })
             .with_stop(stop.clone())
+            .with_observer(Arc::clone(&stages) as Arc<dyn Observer>)
     });
     let sink = deployment.start_sink().await;
     let driver = {
@@ -564,4 +566,274 @@ async fn a_stop_while_the_builder_waits_on_a_full_lane_builds_every_run_handed_o
         deployment.feed.confirmed.lock().unwrap().last(),
         Some(&Position::new(60))
     );
+    let resolved = stages
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(stage, _)| *stage == Stage::Resolve)
+        .count();
+    assert_eq!(
+        resolved, 61,
+        "each run's resolve is reported, the ones the barrier took from the channel too"
+    );
+}
+
+/// The batches `main`'s one task cut for live changes read at `arrivals`
+/// (sorted, each a document of its own), with builds of `build`, at most
+/// `permits` at once, `max_changes` and `max_delay` (ADR 0012 stage 8a, R3).
+/// A model of `main`'s loop, kept here so the engine is compared with the
+/// rule itself:
+///
+/// - a batch's first change is read at its arrival, or at the last live
+///   grant when it arrived before (reading stopped while a batch waited);
+///   the batch closes `max_delay` after that read, or at `max_changes`;
+/// - every change that arrived by then is read at once (the stream is
+///   drained), later ones as they arrive, until the batch closes;
+/// - it is granted the moment a permit is free and either no live build
+///   runs or it is full; otherwise it waits for a build to land.
+fn main_batches(
+    arrivals: &[Duration],
+    build: Duration,
+    max_changes: usize,
+    max_delay: Duration,
+    permits: usize,
+) -> Vec<usize> {
+    let mut batches = Vec::new();
+    let mut next = 0;
+    let mut running: Vec<Duration> = Vec::new();
+    let mut last_grant: Option<Duration> = None;
+    while next < arrivals.len() {
+        let opened = last_grant.map_or(arrivals[next], |grant| grant.max(arrivals[next]));
+        let closes = opened + max_delay;
+        let readable = |by: Duration| {
+            arrivals[next..]
+                .iter()
+                .take_while(|arrival| **arrival <= by && **arrival < closes)
+                .count()
+                .min(max_changes)
+        };
+        let mut now = opened;
+        loop {
+            running.retain(|end| *end > now);
+            let read = readable(now);
+            if read > 0 && running.len() < permits && (running.is_empty() || read == max_changes) {
+                batches.push(read);
+                running.push(now + build);
+                last_grant = Some(now);
+                next += read;
+                break;
+            }
+            let arrival = arrivals
+                .get(next + read)
+                .filter(|arrival| read < max_changes && **arrival < closes)
+                .copied();
+            let landing = running.iter().copied().min();
+            now = match (arrival, landing) {
+                (Some(arrival), Some(landing)) => arrival.min(landing),
+                (Some(at), None) | (None, Some(at)) => at,
+                (None, None) => break,
+            };
+        }
+    }
+    batches
+}
+
+/// Run `arrivals` (each a document of its own) through the engine with
+/// builds of `build`, and return each live build's size.
+async fn batches_of(
+    arrivals: Vec<Duration>,
+    build: Duration,
+    max_changes: usize,
+    builds: usize,
+) -> Vec<usize> {
+    let count = arrivals.len() as i64;
+    let db = Database::new(0, (0..count).map(Change::upsert).collect());
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            delay: Some(build),
+            ..Behaviour::default()
+        },
+    );
+    let stop = Stop::new();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals).open(),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+        1 << 20,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(max_changes))
+            .with_builds(builds)
+            .with_max_waiting(MaxWaiting {
+                per_index: 100_000,
+                total: 100_000,
+            })
+            .with_stop(stop.clone())
+    });
+    tokio::time::timeout(
+        Duration::from_secs(3600),
+        deployment.run_until_landed(&db, &stop, 0),
+    )
+    .await
+    .expect("everything lands");
+    builder.grants().iter().map(Vec::len).collect()
+}
+
+/// R3, a steady trickle behind builds slower than `max_delay`: one change
+/// every 10 ms, builds of 205 ms (off the 10 ms grid, so no grant and no
+/// arrival share an instant), `max_changes = 256`, four builds. `main` cut
+/// one change, then the five read within 50 ms of the second, then about
+/// twenty per build: everything read while a build ran. The builder cuts
+/// the same batches.
+#[tokio::test(start_paused = true)]
+async fn a_paced_trickle_behind_slow_builds_is_batched_as_main_batched_it() {
+    let arrivals: Vec<Duration> = (1..=600).map(|n| Duration::from_millis(10 * n)).collect();
+    let build = Duration::from_millis(205);
+    let expected = main_batches(&arrivals, build, 256, Duration::from_millis(50), 4);
+    assert_eq!(&expected[..4], [1, 5, 20, 20], "the model of main's rule");
+    assert_eq!(expected.iter().sum::<usize>(), 600);
+    assert_eq!(batches_of(arrivals, build, 256, 4).await, expected);
+}
+
+/// R3 under bursts: three bursts of 300 changes, a second apart, builds of
+/// 205 ms, `max_changes = 64`: full batches build four at once, the rest of a
+/// burst waits for the first to land, as `main` cut it.
+#[tokio::test(start_paused = true)]
+async fn bursts_behind_slow_builds_are_batched_as_main_batched_them() {
+    let arrivals: Vec<Duration> = (0..900)
+        .map(|n| Duration::from_millis(100 + 1000 * (n / 300)))
+        .collect();
+    let build = Duration::from_millis(205);
+    let expected = main_batches(&arrivals, build, 64, Duration::from_millis(50), 4);
+    assert_eq!(
+        expected,
+        [64, 64, 64, 64, 44].repeat(3),
+        "the model of main's rule"
+    );
+    assert_eq!(batches_of(arrivals, build, 64, 4).await, expected);
+}
+
+/// R7 with a full lead behind slow builds: a change every 10 ms, builds of
+/// 500 ms, one at a time, so the reader fills its lead (32 documents per
+/// index at `max_changes = 16`) while the first build runs; then the stop.
+/// What was read is built in batches of `max_changes`, not cut by
+/// `max_delay` (which would cut five changes a batch here), so a stop's work
+/// takes as few builds as it can.
+#[tokio::test(start_paused = true)]
+async fn a_stop_with_a_full_lead_behind_slow_builds_builds_batches_of_max_changes() {
+    let db = Database::new(0, (0..2000).map(Change::upsert).collect());
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            delay: Some(Duration::from_millis(500)),
+            ..Behaviour::default()
+        },
+    );
+    let stop = Stop::new();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db)
+            .with_arrivals((1..=2000).map(|n| Duration::from_millis(10 * n)).collect())
+            .open(),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+        1 << 20,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(16))
+            .with_builds(1)
+            .with_stop(stop.clone())
+    });
+    let progress = deployment.ingest.progress();
+    let sink = deployment.start_sink().await;
+    let granted_before = {
+        let builder = Arc::clone(&builder);
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            until("the reader fills its lead", || progress.waiting() >= 32).await;
+            let granted = builder.grants().len();
+            stop.request();
+            granted
+        })
+    };
+    let result = tokio::time::timeout(LIMIT, deployment.ingest.run())
+        .await
+        .expect("the stop ends the run");
+    let granted_before = granted_before.await.unwrap();
+    deployment.drained().await;
+    sink.abort();
+    assert!(result.is_ok(), "{result:?}");
+    let after: Vec<usize> = builder.grants()[granted_before..]
+        .iter()
+        .map(Vec::len)
+        .collect();
+    let (last, full) = after.split_last().expect("the stop builds what was read");
+    assert!(
+        full.iter().all(|size| *size == 16) && *last <= 16,
+        "the stop's batches: {after:?}"
+    );
+}
+
+#[derive(Debug, Default)]
+struct Captured(std::sync::atomic::AtomicU64);
+
+impl Observer for Captured {
+    fn on_change_captured(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// R9 and `changes_in_flight`: a build error ends the run while the reader
+/// is in the middle of a run; the reader is aborted and waited for before
+/// the run returns, and what it read and never handed over is counted read,
+/// so the changes captured and the changes read are equal the moment the
+/// run returns (and the next run's `forget_all` meets no old reader).
+#[tokio::test(start_paused = true)]
+async fn a_build_error_leaves_every_change_captured_counted_read_when_the_run_returns() {
+    let db = Database::new(0, (0..100).map(|n| Change::upsert(2 * n)).collect());
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            fail_once: Mutex::new(HashSet::from([0])),
+            resolve_delay: Some(Duration::from_millis(5)),
+            ..Behaviour::default()
+        },
+    );
+    let captured = Arc::new(Captured::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&captured) as Arc<dyn Observer>;
+    let mut deployment = Deployment::new(Feed::new(&db).open(), builder, Recorder::seeded(true))
+        .ingest(|ingest| ingest.with_batch(batch(16)).with_observer(observer));
+    let progress = deployment.ingest.progress();
+    let sink = deployment.start_sink().await;
+    let result = tokio::time::timeout(LIMIT, deployment.ingest.run())
+        .await
+        .unwrap();
+    assert!(result.is_err());
+    assert_eq!(
+        captured.0.load(Ordering::SeqCst),
+        progress.changes_read(),
+        "every change captured is counted read before the run returns"
+    );
+    sink.abort();
+}
+
+/// R3 cutting inside a run: bursts of 100 changes every 10 ms behind builds
+/// of 205 ms, `max_changes = 256`. The reader's runs are the bursts, `main`'s
+/// batches are 256 changes: a batch ends inside a run, and its rest starts
+/// the next batch.
+#[tokio::test(start_paused = true)]
+async fn a_batch_ends_inside_a_run_where_main_closed_it() {
+    let arrivals: Vec<Duration> = (0..1000)
+        .map(|n| Duration::from_millis(10 * (1 + n / 100)))
+        .collect();
+    let build = Duration::from_millis(205);
+    let expected = main_batches(&arrivals, build, 256, Duration::from_millis(50), 4);
+    assert!(
+        expected.iter().any(|size| size % 100 != 0),
+        "the model cuts inside a burst: {expected:?}"
+    );
+    assert_eq!(batches_of(arrivals, build, 256, 4).await, expected);
 }

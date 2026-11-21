@@ -25,8 +25,9 @@
 //! requested, or the stream ends, the reader hands over the run it was
 //! reading, closes the channel by ending, and returns the live stream, which
 //! the builder closes. An error (the stream's, a resolve's) ends it the same
-//! way, without handing over the run in progress; its changes still count as
-//! read, as each change did when `main` read it.
+//! way, without handing over the run in progress. On every path its changes
+//! count as read, the abort included (the run's guard counts them when it is
+//! dropped), as each change did when `main` read it.
 //!
 //! ```text
 //! stream ─▶ resolve ─▶ mark ─▶ count ─▶ Run ──channel──▶ builder
@@ -35,7 +36,7 @@
 //! ```
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 
 use futures::{FutureExt, StreamExt};
 use kernel::Position;
@@ -52,22 +53,25 @@ use crate::progress::Progress;
 use crate::stop::Stop;
 
 /// One run, handed to the builder once its documents are marked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Run {
-    /// Its last change.
-    pub(super) position: Position,
-    /// How many changes it read.
-    pub(super) changes: usize,
-    /// How many changes had been read through it, over the engine's life:
-    /// what a step through it closes at.
+    /// Each change, in order, with the moment the reader read it: the
+    /// builder cuts batches by these as `main` cut them (R3).
+    pub(super) changes: Vec<(Position, Instant)>,
+    /// How many changes had been read through its last, over the engine's
+    /// life: what a step through it closes at.
     pub(super) read: u64,
-    /// When its first change arrived: its deadline is this plus `max_delay`,
-    /// and the builder's idle wait ends here.
-    pub(super) started: Instant,
     /// How long reading and resolving it took: the builder reports it as
     /// [`Stage::Resolve`](crate::Stage::Resolve) once it closed the idle
     /// wait before it, so the two are reported in the order they happened.
     pub(super) resolved: Duration,
+}
+
+impl Run {
+    /// When its first change was read: the builder's idle wait ends here.
+    pub(super) fn started(&self) -> Option<Instant> {
+        self.changes.first().map(|(_, at)| *at)
+    }
 }
 
 /// What the reader and the builder share for the lead.
@@ -78,6 +82,9 @@ pub(super) struct Lead {
     taken: Notify,
     /// How many changes had been read through the last granted batch.
     granted: AtomicU64,
+    /// The reader waits, or is about to: a grant wakes it only then, so a
+    /// reader that keeps up costs no wake-up.
+    waiting: AtomicBool,
 }
 
 impl Lead {
@@ -87,6 +94,7 @@ impl Lead {
             max,
             taken: Notify::new(),
             granted: AtomicU64::new(read),
+            waiting: AtomicBool::new(false),
         })
     }
 
@@ -94,7 +102,12 @@ impl Lead {
     /// documents taken: the reader may have room again.
     pub(super) fn granted(&self, read: u64) {
         self.granted.fetch_max(read, Ordering::Relaxed);
-        self.taken.notify_waiters();
+        // Pairs with the fence in `Reader::room`: either the reader sees
+        // this grant's take when it reads the lead, or this sees it waiting.
+        fence(Ordering::SeqCst);
+        if self.waiting.load(Ordering::Relaxed) {
+            self.taken.notify_waiters();
+        }
     }
 
     /// Whether the reader is as far ahead as it may be.
@@ -137,18 +150,31 @@ pub(super) struct Reader {
     pub(super) checked: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
-/// The run being read: its documents with their changes' positions, and
-/// where it stands.
-struct Reading {
+/// The run being read: its documents with their changes' positions, each
+/// change with when it was read, and how many changes were read and not yet
+/// counted. Dropped with changes still uncounted (an error, the task aborted
+/// with its engine run), it counts them read, so `changes_captured` and the
+/// read count move together on every path, as `main` counted each change as
+/// it read it.
+struct Reading<'a> {
+    progress: &'a Progress,
     marks: Vec<(DocumentId, Position)>,
-    changes: usize,
-    position: Option<Position>,
+    changes: Vec<(Position, Instant)>,
+    uncounted: usize,
     deadline: Instant,
 }
 
-impl Reading {
-    fn is_open(&self, max_changes: usize) -> bool {
-        self.changes < max_changes && Instant::now() < self.deadline
+impl Reading<'_> {
+    fn is_open(&self, max_changes: usize, now: Instant) -> bool {
+        self.changes.len() < max_changes && now < self.deadline
+    }
+}
+
+impl Drop for Reading<'_> {
+    fn drop(&mut self) {
+        if self.uncounted > 0 {
+            self.progress.read_changes(self.uncounted as u64);
+        }
     }
 }
 
@@ -156,9 +182,10 @@ impl Reader {
     /// Read runs until the stop or the stream's end (see the module docs).
     pub(super) async fn run(self, mut live: LiveStream) -> Result<Ended> {
         let mut reading = Reading {
+            progress: &self.progress,
             marks: Vec::with_capacity(self.batch.max_changes),
-            changes: 0,
-            position: None,
+            changes: Vec::new(),
+            uncounted: 0,
             deadline: Instant::now(),
         };
         loop {
@@ -173,20 +200,9 @@ impl Reader {
             };
             let started = Instant::now();
             reading.deadline = started + self.batch.max_delay;
-            let read = match self.resolve(&mut reading, position, event).await {
-                Ok(()) => self.drain_ready(&mut live, &mut reading).await,
-                Err(error) => Err(error),
-            };
-            let ended = match read {
-                Ok(ended) => ended,
-                Err(error) => {
-                    // Read, though never handed over: counted as `main`
-                    // counted each change as it read it. The next engine run
-                    // closes them into a step no lane is routed.
-                    self.progress.read_changes(reading.changes as u64);
-                    return Err(error);
-                }
-            };
+            reading.changes = Vec::with_capacity(self.batch.max_changes.min(64));
+            self.resolve(&mut reading, position, event, started).await?;
+            let ended = self.drain_ready(&mut live, &mut reading).await?;
             self.hand_over(&mut reading, started);
             if ended {
                 return Ok(end(live, true, false));
@@ -202,11 +218,11 @@ impl Reader {
             let taken = self.lead.taken.notified();
             tokio::pin!(taken);
             taken.as_mut().enable();
-            if self.stop.is_requested() {
-                return false;
-            }
-            if !self.lead.reached(&self.progress) {
-                return true;
+            self.lead.waiting.store(true, Ordering::Relaxed);
+            fence(Ordering::SeqCst);
+            if self.stop.is_requested() || !self.lead.reached(&self.progress) {
+                self.lead.waiting.store(false, Ordering::Relaxed);
+                return !self.stop.is_requested();
             }
             #[cfg(test)]
             if let Some(checked) = &self.checked {
@@ -222,30 +238,34 @@ impl Reader {
     /// Read every change the stream has ready right now into the run, until
     /// it is full, past its deadline, the stream would block, or the stop is
     /// requested. Returns whether the stream ended.
-    async fn drain_ready(&self, live: &mut LiveStream, reading: &mut Reading) -> Result<bool> {
-        while reading.is_open(self.batch.max_changes) && !self.stop.is_requested() {
+    async fn drain_ready(&self, live: &mut LiveStream, reading: &mut Reading<'_>) -> Result<bool> {
+        loop {
+            let now = Instant::now();
+            if !reading.is_open(self.batch.max_changes, now) || self.stop.is_requested() {
+                return Ok(false);
+            }
             match live.next().now_or_never() {
                 None => return Ok(false),
                 Some(None) => return Ok(true),
                 Some(Some(Err(error))) => return Err(error.into()),
                 Some(Some(Ok((position, event)))) => {
-                    self.resolve(reading, position, event).await?;
+                    self.resolve(reading, position, event, now).await?;
                 }
             }
         }
-        Ok(false)
     }
 
     /// Resolve one change into the run: the documents it touches, each with
     /// its position.
     async fn resolve(
         &self,
-        reading: &mut Reading,
+        reading: &mut Reading<'_>,
         position: Position,
         event: ChangeEvent,
+        at: Instant,
     ) -> Result<()> {
         self.observer.on_change_captured();
-        reading.changes += 1;
+        reading.uncounted += 1;
         let affected = self
             .resolver
             .resolve(event.table(), event.key(), event.before(), event.after())
@@ -254,22 +274,22 @@ impl Reader {
         reading
             .marks
             .extend(affected.into_iter().map(|id| (id, position)));
-        reading.position = Some(position);
+        reading.changes.push((position, at));
         Ok(())
     }
 
     /// Mark the run's documents, count its changes, then hand it over (R1).
-    fn hand_over(&self, reading: &mut Reading, started: Instant) {
-        let Some(position) = reading.position.take() else {
+    fn hand_over(&self, reading: &mut Reading<'_>, started: Instant) {
+        if reading.changes.is_empty() {
             return;
-        };
+        }
         self.progress.mark(reading.marks.drain(..));
-        let read = self.progress.read_changes(reading.changes as u64);
+        let read = self
+            .progress
+            .read_changes(std::mem::take(&mut reading.uncounted) as u64);
         let run = Run {
-            position,
             changes: std::mem::take(&mut reading.changes),
             read,
-            started,
             resolved: started.elapsed(),
         };
         #[cfg(test)]
@@ -352,6 +372,22 @@ impl ReaderTask {
     }
 }
 
+impl ReaderTask {
+    /// Abort the reader and wait until it is gone, so nothing it does (a
+    /// mark, a count, its stream) outlives the engine run that ends here.
+    /// Whatever it returned, or a panic of its, is dropped: the run ends on
+    /// its own error.
+    pub(super) async fn abort_and_wait(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
+/// Dropped without [`ReaderTask::abort_and_wait`] (the engine run's future
+/// dropped: a supervisor's abort, a stop's deadline), the reader is only
+/// aborted: it stops at its next poll.
 impl Drop for ReaderTask {
     fn drop(&mut self) {
         if let Some(handle) = self.0.take() {

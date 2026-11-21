@@ -60,22 +60,22 @@ impl IngestEngine {
             // candidate's last change, offered only once none of them is in
             // a running build: `main`'s admission, checked before a permit is
             // taken. Its estimate counts distinct documents.
-            let live = runs
-                .candidate()
-                .filter(|candidate| !self.waiting_held(builds, candidate.position))
-                .map(|candidate| LiveCandidate {
+            let live = runs.candidate(true).and_then(|candidate| {
+                Some(LiveCandidate {
                     live: candidate,
-                    documents: self.progress.waiting_by_index_through(candidate.position),
+                    documents: self.waiting(builds, candidate.position)?,
                     full: candidate.full,
                     changes: candidate.changes > 0,
-                });
+                })
+            });
             let backfill = snapshot
                 .as_ref()
                 .filter(|active| active.batch.count > 0 && (active.batch.is_full() || active.done))
                 .map(|active| active.batch.ids.as_slice());
             match builds.choose(live, backfill) {
-                Some(Grant::Live(candidate, admitted)) => {
-                    self.start_live(runs, builds, candidate, &admitted).await;
+                Some(Grant::Live(candidate, admitted, deferred)) => {
+                    self.start_live(runs, builds, candidate, &admitted, deferred)
+                        .await;
                 }
                 Some(Grant::Backfill) => {
                     if let Some(active) = snapshot.as_mut() {
@@ -120,13 +120,13 @@ impl IngestEngine {
         builds.woke(Wake::Settle);
         loop {
             self.publish_ready(builds, lanes).await?;
-            let live = runs.candidate();
+            let live = runs.candidate(false);
             if let Some(candidate) = live
-                && !self.waiting_held(builds, candidate.position)
-                && let Some(admitted) = builds
-                    .can_take_last(&self.progress.waiting_by_index_through(candidate.position))
+                && let Some(documents) = self.waiting(builds, candidate.position)
+                && let Some((admitted, deferred)) = builds.can_take_last(&documents)
             {
-                self.start_live(runs, builds, candidate, &admitted).await;
+                self.start_live(runs, builds, candidate, &admitted, deferred)
+                    .await;
                 continue;
             }
             if builds.running() == 0 {
@@ -151,13 +151,13 @@ impl IngestEngine {
         }
     }
 
-    /// Whether a running build holds one of the documents waiting through
-    /// `through`: a take now would leave it behind, so the live batch waits,
-    /// as `main`'s did.
-    fn waiting_held(&self, builds: &Builds, through: Position) -> bool {
+    /// Each index's documents waiting through `through`, oldest waiting
+    /// first, or `None` while a running build holds one of them: a take now
+    /// would leave it behind, so the live batch waits, as `main`'s did.
+    fn waiting(&self, builds: &Builds, through: Position) -> Option<Vec<(IndexName, usize)>> {
         let held = |index: &IndexName, key: &source::RowKey| builds.holds(index, key);
         let held: Option<Holds<'_>> = builds.holds_some().then_some(&held);
-        self.progress.any_waiting_held_through(held, Some(through))
+        self.progress.waiting_through(through, held)
     }
 
     /// Take the documents waiting through `candidate`'s last change of every
@@ -178,15 +178,10 @@ impl IngestEngine {
         builds: &mut Builds,
         candidate: Candidate,
         admitted: &[IndexName],
+        deferred: Vec<IndexName>,
     ) {
         let position = candidate.position;
         let (ids, taken) = self.take_all(builds, admitted, position);
-        let deferred: Vec<IndexName> = self
-            .progress
-            .waiting_by_index_through(position)
-            .into_iter()
-            .map(|(index, _)| index)
-            .collect();
         runs.granted(candidate, !deferred.is_empty());
         let step = self.progress.close_step_through(candidate.read);
         let job = Job::Live {

@@ -194,6 +194,10 @@ async fn settle() {
     tokio::time::sleep(Duration::from_millis(10)).await;
 }
 
+fn last(run: &Run) -> Position {
+    run.changes.last().unwrap().0
+}
+
 fn received(runs: &mut mpsc::UnboundedReceiver<Run>) -> Vec<Run> {
     let mut received = Vec::new();
     while let Ok(run) = runs.try_recv() {
@@ -235,7 +239,10 @@ async fn a_run_is_marked_and_counted_before_it_is_handed_over() {
     assert_eq!(*seen.lock().unwrap(), [(3, 3, 3)]);
     let runs = received(&mut started.runs);
     assert_eq!(runs.len(), 1, "three ready changes are one run");
-    assert_eq!((runs[0].position, runs[0].changes), (Position::new(2), 3));
+    assert_eq!(
+        (last(&runs[0]), runs[0].changes.len()),
+        (Position::new(2), 3)
+    );
 }
 
 /// R2: one index's waiting documents stop the reading at the per-index
@@ -264,7 +271,7 @@ async fn the_reader_waits_at_the_lead_per_index_and_resumes_after_a_take() {
     let first = received(&mut started.runs);
     started
         .progress
-        .take_through(&users(), first[0].position, &|_| false)
+        .take_through(&users(), last(&first[0]), &|_| false)
         .unwrap();
     started.lead.granted(first[0].read);
     settle().await;
@@ -383,7 +390,10 @@ async fn a_stop_mid_run_hands_over_what_the_reader_read() {
     assert!(!ended.stream_ended);
     let runs = received(&mut started.runs);
     assert_eq!(runs.len(), 1);
-    assert_eq!((runs[0].position, runs[0].changes), (Position::new(4), 3));
+    assert_eq!(
+        (last(&runs[0]), runs[0].changes.len()),
+        (Position::new(4), 3)
+    );
     assert_eq!(started.progress.waiting(), 3);
     assert!(
         started.runs.recv().await.is_none(),
