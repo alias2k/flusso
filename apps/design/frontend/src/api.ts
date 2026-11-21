@@ -311,6 +311,7 @@ export interface ConfigToml {
     index_budget_share?: number;
     max_waiting_per_index?: number;
     max_waiting?: number;
+    max_pending_documents?: number;
   };
   backoff?: { initial_ms?: number; max_ms?: number };
   server?: Record<string, unknown>;

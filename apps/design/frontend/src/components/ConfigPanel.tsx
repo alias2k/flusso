@@ -266,6 +266,18 @@ export function ConfigPanel({
           </Field>
         </div>
         <div className="w-28">
+          <Field label="concurrency.max_pending_documents">
+            <Num
+              value={config.concurrency?.max_pending_documents}
+              onChange={(v) =>
+                onChange({ ...config, concurrency: { ...config.concurrency, max_pending_documents: v } })
+              }
+              placeholder="1000000"
+              min={1}
+            />
+          </Field>
+        </div>
+        <div className="w-28">
           <Field label="backoff.initial_ms">
             <Num
               value={config.backoff?.initial_ms}
