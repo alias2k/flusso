@@ -2180,6 +2180,57 @@ index has its cap, which the mutation shows).
   at or going on below `max_pending_documents` each log at most once a minute per index (the first
   always).
 
+#### 6b-2, fix round 2 (the review of `b33a2965`)
+
+The rule is in §5 ("Some other index" means a free index), written before the code.
+
+| Finding | Fix | Tests (fail before the fix) |
+| --- | --- | --- |
+| 1: a whole sink down beside a quiet, light or backfilling index still read to `max_pending_documents` ("not held" taken for "making progress") | an index is free while not held and nothing of it waits on a lane unacknowledged for `STUCK_AFTER` (5 s); the record per index (`ingest/outstanding.rs`) counts every published item, live or backfill, until every lane let go of it | (a) `with_a_whole_sink_down_a_silent_index_lets_the_others_read_on_to_the_pending_cap` (documents the stated behaviour), (b) `with_a_whole_sink_down_one_unacknowledged_change_stops_the_reading_after_five_seconds` (the reviewer's idle index with one change never acknowledged: stops, at most five seconds of changes past the bounds), (c) `with_a_whole_sink_down_a_light_index_is_not_free_once_its_item_waits_five_seconds` (stops by 8 s, its share would take ~28 s), (d) `with_a_whole_sink_down_a_backfilling_index_is_not_free_once_its_items_wait_five_seconds`, (e) `one_stuck_index_beside_a_quiet_and_a_flowing_one_is_exempt` (and the acceptance test, unchanged), (f) `a_slow_healthy_index_lets_the_reading_go_on_after_each_acknowledgement`; `an_index_is_stuck_while_its_items_wait_five_seconds_unacknowledged` (unit) |
+| 2: the throttle could leave the opposite of the current state as the last line | the pair throttled together; the current state logged at the next check once the minute is over; the tick re-checks a waiting reader each second | `the_last_line_logged_names_the_current_state_within_a_minute_of_a_change` (the reviewer's), `an_index_hovering_at_its_cap_logs_each_kind_of_line_at_most_once_a_minute` (rewritten for the pair) |
+| 3: §12's bound for `k` indexes rejoining | corrected | — |
+| 4: loose whole-sink bounds | each tightened to its measured value plus one (15/8, 15/9, 17/11 for two and three indexes; 9/5 and 11/5 for one) | — |
+| 5: no engine test of a hold ending's wake | — | `the_reading_goes_on_within_half_a_second_of_a_hold_ending` (measured from `users`' first write after its release, so the tick couldn't carry it) |
+
+**Not as suggested.** The record is not the daemon's stall age (`daemon::Stalls`): that lives a layer
+above the engine and counts live items only, so a backfilling-only index would look free (§5). Its
+cost: per published batch, one allocation per index (the guard beside the budget's charge in the
+item's `Hold`) and an atomic add; per item let go by every lane, a clock read, a store and an atomic
+subtract; per lead check while some index is held, one load per index (a clock read and two loads for
+an index with items outstanding); one wake of a waiting reader per second while the lead exempts. With
+one builder the record is kept (the guards ride every item) but never read.
+
+**Mutations** (round 2):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| free | `STUCK_AFTER` ignored (stuck as soon as anything is outstanding) | `an_index_is_stuck_while_its_items_wait_five_seconds_unacknowledged`, `a_slow_healthy_index_lets_the_reading_go_on_after_each_acknowledgement` |
+| free | outstanding ignored (never stuck) | the unit test, (b), (c), (d), (f) |
+| free | a quiet index with nothing outstanding counted stuck | the unit test, (a), (e), and eleven more exemption tests |
+| free | backfill items not counted | (d) |
+| self-correction | the tick wakes nobody | (f) |
+| log | a suppressed line marked logged (round 1's per-kind bug) | `an_index_hovering_at_its_cap_logs_each_kind_of_line_at_most_once_a_minute` |
+
+**User-visible, changed by round 2** (for the documentation agent; replaces round 1's whole-sink and log
+lines; the manual's "a whole sink down stops the reading" is not true as written):
+
+- **An index counts as working ("free") while it is not stuck and nothing of it has waited on the sink
+  for an acknowledgement for 5 seconds without any being acknowledged.** An index with no changes and
+  nothing sent is working as far as flusso can tell. The 5 seconds are fixed, not a setting.
+- **A stuck index is exempt only while another index is working.** Once its own hold ends, or no other
+  index is working, it may build its backlog down but no longer add to it; an index merely slow (never
+  refused) paces the reading at its cap.
+- **A whole sink down** (every index of two or more stuck at once): within about 5 seconds of each
+  index's first unacknowledged change, no index with traffic is working, and the reading stops at
+  `max_waiting_per_index` / `max_waiting` as before 0.19. In those first seconds an index already stuck
+  may keep about 5 seconds of its changes. An index that gets **no** change at all during the outage
+  counts as working, so the stuck ones read on until `max_pending_documents` (about 266 MB at the
+  default 1,000,000), as they would beside a healthy quiet index, which flusso cannot tell apart; the
+  first change that index gets and the sink doesn't acknowledge within 5 seconds stops the reading.
+- **Logs**: within a minute of any change (plus up to a second), the last exemption line logged for an
+  index names its current state (exempt or not; the reading stopped at `max_pending_documents` or
+  reading on); at most one line of each pair a minute per index.
+
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
 | Rule | |
@@ -2201,9 +2252,10 @@ index has its cap, which the mutation shows).
 **Bounds, from the rules:**
 
 - Documents waiting, non-exempt: per index ≤ `max_waiting_per_index` + one run's; together ≤
-  `max_waiting` + one run's, except briefly when an exempt index's latch clears and it rejoins the total
-  with up to `max_waiting_per_index − 1` documents: then ≤ `max_waiting + max_waiting_per_index − 2` +
-  one run's, until it drains (review of #452). Exempt, together: ≤ `max_pending_documents` + one run's.
+  `max_waiting` + one run's, except when exempt indexes' latches clear and they rejoin the total with up
+  to `max_waiting_per_index − 1` documents each: with `k` of them rejoining while the reader is stopped,
+  ≤ `max_waiting − 1 + k · (max_waiting_per_index − 1)` + one run's, for as long as they take to drain
+  below it, not just briefly (review rounds 1 and 2 of #452). Exempt, together: ≤ `max_pending_documents` + one run's.
   A frozen exempt index: ≤ the count it stopped growing at + one run's.
 - Changes queued on builders: read ahead ≤ `max_waiting` + one run (the global bound); none on a
   folding builder.
