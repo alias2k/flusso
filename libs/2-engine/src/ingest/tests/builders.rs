@@ -557,3 +557,192 @@ async fn a_stop_with_an_exempt_index_still_stuck_does_not_end() {
         .expect("a clean stop");
     sink.abort();
 }
+
+/// I6 (6b-2), end to end: the exempt indexes together stop the reading for
+/// every index at `max_pending_documents`. `orders` is exempt and changes a
+/// new document each time; at ten of them waiting nothing more is read, for
+/// `users` either, until `orders` is let through.
+#[tokio::test(start_paused = true)]
+async fn reading_stops_for_every_index_at_max_pending_documents() {
+    let (db, builder, recorder) = stuck_orders(60, 60);
+    let mut deployment = Deployment::with_lanes(Feed::new(&db), builder, Arc::clone(&recorder), 2)
+        .ingest(|ingest| {
+            ingest
+                .with_batch(batch(1))
+                .with_builds(2)
+                .with_max_pending_documents(10)
+        });
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let first = (progress.changes_read(), progress.waiting_by_index());
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let second = progress.changes_read();
+            recorder.refused_indexes.lock().unwrap().clear();
+            (first, second)
+        })
+    };
+    tokio::time::timeout(LIMIT * 2, deployment.run_to_end(0))
+        .await
+        .expect("the run ends once orders is let through");
+    let ((read, waiting), later) = watcher.await.unwrap();
+    assert!(read < 120, "the reading stopped short of the log: {read}");
+    assert_eq!(read, later, "and stayed stopped");
+    assert!(
+        waiting
+            .iter()
+            .any(|(index, count)| index.as_ref() == "orders" && *count == 10),
+        "orders at max_pending_documents: {waiting:?}"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// D4: an index reaches its exemption with nothing else in flight. Only
+/// `orders` changes at first, so the reader waits at its cap with nothing
+/// to wake it but `orders`' own builder becoming held (its lane full); then
+/// it latches `orders` exempt and reads `users`' changes, which land.
+#[tokio::test(start_paused = true)]
+async fn an_index_reaches_its_exemption_with_nothing_else_in_flight() {
+    let log: Vec<Change> = (0..10)
+        .map(|n| Change::upsert(2 * n + 1))
+        .chain((0..5).map(|n| Change::upsert(2 * n)))
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(&db, Behaviour::default());
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_delay(Duration::from_millis(1)),
+        builder,
+        Arc::clone(&recorder),
+        2,
+    )
+    .ingest(|ingest| ingest.with_batch(batch(1)).with_builds(2));
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            let landed = tokio::time::timeout(Duration::from_secs(10), async {
+                while recorder.state().keys().filter(|id| *id % 2 == 0).count() < 5 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await;
+            recorder.refused_indexes.lock().unwrap().clear();
+            landed
+        })
+    };
+    tokio::time::timeout(LIMIT * 2, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    watcher
+        .await
+        .unwrap()
+        .expect("users' changes landed while orders was stuck");
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// §3.9 §6 on release: a released exempt index drains its backlog in
+/// `max_changes` takes through the same line as every builder, so another
+/// index's changes keep their turns. `orders` has 120 documents waiting
+/// when it is let through (thirty takes, about 300 ms); `users` changes
+/// every 20 ms throughout; one permit, 10 ms builds. While the backlog
+/// drains, each `users` change still lands within 100 ms of being read (its
+/// 50 ms batch and a turn or two), where a line that let the backlog's takes
+/// go first would leave it waiting for the whole drain.
+#[tokio::test(start_paused = true)]
+async fn a_released_backlog_drains_in_parts_beside_another_indexs_changes() {
+    let users_changes = 1500;
+    let log: Vec<Change> = (0..120)
+        .map(|n| Change::upsert(2 * n + 1))
+        .chain((0..users_changes).map(|n| Change::upsert(2 * (n % 8))))
+        .collect();
+    let arrivals: Vec<Duration> = (0..120)
+        .map(Duration::from_millis)
+        .chain(
+            (0..users_changes as u64)
+                .map(|n| Duration::from_secs(1) + Duration::from_millis(20 * n)),
+        )
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            delay: Some(Duration::from_millis(10)),
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        2,
+    )
+    .ingest(|ingest| ingest.with_batch(batch(4)).with_builds(1));
+    let release = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            recorder.refused_indexes.lock().unwrap().clear();
+        })
+    };
+    // Users change `n` writes version `n + 121` and is read when it arrives.
+    let opened = tokio::time::Instant::now();
+    tokio::time::timeout(LIMIT * 2, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    release.await.unwrap();
+    let orders_builds: Vec<usize> = builder
+        .grants()
+        .iter()
+        .filter(|ids| ids.iter().all(|id| id % 2 == 1))
+        .map(Vec::len)
+        .collect();
+    assert!(
+        orders_builds.iter().all(|size| *size <= 4),
+        "the backlog drains in max_changes parts: {orders_builds:?}"
+    );
+    let written = recorder.written_at.lock().unwrap().clone();
+    let orders_landed: Vec<tokio::time::Instant> = (0..120)
+        .filter_map(|n| written.get(&(2 * n + 1)).copied())
+        .collect();
+    let drain = (
+        *orders_landed.iter().min().unwrap(),
+        *orders_landed.iter().max().unwrap(),
+    );
+    assert!(
+        drain.1 - drain.0 >= Duration::from_millis(200),
+        "the backlog took several turns to drain: {:?}",
+        drain.1 - drain.0
+    );
+    let landings = recorder.landings.lock().unwrap().clone();
+    let slow: Vec<u64> = (0..users_changes as u64)
+        .filter(|n| {
+            let read = opened + Duration::from_secs(1) + Duration::from_millis(20 * n);
+            read >= drain.0 && read + Duration::from_millis(100) <= drain.1
+        })
+        .filter(|n| {
+            let read = opened + Duration::from_secs(1) + Duration::from_millis(20 * n);
+            let id = 2 * (*n as i64 % 8);
+            !landings.iter().any(|(of, version, landed)| {
+                *of == id && *version >= 121 + n && *landed <= read + Duration::from_millis(100)
+            })
+        })
+        .collect();
+    assert!(
+        slow.is_empty(),
+        "users changes made during the drain waited for it: {slow:?}"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}

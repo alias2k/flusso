@@ -2077,8 +2077,10 @@ fn a_frontier_never_passes_the_read_count() {
 
 /// The frontier and the landing point against a model kept apart from the
 /// code: seeded reads marking documents of three indexes, grants of one
-/// index's builder at a time (its index taken whole, capped at one, or
-/// around a held document; its lanes registered with an item or as an empty
+/// index's builder at a time (its index taken whole or capped at one, no
+/// grant while a held document waits, as the engine grants none, and one in
+/// four a backlog take at the newest position waiting, as a folding or
+/// exempt builder takes; its lanes registered with an item or as an empty
 /// build under its token, no other index's lanes), landings in lane order
 /// and redelivered landings, reads cut before their marks (checked until
 /// the run ends), and ended runs (with a build taken and never published),
@@ -2339,7 +2341,20 @@ mod model {
             {
                 return;
             }
-            let taken = progress.take_through_at_most(&index, p(seq), max, &nothing_held);
+            // One grant in four takes the index's backlog, as a folding or
+            // exempt builder does (6b-2): the oldest `max` waiting, at the
+            // newest position waiting.
+            let backlog = rng.below(4) == 0;
+            let last = if backlog {
+                progress.newest_waiting(&index).unwrap_or(p(seq))
+            } else {
+                p(seq)
+            };
+            let taken = if backlog {
+                progress.take(&index, max, &nothing_held)
+            } else {
+                progress.take_through_at_most(&index, p(seq), max, &nothing_held)
+            };
             let frontier = taken
                 .as_ref()
                 .map_or_else(|| progress.frontier(&index), |take| take.frontier);
@@ -2379,7 +2394,7 @@ mod model {
             for (lane, _) in lanes.iter().filter(|(lane, _)| lane.index == index) {
                 let entry = match &taken {
                     Some(take) if rng.below(4) == 0 => {
-                        progress.skipped_build(lane, p(seq), Some(take.token), steps[&index]);
+                        progress.skipped_build(lane, last, Some(take.token), steps[&index]);
                         None
                     }
                     Some(take) => {
@@ -2388,14 +2403,14 @@ mod model {
                             lane,
                             key,
                             take.oldest,
-                            p(seq),
+                            last,
                             take.token,
                             steps[&index],
                         );
                         Some(key)
                     }
                     None => {
-                        progress.skipped_step(lane, p(seq), steps[&index]);
+                        progress.skipped_step(lane, last, steps[&index]);
                         None
                     }
                 };

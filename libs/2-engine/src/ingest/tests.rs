@@ -713,6 +713,8 @@ struct Recorder {
     marked_at: Mutex<BTreeMap<String, tokio::time::Instant>>,
     /// When each document was first written.
     written_at: Mutex<BTreeMap<i64, tokio::time::Instant>>,
+    /// Every write of a version: the document, the version, when.
+    landings: Mutex<Vec<(i64, u64, tokio::time::Instant)>>,
 }
 
 impl Recorder {
@@ -844,6 +846,12 @@ impl Sink for Recorder {
                 *seen = version.max(*seen);
             }
             last.insert(id, version);
+            if let Some(version) = version {
+                self.landings
+                    .lock()
+                    .unwrap()
+                    .push((id, version, tokio::time::Instant::now()));
+            }
             self.written_at
                 .lock()
                 .unwrap()
@@ -1248,21 +1256,45 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
     let feed = Feed::new(&db).with_gaps(seed.wrapping_mul(17));
     let feed = if open { feed.open() } else { feed };
     let stop = Stop::new();
-    let mut deployment = Deployment::new(feed, Arc::clone(&builder), Recorder::seeded(rows == 0))
-        .ingest(|ingest| {
+    let recorder = Recorder::seeded(rows == 0);
+    let mut deployment =
+        Deployment::new(feed, Arc::clone(&builder), Arc::clone(&recorder)).ingest(|ingest| {
             ingest
                 .with_batch(batch(max_changes))
                 .with_builds(builds)
                 .with_stop(stop.clone())
         });
+    // Over two indexes, every third seed holds `orders` stuck for a random
+    // stretch (every document refused, its lane parked): held at its cap it
+    // becomes exempt (6b-2) while failures restart the run, and nothing of it
+    // may be confirmed before it lands.
+    let stuck = (two && seed % 3 == 1).then(|| {
+        let from = Duration::from_millis(random.below(200));
+        let lasting = Duration::from_millis(50 + random.below(1000));
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(from).await;
+            recorder
+                .refused_indexes
+                .lock()
+                .unwrap()
+                .insert("orders".to_owned());
+            tokio::time::sleep(lasting).await;
+            recorder.refused_indexes.lock().unwrap().clear();
+        })
+    });
     if open {
         deployment.run_until_landed(&db, &stop, 8).await;
     } else {
         deployment.run_to_end(8).await;
     }
+    if let Some(stuck) = stuck {
+        stuck.await.unwrap();
+    }
 
     let context = format!(
-        "seed {seed}, builds {builds}, two indexes {two}, {changes} changes over {ids} ids, {rows} rows, max_changes {max_changes}, fan {fan}"
+        "seed {seed}, builds {builds}, two indexes {two}, {changes} changes over {ids} ids, {rows} rows, max_changes {max_changes}, fan {fan}, stuck {}",
+        seed % 3 == 1 && two
     );
     assert!(
         !builder.overlapped.load(Ordering::SeqCst),
