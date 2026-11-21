@@ -885,15 +885,6 @@ mod committed {
         assert_eq!(progress.committed(&name("a")), 4);
     }
 
-    /// A sink with no lane has every closed step.
-    #[test]
-    fn a_sink_with_no_lane_has_every_closed_step() {
-        let progress = Progress::new([lane("users", "a")]);
-        read(&progress, 3);
-        progress.change_read();
-        assert_eq!(progress.committed(&name("elsewhere")), 3);
-    }
-
     /// Steps a lane has passed are dropped as new ones are routed, so its
     /// record stays as long as it is behind, not as the run is long.
     #[test]
@@ -906,7 +897,9 @@ mod committed {
         }
         read(&progress, 1);
         assert!(progress.steps_kept(&a).unwrap().0 <= 2);
-        assert_eq!(progress.committed(&name("a")), 100);
+        // The last read built nothing and everything before it landed: it
+        // counts (the catch-up, stage 8a slice 6b-1a).
+        assert_eq!(progress.committed(&name("a")), 101);
     }
 }
 
@@ -1000,7 +993,10 @@ mod parked {
 /// grants over two indexes on two sinks, each lane getting an item or a skip,
 /// items landing in key order at random, an engine run ending now and then
 /// with reads never granted. After every operation each sink's count equals
-/// the model's, and each lane keeps within its bound.
+/// the model's, and each lane keeps within its bound. The model has the
+/// frontier's rules (stage 8a slice 6b-1a): these reads mark nothing, so a
+/// lane with nothing unlanded has every read (its catch-up), and a lane's
+/// count never goes down.
 #[test]
 fn compaction_changes_no_count() {
     let sinks = ["a", "b"];
@@ -1032,6 +1028,7 @@ fn compaction_changes_no_count() {
         let mut routed: Vec<Vec<(u64, Option<u64>)>> = vec![Vec::new(); lanes.len()];
         let mut keys: Vec<Vec<ItemKey>> = vec![Vec::new(); lanes.len()];
         let mut landed: Vec<usize> = vec![0; lanes.len()];
+        let mut most: Vec<u64> = vec![0; lanes.len()];
         for _ in 0..400 {
             match next(10) {
                 0 => {
@@ -1086,14 +1083,19 @@ fn compaction_changes_no_count() {
                     .filter(|(_, lane)| lane.sink.as_ref() == sink)
                     .map(|(at, _)| {
                         let first_unlanded = keys[at].get(landed[at]).map(|key| key.number());
-                        routed[at]
-                            .iter()
-                            .take_while(|(_, key)| {
-                                first_unlanded
-                                    .is_none_or(|unlanded| key.is_none_or(|key| key < unlanded))
-                            })
-                            .last()
-                            .map_or(0, |(read, _)| *read)
+                        let value = match first_unlanded {
+                            None => progress.changes_read(),
+                            Some(_) => routed[at]
+                                .iter()
+                                .take_while(|(_, key)| {
+                                    first_unlanded
+                                        .is_none_or(|unlanded| key.is_none_or(|key| key < unlanded))
+                                })
+                                .last()
+                                .map_or(0, |(read, _)| *read),
+                        };
+                        most[at] = most[at].max(value);
+                        most[at]
                     })
                     .min()
                     .unwrap();
@@ -1111,6 +1113,836 @@ fn compaction_changes_no_count() {
                     progress.steps_kept(lane)
                 );
             }
+        }
+    }
+}
+
+/// Stage 8a slice 6b-1a: each index's steps carry its own frontier (the
+/// changes through which every one of its documents was taken), a lane
+/// catches up to the read count while it and its index are idle, and the
+/// count never goes down.
+mod frontier {
+    use super::*;
+
+    fn lane(index: &str, sink: &str) -> LaneKey {
+        LaneKey::new(
+            kernel::IndexName::try_new(index).unwrap(),
+            kernel::SinkName::try_new(sink).unwrap(),
+        )
+    }
+
+    fn index(name: &str) -> IndexName {
+        IndexName::try_new(name).unwrap()
+    }
+
+    fn name(sink: &str) -> SinkName {
+        SinkName::try_new(sink).unwrap()
+    }
+
+    /// Mark `id` of `index` by the read `read`, at position `read`.
+    fn mark(progress: &Progress, index: &str, id_: i64, read: u64) {
+        progress.mark_reads([(id(index, id_), p(read), read)]);
+    }
+
+    /// Count reads up to `total`.
+    fn read_through(progress: &Progress, total: u64) {
+        while progress.changes_read() < total {
+            progress.change_read();
+        }
+    }
+
+    /// A take of up to `max` of `index`'s documents, its step closed with
+    /// every other index of `others` at its frontier, its item published
+    /// and the build released; the item's key, if it took something.
+    fn grant(
+        progress: &Progress,
+        lanes: &[&LaneKey],
+        taken_index: &str,
+        max: usize,
+        at: u64,
+    ) -> Option<ItemKey> {
+        let taken = progress.take(&index(taken_index), max, &nothing_held);
+        let mut frontiers: Vec<(IndexName, u64)> = progress
+            .indexes()
+            .filter(|other| other.as_ref() != taken_index || taken.is_none())
+            .map(|other| (other.clone(), progress.frontier(other)))
+            .collect();
+        if let Some(taken) = &taken {
+            frontiers.push((index(taken_index), taken.frontier));
+        }
+        let steps = progress.close_steps(frontiers);
+        let key = taken
+            .as_ref()
+            .map(|_| progress.next_key(&index(taken_index)).unwrap());
+        for lane in lanes {
+            let step = steps[&lane.index];
+            match (&taken, key) {
+                (Some(taken), Some(key)) if lane.index.as_ref() == taken_index => {
+                    progress.published_build(lane, key, taken.oldest, p(at), taken.token, step);
+                }
+                _ => progress.skipped_step(lane, p(at), step),
+            }
+        }
+        if let Some(taken) = &taken {
+            progress.release(&index(taken_index), taken.token);
+        }
+        key
+    }
+
+    /// A take that leaves documents waiting commits only through the change
+    /// before the oldest one left: what it took doesn't cover the reads of
+    /// what it left (6b's capped takes and backlog; until 6b-1c the one
+    /// builder takes whole, so this is `Progress`'s alone).
+    #[test]
+    fn a_partial_take_counts_committed_only_through_its_oldest_document_left() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        for read in 1..=3 {
+            mark(&progress, "users", read as i64, read);
+        }
+        read_through(&progress, 3);
+        let first = grant(&progress, &[&users], "users", 1, 3).unwrap();
+        progress.applied(&users, first);
+        assert_eq!(progress.committed(&name("a")), 1, "documents 2 and 3 wait");
+
+        let rest = grant(&progress, &[&users], "users", 10, 3).unwrap();
+        assert_eq!(
+            progress.committed(&name("a")),
+            1,
+            "their item hasn't landed"
+        );
+        progress.applied(&users, rest);
+        assert_eq!(progress.committed(&name("a")), 3);
+    }
+
+    /// An index a grant took nothing of is registered with its own
+    /// frontier, not the read count: a document of it waiting from a later
+    /// read keeps its lanes short of that read.
+    #[test]
+    fn a_skipped_index_counts_through_its_frontier_not_the_read_count() {
+        let (users, orders) = (lane("users", "a"), lane("orders", "a"));
+        let progress = Progress::new([users.clone(), orders.clone()]);
+        mark(&progress, "users", 1, 1);
+        mark(&progress, "orders", 2, 2);
+        read_through(&progress, 2);
+        let key = grant(&progress, &[&users, &orders], "users", 10, 1).unwrap();
+        progress.applied(&users, key);
+        assert_eq!(
+            progress.committed(&name("a")),
+            1,
+            "orders' document of read 2 still waits"
+        );
+    }
+
+    /// A build taken and not yet released holds its index's lanes: nothing
+    /// waits, the lane has nothing unlanded, and still the catch-up must
+    /// not credit the build's reads.
+    #[test]
+    fn a_build_taken_and_not_released_holds_its_lanes_count() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        mark(&progress, "users", 1, 1);
+        read_through(&progress, 1);
+        let taken = progress.take(&index("users"), 10, &nothing_held).unwrap();
+        assert_eq!(
+            progress.committed(&name("a")),
+            0,
+            "the build of read 1 runs"
+        );
+        let steps = progress.close_steps([(index("users"), taken.frontier)]);
+        let key = progress.next_key(&index("users")).unwrap();
+        progress.published_build(
+            &users,
+            key,
+            taken.oldest,
+            p(1),
+            taken.token,
+            steps[&users.index],
+        );
+        progress.release(&index("users"), taken.token);
+        progress.applied(&users, key);
+        assert_eq!(progress.committed(&name("a")), 1);
+    }
+
+    /// A lane caught up to the read count while idle keeps that count when
+    /// its index marks a new document: an older entry answering again
+    /// never lowers it.
+    #[test]
+    fn a_lanes_count_never_goes_down_when_its_index_marks_again() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        mark(&progress, "users", 1, 1);
+        read_through(&progress, 1);
+        let key = grant(&progress, &[&users], "users", 10, 1).unwrap();
+        progress.applied(&users, key);
+        read_through(&progress, 3);
+        assert_eq!(
+            progress.committed(&name("a")),
+            3,
+            "reads 2 and 3 built nothing"
+        );
+
+        mark(&progress, "users", 2, 4);
+        read_through(&progress, 4);
+        assert_eq!(progress.committed(&name("a")), 3, "never down");
+    }
+
+    /// A change that builds nothing counts as soon as it is read with
+    /// everything before it landed, before any build: the catch-up.
+    #[test]
+    fn a_change_that_builds_nothing_counts_once_read() {
+        let (users, orders) = (lane("users", "a"), lane("orders", "a"));
+        let progress = Progress::new([users.clone(), orders.clone()]);
+        read_through(&progress, 2);
+        assert_eq!(progress.committed(&name("a")), 2);
+    }
+
+    /// A sink with no lane has nothing to land: it has every read.
+    #[test]
+    fn a_sink_with_no_lane_has_every_read() {
+        let progress = Progress::new([lane("users", "a")]);
+        read_through(&progress, 4);
+        assert_eq!(progress.committed(&name("elsewhere")), 4);
+    }
+}
+
+/// D1: what the reader routed moves a lane with nothing outstanding.
+mod routed {
+    use super::*;
+
+    fn lane(index: &str) -> LaneKey {
+        LaneKey::new(
+            kernel::IndexName::try_new(index).unwrap(),
+            kernel::SinkName::try_new("a").unwrap(),
+        )
+    }
+
+    /// A quiet index's lane answers through what the reader routed, not
+    /// through the last grant that registered it.
+    #[test]
+    fn a_quiet_index_answers_through_what_the_reader_routed() {
+        let (users, orders) = (lane("users"), lane("orders"));
+        let progress = Progress::new([users.clone(), orders.clone()]);
+        progress.mark([(id("users", 1), p(1))]);
+        progress.change_read();
+        progress.routed(p(1));
+        assert_eq!(
+            progress.lane(&orders, Level::Applied),
+            Some(Landed::Through(p(1)))
+        );
+        assert_eq!(
+            progress.lane(&users, Level::Applied),
+            Some(Landed::Before(p(1)))
+        );
+    }
+
+    /// An index that never had a live item pins no confirmation once the
+    /// other index landed what it was routed.
+    #[test]
+    fn a_quiet_index_pins_no_confirmation_while_another_index_builds() {
+        let (users, orders) = (lane("users"), lane("orders"));
+        let progress = Progress::new([users.clone(), orders.clone()]);
+        progress.mark([(id("users", 1), p(1))]);
+        progress.change_read();
+        progress.routed(p(1));
+        let taken = progress.take(&users.index, 10, &nothing_held).unwrap();
+        let steps = progress.close_steps([(users.index.clone(), taken.frontier)]);
+        let key = progress.next_key(&users.index).unwrap();
+        progress.published_build(
+            &users,
+            key,
+            taken.oldest,
+            p(1),
+            taken.token,
+            steps[&users.index],
+        );
+        progress.release(&users.index, taken.token);
+        assert_eq!(progress.landed(), Landed::Before(p(1)));
+        progress.applied(&users, key);
+        assert_eq!(progress.landed(), Landed::Through(p(1)));
+    }
+
+    /// What an ended run routed and never built is forgotten with it: no
+    /// lane answers through it after `forget_all`.
+    #[test]
+    fn a_forgotten_run_answers_through_nothing_it_routed() {
+        let users = lane("users");
+        let progress = Progress::new([users.clone()]);
+        progress.mark([(id("users", 1), p(5))]);
+        progress.change_read();
+        progress.routed(p(5));
+        progress.forget_all();
+        assert_eq!(progress.lane(&users, Level::Applied), Some(Landed::Idle));
+    }
+
+    /// A routed position moves the answer only forward.
+    #[test]
+    fn routed_never_moves_back() {
+        let users = lane("users");
+        let progress = Progress::new([users.clone()]);
+        progress.routed(p(4));
+        progress.routed(p(2));
+        assert_eq!(
+            progress.lane(&users, Level::Applied),
+            Some(Landed::Through(p(4)))
+        );
+    }
+}
+
+/// D2: an ended run's reads, across `forget_all`.
+mod restart {
+    use super::*;
+
+    fn lane(index: &str, sink: &str) -> LaneKey {
+        LaneKey::new(
+            kernel::IndexName::try_new(index).unwrap(),
+            kernel::SinkName::try_new(sink).unwrap(),
+        )
+    }
+
+    fn name(sink: &str) -> SinkName {
+        SinkName::try_new(sink).unwrap()
+    }
+
+    fn mark(progress: &Progress, index: &str, id_: i64, read: u64) {
+        progress.mark_reads([(id(index, id_), p(read), read)]);
+    }
+
+    fn read_through(progress: &Progress, total: u64) {
+        while progress.changes_read() < total {
+            progress.change_read();
+        }
+    }
+
+    /// Take every waiting document of `index` and publish it on `lanes`
+    /// (the other lanes skipped), all at their frontiers; the key.
+    fn grant(progress: &Progress, lanes: &[&LaneKey], index: &IndexName, at: u64) -> ItemKey {
+        let taken = progress.take(index, usize::MAX, &nothing_held).unwrap();
+        let mut frontiers: Vec<(IndexName, u64)> = progress
+            .indexes()
+            .filter(|other| *other != index)
+            .map(|other| (other.clone(), progress.frontier(other)))
+            .collect();
+        frontiers.push((index.clone(), taken.frontier));
+        let steps = progress.close_steps(frontiers);
+        let key = progress.next_key(index).unwrap();
+        for lane in lanes {
+            if lane.index == *index {
+                progress.published_build(
+                    lane,
+                    key,
+                    taken.oldest,
+                    p(at),
+                    taken.token,
+                    steps[&lane.index],
+                );
+            } else {
+                progress.skipped_step(lane, p(at), steps[&lane.index]);
+            }
+        }
+        progress.release(index, taken.token);
+        key
+    }
+
+    /// The first grant after a restart lifts the cap: a change read after it
+    /// that builds nothing counts at once, as it did before the restart.
+    #[test]
+    fn after_the_first_grant_a_change_that_builds_nothing_counts_once_read() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        mark(&progress, "users", 1, 1);
+        read_through(&progress, 1);
+        progress.forget_all();
+        mark(&progress, "users", 1, 2);
+        read_through(&progress, 2);
+        let replay = grant(&progress, &[&users], &users.index, 2);
+        progress.applied(&users, replay);
+        assert_eq!(progress.committed(&name("a")), 2);
+
+        read_through(&progress, 3);
+        assert_eq!(
+            progress.committed(&name("a")),
+            3,
+            "read 3 touched nothing and everything before it landed"
+        );
+    }
+
+    /// The intermediate count: an ended run's unbuilt read counts no sooner
+    /// than the new run's first live grant, through the replay's marks.
+    #[test]
+    fn an_ended_runs_reads_count_only_with_the_first_grant_after_the_restart() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        mark(&progress, "users", 1, 1);
+        read_through(&progress, 1);
+        let key = grant(&progress, &[&users], &users.index, 1);
+        progress.applied(&users, key);
+        mark(&progress, "users", 2, 2);
+        read_through(&progress, 2);
+        assert_eq!(progress.committed(&name("a")), 1);
+
+        progress.forget_all();
+        assert_eq!(progress.committed(&name("a")), 1, "read 2 was never built");
+        mark(&progress, "users", 2, 3);
+        read_through(&progress, 3);
+        assert_eq!(
+            progress.committed(&name("a")),
+            1,
+            "its replay is read, not built"
+        );
+        let replay = grant(&progress, &[&users], &users.index, 3);
+        assert_eq!(
+            progress.committed(&name("a")),
+            1,
+            "the replay hasn't landed"
+        );
+        progress.applied(&users, replay);
+        assert_eq!(progress.committed(&name("a")), 3);
+    }
+
+    /// Two sinks: one had committed more than the other when the run ended;
+    /// neither count goes down across the restart and the replay.
+    #[test]
+    fn a_sinks_count_never_goes_down_across_a_restart() {
+        let (on_a, on_b) = (lane("users", "a"), lane("users", "b"));
+        let progress = Progress::new([on_a.clone(), on_b.clone()]);
+        let last = std::cell::Cell::new((0, 0));
+        let check = |progress: &Progress| {
+            let now = (
+                progress.committed(&name("a")),
+                progress.committed(&name("b")),
+            );
+            let before = last.get();
+            assert!(
+                now.0 >= before.0 && now.1 >= before.1,
+                "{before:?} then {now:?}"
+            );
+            last.set(now);
+        };
+        for read in 1..=2 {
+            mark(&progress, "users", read as i64, read);
+            read_through(&progress, read);
+            let key = grant(&progress, &[&on_a, &on_b], &on_a.index, read);
+            progress.applied(&on_a, key);
+            if read == 1 {
+                progress.applied(&on_b, key);
+            }
+        }
+        mark(&progress, "users", 3, 3);
+        read_through(&progress, 3);
+        check(&progress);
+        assert_eq!(last.get(), (2, 1));
+
+        progress.forget_all();
+        check(&progress);
+        mark(&progress, "users", 3, 4);
+        read_through(&progress, 4);
+        check(&progress);
+        let key = grant(&progress, &[&on_a, &on_b], &on_a.index, 4);
+        check(&progress);
+        progress.applied(&on_a, key);
+        check(&progress);
+        progress.applied(&on_b, key);
+        check(&progress);
+        assert_eq!(last.get(), (4, 4));
+    }
+
+    /// The source resumes before what was committed (Postgres's confirmed
+    /// position trails what landed): the replay's reads re-mark documents
+    /// already built, and nothing past what was committed counts before the
+    /// first grant after the restart.
+    #[test]
+    fn a_replay_from_before_the_committed_point_credits_nothing_before_the_first_grant() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        for read in 1..=3 {
+            mark(&progress, "users", read as i64, read);
+            read_through(&progress, read);
+            let key = grant(&progress, &[&users], &users.index, read);
+            progress.applied(&users, key);
+        }
+        mark(&progress, "users", 4, 4);
+        read_through(&progress, 4);
+        assert_eq!(progress.committed(&name("a")), 3);
+
+        progress.forget_all();
+        assert_eq!(progress.committed(&name("a")), 3, "read 4 was never built");
+        for (document, read) in [(2, 5), (3, 6), (4, 7)] {
+            mark(&progress, "users", document, read);
+            read_through(&progress, read);
+            assert_eq!(
+                progress.committed(&name("a")),
+                3,
+                "nothing before the first grant"
+            );
+        }
+        let key = grant(&progress, &[&users], &users.index, 7);
+        assert_eq!(progress.committed(&name("a")), 3);
+        progress.applied(&users, key);
+        assert_eq!(progress.committed(&name("a")), 7);
+    }
+
+    /// A replay shorter than the ended run's reads, and an index that gets
+    /// no item after the restart: once what was read has landed, the count
+    /// reaches every read.
+    #[test]
+    fn a_short_replay_and_a_quiet_index_count_everything_once_landed() {
+        let (users, orders) = (lane("users", "a"), lane("orders", "a"));
+        let progress = Progress::new([users.clone(), orders.clone()]);
+        mark(&progress, "users", 1, 1);
+        mark(&progress, "users", 2, 2);
+        read_through(&progress, 3);
+        progress.forget_all();
+        mark(&progress, "users", 2, 4);
+        read_through(&progress, 4);
+        let key = grant(&progress, &[&users, &orders], &users.index, 4);
+        progress.applied(&users, key);
+        assert_eq!(progress.committed(&name("a")), 4);
+    }
+
+    /// Reads that built nothing are confirmed once routed and never
+    /// replayed: after a restart with no replay they still count.
+    #[test]
+    fn reads_that_built_nothing_count_across_a_restart_with_no_replay() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        read_through(&progress, 2);
+        progress.routed(p(2));
+        progress.forget_all();
+        assert_eq!(progress.committed(&name("a")), 2);
+    }
+
+    /// A build taken and never released when the run ended leaves its reads
+    /// unbuilt: they count no sooner than the first grant after the restart.
+    #[test]
+    fn a_build_in_flight_at_the_restart_caps_the_count() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        mark(&progress, "users", 1, 1);
+        read_through(&progress, 2);
+        let _in_flight = progress.take(&users.index, 10, &nothing_held).unwrap();
+        progress.forget_all();
+        assert_eq!(progress.committed(&name("a")), 0);
+    }
+
+    /// Reads counted without their marks (a run cut before them, R9's
+    /// guard) count no sooner than the first grant after the restart.
+    #[test]
+    fn reads_cut_before_their_marks_count_no_sooner_than_the_first_grant() {
+        let users = lane("users", "a");
+        let progress = Progress::new([users.clone()]);
+        read_through(&progress, 1);
+        progress.read_unmarked(2);
+        progress.forget_all();
+        assert_eq!(progress.committed(&name("a")), 1);
+        mark(&progress, "users", 1, 4);
+        read_through(&progress, 4);
+        let key = grant(&progress, &[&users], &users.index, 4);
+        progress.applied(&users, key);
+        assert_eq!(progress.committed(&name("a")), 4);
+    }
+}
+
+/// The frontier against a model kept apart from the code: seeded reads
+/// marking documents of three indexes, grants of the one builder (each
+/// index taken whole or capped, every lane registered with an item or a
+/// skip), landings in lane order, and ended runs (with reads cut before
+/// their marks), on two sinks. The model knows, per read and index, whether
+/// its documents wait, which step took them, or that its run ended; a read
+/// is done for a lane once each of its takes landed there, and an ended
+/// run's read once the lane landed an entry of a step closed after the
+/// restart (slice 3's moment). At every step a sink's count never passes
+/// the model's and never goes down; once everything landed they are equal.
+mod model {
+    use std::collections::{BTreeMap, HashMap};
+
+    use super::*;
+
+    const INDEXES: [&str; 3] = ["users", "orders", "items"];
+    const SINKS: [&str; 2] = ["a", "b"];
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % n
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Need {
+        /// The document `doc` waits.
+        Waiting(i64),
+        /// The step numbered so took it.
+        Taken(u64),
+        /// Its run ended; done once an entry of a step from this one landed.
+        Ended(u64),
+    }
+
+    #[derive(Default)]
+    struct Model {
+        /// Per read (from 1): what each index needs of it.
+        reads: Vec<Vec<(usize, Need)>>,
+        /// Per lane: its entries in order, each a step and its item key.
+        entries: BTreeMap<LaneKey, Vec<(u64, Option<ItemKey>)>>,
+        /// Per lane: how many of its items landed.
+        landed: BTreeMap<LaneKey, usize>,
+        steps: u64,
+    }
+
+    impl Model {
+        fn entry_landed(&self, lane: &LaneKey, wanted: impl Fn(u64) -> bool) -> bool {
+            let mut items = 0;
+            let landed = self.landed.get(lane).copied().unwrap_or(0);
+            for (step, key) in self.entries.get(lane).into_iter().flatten() {
+                if key.is_some() {
+                    items += 1;
+                }
+                if items > landed {
+                    return false;
+                }
+                if wanted(*step) {
+                    return true;
+                }
+            }
+            false
+        }
+
+        fn done(&self, read: usize, lane: &LaneKey, index: usize) -> bool {
+            self.reads[read]
+                .iter()
+                .filter(|(of, _)| *of == index)
+                .all(|(_, need)| match need {
+                    Need::Waiting(_) => false,
+                    Need::Taken(step) => self.entry_landed(lane, |s| s == *step),
+                    Need::Ended(from) => self.entry_landed(lane, |s| s >= *from),
+                })
+        }
+
+        fn committed(&self, lanes: &[(LaneKey, usize)], sink: &str) -> u64 {
+            let mine: Vec<_> = lanes
+                .iter()
+                .filter(|(lane, _)| lane.sink.as_ref() == sink)
+                .collect();
+            let mut done = 0;
+            for read in 0..self.reads.len() {
+                if mine
+                    .iter()
+                    .all(|(lane, index)| self.done(read, lane, *index))
+                {
+                    done = read as u64 + 1;
+                } else {
+                    break;
+                }
+            }
+            done
+        }
+    }
+
+    fn run(seed: u64) {
+        let lanes: Vec<(LaneKey, usize)> = INDEXES
+            .iter()
+            .enumerate()
+            .flat_map(|(at, index)| {
+                SINKS.iter().map(move |sink| {
+                    (
+                        LaneKey::new(
+                            IndexName::try_new(*index).unwrap(),
+                            SinkName::try_new(*sink).unwrap(),
+                        ),
+                        at,
+                    )
+                })
+            })
+            .collect();
+        let progress = Progress::new(lanes.iter().map(|(lane, _)| lane.clone()));
+        let mut model = Model::default();
+        let mut rng = Rng(seed | 1);
+        let mut seq = 0;
+        let mut last: HashMap<&str, u64> = HashMap::new();
+        let check = |progress: &Progress, model: &Model, last: &mut HashMap<&str, u64>| {
+            for sink in SINKS {
+                let ours = progress.committed(&SinkName::try_new(sink).unwrap());
+                let theirs = model.committed(&lanes, sink);
+                assert!(
+                    ours <= theirs,
+                    "seed {seed}: {sink} at {ours}, the model at {theirs}"
+                );
+                let before = last.insert(sink, ours).unwrap_or(0);
+                assert!(
+                    ours >= before,
+                    "seed {seed}: {sink} went from {before} to {ours}"
+                );
+            }
+        };
+        let grant = |progress: &Progress, model: &mut Model, rng: &mut Rng, seq: u64| {
+            let mut taken: BTreeMap<IndexName, Taken> = BTreeMap::new();
+            let mut frontiers = Vec::new();
+            for index in INDEXES {
+                let index = IndexName::try_new(index).unwrap();
+                let max = if rng.below(3) == 0 { 1 } else { usize::MAX };
+                match progress.take(&index, max, &nothing_held) {
+                    Some(take) => {
+                        frontiers.push((index.clone(), take.frontier));
+                        taken.insert(index, take);
+                    }
+                    None => frontiers.push((index.clone(), progress.frontier(&index))),
+                }
+            }
+            let steps = progress.close_steps(frontiers);
+            let step = model.steps;
+            model.steps += 1;
+            for (at, index) in INDEXES.iter().enumerate() {
+                let index = IndexName::try_new(*index).unwrap();
+                let Some(take) = taken.get(&index) else {
+                    continue;
+                };
+                let docs: Vec<i64> = take
+                    .ids
+                    .iter()
+                    .map(|id| match id.key.0.first() {
+                        Some((_, kernel::GenericValue::BigInt(n))) => *n,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                for read in &mut model.reads {
+                    for (of, need) in read.iter_mut() {
+                        if *of == at && matches!(need, Need::Waiting(doc) if docs.contains(doc)) {
+                            *need = Need::Taken(step);
+                        }
+                    }
+                }
+            }
+            let mut keys: BTreeMap<IndexName, ItemKey> = BTreeMap::new();
+            for (lane, _) in &lanes {
+                let entry = match taken.get(&lane.index) {
+                    Some(take) => {
+                        let key = *keys
+                            .entry(lane.index.clone())
+                            .or_insert_with(|| progress.next_key(&lane.index).unwrap());
+                        progress.published_build(
+                            lane,
+                            key,
+                            take.oldest,
+                            p(seq),
+                            take.token,
+                            steps[&lane.index],
+                        );
+                        Some(key)
+                    }
+                    None => {
+                        progress.skipped_step(lane, p(seq), steps[&lane.index]);
+                        None
+                    }
+                };
+                model
+                    .entries
+                    .entry(lane.clone())
+                    .or_default()
+                    .push((step, entry));
+            }
+            for (index, take) in &taken {
+                progress.release(index, take.token);
+            }
+        };
+        for _ in 0..400 {
+            match rng.below(10) {
+                0..=3 => {
+                    seq += 1;
+                    let read = progress.changes_read() + 1;
+                    let mut needs = Vec::new();
+                    let mut marks = Vec::new();
+                    for _ in 0..rng.below(3) {
+                        let at = rng.below(3) as usize;
+                        let doc = rng.below(6) as i64;
+                        marks.push((id(INDEXES[at], doc), p(seq), read));
+                        needs.push((at, Need::Waiting(doc)));
+                    }
+                    progress.mark_reads(marks);
+                    progress.change_read();
+                    progress.routed(p(seq));
+                    model.reads.push(needs);
+                }
+                4..=5 => grant(&progress, &mut model, &mut rng, seq),
+                6..=8 => {
+                    let (lane, _) = &lanes[rng.below(lanes.len() as u64) as usize];
+                    let registered = model.entries.get(lane).map_or(0, |entries| {
+                        entries.iter().filter(|(_, key)| key.is_some()).count()
+                    });
+                    let landed = model.landed.entry(lane.clone()).or_insert(0);
+                    if *landed < registered {
+                        let key = model.entries[lane]
+                            .iter()
+                            .filter_map(|(_, key)| *key)
+                            .nth(*landed)
+                            .unwrap();
+                        progress.applied(lane, key);
+                        *landed += 1;
+                    }
+                }
+                _ => {
+                    if rng.below(2) == 0 {
+                        let cut = rng.below(3);
+                        progress.read_unmarked(cut);
+                        for _ in 0..cut {
+                            model.reads.push(
+                                (0..INDEXES.len())
+                                    .map(|at| (at, Need::Waiting(-1)))
+                                    .collect(),
+                            );
+                        }
+                    }
+                    progress.forget_all();
+                    let from = model.steps;
+                    for read in &mut model.reads {
+                        for (_, need) in read.iter_mut() {
+                            if matches!(need, Need::Waiting(_)) {
+                                *need = Need::Ended(from);
+                            }
+                        }
+                    }
+                }
+            }
+            check(&progress, &model, &mut last);
+        }
+        // Build what waits, land everything: every read counts.
+        grant(&progress, &mut model, &mut rng, seq);
+        while progress.waiting() > 0 {
+            grant(&progress, &mut model, &mut rng, seq);
+        }
+        for (lane, _) in &lanes {
+            let keys: Vec<ItemKey> = model.entries[lane]
+                .iter()
+                .filter_map(|(_, key)| *key)
+                .collect();
+            if let Some(key) = keys.last() {
+                progress.applied(lane, *key);
+            }
+            model.landed.insert(lane.clone(), keys.len());
+        }
+        check(&progress, &model, &mut last);
+        for sink in SINKS {
+            let name = SinkName::try_new(sink).unwrap();
+            assert_eq!(
+                progress.committed(&name),
+                model.committed(&lanes, sink),
+                "seed {seed}"
+            );
+            assert_eq!(
+                progress.committed(&name),
+                progress.changes_read(),
+                "seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_frontier_never_passes_the_model_and_meets_it_once_everything_landed() {
+        for seed in 1..=200 {
+            run(seed);
         }
     }
 }

@@ -1113,3 +1113,43 @@ async fn a_backlog_resolved_a_change_a_millisecond_is_batched_as_main_batched_it
     .await;
     assert_eq!(batches, [50; 12]);
 }
+
+/// D1 (stage 8a slice 6b-1a): a quiet index's lane answers through what
+/// the reader routed while another index's build runs, so a fence on
+/// `orders` passes a change that touched only `users`, whose build is held.
+/// Before `routed`, `orders` answered nothing until that build published and
+/// skipped it.
+#[tokio::test(start_paused = true)]
+async fn a_fence_on_a_quiet_index_passes_while_another_index_builds() {
+    let db = Database::new(0, vec![Change::upsert(0)]);
+    let builder = Builder::over(&db, held([0]), 2);
+    let stop = Stop::new();
+    let mut deployment = Deployment::new(
+        Feed::new(&db).open(),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| ingest.with_stop(stop.clone()));
+    let progress = deployment.ingest.progress();
+    let driver = {
+        let builder = Arc::clone(&builder);
+        let db = Arc::clone(&db);
+        async move {
+            let orders = stream::LaneKey::new(IndexName::try_new("orders").unwrap(), sink_name());
+            until("the change is read", || {
+                db.visible.load(Ordering::SeqCst) == 1
+            })
+            .await;
+            until("orders answers through the change", || {
+                matches!(
+                    progress.lane(&orders, crate::Level::Applied),
+                    Some(source::cdc::Landed::Through(position)) if position.seq == 0
+                )
+            })
+            .await;
+            assert_eq!(builder.grants(), [vec![0]], "users' build still held");
+            builder.release(0);
+        }
+    };
+    run_beside(&mut deployment, &db, &stop, driver).await;
+}
