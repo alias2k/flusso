@@ -74,9 +74,6 @@ pub(super) enum Job {
         /// Each index's step at the grant, with its own frontier: its lanes
         /// are registered with it.
         steps: BTreeMap<IndexName, Step>,
-        /// The indexes with documents waiting that the budget left out:
-        /// their lanes get nothing from this build, not even a step.
-        deferred: Vec<IndexName>,
     },
     /// A snapshot batch, to each lane the slice it asked for, each index's
     /// slice carrying how far its walk got (the batch's greatest key of it).
@@ -190,18 +187,14 @@ pub(super) struct LiveCandidate<L> {
     pub(super) documents: Vec<(IndexName, usize)>,
     /// The live run is full: a build may start beside a running live one.
     pub(super) full: bool,
-    /// Changes were read since the last grant: a build that takes nothing
-    /// still settles them.
-    pub(super) changes: bool,
 }
 
 /// Which kind of batch a free slot goes to; a live grant carries back what
 /// the live candidate was offered with and the indexes it may take.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Grant<L> {
-    /// What the live candidate was offered with, the indexes taken, and the
-    /// indexes the budget left waiting.
-    Live(L, Vec<IndexName>, Vec<IndexName>),
+    /// What the live candidate was offered with, and the indexes taken.
+    Live(L, Vec<IndexName>),
     Backfill,
 }
 
@@ -231,10 +224,6 @@ pub(super) struct Builds {
     per_document: PerDocument,
     /// What the last choice reserved for the build it granted.
     reserved: Vec<Reservation>,
-    /// The most documents an index may leave waiting while a live build
-    /// takes the others (ADR 0012 stage 8a slice 4); `None` lets none wait:
-    /// a live batch then goes whole or not at all, as with one index.
-    defer_below: Option<usize>,
     /// The last choice found a batch the budget alone refused (for live,
     /// some index it left waiting).
     refused: Option<Work>,
@@ -327,7 +316,6 @@ impl Builds {
             budget,
             per_document: PerDocument::default(),
             reserved: Vec::new(),
-            defer_below: None,
             refused: None,
             refused_generation: 0,
             waits: Arc::default(),
@@ -630,7 +618,7 @@ impl Builds {
         let live = live
             .filter(|candidate| self.live_running.is_empty() || candidate.full)
             .and_then(|candidate| {
-                let taken = self.live_part(&candidate.documents, candidate.changes)?;
+                let taken = self.live_part(&candidate.documents)?;
                 Some((candidate.live, taken))
             });
         let backfill = backfill.and_then(|ids| {
@@ -640,72 +628,48 @@ impl Builds {
         });
         let live_parts = live
             .as_ref()
-            .map(|(_, (taken, _))| self.reserving(Work::Live, taken));
+            .map(|(_, taken)| self.reserving(Work::Live, taken));
         let backfill_parts = backfill
             .as_ref()
             .map(|documents| self.reserving(Work::Backfill, documents));
         match (self.ask(live_parts, backfill_parts)?, live) {
-            (Work::Live, Some((live, (taken, left)))) => Some(Grant::Live(
+            (Work::Live, Some((live, taken))) => Some(Grant::Live(
                 live,
                 taken.into_iter().map(|(index, _)| index).collect(),
-                left.into_iter().map(|(index, _)| index).collect(),
             )),
             (Work::Backfill, _) => Some(Grant::Backfill),
             (Work::Live, None) => None,
         }
     }
 
-    /// Which of the live batch's `documents` (per index, oldest waiting
+    /// Whether the live batch's `documents` (per index, oldest waiting
     /// first) could be granted ignoring the rule that a second live build
-    /// waits for a full batch: for the last batch of a run, with the indexes
-    /// the budget left waiting. `None` when none.
+    /// waits for a full batch: for the last batch of a run. The indexes it
+    /// takes, `None` when it waits.
     pub(super) fn can_take_last(
         &mut self,
         documents: &[(IndexName, usize)],
-    ) -> Option<(Vec<IndexName>, Vec<IndexName>)> {
+    ) -> Option<Vec<IndexName>> {
         self.refused = None;
         if !self.has_room() {
             return None;
         }
-        let (taken, left) = self.live_part(documents, false)?;
+        let taken = self.live_part(documents)?;
         let parts = self.reserving(Work::Live, &taken);
         self.ask(Some(parts), None)?;
-        Some((
-            taken.into_iter().map(|(index, _)| index).collect(),
-            left.into_iter().map(|(index, _)| index).collect(),
-        ))
+        Some(taken.into_iter().map(|(index, _)| index).collect())
     }
 
-    /// The part of a live batch's `documents` (per index, oldest waiting
-    /// first) a build may take now: the indexes the budget has room for,
-    /// when every index left out may wait (see
-    /// [`with_deferral`](Self::with_deferral)) and the build takes
-    /// something, or settles `changes` read since the last grant; with the
-    /// part left waiting. `None` when the batch waits.
-    #[allow(clippy::type_complexity)]
-    fn live_part(
-        &mut self,
-        documents: &[(IndexName, usize)],
-        changes: bool,
-    ) -> Option<(Vec<(IndexName, usize)>, Vec<(IndexName, usize)>)> {
-        let admitted = self.affordable(Work::Live, documents);
-        let admitted = match (admitted, self.defer_below) {
-            (Some(admitted), _) => admitted,
-            (None, Some(_)) if changes => Vec::new(),
-            (None, _) => return None,
-        };
-        let (taken, left): (Vec<_>, Vec<_>) = documents
+    /// A live batch's `documents` (per index, oldest waiting first) when the
+    /// budget has room for all of them; `None` when the batch waits whole
+    /// (each builder builds one index: no index is left out while others
+    /// build).
+    fn live_part(&mut self, documents: &[(IndexName, usize)]) -> Option<Vec<(IndexName, usize)>> {
+        let admitted = self.affordable(Work::Live, documents)?;
+        documents
             .iter()
-            .cloned()
-            .partition(|(index, _)| admitted.contains(index));
-        let may_wait = left.is_empty()
-            || self
-                .defer_below
-                .is_some_and(|below| left.iter().all(|(_, waiting)| *waiting < below));
-        if !may_wait || (taken.is_empty() && !left.is_empty() && !changes) {
-            return None;
-        }
-        Some((taken, left))
+            .all(|(index, _)| admitted.contains(index))
+            .then(|| documents.to_vec())
     }
 
     /// An empty id list to fill, reusing one a finished build gave back.
@@ -740,11 +704,7 @@ impl Builds {
         }
         let live = matches!(job, Job::Live { .. });
         let work = if live { Work::Live } else { Work::Backfill };
-        // A live grant that leaves an index waiting for the budget doesn't
-        // end the live wait: one index held back while others build is one
-        // wait, from its first refusal to the grant that takes it.
-        let still_waiting = matches!(&job, Job::Live { deferred, .. } if !deferred.is_empty());
-        if !still_waiting {
+        {
             let since = {
                 let mut waits = lock(&self.waits);
                 let wait = waits.of(work);
@@ -1042,7 +1002,6 @@ mod tests {
             position: Position::new(0),
             changes: 0,
             steps: BTreeMap::new(),
-            deferred: Vec::new(),
         };
         run.start(&documents, Vec::new(), job, &|_| false).await;
         assert_eq!(budget.refused(Work::Live), 1, "one hold, counted once");
@@ -1079,7 +1038,6 @@ mod tests {
             live: (),
             documents: vec![(index("users"), 1)],
             full: true,
-            changes: true,
         }
     }
 

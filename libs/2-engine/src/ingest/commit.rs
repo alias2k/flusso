@@ -74,7 +74,6 @@ impl IngestEngine {
                     live: candidate,
                     documents: self.waiting(builds, candidate.position)?,
                     full: candidate.full,
-                    changes: candidate.changes > 0,
                 })
             });
             let backfill = snapshot
@@ -82,9 +81,8 @@ impl IngestEngine {
                 .filter(|active| active.batch.count > 0 && (active.batch.is_full() || active.done))
                 .map(|active| active.batch.ids.as_slice());
             match builds.choose(live, backfill) {
-                Some(Grant::Live(candidate, admitted, deferred)) => {
-                    self.start_live(runs, builds, candidate, &admitted, deferred)
-                        .await;
+                Some(Grant::Live(candidate, admitted)) => {
+                    self.start_live(runs, builds, candidate, &admitted).await;
                 }
                 Some(Grant::Backfill) => {
                     if let Some(active) = snapshot.as_mut() {
@@ -139,10 +137,9 @@ impl IngestEngine {
             };
             if let Some(candidate) = live
                 && let Some(documents) = self.waiting(builds, candidate.position)
-                && let Some((admitted, deferred)) = builds.can_take_last(&documents)
+                && let Some(admitted) = builds.can_take_last(&documents)
             {
-                self.start_live(runs, builds, candidate, &admitted, deferred)
-                    .await;
+                self.start_live(runs, builds, candidate, &admitted).await;
                 continue;
             }
             if builds.running() == 0 {
@@ -201,19 +198,17 @@ impl IngestEngine {
     /// a running build). A batch whose changes touched no document any lane
     /// receives is an empty build, as on `main`: its slot settles those
     /// changes in grant order. The batch carries the candidate's newest
-    /// change, and its step closes at the candidate's read count, so a
-    /// newer run's change, whose documents it doesn't take, falls in a later
-    /// step (R4). An index left waiting is **deferred**: its lanes are not
-    /// registered with this build's step, so no change of it counts as
-    /// committed before its documents land, and the candidate is kept so a
-    /// later grant takes them.
+    /// change, and its index's frontier at the take, so a newer run's
+    /// change, whose documents it doesn't take, is not counted through it
+    /// (R4). One index's build takes at most `max_changes` documents (O2):
+    /// what a capped take leaves keeps the candidate, so a later grant takes
+    /// it whether or not a change comes.
     async fn start_live(
         &self,
         runs: &mut Runs,
         builds: &mut Builds,
         candidate: Candidate,
         admitted: &[IndexName],
-        deferred: Vec<IndexName>,
     ) {
         let position = candidate.position;
         let backlog = builds.folding();
@@ -225,7 +220,7 @@ impl IngestEngine {
                 .progress
                 .waiting_of(builds.index(), position, None)
                 .is_some_and(|waiting| !waiting.is_empty());
-            runs.granted(candidate, !deferred.is_empty() || left);
+            runs.granted(candidate, left);
         }
         // Every other index this builder builds is registered with its
         // frontier now, at the grant: computed at publish, it could cover
@@ -233,7 +228,6 @@ impl IngestEngine {
         // (§3.9 I5). A builder of one index registers only its own.
         for index in self.progress.indexes() {
             if builds.index().is_none_or(|own| own == index)
-                && !deferred.contains(index)
                 && !frontiers.iter().any(|(taken, _)| taken == index)
             {
                 frontiers.push((index.clone(), self.progress.frontier(index)));
@@ -245,7 +239,6 @@ impl IngestEngine {
             position,
             changes: candidate.changes,
             steps,
-            deferred,
         };
         builds
             .start(&self.documents, ids, job, &|built| self.halts(built))
@@ -394,7 +387,6 @@ impl IngestEngine {
                         position,
                         changes,
                         steps,
-                        deferred,
                     },
                     Some(built),
                 ) => {
@@ -403,7 +395,7 @@ impl IngestEngine {
                         changes,
                         steps,
                     };
-                    self.publish_live(built, &taken, &deferred, granted, &holds, lanes)
+                    self.publish_live(built, &taken, granted, &holds, lanes)
                         .await?;
                 }
                 (Job::Backfill { requested, marks }, Some(built)) => {
@@ -425,7 +417,6 @@ impl IngestEngine {
         &self,
         built: Built,
         taken: &[(IndexName, Token, Position)],
-        deferred: &[IndexName],
         granted: Granted,
         holds: &BTreeMap<IndexName, Hold>,
         lanes: &Lanes,
@@ -454,15 +445,12 @@ impl IngestEngine {
         // (the same on each of its lanes; lanes are ordered by index, so an
         // index's lanes are adjacent). Every lane, with an item or not, is
         // registered with its index's step (what a sink's committed count
-        // follows), except a deferred index's: its documents still wait.
+        // follows).
         let mut by_lane: Vec<Item<'_>> = Vec::new();
         let mut skipped: Vec<(&LaneKey, Step)> = Vec::new();
         let mut keyed: Option<(&IndexName, ItemKey)> = None;
         let groups = group_by_index(envelopes);
         for (lane, producer) in lanes {
-            if deferred.contains(&lane.index) {
-                continue;
-            }
             let Some(step) = steps.get(&lane.index).copied() else {
                 continue;
             };
