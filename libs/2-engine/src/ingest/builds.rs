@@ -50,7 +50,7 @@ use source::document::{Document, DocumentBuilder, DocumentId};
 use tokio::task::AbortHandle;
 use tokio::time::{Duration, Instant};
 
-use super::gate::{Gate, Permit};
+use super::gate::{Asked, Gate, Permit, Waiter};
 use super::snapshot::Snapshot;
 use crate::budget::{Budget, Charge, Reservation, document_bytes};
 use crate::error::{EngineError, Result};
@@ -158,6 +158,10 @@ struct Wait {
     /// Kept across engine runs until a grant ends the hold, so a refusal of
     /// the same hold in the next run isn't counted again.
     counted: bool,
+    /// The builders held by the budget now, by their index (`None`: a lone
+    /// `Builds` of every index). Overlapping holds of several builders are
+    /// one wait (§3.9 §9): it ends when none is held.
+    held: std::collections::BTreeSet<Option<IndexName>>,
 }
 
 impl Waits {
@@ -249,6 +253,23 @@ pub(super) struct Builds {
     /// Told when a live build lands, so its documents leave admission there
     /// too (the pending take reads it).
     progress: Option<Arc<Progress>>,
+    /// The index this builder builds (ADR 0012 stage 8a, 6b-1c); `None`
+    /// builds every index (tests of a lone `Builds`).
+    index: Option<IndexName>,
+    /// The builder folds (§3.9 I7): held by the budget, it queues no slice
+    /// and takes its backlog oldest first instead of R3's batches.
+    folding: bool,
+    /// Other builders ask the gate too (G9′): a batch a pass didn't grant
+    /// keeps a waiter in its kind's line, so a freed permit has someone to
+    /// wake and G4, G6 hold across builders. Alone, a builder asks with G9's
+    /// pass: nobody else can stand in a line.
+    several: bool,
+    /// Its waiters, one per kind at most, while it has a batch of that kind
+    /// ready and a slot to run it.
+    waiters: Vec<(Work, Waiter)>,
+    /// The gate's generation when it last asked: a change past it is its
+    /// turn to ask again.
+    asked_at: u64,
 }
 
 impl Drop for Builds {
@@ -257,7 +278,12 @@ impl Drop for Builds {
     /// before the next run doesn't stretch it; the hold stays counted.
     fn drop(&mut self) {
         for work in [Work::Live, Work::Backfill] {
-            let since = lock(&self.waits).of(work).since.take();
+            let since = {
+                let mut waits = lock(&self.waits);
+                let wait = waits.of(work);
+                wait.held.clear();
+                wait.since.take()
+            };
             if let Some(since) = since {
                 self.observer
                     .on_budget_wait(work, Wake::Settle, since.elapsed());
@@ -309,7 +335,67 @@ impl Builds {
             observer: Arc::new(crate::observer::NoopObserver),
             spawned: Vec::new(),
             progress: None,
+            index: None,
+            folding: false,
+            several: false,
+            waiters: Vec::new(),
+            asked_at: 0,
         }
+    }
+
+    /// Ask the gate beside other builders (G9′): see `several`.
+    pub(super) fn beside_others(mut self, several: bool) -> Self {
+        self.several = several;
+        self
+    }
+
+    /// Whether it waits in a line of the gate.
+    pub(super) fn in_line(&self) -> bool {
+        !self.waiters.is_empty()
+    }
+
+    /// Ready once the gate changed since it last asked: its waiters may be
+    /// offered a permit now (G7, G9′). Owned, so the builder's loop polls it
+    /// beside the arms that borrow the builds.
+    pub(super) fn turn(&self) -> impl Future<Output = ()> + Send + 'static {
+        let gate = Arc::clone(&self.gate);
+        let asked_at = self.asked_at;
+        async move { gate.changed_since(asked_at).await }
+    }
+
+    /// Leave every line: no batch ready, no slot, or an await outside the
+    /// builder's loop is about to pend (G9′: a waiter that can't ask holds no
+    /// place).
+    pub(super) fn leave_lines(&mut self) {
+        self.waiters.clear();
+    }
+
+    /// Ask `gate` for permits, the one every builder of the engine run
+    /// shares, instead of a gate of its own.
+    pub(super) fn with_gate(mut self, gate: Arc<Gate>) -> Self {
+        self.gate = gate;
+        self
+    }
+
+    /// Build `index` alone.
+    pub(super) fn of_index(mut self, index: IndexName) -> Self {
+        self.index = Some(index);
+        self
+    }
+
+    /// The index this builder builds; `None` for every index.
+    pub(super) fn index(&self) -> Option<&IndexName> {
+        self.index.as_ref()
+    }
+
+    /// Whether the builder folds (§3.9 I7).
+    pub(super) fn folding(&self) -> bool {
+        self.folding
+    }
+
+    /// Enter or leave the fold.
+    pub(super) fn set_folding(&mut self, folding: bool) {
+        self.folding = folding;
     }
 
     /// Keep the budget waits in `waits`, which outlives this engine run: a
@@ -318,14 +404,6 @@ impl Builds {
     /// counting the hold again.
     pub(super) fn with_waits(mut self, waits: Arc<std::sync::Mutex<Waits>>) -> Self {
         self.waits = waits;
-        self
-    }
-
-    /// Let a live build take the indexes the budget has room for while each
-    /// index left out has fewer than `below` documents waiting; past that,
-    /// or without this, the batch waits whole.
-    pub(super) fn with_deferral(mut self, below: Option<usize>) -> Self {
-        self.defer_below = below;
         self
     }
 
@@ -409,6 +487,7 @@ impl Builds {
         let first = {
             let mut waits = lock(&self.waits);
             let wait = waits.of(work);
+            wait.held.insert(self.index.clone());
             wait.since.get_or_insert_with(Instant::now);
             !std::mem::replace(&mut wait.counted, true)
         };
@@ -425,6 +504,9 @@ impl Builds {
         live: Option<Vec<(IndexName, usize)>>,
         backfill: Option<Vec<(IndexName, usize)>>,
     ) -> Option<Work> {
+        if self.several {
+            return self.ask_in_lines(live, backfill);
+        }
         let passed = self.gate.pass(live, backfill);
         for (work, refusal) in passed.refused {
             self.refuse(work, refusal.generation);
@@ -433,6 +515,55 @@ impl Builds {
         self.granted = Some(permit);
         self.reserved = reserved;
         Some(work)
+    }
+
+    /// [`ask`](Self::ask) beside other builders (G9′): each kind ready keeps
+    /// its waiter, joined at the back of its line the first time and asked
+    /// with its current parts after; a kind not ready leaves its line. A
+    /// granted waiter has left its line already.
+    fn ask_in_lines(
+        &mut self,
+        live: Option<Vec<(IndexName, usize)>>,
+        backfill: Option<Vec<(IndexName, usize)>>,
+    ) -> Option<Work> {
+        self.asked_at = self.gate.generation();
+        for (work, parts) in [(Work::Live, live), (Work::Backfill, backfill)] {
+            let at = self.waiters.iter().position(|(kind, _)| *kind == work);
+            match (parts, at) {
+                (Some(parts), Some(at)) => {
+                    if let Some((_, waiter)) = self.waiters.get_mut(at) {
+                        waiter.set_parts(parts);
+                    }
+                }
+                (Some(parts), None) => {
+                    let waiter = self.gate.join(work, parts);
+                    self.waiters.push((work, waiter));
+                }
+                (None, Some(at)) => {
+                    self.waiters.remove(at);
+                }
+                (None, None) => {}
+            }
+        }
+        for work in [Work::Live, Work::Backfill, Work::Live] {
+            let Some(at) = self.waiters.iter().position(|(kind, _)| *kind == work) else {
+                continue;
+            };
+            let Some((_, waiter)) = self.waiters.get_mut(at) else {
+                continue;
+            };
+            match waiter.try_grant() {
+                Asked::Granted(permit, reserved) => {
+                    self.waiters.remove(at);
+                    self.granted = Some(permit);
+                    self.reserved = reserved;
+                    return Some(work);
+                }
+                Asked::Refused(refusal) => self.refuse(work, refusal.generation),
+                Asked::NotNow(_) => {}
+            }
+        }
+        None
     }
 
     /// Whether a live build runs: only a full live batch may start beside
@@ -493,6 +624,7 @@ impl Builds {
     ) -> Option<Grant<L>> {
         self.refused = None;
         if !self.has_room() {
+            self.leave_lines();
             return None;
         }
         let live = live
@@ -616,8 +748,13 @@ impl Builds {
             let since = {
                 let mut waits = lock(&self.waits);
                 let wait = waits.of(work);
-                wait.counted = false;
-                wait.since.take()
+                wait.held.remove(&self.index);
+                if wait.held.is_empty() {
+                    wait.counted = false;
+                    wait.since.take()
+                } else {
+                    None
+                }
             };
             if let Some(since) = since {
                 self.observer

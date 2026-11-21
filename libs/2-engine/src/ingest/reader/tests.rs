@@ -227,7 +227,7 @@ fn reader(
             max_delay: Duration::from_secs(60),
         },
         lead: Arc::clone(&lead),
-        runs: sender,
+        runs: vec![(IndexName::try_new("users").unwrap(), sender)],
         handing,
         checked: None,
     };
@@ -597,7 +597,7 @@ async fn a_take_at(point: Check) {
                 max_delay: Duration::from_secs(60),
             },
             lead,
-            runs: sender,
+            runs: vec![(IndexName::try_new("users").unwrap(), sender)],
             handing: None,
             checked: Some(checked),
         },

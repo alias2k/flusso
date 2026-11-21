@@ -723,6 +723,33 @@ impl Progress {
         self.take_from(index, usize::MAX, Some(through), held)
     }
 
+    /// [`take_through`](Self::take_through) at most `max` ids, oldest first
+    /// (one index's build takes at most `max_changes` documents, O2).
+    pub fn take_through_at_most(
+        &self,
+        index: &IndexName,
+        through: Position,
+        max: usize,
+        held: &dyn Fn(&RowKey) -> bool,
+    ) -> Option<Taken> {
+        self.take_from(index, max, Some(through), held)
+    }
+
+    /// The newest position among `index`'s documents waiting: where a take
+    /// of its backlog ends.
+    pub fn newest_waiting(&self, index: &IndexName) -> Option<Position> {
+        self.pending
+            .get(index)
+            .and_then(|pending| lock(pending).newest_waiting())
+    }
+
+    /// How many of `index`'s documents wait to be taken.
+    pub fn waiting_on(&self, index: &IndexName) -> usize {
+        self.waiting_on
+            .get(index)
+            .map_or(0, |waiting| waiting.load(Ordering::Relaxed))
+    }
+
     fn take_from(
         &self,
         index: &IndexName,
@@ -884,6 +911,19 @@ impl Progress {
     ) -> BTreeMap<IndexName, Step> {
         let mut registry = lock(&self.registry);
         let number = Self::next_step(&mut registry, 0).number;
+        // A step closed after a restart lifts the cap of every lane whose
+        // index has nothing waiting or building: no builder of it would
+        // ever register a step of its own (the rule in `forget_all`'s doc).
+        for (lane, registered) in registry.lanes.iter_mut() {
+            if registered.restart.is_some()
+                && self
+                    .pending
+                    .get(&lane.index)
+                    .is_none_or(|pending| lock(pending).is_idle())
+            {
+                registered.restart = None;
+            }
+        }
         frontiers
             .into_iter()
             .map(|(index, read)| (index, Step { number, read }))
@@ -921,13 +961,17 @@ impl Progress {
                 continue;
             };
             let landed = registered.committed(marks).map_or(0, |step| step.read);
-            let idle = registered.unlanded.is_empty()
-                && self
+            // With nothing unlanded, every read below the index's oldest
+            // unbuilt one (a document waiting, a build not yet released) is
+            // landed on the lane or had nothing for it (ADR 0012 stage 8a,
+            // 6b-1c: a lane is registered only with its own index's steps).
+            let caught_up = if registered.unlanded.is_empty() {
+                let unbuilt = self
                     .pending
                     .get(&lane.index)
-                    .is_none_or(|pending| lock(pending).is_idle());
-            let caught_up = if idle {
-                registered.restart.map_or(readable, |cap| cap.min(readable))
+                    .and_then(|pending| lock(pending).least_unbuilt());
+                let reach = unbuilt.map_or(readable, |least| least.saturating_sub(1).min(readable));
+                registered.restart.map_or(reach, |cap| cap.min(reach))
             } else {
                 0
             };
@@ -1003,8 +1047,23 @@ impl Progress {
         through: Position,
         held: Option<Holds<'_>>,
     ) -> Option<Vec<(IndexName, usize)>> {
+        self.waiting_of(None, through, held)
+    }
+
+    /// [`waiting_through`](Self::waiting_through) on `index` alone, or on
+    /// every index when `None`: what one index's builder takes.
+    pub fn waiting_of(
+        &self,
+        only: Option<&IndexName>,
+        through: Position,
+        held: Option<Holds<'_>>,
+    ) -> Option<Vec<(IndexName, usize)>> {
         let mut waiting: Vec<(Position, IndexName, usize)> = Vec::new();
-        for (index, pending) in &self.pending {
+        for (index, pending) in self
+            .pending
+            .iter()
+            .filter(|(index, _)| only.is_none_or(|only| *index == only))
+        {
             let held = held.map(|held| move |key: &RowKey| held(index, key));
             let pending = lock(pending);
             let count = pending.scan(

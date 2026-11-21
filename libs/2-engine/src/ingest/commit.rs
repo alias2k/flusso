@@ -62,7 +62,9 @@ impl IngestEngine {
             // taken. Its estimate counts distinct documents.
             // Beside a running live build only a full batch may start, so a
             // hand-over that can't fill one costs no walk.
-            let candidate = if builds.live_running() {
+            let candidate = if builds.folding() {
+                self.backlog(builds)
+            } else if builds.live_running() {
                 runs.full_candidate()
             } else {
                 runs.candidate(true)
@@ -127,7 +129,14 @@ impl IngestEngine {
         builds.woke(Wake::Settle);
         loop {
             self.publish_ready(builds, lanes).await?;
-            let live = runs.candidate(false);
+            let live = if builds.folding() {
+                builds
+                    .index()
+                    .and_then(|index| self.progress.newest_waiting(index))
+                    .map(|position| Candidate::backlog(position, true))
+            } else {
+                runs.candidate(false)
+            };
             if let Some(candidate) = live
                 && let Some(documents) = self.waiting(builds, candidate.position)
                 && let Some((admitted, deferred)) = builds.can_take_last(&documents)
@@ -148,6 +157,12 @@ impl IngestEngine {
                             tokio::time::timeout(CONFIRM_TICK, budget.released_since(since)).await;
                         continue;
                     }
+                    // Another builder holds the permits: its turn comes when
+                    // one is freed (G9′).
+                    (true, _, _) if builds.in_line() => {
+                        builds.turn().await;
+                        continue;
+                    }
                     _ => return Ok(()),
                 }
             }
@@ -158,13 +173,26 @@ impl IngestEngine {
         }
     }
 
-    /// Each index's documents waiting through `through`, oldest waiting
-    /// first, or `None` while a running build holds one of them: a take now
-    /// would leave it behind, so the live batch waits, as `main`'s did.
+    /// Each index's documents waiting through `through` (the builder's own
+    /// index alone), oldest waiting first, or `None` while a running build
+    /// holds one of them: a take now would leave it behind, so the live
+    /// batch waits, as `main`'s did.
     fn waiting(&self, builds: &Builds, through: Position) -> Option<Vec<(IndexName, usize)>> {
         let held = |index: &IndexName, key: &source::RowKey| builds.holds(index, key);
         let held: Option<Holds<'_>> = builds.holds_some().then_some(&held);
-        self.progress.waiting_through(through, held)
+        self.progress.waiting_of(builds.index(), through, held)
+    }
+
+    /// While the builder folds (§3.9 I7), its standing candidate: the
+    /// documents waiting on its index, through the newest of them, full
+    /// once `max_changes` wait (a full one may start beside a running live
+    /// build). `None` with nothing waiting.
+    fn backlog(&self, builds: &Builds) -> Option<Candidate> {
+        let index = builds.index()?;
+        let waiting = self.progress.waiting_on(index);
+        let position = self.progress.newest_waiting(index)?;
+        let full = waiting >= self.batch.max_changes;
+        (!builds.live_running() || full).then_some(Candidate::backlog(position, full))
     }
 
     /// Take the documents waiting through `candidate`'s last change of every
@@ -188,13 +216,26 @@ impl IngestEngine {
         deferred: Vec<IndexName>,
     ) {
         let position = candidate.position;
-        let (ids, taken, mut frontiers) = self.take_all(builds, admitted, position);
-        runs.granted(candidate, !deferred.is_empty());
-        // Every other index with lanes is registered with its frontier now,
-        // at the grant: computed at publish, it could cover documents a
-        // later grant takes, whose item comes after this one (§3.9 I5).
+        let backlog = builds.folding();
+        let (ids, taken, mut frontiers) = self.take_all(builds, admitted, position, backlog);
+        if !backlog {
+            // Documents a capped take left behind keep the candidate: a later
+            // grant takes them whether or not a change comes (F2).
+            let left = self
+                .progress
+                .waiting_of(builds.index(), position, None)
+                .is_some_and(|waiting| !waiting.is_empty());
+            runs.granted(candidate, !deferred.is_empty() || left);
+        }
+        // Every other index this builder builds is registered with its
+        // frontier now, at the grant: computed at publish, it could cover
+        // documents a later grant takes, whose item comes after this one
+        // (§3.9 I5). A builder of one index registers only its own.
         for index in self.progress.indexes() {
-            if !deferred.contains(index) && !frontiers.iter().any(|(taken, _)| taken == index) {
+            if builds.index().is_none_or(|own| own == index)
+                && !deferred.contains(index)
+                && !frontiers.iter().any(|(taken, _)| taken == index)
+            {
                 frontiers.push((index.clone(), self.progress.frontier(index)));
             }
         }
@@ -219,6 +260,7 @@ impl IngestEngine {
         builds: &mut Builds,
         admitted: &[IndexName],
         through: Position,
+        backlog: bool,
     ) -> (
         Vec<DocumentId>,
         Vec<(IndexName, Token, Position)>,
@@ -232,10 +274,22 @@ impl IngestEngine {
             .indexes()
             .filter(|index| admitted.contains(index))
         {
-            if let Some(take) = self
-                .progress
-                .take_through(index, through, &|key| builds.holds(index, key))
-            {
+            let held = |key: &source::RowKey| builds.holds(index, key);
+            // One index's build takes at most `max_changes` documents (O2);
+            // a builder of every index (a lone `Builds`) takes them all, as
+            // 6b-1b did.
+            let most = if builds.index().is_some() {
+                self.batch.max_changes
+            } else {
+                usize::MAX
+            };
+            let take = if backlog {
+                self.progress.take(index, most, &held)
+            } else {
+                self.progress
+                    .take_through_at_most(index, through, most, &held)
+            };
+            if let Some(take) = take {
                 ids.extend(take.ids);
                 taken.push((index.clone(), take.token, take.oldest));
                 frontiers.push((index.clone(), take.frontier));

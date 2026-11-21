@@ -46,7 +46,7 @@ use std::task::Poll;
 
 use futures::task::AtomicWaker;
 use futures::{FutureExt, StreamExt};
-use kernel::Position;
+use kernel::{IndexName, Position};
 use source::cdc::{ChangeEvent, LiveChange};
 use source::document::{DocumentBuilder, DocumentId};
 use tokio::sync::{mpsc, oneshot};
@@ -59,14 +59,15 @@ use crate::policy::{BatchPolicy, MaxWaiting};
 use crate::progress::Progress;
 use crate::stop::Stop;
 
-/// One run, handed to the builder once its documents are marked.
+/// One run's slice for one builder, handed over once its documents are
+/// marked: with one builder every change of the run, with several the
+/// changes that touched the builder's index (§3.9 I2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Run {
-    /// Each change, in order, with the moment the reader read it: the
-    /// builder cuts batches by these as `main` cut them (R3).
-    pub(super) changes: Vec<(Position, Instant)>,
-    /// How many changes had been read through its last, over the engine's
-    /// life: what a step through it closes at.
+    /// Each change, in order, with the moment the reader read it and its
+    /// read number: the builder cuts batches by these as `main` cut them (R3).
+    pub(super) changes: Vec<(Position, Instant, u64)>,
+    /// The read number of its last change.
     pub(super) read: u64,
     /// How long reading and resolving it took: the builder reports it as
     /// [`Stage::Resolve`](crate::Stage::Resolve) once it closed the idle
@@ -77,39 +78,121 @@ pub(super) struct Run {
 impl Run {
     /// When its first change was read: the builder's idle wait ends here.
     pub(super) fn started(&self) -> Option<Instant> {
-        self.changes.first().map(|(_, at)| *at)
+        self.changes.first().map(|(_, at, _)| *at)
     }
 }
 
-/// What the reader and the builder share for the lead.
+/// What the reader and the builders share for the lead.
 #[derive(Debug)]
 pub(super) struct Lead {
     max: MaxWaiting,
     /// The reader's wake-up, woken after a live take while it waits: the
     /// lead may have room. One waiter, so no list and no lock.
     taken: AtomicWaker,
-    /// How many changes had been read through the last granted batch.
-    granted: AtomicU64,
     /// The reader waits, or is about to: a grant wakes it only then, so a
     /// reader that keeps up costs no wake-up.
     waiting: AtomicBool,
+    /// One per builder, in the builders' order.
+    queues: Vec<Queue>,
+    /// The reader ended while waiting (on the stream, or at its lead), not
+    /// in the middle of a run: a builder's wait until then was idle.
+    ended_waiting: AtomicBool,
+}
+
+/// One builder's queue as the lead counts it (§3.9 I6): the read number of
+/// its oldest change queued and not granted (`u64::MAX` for none) and of
+/// the last change routed to it; changes read ahead are counted from the
+/// oldest queued change of any builder that doesn't fold.
+#[derive(Debug)]
+pub(super) struct Queue {
+    oldest: AtomicU64,
+    routed: AtomicU64,
+    folding: AtomicBool,
 }
 
 impl Lead {
-    /// A lead of `max`, nothing read ahead past `read`.
+    /// A lead of `max` over one builder, nothing read ahead past `read`.
+    #[cfg(test)]
     pub(super) fn new(max: MaxWaiting, read: u64) -> Arc<Self> {
+        Self::over(max, read, 1)
+    }
+
+    /// A lead of `max` over `builders` builders, nothing read ahead past
+    /// `read`.
+    pub(super) fn over(max: MaxWaiting, read: u64, builders: usize) -> Arc<Self> {
         Arc::new(Self {
             max,
             taken: AtomicWaker::new(),
-            granted: AtomicU64::new(read),
             waiting: AtomicBool::new(false),
+            ended_waiting: AtomicBool::new(false),
+            queues: (0..builders.max(1))
+                .map(|_| Queue {
+                    oldest: AtomicU64::new(u64::MAX),
+                    routed: AtomicU64::new(read),
+                    folding: AtomicBool::new(false),
+                })
+                .collect(),
         })
     }
 
-    /// A live batch through the `read`th change was granted and its
-    /// documents taken: the reader may have room again.
+    /// A live batch of the first builder through its change read `read`th
+    /// was granted, the builder's changes read one after another (one
+    /// builder, handed every change).
+    #[cfg(test)]
     pub(super) fn granted(&self, read: u64) {
-        self.granted.fetch_max(read, Ordering::Relaxed);
+        let next = self
+            .queues
+            .first()
+            .is_some_and(|queue| queue.routed.load(Ordering::Relaxed) > read)
+            .then_some(read + 1);
+        self.queued(0, next);
+    }
+
+    /// Builder `queue` granted a live batch and took its documents: its
+    /// oldest change still queued is the `next`th read (`None`: none). The
+    /// reader may have room again.
+    pub(super) fn queued(&self, queue: usize, next: Option<u64>) {
+        if let Some(queue) = self.queues.get(queue) {
+            queue
+                .oldest
+                .store(next.unwrap_or(u64::MAX), Ordering::Relaxed);
+        }
+        self.wake();
+    }
+
+    /// Whether the reader ended while waiting, not in the middle of a run.
+    pub(super) fn ended_waiting(&self) -> bool {
+        self.ended_waiting.load(Ordering::Relaxed)
+    }
+
+    /// Whether builder `queue` folds: the reader hands it nothing.
+    pub(super) fn folds(&self, queue: usize) -> bool {
+        self.queues
+            .get(queue)
+            .is_some_and(|queue| queue.folding.load(Ordering::Relaxed))
+    }
+
+    /// Builder `queue` enters or leaves the fold (§3.9 I7): its queue counts
+    /// toward no bound while it folds, and leaving it, nothing it had is
+    /// outstanding. Wakes the reader: the bound may have moved.
+    pub(super) fn fold(&self, queue: usize, folding: bool) {
+        if let Some(queue) = self.queues.get(queue) {
+            queue.oldest.store(u64::MAX, Ordering::Relaxed);
+            queue.folding.store(folding, Ordering::Relaxed);
+        }
+        self.wake();
+    }
+
+    /// The reader routed builder `queue` a slice from its `first`th read to
+    /// its `last`th.
+    fn routed(&self, queue: usize, first: u64, last: u64) {
+        if let Some(queue) = self.queues.get(queue) {
+            queue.oldest.fetch_min(first, Ordering::Relaxed);
+            queue.routed.fetch_max(last, Ordering::Relaxed);
+        }
+    }
+
+    fn wake(&self) {
         // Pairs with the fence in `Reader::room`: either the reader sees
         // this grant's take when it reads the lead, or this sees it waiting.
         fence(Ordering::SeqCst);
@@ -120,12 +203,16 @@ impl Lead {
 
     /// Whether the reader is as far ahead as it may be.
     fn reached(&self, progress: &Progress) -> bool {
-        progress.most_waiting() >= self.max.per_index
-            || progress.waiting() >= self.max.total
-            || progress
-                .changes_read()
-                .saturating_sub(self.granted.load(Ordering::Relaxed))
-                >= self.max.total as u64
+        if progress.most_waiting() >= self.max.per_index || progress.waiting() >= self.max.total {
+            return true;
+        }
+        let read = progress.changes_read();
+        self.queues.iter().any(|queue| {
+            let oldest = queue.oldest.load(Ordering::Relaxed);
+            !queue.folding.load(Ordering::Relaxed)
+                && oldest != u64::MAX
+                && read.saturating_sub(oldest - 1) >= self.max.total as u64
+        })
     }
 }
 
@@ -146,9 +233,6 @@ pub(super) struct Ended {
     pub(super) live: LiveStream,
     /// The stream ended (rather than the stop being requested).
     pub(super) stream_ended: bool,
-    /// It ended while waiting (on the stream, or at its lead), not in the
-    /// middle of a run: the builder's wait until then was idle.
-    pub(super) waiting: bool,
 }
 
 /// The reader of one engine run (its stream is handed to [`reading`] apart:
@@ -160,7 +244,9 @@ pub(super) struct Reader {
     pub(super) stop: Stop,
     pub(super) batch: BatchPolicy,
     pub(super) lead: Arc<Lead>,
-    pub(super) runs: mpsc::UnboundedSender<Run>,
+    /// Each builder's hand-over, in the lead's queue order, with the index it
+    /// builds. With one builder it is handed every change.
+    pub(super) runs: Vec<(IndexName, mpsc::UnboundedSender<Run>)>,
     /// A test's look at each run just before it is handed over.
     #[cfg(test)]
     pub(super) handing: Option<Box<dyn Fn(&Run) + Send + Sync>>,
@@ -181,6 +267,9 @@ struct Reading<'a> {
     progress: &'a Progress,
     marks: Vec<(DocumentId, Position, u64)>,
     changes: Vec<(Position, Instant)>,
+    /// With several builders, each one's slice of the run: the changes that
+    /// touched its index, with their read numbers.
+    slices: Vec<Vec<(Position, Instant, u64)>>,
     counted: u64,
     uncounted: usize,
     deadline: Instant,
@@ -202,16 +291,24 @@ impl Reader {
             marks: Vec::with_capacity(self.batch.max_changes),
             counted: self.progress.changes_read(),
             changes: Vec::new(),
+            slices: vec![
+                Vec::new();
+                if self.runs.len() > 1 {
+                    self.runs.len()
+                } else {
+                    0
+                }
+            ],
             uncounted: 0,
             deadline: Instant::now(),
         };
         loop {
             if !self.room().await {
-                return Ok(end(live, false, true));
+                return Ok(self.end(live, false, true));
             }
             let (position, event) = match next_live(&mut live, &self.stop).await {
-                Next::Stopped => return Ok(end(live, false, true)),
-                Next::Change(None) => return Ok(end(live, true, true)),
+                Next::Stopped => return Ok(self.end(live, false, true)),
+                Next::Change(None) => return Ok(self.end(live, true, true)),
                 Next::Change(Some(Err(error))) => return Err(error.into()),
                 Next::Change(Some(Ok(change))) => change,
             };
@@ -222,9 +319,15 @@ impl Reader {
             let ended = self.drain_ready(&mut live, &mut reading).await?;
             self.hand_over(&mut reading, started);
             if ended {
-                return Ok(end(live, true, false));
+                return Ok(self.end(live, true, false));
             }
         }
+    }
+
+    /// The reader's end, recording on the lead whether it ended `waiting`.
+    fn end(&self, live: LiveStream, stream_ended: bool, waiting: bool) -> Ended {
+        self.lead.ended_waiting.store(waiting, Ordering::Relaxed);
+        end(live, stream_ended)
     }
 
     /// Wait while the lead is reached. `false` when the stop came first.
@@ -299,6 +402,19 @@ impl Reader {
             .resolve(event.table(), event.key(), event.before(), event.after())
             .await?;
         tracing::trace!(documents = affected.len(), "change resolved to documents");
+        if !reading.slices.is_empty() {
+            for id in &affected {
+                if let Some(slice) = self
+                    .runs
+                    .iter()
+                    .position(|(index, _)| *index == id.index)
+                    .and_then(|at| reading.slices.get_mut(at))
+                    && slice.last().is_none_or(|(_, _, last)| *last != read)
+                {
+                    slice.push((position, at, read));
+                }
+            }
+        }
         reading
             .marks
             .extend(affected.into_iter().map(|id| (id, position, read)));
@@ -318,30 +434,72 @@ impl Reader {
             .read_changes(std::mem::take(&mut reading.uncounted) as u64);
         reading.counted = read;
         self.progress.routed(last);
-        let run = Run {
-            changes: std::mem::take(&mut reading.changes),
-            read,
-            resolved: started.elapsed(),
-        };
+        let resolved = started.elapsed();
+        let changes = std::mem::take(&mut reading.changes);
+        // One builder is handed the whole run, changes that touched nothing
+        // included: its batches are 6b-1b's (§3.9, 6b-1c against the code).
+        if reading.slices.is_empty() {
+            let first = read - changes.len() as u64;
+            let run = Run {
+                changes: changes
+                    .into_iter()
+                    .zip(first + 1..)
+                    .map(|((position, at), read)| (position, at, read))
+                    .collect(),
+                read,
+                resolved,
+            };
+            self.hand(0, run);
+            return;
+        }
+        // The run's `Resolve` goes with its first slice; a run that touched
+        // no index reports its own.
+        let mut resolved = Some(resolved);
+        for at in 0..reading.slices.len() {
+            let Some(slice) = reading.slices.get_mut(at).filter(|slice| !slice.is_empty()) else {
+                continue;
+            };
+            let changes = std::mem::take(slice);
+            if self.lead.folds(at) {
+                continue;
+            }
+            let run = Run {
+                read: changes.last().map_or(read, |(_, _, read)| *read),
+                changes,
+                resolved: resolved.take().unwrap_or_default(),
+            };
+            self.hand(at, run);
+        }
+        if let Some(resolved) = resolved {
+            self.observer.on_stage(
+                crate::observer::StageTiming::new(crate::observer::Stage::Resolve, resolved)
+                    .work(crate::observer::Work::Live),
+            );
+        }
+    }
+
+    /// Hand builder `at` its slice.
+    fn hand(&self, at: usize, run: Run) {
         #[cfg(test)]
         if let Some(handing) = &self.handing {
             handing(&run);
         }
-        // The builder is gone only when the engine run ended, which drops
-        // this reader with it.
-        let _ = self.runs.send(run);
+        if let Some(&(_, _, first)) = run.changes.first() {
+            self.lead.routed(at, first, run.read);
+        }
+        // A builder is gone only when the engine run ended, which drops this
+        // reader with it.
+        if let Some((_, runs)) = self.runs.get(at) {
+            let _ = runs.send(run);
+        }
     }
 }
 
 /// The reader's end: the stream for the builder to close, and how it ended.
 /// Dropping the reader drops its channel's sender, which is what the
 /// builder sees first.
-fn end(live: LiveStream, stream_ended: bool, waiting: bool) -> Ended {
-    Ended {
-        live,
-        stream_ended,
-        waiting,
-    }
+fn end(live: LiveStream, stream_ended: bool) -> Ended {
+    Ended { live, stream_ended }
 }
 
 /// What the live read got.

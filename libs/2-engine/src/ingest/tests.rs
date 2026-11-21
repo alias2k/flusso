@@ -854,6 +854,9 @@ struct Spy {
 /// Every position published, per lane, in lane order.
 type Published = Arc<Mutex<BTreeMap<stream::LaneKey, Vec<u64>>>>;
 
+/// Where an engine run ended and the next began, in [`Published`].
+const RESTART: u64 = u64::MAX;
+
 #[derive(Debug)]
 struct SpyProducer {
     inner: Box<dyn stream::Producer<stream::LaneItem>>,
@@ -1072,6 +1075,14 @@ impl Deployment {
     /// Run the ingest engine on a stream that stays open until every change
     /// of `db` has landed, then stop it, restarting it after a failed run as
     /// [`run_to_end`](Self::run_to_end) does.
+    /// An engine run ended and the next starts: the positions published
+    /// after it are another run's (`RESTART` in the record).
+    fn restarted(&self) {
+        for positions in self.published.lock().unwrap().values_mut() {
+            positions.push(RESTART);
+        }
+    }
+
     async fn run_until_landed(&mut self, db: &Arc<Database>, stop: &Stop, most_restarts: usize) {
         let sink = self.start_sink().await;
         let watcher = {
@@ -1098,6 +1109,7 @@ impl Deployment {
                 Ok(()) => break,
                 Err(error) => {
                     failed += 1;
+                    self.restarted();
                     assert!(
                         failed <= most_restarts,
                         "the ingest engine failed {failed} times; the last: {error}"
@@ -1126,6 +1138,7 @@ impl Deployment {
                 Ok(()) => break,
                 Err(error) => {
                     failed += 1;
+                    self.restarted();
                     assert!(
                         failed <= most_restarts,
                         "the ingest engine failed {failed} times; the last: {error}"
@@ -1226,11 +1239,16 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
         regressed.is_empty(),
         "a document's version went down: {regressed:?} ({context})"
     );
+    // Within one engine run a lane's positions only grow. A restart replays
+    // from the confirmed position, the least over the lanes, so a lane whose
+    // index was ahead of another's gets some of its positions again.
     for (lane, positions) in deployment.published.lock().unwrap().iter() {
-        assert!(
-            positions.windows(2).all(|pair| pair[0] < pair[1]),
-            "{lane}'s positions are out of order: {positions:?} ({context})"
-        );
+        for run in positions.split(|position| *position == RESTART) {
+            assert!(
+                run.windows(2).all(|pair| pair[0] < pair[1]),
+                "{lane}'s positions are out of order within a run: {positions:?} ({context})"
+            );
+        }
     }
     assert_eq!(
         deployment.recorder.state(),

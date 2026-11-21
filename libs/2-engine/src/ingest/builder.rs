@@ -29,18 +29,15 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::builds::Builds;
-use super::dispatcher::{Signal, Signals};
+use super::dispatcher::{Reports, Signal, Signals};
 use super::live::Runs;
-use super::reader::{self, ReaderEnd};
 use super::snapshot::{Snapshot, Step, next_snapshot_step};
 use super::{IngestEngine, Lanes, released};
 use crate::error::Result;
 use crate::observer::{Stage, StageTiming, Wake, Work};
 
-/// How the builder ended without an error: the reader's end, and whether
-/// the stop ended it.
+/// How a builder ended without an error: whether the stop ended it.
 pub(super) struct BuilderEnd {
-    pub(super) reader: reader::Ended,
     pub(super) stopped: bool,
 }
 
@@ -56,9 +53,13 @@ struct Coalescing {
 /// What the builder borrows for one engine run.
 pub(super) struct Building<'a> {
     pub(super) runs: Runs,
-    pub(super) reader: ReaderEnd,
     pub(super) inbox: mpsc::UnboundedReceiver<Delivery<Request>>,
     pub(super) signals: &'a Signals,
+    pub(super) reports: &'a Reports,
+    /// Other builders run beside it: a builder held by the budget folds, so
+    /// its index doesn't stop the reading for theirs (§3.9 I7). Alone, it
+    /// never folds: it is 6b-1b's builder.
+    pub(super) several: bool,
     pub(super) lanes: &'a Lanes,
     pub(super) scopes: &'a HashSet<IndexName>,
     pub(super) builds: &'a mut Builds,
@@ -80,18 +81,19 @@ impl IngestEngine {
     async fn building(&self, building: Building<'_>) -> Result<BuilderEnd> {
         let Building {
             mut runs,
-            reader: mut reader_end,
             mut inbox,
             signals,
+            reports,
+            several,
             lanes,
             scopes,
             builds,
         } = building;
         let mut snapshot: Option<Snapshot> = None;
         let mut coalescing: Option<Coalescing> = None;
-        // The reader's end, once joined: the stream to close, and whether it
-        // ended by itself.
-        let mut ended: Option<reader::Ended> = None;
+        // The reader ended: every slice of this builder is handed over (its
+        // channel closed after the last one).
+        let mut reader_done = false;
         // Where the last arm's work ended: every arm times its wait from here,
         // so the loop reads no clock of its own.
         let mut mark = Instant::now();
@@ -100,21 +102,20 @@ impl IngestEngine {
             // A live stream that ends while a snapshot runs or requests wait
             // still gets those served; the builder settles once the
             // dispatcher saw nothing left to forward either.
-            if ended.as_ref().is_some_and(|ended| ended.stream_ended)
+            if several {
+                self.fold(&mut runs, builds);
+            }
+            if reader_done
+                && !self.stop.is_requested()
                 && snapshot.is_none()
                 && coalescing.is_none()
                 && inbox.is_empty()
             {
                 if signals.ended() {
                     self.settle(&mut runs, builds, lanes).await?;
-                    if let Some(reader) = ended.take() {
-                        return Ok(BuilderEnd {
-                            reader,
-                            stopped: false,
-                        });
-                    }
+                    return Ok(BuilderEnd { stopped: false });
                 }
-                signals.report_idle();
+                signals.report_idle(reports);
             }
             if self.stop.is_requested() {
                 if let Some(abandoned) = snapshot.take() {
@@ -132,34 +133,44 @@ impl IngestEngine {
                     );
                 }
                 // The barrier (R7): the reader hands over what it read and
-                // ends before anything is settled.
-                let reader = match ended.take() {
-                    Some(ended) => ended,
-                    None => self.reader_end(&mut reader_end, &mut runs).await?,
-                };
+                // ends (this builder's channel closes) before anything is
+                // settled.
+                while let Some(run) = runs.next().await {
+                    runs.push(run);
+                }
                 tracing::info!(
                     buffered = runs.changes(),
                     "stop requested: reading no further changes; landing what is in flight"
                 );
                 self.settle(&mut runs, builds, lanes).await?;
-                return Ok(BuilderEnd {
-                    reader,
-                    stopped: true,
-                });
+                return Ok(BuilderEnd { stopped: true });
             }
             let building = builds.running() > 0;
             let quiet = building || coalescing.is_some();
             let deadline = coalescing.as_ref().map(|gathered| gathered.deadline);
+            // Built only while it waits in a line: one builder never does.
+            let turn = builds.in_line().then(|| builds.turn());
             tokio::select! {
-                run = runs.next(), if ended.is_none() => match run {
+                // A permit or the state of the lines changed while this
+                // builder waits in one (G9′): ask again.
+                () = async {
+                    match turn {
+                        Some(turn) => turn.await,
+                        None => std::future::pending().await,
+                    }
+                }, if builds.in_line() => {
+                    builds.woke(Wake::Landed);
+                    self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
+                    mark = Instant::now();
+                }
+                run = runs.next(), if !reader_done => match run {
                     None => {
-                        let end = reader_end.join().await?;
-                        mark = if end.waiting {
+                        mark = if runs.lead().ended_waiting() {
                             self.waited(mark, None, &mut snapshot, quiet)
                         } else {
                             Instant::now()
                         };
-                        ended = Some(end);
+                        reader_done = true;
                     }
                     Some(run) => {
                         self.waited(mark, run.started(), &mut snapshot, quiet);
@@ -235,6 +246,24 @@ impl IngestEngine {
                     }
                 }
             }
+        }
+    }
+
+    /// Enter the fold when the budget held the live batch back, and leave it
+    /// once nothing waits on the index (§3.9 I7): entering drops the queued
+    /// slices (their documents stay waiting; the backlog takes them), and
+    /// the reader hands the builder nothing while it folds.
+    fn fold(&self, runs: &mut Runs, builds: &mut Builds) {
+        let Some(index) = builds.index() else {
+            return;
+        };
+        if !builds.folding() && builds.refused() == Some(Work::Live) {
+            runs.clear();
+            builds.set_folding(true);
+            runs.lead().fold(runs.slot(), true);
+        } else if builds.folding() && self.progress.waiting_on(index) == 0 {
+            builds.set_folding(false);
+            runs.lead().fold(runs.slot(), false);
         }
     }
 

@@ -128,6 +128,14 @@ impl Pending {
     /// The read number of the oldest waiting id; `None` while none waits.
     /// Within one engine run read numbers follow positions, so the oldest by
     /// position is the least.
+    /// The newest position among the documents waiting.
+    pub(crate) fn newest_waiting(&self) -> Option<Position> {
+        self.order
+            .last_key_value()
+            .and_then(|(_, key)| self.waiting.get(key))
+            .map(|(position, _, _)| *position)
+    }
+
     pub(crate) fn least_waiting_read(&self) -> Option<u64> {
         self.order
             .first_key_value()
@@ -137,6 +145,18 @@ impl Pending {
 
     /// Nothing waits and no build is taken and not yet released: every
     /// document marked is on its lanes.
+    /// The least read number of what is not yet on its lanes: a document
+    /// waiting, or one in a build taken and not yet released.
+    pub(crate) fn least_unbuilt(&self) -> Option<u64> {
+        self.waiting
+            .values()
+            .map(|(_, _, read)| *read)
+            .min()
+            .into_iter()
+            .chain(self.builds.iter().map(|build| build.least_read))
+            .min()
+    }
+
     pub(crate) fn is_idle(&self) -> bool {
         self.waiting.is_empty() && self.builds.is_empty()
     }
