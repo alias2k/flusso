@@ -538,3 +538,130 @@ async fn indexes_walk_one_at_a_time() {
         .unwrap();
     running.sink.abort();
 }
+
+/// A walk of `orders` takes two seconds to find its bound; `users` has
+/// none. Records the indexes marked seeded.
+#[derive(Debug, Default)]
+struct SlowOrdersWalk;
+
+#[async_trait]
+impl DocumentBuilder for SlowOrdersWalk {
+    async fn resolve(
+        &self,
+        _: &TableName,
+        _: &RowKey,
+        _: Option<&source::RowImage>,
+        _: Option<&source::RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        Ok(Vec::new())
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        Ok(Document::Upsert {
+            id: id.clone(),
+            body: GenericValue::Null,
+        })
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![orders(), users()]
+    }
+
+    async fn last_key(&self, index: &IndexName) -> source::Result<Option<RowKey>> {
+        if *index == orders() {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        Ok(None)
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        _: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        Ok(Vec::new())
+    }
+}
+
+/// `orders` unseeded, `users` seeded; records what is marked seeded.
+#[derive(Debug, Default)]
+struct OrdersUnseeded(Mutex<Vec<String>>);
+
+#[async_trait]
+impl Sink for OrdersUnseeded {
+    async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        Ok(WriteReport::clean())
+    }
+
+    async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {
+        Ok(*index != orders())
+    }
+
+    async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
+        self.0.lock().unwrap().push(index.to_string());
+        Ok(())
+    }
+}
+
+/// The end waits for every builder (§3.9 §8): the live stream ended at
+/// once, `users`' builder is idle while `orders` still walks, and a request
+/// for `users` reaches the lane meanwhile. The dispatcher still forwards it
+/// and `users` is served before the run ends ("a live stream that ends still
+/// drains queued requests"), not left for the next start.
+#[tokio::test(start_paused = true)]
+async fn a_request_queued_for_one_index_after_live_ends_is_served() {
+    let primary = primary();
+    let indexes = vec![orders(), users()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(indexes.clone(), [primary.clone()]));
+    let sink = Arc::new(OrdersUnseeded::default());
+    let engine = SinkEngine::new(
+        primary.clone(),
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        indexes.iter().cloned().map(index_mapping).collect(),
+        Arc::clone(&progress),
+    )
+    .with_writes(4);
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .unwrap();
+    let sink_task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    let ingest = IngestEngine::new(
+        Arc::new(MockSource::new(Vec::new())) as Arc<dyn ChangeCapture>,
+        Arc::new(SlowOrdersWalk) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![primary.clone()],
+        Arc::clone(&progress),
+    );
+    let run = tokio::spawn(async move { ingest.run().await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stream
+        .requests()
+        .unwrap()
+        .producer
+        .publish(stream::Request::Backfill {
+            index: users(),
+            sink: primary,
+            after: None,
+            ticket: stream::Ticket::default(),
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    wait_for(|| sink.0.lock().unwrap().len() == 2).await;
+    let mut seeded = sink.0.lock().unwrap().clone();
+    seeded.sort();
+    assert_eq!(seeded, ["orders", "users"]);
+    sink_task.abort();
+}

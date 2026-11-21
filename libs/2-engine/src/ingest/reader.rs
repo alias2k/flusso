@@ -208,10 +208,10 @@ impl Lead {
         }
         let read = progress.changes_read();
         self.queues.iter().any(|queue| {
+            // A folding queue holds nothing: entering the fold cleared it,
+            // and the reader routes it nothing while it folds.
             let oldest = queue.oldest.load(Ordering::Relaxed);
-            !queue.folding.load(Ordering::Relaxed)
-                && oldest != u64::MAX
-                && read.saturating_sub(oldest - 1) >= self.max.total as u64
+            oldest != u64::MAX && read.saturating_sub(oldest - 1) >= self.max.total as u64
         })
     }
 }
@@ -266,7 +266,7 @@ pub(super) struct Reader {
 struct Reading<'a> {
     progress: &'a Progress,
     marks: Vec<(DocumentId, Position, u64)>,
-    changes: Vec<(Position, Instant)>,
+    changes: Vec<(Position, Instant, u64)>,
     /// With several builders, each one's slice of the run: the changes that
     /// touched its index, with their read numbers.
     slices: Vec<Vec<(Position, Instant, u64)>>,
@@ -418,14 +418,14 @@ impl Reader {
         reading
             .marks
             .extend(affected.into_iter().map(|id| (id, position, read)));
-        reading.changes.push((position, at));
+        reading.changes.push((position, at, read));
         Ok(())
     }
 
     /// Mark the run's documents, count its changes, route its last, then
     /// hand it over (R1; routed after the marks, §3.9 D1).
     fn hand_over(&self, reading: &mut Reading<'_>, started: Instant) {
-        let Some(&(last, _)) = reading.changes.last() else {
+        let Some(&(last, _, _)) = reading.changes.last() else {
             return;
         };
         self.progress.mark_reads(reading.marks.drain(..));
@@ -439,13 +439,8 @@ impl Reader {
         // One builder is handed the whole run, changes that touched nothing
         // included: its batches are 6b-1b's (§3.9, 6b-1c against the code).
         if reading.slices.is_empty() {
-            let first = read - changes.len() as u64;
             let run = Run {
-                changes: changes
-                    .into_iter()
-                    .zip(first + 1..)
-                    .map(|((position, at), read)| (position, at, read))
-                    .collect(),
+                changes,
                 read,
                 resolved,
             };

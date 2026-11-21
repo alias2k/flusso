@@ -637,10 +637,11 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
 is the one concrete piece.
 `FanOutSink` is gone; sinks are independent. Key invariants to preserve when editing the engines:
 
-- **One reader, one dispatcher, one builder (ADR 0012 stage 8a slices 6a and 6b-1b; rules R1–R10 in
-  the stage note's §3.8, I1 and I10 in §3.9).** The ingest engine's run polls a **reader**
-  (`ingest/reader.rs`, `reading`), the **dispatcher** (`ingest/dispatcher.rs`, the run's result) and
-  the **builder** (`ingest/builder.rs`) as futures of its own task (`ingest/together.rs`, `together`
+- **One reader, one dispatcher, a builder per index (ADR 0012 stage 8a slices 6a, 6b-1b and 6b-1c;
+  rules R1–R10 in the stage note's §3.8, I1–I13 in §3.9).** The ingest engine's run polls a **reader**
+  (`ingest/reader.rs`, `reading`), the **dispatcher** (`ingest/dispatcher.rs`, the run's result) and a
+  **builder** per index with lanes (`ingest/builder.rs`, each with its own `Builds`, `Runs`, lanes,
+  inbox and signals) as futures of its own task (`ingest/together.rs`, `together`
   for N; review round 3 of 6a: a spawned reader cost a scheduler hop per hand-over and per grant, +22%
   at one change per batch): one `AtomicU64`, bit 0 the "being polled" mark, bit 1 the stop's watch,
   bits 2–63 one group per future (`i mod 62`: futures past 62 share a group and may be polled unwoken);
@@ -664,9 +665,23 @@ is the one concrete piece.
   empty, and forwards nothing after; and finishes the run from the builder's one-shot result:
   `drain_lanes` + `close_live` at a stop, a last confirmation at the stream's end, or its error. **The
   builder** is 6a's loop without those: it gathers requests on a deadline (`max_delay` from the first;
-  started once every sink with a lane asked and the inbox is empty), granting live batches meanwhile;
-  at the stop it drops its snapshot and coalescing set (served again on the next start), waits for the
-  reader's end and settles. The reader
+  started once every sink with a lane of its index asked and the inbox is empty), granting live batches
+  meanwhile; at the stop it drops its snapshot and coalescing set (served again on the next start),
+  waits for its slice channel to close (the reader's end, R7) and settles. **Per index (6b-1c)**: the
+  reader hands each builder the changes that touched its index (`Run` slices with each change's read
+  number; with one builder it hands it every change, so one index is 6b-1b's path: same batches,
+  grants and costs); each builder cuts R3's batches over its own queue, and one index's build takes at
+  most `max_changes` documents (O2: `Progress::take_through_at_most`; what a capped take leaves keeps
+  the candidate, F2); builders share one gate (`Builds::with_gate`) and, with two or more, a batch a
+  pass didn't grant keeps a waiter in its kind's line (G9′, `Builds::ask_in_lines`, `Waiter::set_parts`:
+  a growth keeps the refusal, a shrink clears it), woken by any change of the gate past the generation
+  it asked at (`Gate::changed_since`), and left when no batch or slot is ready; one builder keeps G9's
+  pass and never joins a line (`one_index_never_waits_in_a_gate_line`). A builder held by the budget
+  **folds** (only with two or more): its queued slices are dropped (`Runs::clear`), the reader hands it
+  nothing, and it takes its backlog oldest first in takes of at most `max_changes` until nothing waits
+  on its index. Walks are one at a time (the walk token, a FIFO semaphore whose acquire a builder keeps
+  across polls while it coalesces on); `Idle` with several builders is one clock (`IdleClock`: reported
+  only while every builder is idle). The reader
   owns the live stream and the resolver, reads a run as `main`'s `drain_ready` did (cut at
   `max_changes`, `max_delay`, would-block, the stop), resolves it, **marks** its documents
   (`Progress::mark_reads`, each id with its read number), **counts** it (`Progress::read_changes`), raises
@@ -684,12 +699,12 @@ is the one concrete piece.
   the deadline is known to cut the batch, `Runs::full_candidate`), takes only documents marked through the batch's last change (`Progress::take_through`), and
   each index's lanes are registered with that index's frontier (below), so no step claims a newer run's change. **The lead**:
   before each run the reader waits while one index has `max_waiting_per_index` documents waiting, all
-  indexes `max_waiting`, or `max_waiting` changes are read and not granted (`engine::MaxWaiting`;
+  indexes `max_waiting`, or `max_waiting` changes are read ahead of the oldest change still queued on a
+  builder that doesn't fold (`Lead`'s queues; `engine::MaxWaiting`;
   `[concurrency]` keys, `--max-waiting-per-index`/`--max-waiting` + `FLUSSO_MAX_WAITING*`, never in the
   lock, defaults `2 × max_changes` and `2 × builds × max_changes`, an unset one following the other
   as `[backoff]`'s pair does, judged by `daemon::max_waiting` in `check`/`build`/`run`/`Daemon::start`:
-  0, or both set with the total below the per-index bound, refused naming each origin); the deferral
-  cap of slice 4 is the same per-index number. **The stop**: the reader hands over
+  0, or both set with the total below the per-index bound, refused naming each origin). **The stop**: the reader hands over
   its cut run, ends and returns the stream; the builder waits for that (the barrier), builds and
   publishes every run handed over and hands its end to the dispatcher, which drains, then `close_live`.
   A reader error (through the builder, which joins the reader) or a builder error reaches the
@@ -734,15 +749,17 @@ is the one concrete piece.
   number; a live grant closes one `Step` number and registers each index's lanes with that index's
   **frontier** (`Progress::close_steps`: a take's `Taken::frontier`, else `Progress::frontier`; one below
   the oldest read still waiting, else the read count), with an item or without (`published_build`/`skipped_build`);
-  a lane has committed the frontier of the newest step it landed through, or, with nothing unlanded and
-  its index idle (nothing waiting, no build unreleased: `Pending::is_idle`), the read count (the
-  catch-up: a change that builds nothing counts once read and everything before it landed); each lane
+  a lane has committed the frontier of the newest step it landed through, or, with nothing unlanded,
+  every read below its index's oldest unbuilt one (`Pending::least_unbuilt`: a document waiting, a build
+  not yet released; the read count when none: the catch-up, so a change that builds nothing counts once
+  read and everything before it landed; 6b-1c, since a lane is registered only with its own index's
+  steps); each lane
   keeps a high-water, so a sink's count (the least over its lanes; every read with no lane) never goes
   down. Reads the reader's guard counts without marks (a run cut by an error, `Progress::read_unmarked`)
   stop every frontier and catch-up at once (`readable`), until the next run. `forget_all` caps each
   lane's catch-up one below the least read the ended run left unbuilt (waiting, in a build never
-  released, or cut) until a step is registered on that lane, so a lane the first grant defers keeps
-  it; it runs under the registry lock throughout, so a reader sees the run whole or forgotten, never
+  released, or cut) until a step is registered on that lane, or until a step closes while its index has
+  nothing waiting or building (a quiet index's lanes get no step of their own); it runs under the registry lock throughout, so a reader sees the run whole or forgotten, never
   its documents gone while `routed` still answers. The read count is written with release after the marks and read with
   acquire first. Computed when read (`Status::with_progress`, the observable `flusso.changes.committed`);
   nothing listens. A lane keeps at most `k + 2` steps (`k` its unlanded items: a skip replaces the
@@ -1316,22 +1333,19 @@ is the one concrete piece.
   `notify_waiters` outside the lock, and a waiter passes the generation of its refusal to
   `Budget::released_since` (no lost wake-up). A grant estimates per index (ids × a running average per
   index and kind) in `Builds::choose`, admits, lets the gate pick, then reserves: a backfill batch fits
-  whole or not at all; a live batch takes the indexes that fit (`Grant::Live(_, admitted)`) and **defers**
-  the rest: their documents stay waiting, the live run keeps its position, and their lanes get nothing
-  from that build, not even its step, so nothing of them counts committed early. An index may stay
-  deferred only while it has fewer than `2 × max_changes` documents waiting (`Builds::with_deferral`,
-  only with a shared budget); past that the batch waits whole and a full run stops the reading, as with one
-  index. Rules (`budget.rs`'s module doc): 1 total ≤ limit, 2 backfill ≤ half, 3 an index's **live** bytes
+  whole or not at all, and so does a live batch (one index per builder, 6b-1c; slice 4's deferral is
+  gone): an index the budget refuses holds only its own builder, which folds. Rules (`budget.rs`'s module doc): 1 total ≤ limit, 2 backfill ≤ half, 3 an index's **live** bytes
   ≤ its share (its backfill bytes don't count, so an index's backfill or reindex leaves its live stream
   `main`'s room), 4 backfill holding nothing gets one batch, 5 an index holding no live bytes gets one live
   batch whatever 1 and 3 say (so one stuck index, a parked lane at its share for hours, leaves the others
-  building until it has `2 × max_changes` documents waiting, then reading stops for all as before; 6b
+  building until it has `2 × max_changes` documents waiting, then reading stops for all as before; 6b-2
   lifts that; live holding nothing takes every index). Total ≤ limit + one live batch per index + one backfill
   batch + settle slack; one index's live batch is take-all, up to about `3 × max_changes` changes'
   documents with two or more indexes (a per-index cap would register a step while documents of it still
   wait). Indexes are offered oldest waiting first and the first refused by the limit stops younger ones
   **holding live bytes** from taking room by it (no starvation by small batches; rule 5 is never held back).
-  A live wait (`flusso.memory.refused`/`wait`) lasts until no index is deferred; whether a hold was counted
+  A live wait (`flusso.memory.refused`/`wait`) lasts while any builder is held (`Waits` keeps the held
+  builders: overlapping holds of several are one wait, counted once); whether a hold was counted
   belongs to the engine (`builds::Waits`), its clock to the engine run: a run that ends reports its open wait
   up to then, and the next run's refusal of the same hold starts a new clock without counting again. Each index's settled `Charge` rides only that
   index's lane items. A candidate the budget can't fit is not admissible, so the gate's every-fourth

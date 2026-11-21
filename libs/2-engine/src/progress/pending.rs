@@ -148,10 +148,10 @@ impl Pending {
     /// The least read number of what is not yet on its lanes: a document
     /// waiting, or one in a build taken and not yet released.
     pub(crate) fn least_unbuilt(&self) -> Option<u64> {
-        self.waiting
-            .values()
-            .map(|(_, _, read)| *read)
-            .min()
+        // The oldest waiting by position is the least read: reads follow
+        // the stream's order, and a document marked again keeps its older
+        // change.
+        self.least_waiting_read()
             .into_iter()
             .chain(self.builds.iter().map(|build| build.least_read))
             .min()
