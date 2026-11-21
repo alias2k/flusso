@@ -645,7 +645,7 @@ that also reads the mark, and a pass ends with one `compare_exchange` that drops
 no running future's flag is raised, so a wake is either taken by the pass or wakes the task, on any
 architecture (one location's changes are seen in one order by every thread; round 3's two
 locations needed a `SeqCst` store-load argument). A loom model checks every interleaving and loom's
-acquire/release model (`every_wake_is_taken_by_a_pass_or_wakes_the_task_in_every_interleaving`).
+acquire/release model (`every_wake_is_taken_by_a_pass_or_wakes_the_task_within_three_preemptions`).
 Only running futures' flags count: an ended reader, woken by the stop or a stale waker, keeps no
 poll going. A poll ends when no running future's flag is raised, or after 32 passes, yielding to the
 worker and woken again at once. A spent cooperative budget ends a poll by itself: tokio wakes a
@@ -783,8 +783,8 @@ takes about 25 s on the unchanged code (28 s before this slice) and is left out 
 | R1: no deadline for a run | `a_backlog_resolved_a_change_a_millisecond_is_batched_as_main_batched_it` |
 | R5: nothing reserved whatever the parts (round 3) | 12 tests, the budget's |
 | R5: the budget asked with nothing to reserve (round 2's form) | **equivalent**: an empty reservation is always admitted and adds nothing; a lock, nothing else |
-| `together` (round 4, one word): the mark dropped by a store after the flags are read, round 3's two-step form | `a_wake_at_the_end_of_a_pass_is_not_lost`, `every_wake_is_taken_by_a_pass_or_wakes_the_task_in_every_interleaving` (loom) |
-| `together`: relaxed orderings on the word | `every_wake_is_taken_by_a_pass_or_wakes_the_task_in_every_interleaving` (loom: a pass that took a flag misses what its waker wrote) |
+| `together` (round 4, one word): the mark dropped by a store after the flags are read, round 3's two-step form | `a_wake_at_the_end_of_a_pass_is_not_lost`, `every_wake_is_taken_by_a_pass_or_wakes_the_task_within_three_preemptions` (loom) |
+| `together`: relaxed orderings on the word | `every_wake_is_taken_by_a_pass_or_wakes_the_task_within_three_preemptions` (loom: a pass that took a flag misses what its waker wrote) |
 | `together`: a wake from outside never wakes the task | 79 tests (most hang) |
 | `together`: a wake while polled also wakes the task | `wakes_between_the_two_are_served_in_the_same_poll`, `a_wake_from_another_thread_during_a_pass_is_not_lost`, `a_wake_at_the_end_of_a_pass_is_not_lost`, `a_poll_yields_to_the_worker_after_its_passes` |
 | `together`: no cap on the passes | `a_poll_yields_to_the_worker_after_its_passes` |
@@ -1557,6 +1557,9 @@ Built as "6b-1b against the code" states; where the code sits:
   bit (and the watch's), the watch first, then the futures from `start` (advanced every poll);
   `MAX_POLLS` (64) counts every poll, the watch's included; a poll cut mid-pass `raise`s the groups of the
   futures it took and didn't reach, then ends with the task woken.
+- **The cap is checked twice**: before every pass and before every future. The first matters only for a
+  pass that polls nothing but the watch (a watch that kept waking itself would loop without it,
+  `a_watch_that_keeps_waking_itself_still_yields`); both stay.
 - **The dispatcher** (`ingest/dispatcher.rs`, `IngestEngine::dispatch`) and **`Signals`** (in-task
   flags and two `AtomicWaker`s: the builder's look, tick and end; its idle report). `Look` is raised once per stop or end, so a builder that can't act on it yet doesn't
   spin (the level-triggered first try spun on the random schedules, which caught it as a hang).
@@ -1581,7 +1584,7 @@ engines) changed.
 | Where | `main` (6a + 6b-1a) | 6b-1b |
 | --- | --- | --- |
 | per change | — | — |
-| per run | the builder confirmed after the run's grant | the run's `routed` raises the registration flag: a `swap`, an `AtomicWaker` wake (a waker clone when the dispatcher registers again) and a `fetch_or` on the flags word; the dispatcher is polled once more in the same task poll (its `select!`: the result one-shot, the registration flag, the request lane's `recv`, the idle report, the tick) and confirms once |
+| per run | the builder confirmed after the run's grant | the run's `routed` raises the registration flag: a `swap`, an `AtomicWaker` wake (a waker clone when the dispatcher registers again) and a `fetch_or` on the flags word; the dispatcher is polled once or twice more in the same task poll, each one pass through its `select!` with no allocation and no lock (review round 1, below), and confirms once per poll |
 | per grant | a confirmation after it | a `swap` per lane registration and release (the flag is already up: no wake); the confirmation moves to the dispatcher, once per poll however many registrations |
 | per builder poll | the request lane's `recv` (a `tokio::sync::Mutex` try and the channel) in the builder's `select!` | the inbox's `recv` (an unbounded channel) and the signals (an `AtomicWaker` register and two `swap`s); the request lane's `recv` moves to the dispatcher's polls |
 | per task poll | a `fetch_and` per running future per pass, a load and a `compare_exchange` | one `fetch_and` per pass for every future, the load and `compare_exchange`, a rotation counter, bounds-checked lookups in two small `Vec`s per polled future |
@@ -1619,6 +1622,36 @@ run never ends without the mutated rule):
 The first version also had two defects the random schedules found as hangs before any mutation: a
 level-triggered `Look` (fixed: raised once per stop or end) and the forwarding loop to a builder gone
 (fixed, `a_request_for_a_builder_gone_goes_back_to_its_lane_once`).
+
+**Review round 1 of #450** (no blocker; each point taken):
+
+| Point | Change | Test, and the mutation it fails under |
+| --- | --- | --- |
+| 1. The builder's "inbox empty" idle check had no test | none in the code | `a_request_forwarded_after_the_builder_went_idle_is_served`: a request lane that publishes a request the first time it is asked whether it is empty, so the request reaches the lane as the dispatcher looks, after the builder reported idle; 40 runs, since which of the builder's arms wins is tokio's pick. Fails with the check removed; also with the dispatcher's own lane check removed, which last round's table called untestable: this lane is exactly the half-published case |
+| 2. `inbox.recv(), if snapshot.is_none()` had no test | none | `a_request_arriving_mid_snapshot_waits_for_it` (`HangingKeys`; a second request mid-walk; 5 s of paused time; the walk is not asked for again) |
+| 3. The watch's bit at the end of a pass had only an incidental test | none | `a_watch_woken_at_the_end_of_a_pass_is_not_lost` (a wake of the watch after it was polled, before the mark drops) |
+| 4. The loom model's doc said "every interleaving" | the doc says what it is (bounded at three preemptions, four threads), what it drives and what the unit tests cover instead; the two tests renamed `…_within_three_preemptions` | — |
+| 5. The cost table undercounted a lone change | the dispatcher keeps the request lane's `recv` in one long-lived future (`feed`) across its polls, dropped only when it yields or the builder reports idle; a registration confirms inside its arm's poll, which stays pending, so a wake for a registration is one pass through the `select!`; the tick stays as it was (`Interval::tick` allocates nothing) | the request rows below, re-run on the new code |
+| 6. The note said the cap before a pass was gone | corrected above: it stays, and is required | — |
+
+Mutations re-run on the code after the round: a registration confirming nothing and a registration
+raising no wake fail `the_dispatcher_confirms_after_the_builder_that_registered`; no stop fan-out fails
+`a_stop_reaches_a_builder_whose_stream_ended_while_its_snapshot_waits_on_a_page`; forwarding to a builder
+gone fails `a_request_for_a_builder_gone_goes_back_to_its_lane_once`; the end with the request lane not
+empty and the builder settling with a request in its inbox fail
+`a_request_forwarded_after_the_builder_went_idle_is_served`; a request taken while a snapshot runs fails
+`a_request_arriving_mid_snapshot_waits_for_it`; the watch dropped from the end of a pass fails
+`a_watch_woken_at_the_end_of_a_pass_is_not_lost` and `a_watch_that_keeps_waking_itself_still_yields`.
+
+**A lone change's cost, corrected** (the reviewer's count: one task poll; the reader and the builder
+polled once each, the dispatcher once or twice). Before the round, each dispatcher wake entered its
+`select!` at least twice (the ready arm, then to park), each entry creating the `async_trait` box of
+the request lane's `recv`, taking and releasing its `tokio::sync::Mutex`, and polling the tick: about
+2–4 boxes and mutex round trips per lone change beyond `main`. After it, a wake for a registration is
+one entry: the result one-shot, the stop's flag, the registration flag (an `AtomicWaker` register, a
+`swap`, the confirmation), `feed` (a poll of the `recv` it holds: the channel's atomics, no box, no lock;
+the idle report's `AtomicWaker` register and `swap`) and the tick's timer. The `recv` box and the lock
+are paid once per request received or idle report, not per wake.
 
 **User-visible**: live batches are built and published while backfill requests are gathered (up to
 `max_delay`), where `main` and 6a waited the gathering out. Nothing else.

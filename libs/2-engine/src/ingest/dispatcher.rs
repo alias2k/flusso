@@ -31,7 +31,7 @@
 //! ```
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use futures::FutureExt;
 use futures::task::AtomicWaker;
@@ -119,17 +119,22 @@ impl Signals {
     }
 
     /// Ready once the builder reported itself idle since the last time.
-    async fn idle_reported(&self) {
-        std::future::poll_fn(|cx| {
-            self.dispatcher.register(cx.waker());
-            if self.reported.swap(false, Ordering::AcqRel) {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
+    fn poll_idle(&self, cx: &mut Context<'_>) -> Poll<()> {
+        self.dispatcher.register(cx.waker());
+        if self.reported.swap(false, Ordering::AcqRel) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
+}
+
+/// How the request side of a run ended.
+enum Fed {
+    /// The end was signalled: nothing more is forwarded.
+    End,
+    /// The builder is gone; its result is on the way.
+    Gone,
 }
 
 impl IngestEngine {
@@ -145,9 +150,11 @@ impl IngestEngine {
         let mut last_confirmed: Option<Landed> = None;
         let mut tick = tokio::time::interval(CONFIRM_TICK);
         let mut stopping = false;
-        // Once the end is signalled nothing more is forwarded: as on `main`,
-        // a request arriving after the run decided to end waits for the next.
-        let mut ending = false;
+        // The request side, one future for the run (`feed`): it keeps the
+        // lane's `recv` across polls, so a wake for a registration or the
+        // tick creates no future and takes no lock there.
+        let mut feed = std::pin::pin!(feed(&mut requests, &inbox, signals));
+        let mut fed = false;
         loop {
             if !stopping && self.stop.is_requested() {
                 stopping = true;
@@ -163,27 +170,21 @@ impl IngestEngine {
                 () = std::future::poll_fn(|_| {
                     if self.stop.is_requested() { Poll::Ready(()) } else { Poll::Pending }
                 }), if !stopping => {}
-                () = std::future::poll_fn(|cx| self.progress.poll_registered(cx)) => {
-                    self.confirm(&mut last_confirmed, false);
-                }
-                // A builder gone (it returned, its result on the way) takes
-                // nothing more: the next poll reads its result.
-                request = requests.recv(), if !stopping && !ending && !inbox.is_closed() => {
-                    if forward(request?, &mut requests, &inbox) {
-                        forward_ready(&mut requests, &inbox)?;
+                // Confirms inside its poll and stays pending, so a
+                // registration costs one pass through this `select!`, not a
+                // second one to park again.
+                () = std::future::poll_fn(|cx| {
+                    if self.progress.poll_registered(cx).is_ready() {
+                        self.confirm(&mut last_confirmed, false);
                     }
-                }
-                // The end, once nothing waits on the request lane. A request
-                // forwarded since the builder went idle is still served: the
-                // builder acts on the end only while idle itself.
-                () = signals.idle_reported(), if !stopping && !ending && !inbox.is_closed() => {
-                    forward_ready(&mut requests, &inbox)?;
-                    // Drained just above; still not empty only while a sink's
-                    // request is half published, which must not be left.
-                    if requests.is_empty() {
-                        ending = true;
-                        signals.end.store(true, Ordering::Release);
-                        signals.raise_builder();
+                    Poll::<()>::Pending
+                }) => {}
+                // Nothing more is forwarded at the stop: what stays on the
+                // lane is served on the next start.
+                outcome = &mut feed, if !stopping && !fed => {
+                    fed = true;
+                    if let Fed::End = outcome? {
+                        tracing::debug!("the stream ended and nothing waits: the run ends");
                     }
                 }
                 _ = tick.tick() => {
@@ -250,6 +251,55 @@ fn forward_ready(
         }
     }
     Ok(())
+}
+
+/// The request side of a run: forward every request to the builder as it
+/// arrives, and on the builder's idle report forward what is ready and, with
+/// the lane empty, signal the end (see the module docs). Returns once the end
+/// is signalled or the builder is gone. The lane's `recv` lives across polls
+/// until it yields or the idle report comes first; then it is dropped (it is
+/// cancel-safe) and the lane is used directly.
+async fn feed(
+    requests: &mut Box<dyn Consumer<Request>>,
+    inbox: &mpsc::UnboundedSender<Delivery<Request>>,
+    signals: &Signals,
+) -> Result<Fed> {
+    loop {
+        if inbox.is_closed() {
+            return Ok(Fed::Gone);
+        }
+        let next = {
+            let mut recv = requests.recv();
+            std::future::poll_fn(|cx| {
+                if let Poll::Ready(request) = recv.as_mut().poll(cx) {
+                    return Poll::Ready(Some(request));
+                }
+                signals.poll_idle(cx).map(|()| None)
+            })
+            .await
+        };
+        match next {
+            Some(request) => {
+                if !forward(request?, requests, inbox) {
+                    return Ok(Fed::Gone);
+                }
+                forward_ready(requests, inbox)?;
+            }
+            // The end, once nothing waits on the request lane. A request
+            // forwarded since the builder went idle is still served: the
+            // builder acts on the end only while idle itself.
+            None => {
+                forward_ready(requests, inbox)?;
+                // Drained just above; still not empty only while a sink's
+                // request is half published, which must not be left.
+                if requests.is_empty() && !inbox.is_closed() {
+                    signals.end.store(true, Ordering::Release);
+                    signals.raise_builder();
+                    return Ok(Fed::End);
+                }
+            }
+        }
+    }
 }
 
 fn builder_gone() -> EngineError {

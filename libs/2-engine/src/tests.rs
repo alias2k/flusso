@@ -967,6 +967,125 @@ async fn the_dispatcher_confirms_after_the_builder_that_registered() {
     sink_task.abort();
 }
 
+/// A request lane that publishes one request of its own the first time it
+/// is asked whether it is empty: a request reaching the lane just as the
+/// dispatcher looks, after the builder reported itself idle.
+#[derive(Debug)]
+struct LateRequest {
+    inner: Arc<ChannelStream>,
+    fired: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct LateConsumer {
+    inner: Box<dyn stream::Consumer<stream::Request>>,
+    producer: Box<dyn stream::Producer<stream::Request>>,
+    fired: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl stream::Consumer<stream::Request> for LateConsumer {
+    async fn recv(&mut self) -> stream::Result<Option<stream::Delivery<stream::Request>>> {
+        self.inner.recv().await
+    }
+
+    fn is_empty(&self) -> bool {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            let request = stream::Request::Backfill {
+                index: users(),
+                sink: sink_name("primary"),
+                after: None,
+                ticket: stream::Ticket::default(),
+            };
+            let published = futures::FutureExt::now_or_never(self.producer.publish(request));
+            assert!(published.is_some_and(|published| published.is_ok()));
+        }
+        self.inner.is_empty()
+    }
+}
+
+impl Stream for LateRequest {
+    fn lane(&self, key: &stream::LaneKey) -> stream::Result<stream::Lane> {
+        self.inner.lane(key)
+    }
+
+    fn lanes(&self, sink: &SinkName) -> Vec<stream::LaneKey> {
+        self.inner.lanes(sink)
+    }
+
+    fn requests(&self) -> stream::Result<stream::RequestLane> {
+        let lane = self.inner.requests()?;
+        Ok(stream::RequestLane {
+            producer: lane.producer,
+            consumer: Box::new(LateConsumer {
+                inner: lane.consumer,
+                producer: self.inner.requests()?.producer,
+                fired: Arc::clone(&self.fired),
+            }),
+        })
+    }
+
+    fn is_idle(&self) -> bool {
+        self.inner.is_idle()
+    }
+}
+
+/// ADR 0012 stage 8a, slice 6b-1b review: the live stream ended and the
+/// builder reported itself idle; a request reaches the lane as the
+/// dispatcher looks, which forwards it and signals the end in one go. The
+/// builder settles only while its inbox is empty too, so the request is
+/// served ("a live stream that ends still drains queued requests"). Which
+/// of the builder's arms wins is tokio's random pick, so it runs 40 times
+/// (without the check about a third of the runs lose the request).
+#[tokio::test(start_paused = true)]
+async fn a_request_forwarded_after_the_builder_went_idle_is_served() {
+    for _ in 0..40 {
+        let inner = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+        let fired = Arc::new(AtomicBool::new(false));
+        let stream = Arc::new(LateRequest {
+            inner: Arc::clone(&inner),
+            fired: Arc::clone(&fired),
+        });
+        let progress = Arc::new(Progress::of([users()], [sink_name("primary")]));
+        let (source, feed) = MockSource::fed();
+        let source = Arc::new(source.with_snapshot(vec![upsert(10)]));
+        drop(feed);
+        let ingest = IngestEngine::new(
+            Arc::clone(&source) as Arc<dyn ChangeCapture>,
+            Arc::new(MockDocuments::paging(&source)),
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            vec![sink_name("primary")],
+            Arc::clone(&progress),
+        );
+        tokio::time::timeout(Duration::from_secs(30), ingest.run())
+            .await
+            .expect("the run ended")
+            .unwrap();
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "the dispatcher looked at the lane"
+        );
+        let mut lane = inner
+            .lane(&stream::LaneKey::new(users(), sink_name("primary")))
+            .unwrap()
+            .consumer;
+        let mut completed = false;
+        // Unconstrained: forty runs inline spend this task's cooperative
+        // budget, and a budgeted `recv` would answer pending with items there.
+        while let Some(Ok(Some(delivery))) =
+            futures::FutureExt::now_or_never(tokio::task::unconstrained(lane.recv()))
+        {
+            completed |= matches!(delivery.item(), stream::LaneItem::SnapshotComplete { .. });
+            let (_, handle) = delivery.into_parts();
+            handle.ack().await.unwrap();
+        }
+        assert!(
+            completed,
+            "the request forwarded after the idle report was served"
+        );
+    }
+}
+
 #[tokio::test]
 async fn fresh_source_rebuilds_seeded_indexes_before_prepare_then_snapshots() {
     let events = Arc::new(Mutex::new(Vec::new()));

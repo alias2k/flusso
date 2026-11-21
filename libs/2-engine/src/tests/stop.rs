@@ -479,6 +479,65 @@ async fn a_snapshot_waiting_on_a_page_is_abandoned_and_its_request_served_again_
     }
 }
 
+/// ADR 0012 stage 8a, slice 6b-1b review: a request arriving while a
+/// snapshot waits on a page waits for that snapshot (the builder takes nothing
+/// from its inbox while one runs). Gathered at once, it would start a new
+/// snapshot over the running one, dropping it (its request back on the lane),
+/// and two requests could keep cancelling each other's walks.
+#[tokio::test(start_paused = true)]
+async fn a_request_arriving_mid_snapshot_waits_for_it() {
+    let (source, _feed) = ClosableSource::new();
+    let source = Arc::new(source);
+    let hanging = Arc::new(HangingKeys::default());
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
+    let sink = Arc::new(RecordingSink::seeded(false));
+    let sinks = spawn_sinks(
+        &stream,
+        &progress,
+        vec![(sink_name("primary"), sink as Arc<dyn Sink>)],
+    )
+    .await;
+    let stop = Stop::new();
+    let engine = ingest(
+        &source,
+        Arc::clone(&hanging) as Arc<dyn DocumentBuilder>,
+        &stream,
+        &progress,
+        &["primary"],
+        &stop,
+    );
+    let run = tokio::spawn(async move { engine.run().await });
+    super::wait_for(|| hanging.asked.load(Ordering::SeqCst)).await;
+    hanging.asked.store(false, Ordering::SeqCst);
+    stream
+        .requests()
+        .unwrap()
+        .producer
+        .publish(stream::Request::Backfill {
+            index: users(),
+            sink: sink_name("primary"),
+            after: None,
+            ticket: stream::Ticket::default(),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        !hanging.asked.load(Ordering::SeqCst),
+        "the running walk was dropped for a new one"
+    );
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("the stop ended the run")
+        .unwrap()
+        .unwrap();
+    for task in sinks {
+        task.abort();
+    }
+}
+
 /// ADR 0012 stage 8a, slice 6b-1b: the stop's fan-out. The live stream
 /// ended, so no reader's end can wake the builder, and its snapshot waits on
 /// a page that never comes: the dispatcher raises the builder at the stop,

@@ -296,19 +296,32 @@ fn an_ended_first_keeps_no_poll_going() {
 // [`Flags`] over loom's atomics, with the orderings `std`'s byte has.
 word!(loom::sync::atomic::AtomicU64);
 
-/// The handshake of [`Flags`], over loom's atomics: every interleaving, and
-/// loom's model of acquire/release, of a poll's passes against wakes from
-/// three other threads, two of them waking one shared group. Each wake is
-/// either taken by a pass (which then sees what the waker wrote before
-/// waking: the hand-over's run, in the engine) or wakes the task; never
-/// neither. A wake lost this way would leave a future pending forever with
-/// its event already happened. With `cut`, the first poll ends as the cap
-/// ends it: it polls only the own group's future, raises the shared group it
-/// took again, and drops the mark; the next poll must find it.
+/// The handshake of [`Flags`], over loom's atomics: a **bounded** search
+/// (`preemption_bound = Some(3)`: every interleaving with at most three
+/// preemptions, over four threads) of a poll's passes against wakes from
+/// three other threads, with loom's model of acquire/release. It drives the
+/// real `Flags` (`begin`, `raise`, `take`, `end_pass`, `end_poll`): the
+/// concurrent `fetch_or`s of the wakers, the take-all `fetch_and` that starts
+/// a pass, two wakers sharing a group, the end of a pass dropping the mark
+/// only while no running flag is raised, and, with `cut`, a first poll that
+/// ends as the cap ends it (it takes everything, polls only the own group's
+/// future, raises the shared group again and drops the mark; the next poll
+/// must find it). Each wake is either taken by a pass (which then sees what
+/// the waker wrote before waking: the hand-over's run, in the engine) or
+/// wakes the task; never neither. A wake lost this way would leave a future
+/// pending forever with its event already happened.
 ///
-/// What it does not cover: which futures a pass polls (the rotation, the
-/// running mask, the cap's count), which the unit tests below pin, and the
-/// task's waker itself (`AtomicWaker`, the futures crate's).
+/// What it does not cover, and what does instead (the single-threaded unit
+/// tests below): the running mask per future and ended futures' stale wakes
+/// (`an_ended_first_keeps_no_poll_going`,
+/// `an_ended_future_in_a_shared_group_is_never_polled_again`), the watch's
+/// bit at the end of a pass (`a_watch_woken_at_the_end_of_a_pass_is_not_lost`)
+/// and the local raise on the watch's end
+/// (`the_watch_wakes_the_reader_and_the_dispatcher_not_the_builders`), the
+/// rotation (the spender tests), the cap's counts
+/// (`a_poll_of_n_futures_yields_after_64_polls`,
+/// `a_watch_that_keeps_waking_itself_still_yields`), and the task's waker
+/// itself (`AtomicWaker`, the futures crate's).
 fn handshake(cut: bool) {
     use loom::sync::Arc;
     use loom::sync::atomic::{AtomicBool, AtomicUsize};
@@ -401,12 +414,12 @@ fn handshake(cut: bool) {
 }
 
 #[test]
-fn every_wake_is_taken_by_a_pass_or_wakes_the_task_in_every_interleaving() {
+fn every_wake_is_taken_by_a_pass_or_wakes_the_task_within_three_preemptions() {
     handshake(false);
 }
 
 #[test]
-fn a_group_raised_again_by_a_cut_poll_is_found_by_the_next_in_every_interleaving() {
+fn a_group_raised_again_by_a_cut_poll_is_found_by_the_next_within_three_preemptions() {
     handshake(true);
 }
 
@@ -828,4 +841,49 @@ fn a_watch_that_keeps_waking_itself_still_yields() {
     assert!(poll_once(run.as_mut(), &waker).is_pending());
     assert!(polls.load(Ordering::SeqCst) <= MAX_POLLS);
     assert_eq!(task.wakes(), 1, "woken to come back");
+}
+
+/// The watch's wake at the very end of a pass, after the pass polled it but
+/// while the task still counts as polled (so it wakes no task), is served in
+/// the same poll: the end of a pass counts the watch's flag while it runs.
+/// Dropped from the mask, the stop would be lost until another wake.
+#[test]
+fn a_watch_woken_at_the_end_of_a_pass_is_not_lost() {
+    let stashed: Arc<std::sync::Mutex<Option<Waker>>> = Arc::default();
+    let watch_polls = Arc::new(AtomicUsize::new(0));
+    let (stash, counter) = (Arc::clone(&stashed), Arc::clone(&watch_polls));
+    let watch = std::future::poll_fn(move |cx| {
+        *stash.lock().unwrap() = Some(cx.waker().clone());
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    });
+    let mut fired = false;
+    let hook = Arc::clone(&stashed);
+    BEFORE_THE_MARK_DROPS.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            if !std::mem::replace(&mut fired, true)
+                && let Some(waker) = hook.lock().unwrap().take()
+            {
+                std::thread::spawn(move || waker.wake()).join().unwrap();
+            }
+        }));
+    });
+    let (task, waker) = task();
+    let mut run = std::pin::pin!(together(
+        std::future::pending::<()>(),
+        std::future::pending::<()>(),
+        none(),
+        watch
+    ));
+    assert!(poll_once(run.as_mut(), &waker).is_pending());
+    BEFORE_THE_MARK_DROPS.with(|slot| *slot.borrow_mut() = None);
+    assert_eq!(task.wakes(), 0, "the wake landed while the task was polled");
+    assert_eq!(
+        watch_polls.load(Ordering::SeqCst),
+        2,
+        "the watch was polled again in the same poll"
+    );
 }

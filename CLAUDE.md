@@ -652,10 +652,11 @@ is the one concrete piece.
   `compare_exchange` (loom-modelled: three wakers, two sharing a group, and the cut); an ended future
   is masked on its own, not its group; the stop is watched once per run and its end wakes the reader
   and the dispatcher (the reader reads the flag and registers nothing for it). **The dispatcher**
-  forwards every request ready on the request lane to the builder's inbox each poll, never waiting on
-  it, and stops forwarding once the builder is gone (`forward`: a send to a dropped inbox releases the
-  delivery, which would be received again at once); confirms once per poll after a registration
-  (`Progress::poll_registered`, a flag and an `AtomicWaker` beside the fence's listener, raised
+  forwards every request ready on the request lane to the builder's inbox, never waiting on it, from
+  one long-lived future (`feed`, which keeps the lane's `recv` across polls: a wake for a registration
+  or the tick allocates nothing and takes no lock), and stops forwarding once the builder is gone (`forward`: a send to a dropped inbox releases the
+  delivery, which would be received again at once); confirms once per poll after a registration,
+  inside the arm's poll, which stays pending (`Progress::poll_registered`, a flag and an `AtomicWaker` beside the fence's listener, raised
   wherever the listener fires: a run routed, a build's lanes, a release) and always on the 1 s tick,
   which also raises the builder's tick (its budget backstop grant); raises the builder once at the
   stop; signals the end only while the builder reported itself idle (the reader ended with its stream,
@@ -704,8 +705,11 @@ is the one concrete piece.
   mid-pass and at the end of a pass, the cap of 64 polls and a cut pass's groups raised again, a shared
   group polling every future in it, an ended future masked on its own, an idle builder polled only when
   woken, the watch waking the reader and the dispatcher only, a panic in any future, fairness with three
-  futures, and the loom models of the one-word handshake), `dispatcher::tests` (a request for a builder
-  gone goes back to its lane once), the engine's `coalescing_for_one_index_delays_no_live_change_of_it`,
+  futures, the watch woken at the end of a pass, and the loom models of the one-word handshake, bounded
+  at three preemptions), `dispatcher::tests` (a request for a builder gone goes back to its lane once),
+  the engine's `coalescing_for_one_index_delays_no_live_change_of_it`,
+  `a_request_forwarded_after_the_builder_went_idle_is_served`, `tests::stop`'s
+  `a_request_arriving_mid_snapshot_waits_for_it`,
   `the_dispatcher_confirms_after_the_builder_that_registered` and `tests::stop`'s
   `a_stop_reaches_a_builder_whose_stream_ended_while_its_snapshot_waits_on_a_page`, `live::tests` (a batch formed only after the hand-over is
   drained), `ingest::tests::reading` (batches as `main` cut them, a
