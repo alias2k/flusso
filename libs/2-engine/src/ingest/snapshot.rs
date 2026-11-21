@@ -34,7 +34,7 @@ use source::RowKey;
 use source::document::{DocumentBuilder, DocumentId};
 use stream::{AckHandle, Consumer, LaneItem, LaneKey, Request, Ticket};
 use tokio::sync::Semaphore;
-use tokio::time::{Duration, Instant, timeout_at};
+use tokio::time::Duration;
 
 use crate::error::Result;
 
@@ -46,50 +46,6 @@ use super::{IngestEngine, Lanes};
 pub const KEY_PAGE: usize = 1024;
 
 impl IngestEngine {
-    /// Gather the requests one snapshot will serve: everything already queued
-    /// behind `first`, then, only while some lane has not asked yet, stragglers
-    /// for up to `max_delay`. Returns as soon as every lane has asked, so a
-    /// single-sink backfill starts at once; a lane that never asks (a seeded
-    /// sibling) costs one `max_delay`. A straggler past the window simply gets
-    /// its own snapshot.
-    pub(super) async fn collect_requests(
-        &self,
-        first: stream::Delivery<Request>,
-        requests: &mut Box<dyn Consumer<Request>>,
-        lanes: &Lanes,
-    ) -> Result<Vec<stream::Delivery<Request>>> {
-        let mut deliveries = vec![first];
-        let deadline = Instant::now() + self.batch.max_delay;
-        loop {
-            let asked: HashSet<&SinkName> = deliveries
-                .iter()
-                .map(|delivery| {
-                    let Request::Backfill { sink, .. } = delivery.item();
-                    sink
-                })
-                .collect();
-            // Requests come one per index: once every sink asked, what is
-            // already queued still joins (a sink's other indexes).
-            let everyone = lanes.keys().all(|lane| asked.contains(&lane.sink));
-            if everyone && requests.is_empty() {
-                break;
-            }
-            let next = if requests.is_empty() {
-                match timeout_at(deadline, requests.recv()).await {
-                    Ok(received) => received?,
-                    Err(_) => break,
-                }
-            } else {
-                requests.recv().await?
-            };
-            match next {
-                Some(more) => deliveries.push(more),
-                None => break,
-            }
-        }
-        Ok(deliveries)
-    }
-
     /// Coalesce the delivered requests into one snapshot: the union of their
     /// indexes, each walked once, remembering which lane asked for which.
     /// Requests for indexes the builder knows nothing about are answered with

@@ -637,14 +637,36 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
 is the one concrete piece.
 `FanOutSink` is gone; sinks are independent. Key invariants to preserve when editing the engines:
 
-- **One reader, one builder (ADR 0012 stage 8a slice 6a; rules R1–R10 in the stage note's §3.8).**
-  The ingest engine's run polls a **reader** (`ingest/reader.rs`, `reading`) beside the **builder** as
-  two futures of its own task (`ingest/together.rs`, review round 3: a spawned reader cost a scheduler
-  hop per hand-over and per grant, +22% at one change per batch): each gets its own waker, a wake
-  during the poll only raises a flag and the poll goes on, at most 32 passes per poll (a spent tokio
-  budget ends a poll by itself), the one polled first swapping every poll so neither takes the whole budget; the flags and the "being polled" mark are one atomic byte (a wake is a `fetch_or`, a
-  pass ends with a `compare_exchange`; loom-modelled), only running futures' flags count, and the stop
-  is watched once per run (the reader reads the flag and registers nothing for it). It
+- **One reader, one dispatcher, one builder (ADR 0012 stage 8a slices 6a and 6b-1b; rules R1–R10 in
+  the stage note's §3.8, I1 and I10 in §3.9).** The ingest engine's run polls a **reader**
+  (`ingest/reader.rs`, `reading`), the **dispatcher** (`ingest/dispatcher.rs`, the run's result) and
+  the **builder** (`ingest/builder.rs`) as futures of its own task (`ingest/together.rs`, `together`
+  for N; review round 3 of 6a: a spawned reader cost a scheduler hop per hand-over and per grant, +22%
+  at one change per batch): one `AtomicU64`, bit 0 the "being polled" mark, bit 1 the stop's watch,
+  bits 2–63 one group per future (`i mod 62`: futures past 62 share a group and may be polled unwoken);
+  a wake during the poll only raises its group's flag and the poll goes on; a pass takes every raised
+  running flag with one `fetch_and` and polls those futures from a start that rotates every poll, so
+  none takes tokio's whole budget; a poll makes at most 64 future polls (`MAX_POLLS`, the watch
+  included; a spent tokio budget ends a poll by itself), and a poll cut mid-pass raises the groups it
+  took and didn't poll again (one `fetch_or`); a wake is a `fetch_or`, a pass ends with a
+  `compare_exchange` (loom-modelled: three wakers, two sharing a group, and the cut); an ended future
+  is masked on its own, not its group; the stop is watched once per run and its end wakes the reader
+  and the dispatcher (the reader reads the flag and registers nothing for it). **The dispatcher**
+  forwards every request ready on the request lane to the builder's inbox, never waiting on it, from
+  one long-lived future (`feed`, which keeps the lane's `recv` across polls: a wake for a registration
+  or the tick allocates nothing and takes no lock), and stops forwarding once the builder is gone (`forward`: a send to a dropped inbox releases the
+  delivery, which would be received again at once); confirms once per poll after a registration,
+  inside the arm's poll, which stays pending (`Progress::poll_registered`, a flag and an `AtomicWaker` beside the fence's listener, raised
+  wherever the listener fires: a run routed, a build's lanes, a release) and always on the 1 s tick,
+  which also raises the builder's tick (its budget backstop grant); raises the builder once at the
+  stop; signals the end only while the builder reported itself idle (the reader ended with its stream,
+  no snapshot, no coalescing set, inbox empty), received everything forwarded and the request lane is
+  empty, and forwards nothing after; and finishes the run from the builder's one-shot result:
+  `drain_lanes` + `close_live` at a stop, a last confirmation at the stream's end, or its error. **The
+  builder** is 6a's loop without those: it gathers requests on a deadline (`max_delay` from the first;
+  started once every sink with a lane asked and the inbox is empty), granting live batches meanwhile;
+  at the stop it drops its snapshot and coalescing set (served again on the next start), waits for the
+  reader's end and settles. The reader
   owns the live stream and the resolver, reads a run as `main`'s `drain_ready` did (cut at
   `max_changes`, `max_delay`, would-block, the stop), resolves it, **marks** its documents
   (`Progress::mark_reads`, each id with its read number), **counts** it (`Progress::read_changes`), raises
@@ -669,17 +691,27 @@ is the one concrete piece.
   0, or both set with the total below the per-index bound, refused naming each origin); the deferral
   cap of slice 4 is the same per-index number. **The stop**: the reader hands over
   its cut run, ends and returns the stream; the builder waits for that (the barrier), builds and
-  publishes every run handed over, drains, then `close_live`. A reader error or panic ends the run
-  (the panic unwinds the run's task, as `main`'s did), a builder error ends the run's future, which drops
-  the reader in place (nothing spawned, nothing outlives the run), and an engine restart forgets the
+  publishes every run handed over and hands its end to the dispatcher, which drains, then `close_live`.
+  A reader error (through the builder, which joins the reader) or a builder error reaches the
+  dispatcher over the builder's one-shot and ends the run; a panic in any of the three unwinds the run's
+  task, as `main`'s did; returning drops the reader and the builder in place (nothing spawned, nothing
+  outlives the run), and an engine restart forgets the
   old marks before the new reader starts. A change read always counts read: the run being read is a guard that counts what wasn't
   handed over when it drops, so `changes_captured` and the read count move together. `Idle` ends where the reader began the run that woke the
   builder; the run's `Resolve` is reported by the builder after it. Guards: `reader::tests` (run as the engine runs it;
   marked and counted before the hand-over, the lead per index, in all and in changes, a take before the
   registration and before the wait, the stop in a run and at the lead, an error, a panic, the run
   dropped), `together::tests` (wakes served in one poll, a wake from outside, a wake from another thread
-  mid-pass and at the end of a pass, the pass cap, the watch, an ended reader keeping no poll going, and
-  the loom model of the one-word handshake), `live::tests` (a batch formed only after the hand-over is
+  mid-pass and at the end of a pass, the cap of 64 polls and a cut pass's groups raised again, a shared
+  group polling every future in it, an ended future masked on its own, an idle builder polled only when
+  woken, the watch waking the reader and the dispatcher only, a panic in any future, fairness with three
+  futures, the watch woken at the end of a pass, and the loom models of the one-word handshake, bounded
+  at three preemptions), `dispatcher::tests` (a request for a builder gone goes back to its lane once),
+  the engine's `coalescing_for_one_index_delays_no_live_change_of_it`,
+  `a_request_forwarded_after_the_builder_went_idle_is_served`, `tests::stop`'s
+  `a_request_arriving_mid_snapshot_waits_for_it`,
+  `the_dispatcher_confirms_after_the_builder_that_registered` and `tests::stop`'s
+  `a_stop_reaches_a_builder_whose_stream_ended_while_its_snapshot_waits_on_a_page`, `live::tests` (a batch formed only after the hand-over is
   drained), `ingest::tests::reading` (batches as `main` cut them, a
   paced trickle and bursts behind slow builds against `main_batches`, a backlog resolved a change a
   millisecond, a batch ending inside a run closing its step there, a grant beside a landing taking the
@@ -1106,7 +1138,8 @@ is the one concrete piece.
   already queued with no wait (every startup request is, since the daemon stages every sink
   first) and holds for stragglers only while some lane has not asked, for at most
   `BatchPolicy::max_delay` (a seeded sibling that never asks costs one `max_delay`; a straggler
-  past it gets its own snapshot) — and acks a request only after its `SnapshotComplete` is
+  past it gets its own snapshot), on a deadline beside the live work, which goes on meanwhile
+  (6b-1b; `coalescing_for_one_index_delays_no_live_change_of_it`) — and acks a request only after its `SnapshotComplete` is
   published (a crash mid-snapshot redelivers it); the sink engine keeps an `outstanding` map of
   requested, not-yet-seeded indexes (each with its request's ticket and target) so re-staging after
   its own restart (and a reindex control for the same index) doesn't ask twice while the index's
@@ -2677,7 +2710,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 
 | To work on… | Go to |
 | --- | --- |
-| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the builder's loop; `ingest/reader.rs` the reader: read, resolve, mark, the lead; `ingest/together.rs` the reader and the builder polled as one task; `ingest/live.rs` the queued runs formed into batches, `ingest/builds.rs` admission and the grant-ordered slots, `ingest/gate.rs` the build permits (live first, every fourth contested grant to backfill), `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`; `budget.rs` the memory budget: `Budget`, `Reservation`/`Charge`, the heap walk), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in item-key order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `sink_engine/walked.rs` (the landed prefix of a backfill walk, recorded for resume), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
+| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the builder's loop; `ingest/reader.rs` the reader: read, resolve, mark, the lead; `ingest/together.rs` the reader, the dispatcher and the builders polled as one task; `ingest/dispatcher.rs` requests forwarded, confirmation, the tick, the end and the stop; `ingest/builder.rs` the builder's loop and request coalescing; `ingest/live.rs` the queued runs formed into batches, `ingest/builds.rs` admission and the grant-ordered slots, `ingest/gate.rs` the build permits (live first, every fourth contested grant to backfill), `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`; `budget.rs` the memory budget: `Budget`, `Reservation`/`Charge`, the heap walk), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in item-key order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `sink_engine/walked.rs` (the landed prefix of a backfill walk, recorded for resume), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
 | Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `stall.rs` (stall age, WAL behind, `pinned_by`), `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |

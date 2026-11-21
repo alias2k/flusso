@@ -837,6 +837,255 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
     assert_eq!(*b_marked.lock().unwrap(), vec!["users".to_owned()]);
 }
 
+/// ADR 0012 stage 8a, slice 6b-1b: requests are gathered on a deadline
+/// beside the live work, not inline. One sink asks for a reindex and the
+/// other never does, so the snapshot waits out `max_delay` (60 s here); a
+/// live change read meanwhile lands on both sinks at once. On `main` and 6a
+/// it waited out the gathering.
+#[tokio::test(start_paused = true)]
+async fn coalescing_for_one_index_delays_no_live_change_of_it() {
+    let a = Arc::new(RecordingSink::seeded(true));
+    let b = Arc::new(RecordingSink::seeded(true));
+    let (a_ops, b_ops) = (Arc::clone(&a.ops), Arc::clone(&b.ops));
+    let a_marked = Arc::clone(&a.marked);
+    let stream = Arc::new(ChannelStream::over(
+        64,
+        [users()],
+        [sink_name("a"), sink_name("b")],
+    ));
+    let progress = Arc::new(Progress::of([users()], [sink_name("a"), sink_name("b")]));
+    let (source, feed) = MockSource::fed();
+    let source = Arc::new(source.with_snapshot(vec![upsert(10)]));
+    let mut controls = Vec::new();
+    let mut tasks = Vec::new();
+    for (name, sink) in [
+        (sink_name("a"), a as Arc<dyn Sink>),
+        (sink_name("b"), b as Arc<dyn Sink>),
+    ] {
+        let engine = SinkEngine::new(
+            name,
+            sink,
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            vec![mapping()],
+            Arc::clone(&progress),
+        );
+        engine.stage(Continuity::Resumed).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+        controls.push(tx);
+        tasks.push(tokio::spawn(async move {
+            let _ = engine.run(&mut rx).await;
+        }));
+    }
+    controls[0]
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    let ingest = IngestEngine::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        Arc::new(MockDocuments::paging(&source)),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![sink_name("a"), sink_name("b")],
+        Arc::clone(&progress),
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 256,
+        max_delay: Duration::from_secs(60),
+    });
+    tasks.push(tokio::spawn(async move {
+        ingest.run().await.unwrap();
+    }));
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let sent = tokio::time::Instant::now();
+    feed.send(upsert(1)).await.unwrap();
+    let landed =
+        |ops: &Arc<Mutex<Vec<String>>>| ops.lock().unwrap().contains(&"upsert users 1".to_owned());
+    wait_for(|| landed(&a_ops) && landed(&b_ops)).await;
+    assert!(
+        sent.elapsed() < Duration::from_secs(1),
+        "the live change waited {:?} behind the gathering",
+        sent.elapsed()
+    );
+    assert!(
+        a_marked.lock().unwrap().is_empty(),
+        "the reindex still gathers"
+    );
+    for task in tasks {
+        task.abort();
+    }
+}
+
+/// ADR 0012 stage 8a, slice 6b-1b: the dispatcher confirms after the future
+/// that registered, in the same poll or the next, not at the tick. Change 0
+/// lands with no registration after it, so nothing confirms it until the
+/// tick (a second); change 1 is routed half a second later, and that
+/// registration confirms change 0 at once.
+#[tokio::test(start_paused = true)]
+async fn the_dispatcher_confirms_after_the_builder_that_registered() {
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], [sink_name("primary")]));
+    let (source, feed) = MockSource::fed();
+    let source = Arc::new(source);
+    let confirmed = Arc::clone(&source.confirmed);
+    let engine = SinkEngine::new(
+        sink_name("primary"),
+        sink as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![mapping()],
+        Arc::clone(&progress),
+    );
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+    let sink_task = tokio::spawn(async move { engine.run(&mut rx).await });
+    let ingest = IngestEngine::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        Arc::new(MockDocuments::paging(&source)),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![sink_name("primary")],
+        Arc::clone(&progress),
+    );
+    let ingest_task = tokio::spawn(async move { ingest.run().await });
+    let started = tokio::time::Instant::now();
+    feed.send(upsert(1)).await.unwrap();
+    wait_for(|| progress.landed() == source::cdc::Landed::Through(Position::new(0))).await;
+    tokio::time::sleep_until(started + Duration::from_millis(500)).await;
+    assert!(
+        confirmed.lock().unwrap().is_empty(),
+        "no registration since change 0 landed, and no tick yet"
+    );
+    feed.send(upsert(2)).await.unwrap();
+    wait_for(|| !confirmed.lock().unwrap().is_empty()).await;
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "confirmed at {:?}: by the tick, not by change 1's registration",
+        started.elapsed()
+    );
+    assert_eq!(confirmed.lock().unwrap().first(), Some(&Position::new(0)));
+    ingest_task.abort();
+    sink_task.abort();
+}
+
+/// A request lane that publishes one request of its own the first time it
+/// is asked whether it is empty: a request reaching the lane just as the
+/// dispatcher looks, after the builder reported itself idle.
+#[derive(Debug)]
+struct LateRequest {
+    inner: Arc<ChannelStream>,
+    fired: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct LateConsumer {
+    inner: Box<dyn stream::Consumer<stream::Request>>,
+    producer: Box<dyn stream::Producer<stream::Request>>,
+    fired: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl stream::Consumer<stream::Request> for LateConsumer {
+    async fn recv(&mut self) -> stream::Result<Option<stream::Delivery<stream::Request>>> {
+        self.inner.recv().await
+    }
+
+    fn is_empty(&self) -> bool {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            let request = stream::Request::Backfill {
+                index: users(),
+                sink: sink_name("primary"),
+                after: None,
+                ticket: stream::Ticket::default(),
+            };
+            let published = futures::FutureExt::now_or_never(self.producer.publish(request));
+            assert!(published.is_some_and(|published| published.is_ok()));
+        }
+        self.inner.is_empty()
+    }
+}
+
+impl Stream for LateRequest {
+    fn lane(&self, key: &stream::LaneKey) -> stream::Result<stream::Lane> {
+        self.inner.lane(key)
+    }
+
+    fn lanes(&self, sink: &SinkName) -> Vec<stream::LaneKey> {
+        self.inner.lanes(sink)
+    }
+
+    fn requests(&self) -> stream::Result<stream::RequestLane> {
+        let lane = self.inner.requests()?;
+        Ok(stream::RequestLane {
+            producer: lane.producer,
+            consumer: Box::new(LateConsumer {
+                inner: lane.consumer,
+                producer: self.inner.requests()?.producer,
+                fired: Arc::clone(&self.fired),
+            }),
+        })
+    }
+
+    fn is_idle(&self) -> bool {
+        self.inner.is_idle()
+    }
+}
+
+/// ADR 0012 stage 8a, slice 6b-1b review: the live stream ended and the
+/// builder reported itself idle; a request reaches the lane as the
+/// dispatcher looks, which forwards it and signals the end in one go. The
+/// builder settles only while its inbox is empty too, so the request is
+/// served ("a live stream that ends still drains queued requests"). Which
+/// of the builder's arms wins is tokio's random pick, so it runs 40 times
+/// (without the check about a third of the runs lose the request).
+#[tokio::test(start_paused = true)]
+async fn a_request_forwarded_after_the_builder_went_idle_is_served() {
+    for _ in 0..40 {
+        let inner = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+        let fired = Arc::new(AtomicBool::new(false));
+        let stream = Arc::new(LateRequest {
+            inner: Arc::clone(&inner),
+            fired: Arc::clone(&fired),
+        });
+        let progress = Arc::new(Progress::of([users()], [sink_name("primary")]));
+        let (source, feed) = MockSource::fed();
+        let source = Arc::new(source.with_snapshot(vec![upsert(10)]));
+        drop(feed);
+        let ingest = IngestEngine::new(
+            Arc::clone(&source) as Arc<dyn ChangeCapture>,
+            Arc::new(MockDocuments::paging(&source)),
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            vec![sink_name("primary")],
+            Arc::clone(&progress),
+        );
+        tokio::time::timeout(Duration::from_secs(30), ingest.run())
+            .await
+            .expect("the run ended")
+            .unwrap();
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "the dispatcher looked at the lane"
+        );
+        let mut lane = inner
+            .lane(&stream::LaneKey::new(users(), sink_name("primary")))
+            .unwrap()
+            .consumer;
+        let mut completed = false;
+        // Unconstrained: forty runs inline spend this task's cooperative
+        // budget, and a budgeted `recv` would answer pending with items there.
+        while let Some(Ok(Some(delivery))) =
+            futures::FutureExt::now_or_never(tokio::task::unconstrained(lane.recv()))
+        {
+            completed |= matches!(delivery.item(), stream::LaneItem::SnapshotComplete { .. });
+            let (_, handle) = delivery.into_parts();
+            handle.ack().await.unwrap();
+        }
+        assert!(
+            completed,
+            "the request forwarded after the idle report was served"
+        );
+    }
+}
+
 #[tokio::test]
 async fn fresh_source_rebuilds_seeded_indexes_before_prepare_then_snapshots() {
     let events = Arc::new(Mutex::new(Vec::new()));

@@ -41,9 +41,11 @@
 //! live stream closed once the source has the final position. See
 //! [`Stop`] for the sequence.
 
+mod builder;
 mod builds;
 mod commit;
 mod confirm;
+mod dispatcher;
 mod gate;
 mod live;
 mod reader;
@@ -60,26 +62,26 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use kernel::{IndexName, SinkName};
 use source::SourceError;
-use source::cdc::{ChangeCapture, Landed, LiveChange};
+use source::cdc::{ChangeCapture, LiveChange};
 use source::document::{DocumentBuilder, DocumentId};
 use stream::{Consumer, LaneItem, LaneKey, Producer, Request, Stream};
 use tokio::time::{Duration, Instant, timeout_at};
 
 use crate::budget::Budget;
 use crate::error::{EngineError, Result};
-use crate::observer::{
-    EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Wake, Work,
-};
+use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep};
 use crate::policy::{BatchPolicy, FailurePolicies, MaxWaiting};
 use crate::progress::Progress;
-use crate::stop::{Stop, drain_lanes};
+use crate::stop::Stop;
 
+use builder::Building;
 use builds::Builds;
-use confirm::{CONFIRM_TICK, Furthest};
+use confirm::Furthest;
+use dispatcher::Signals;
 use live::Runs;
 use reader::{Lead, Reader, ReaderEnd};
 pub use snapshot::KEY_PAGE;
-use snapshot::{ClosedConsumer, Snapshot, Step, next_snapshot_step};
+use snapshot::Snapshot;
 use together::together;
 
 /// The longest a stopping engine polls the live stream for its end after
@@ -331,13 +333,13 @@ impl IngestEngine {
         ended
     }
 
-    /// The run's loop, from an open live stream to its end or a stop: the
-    /// builder and the reader, two futures of this task (ADR 0012 stage 8a,
-    /// §3.8).
+    /// The run, from an open live stream to its end or a stop: the reader,
+    /// the dispatcher and the builder, futures of this task (ADR 0012 stage
+    /// 8a, §3.8, §3.9).
     async fn follow(
         &self,
         lanes: &Lanes,
-        mut requests: Box<dyn Consumer<Request>>,
+        requests: Box<dyn Consumer<Request>>,
         scopes: &HashSet<IndexName>,
         live: LiveStream,
         builds: &mut Builds,
@@ -348,7 +350,7 @@ impl IngestEngine {
         self.progress.forget_all();
         let lead = Lead::new(self.max_waiting(), self.progress.changes_read());
         let (sender, handed) = tokio::sync::mpsc::unbounded_channel();
-        let (reading, mut reader) = reader::reading(
+        let (reading, reader) = reader::reading(
             Reader {
                 resolver: Arc::clone(&self.resolver),
                 progress: Arc::clone(&self.progress),
@@ -364,155 +366,34 @@ impl IngestEngine {
             },
             live,
         );
-        let mut runs = Runs::new(
+        let runs = Runs::new(
             self.batch.max_changes,
             self.batch.max_delay,
             lead,
             handed,
             Arc::clone(&self.observer),
         );
-        let building = async {
-            let mut snapshot: Option<Snapshot> = None;
-            let mut last_confirmed: Option<Landed> = None;
-            let mut confirm_tick = tokio::time::interval(CONFIRM_TICK);
-            // The reader's end, once joined: the stream to close, and whether
-            // it ended by itself.
-            let mut ended: Option<reader::Ended> = None;
-            // Where the last arm's work ended: every arm times its wait from here,
-            // so the loop reads no clock of its own.
-            let mut mark = Instant::now();
-
-            loop {
-                // A live stream that ends while a snapshot runs or requests wait
-                // (a sink staged its backfill before this engine started) still
-                // gets those served; the run ends once nothing is left to do.
-                if ended.as_ref().is_some_and(|ended| ended.stream_ended)
-                    && snapshot.is_none()
-                    && requests.is_empty()
-                {
-                    self.settle(&mut runs, builds, lanes).await?;
-                    self.confirm(&mut last_confirmed, false);
-                    return Ok(Ended::LiveEnded);
-                }
-                if self.stop.is_requested() {
-                    if let Some(abandoned) = snapshot.take() {
-                        tracing::info!(
-                            indexes = abandoned.indexes.len(),
-                            "stop requested: abandoning the snapshot in progress; its request is \
-                             served again on the next start"
-                        );
-                    }
-                    // The barrier (R7): the reader hands over what it read and
-                    // ends before anything is settled.
-                    let ended = match ended.take() {
-                        Some(ended) => ended,
-                        None => self.reader_end(&mut reader, &mut runs).await?,
-                    };
-                    self.wind_down(
-                        &mut runs,
-                        builds,
-                        lanes,
-                        ended.live,
-                        ended.stream_ended,
-                        &mut last_confirmed,
-                    )
-                    .await?;
-                    return Ok(Ended::Stopped);
-                }
-                let building = builds.running() > 0;
-                tokio::select! {
-                    // While the reader runs, its end (the channel closing) is what
-                    // a stop wakes this loop with.
-                    () = self.stop.requested(), if ended.is_some() => {
-                        mark = self.waited(mark, None, &mut snapshot, building);
-                    }
-                    run = runs.next(), if ended.is_none() => match run {
-                        None => {
-                            let end = reader.join().await?;
-                            mark = if end.waiting {
-                                self.waited(mark, None, &mut snapshot, building)
-                            } else {
-                                Instant::now()
-                            };
-                            ended = Some(end);
-                        }
-                        Some(run) => {
-                            self.waited(mark, run.started(), &mut snapshot, building);
-                            runs.push(run);
-                            builds.woke(Wake::Change);
-                            self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
-                            self.confirm(&mut last_confirmed, false);
-                            mark = Instant::now();
-                        }
-                    },
-                    () = released(self.budget.as_deref(), builds.refused_since()),
-                        if builds.refused().is_some() =>
-                    {
-                        builds.woke(Wake::Released);
-                        self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
-                        self.confirm(&mut last_confirmed, false);
-                        mark = Instant::now();
-                    }
-                    landed = builds.next(), if building => {
-                        builds.woke(Wake::Landed);
-                        self.landed(landed, &mut runs, &mut snapshot, builds, lanes).await?;
-                        self.confirm(&mut last_confirmed, false);
-                        mark = Instant::now();
-                    }
-                    step = next_snapshot_step(&mut snapshot),
-                        if snapshot.as_ref().is_some_and(Snapshot::wants_keys) =>
-                    {
-                        let Some(active) = snapshot.as_mut() else { continue };
-                        // The wait for a page, if any, is `Page`, unless builds
-                        // ran meanwhile: then the loop was waiting on them too.
-                        if !building {
-                            active.page_wait += mark.elapsed();
-                        }
-                        match step {
-                            Err(error) => return Err(error.into()),
-                            Ok(Step::Keys) => active.take_keys(),
-                            Ok(Step::Done) => active.done = true,
-                        }
-                        builds.woke(Wake::Page);
-                        self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
-                        mark = Instant::now();
-                    },
-                    request = requests.recv(), if snapshot.is_none() => match request? {
-                        None => {
-                            mark = self.waited(mark, None, &mut snapshot, building);
-                            tracing::warn!("request lane closed; no further backfills can be served");
-                            requests = Box::new(ClosedConsumer);
-                        }
-                        Some(first) => {
-                            let started = self.waited(mark, None, &mut snapshot, building);
-                            let deliveries = self.collect_requests(first, &mut requests, lanes).await?;
-                            snapshot = self.start_snapshot(deliveries, scopes, lanes).await?;
-                            mark = Instant::now();
-                            self.observer.on_stage(
-                                StageTiming::new(Stage::Snapshot, mark - started).work(Work::Backfill),
-                            );
-                        }
-                    },
-                    _ = confirm_tick.tick() => {
-                        mark = self.waited(mark, None, &mut snapshot, building);
-                        // A backstop, not the mechanism: a batch the budget held
-                        // back is granted on a release (the arm above). Should a
-                        // release ever go unheard, the next tick still grants it,
-                        // so it costs a second, never the run.
-                        if builds.refused().is_some() {
-                            builds.woke(Wake::Tick);
-                            self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
-                            mark = Instant::now();
-                        }
-                        self.confirm(&mut last_confirmed, true);
-                    }
-                }
-            }
-        };
-        // One task, two futures (§3.8, review round 3). The run ends with the
-        // builder; returning drops the reader in place (R9), so nothing of it
-        // outlives the run, the next run's `forget_all` included.
-        together(reading, building, self.stop.requested()).await
+        let signals = Signals::default();
+        let (inbox, delivered) = tokio::sync::mpsc::unbounded_channel();
+        let (done, result) = tokio::sync::oneshot::channel();
+        let building = self.build(
+            Building {
+                runs,
+                reader,
+                inbox: delivered,
+                signals: &signals,
+                lanes,
+                scopes,
+                builds,
+            },
+            done,
+        );
+        let dispatching = self.dispatch(requests, inbox, result, &signals);
+        // One task, three futures (§3.9 I1). The run ends with the
+        // dispatcher; returning drops the reader and the builder in place
+        // (R9), so nothing of them outlives the run, the next run's
+        // `forget_all` included.
+        together(reading, dispatching, vec![building], self.stop.requested()).await
     }
 
     /// The reader's end once the stop is requested: every run it hands over
@@ -525,8 +406,10 @@ impl IngestEngine {
     }
 
     /// Close the wait since `since` as the loop wakes, and return the moment,
-    /// so the work that follows times from it. While builds run, the loop was
-    /// waiting on them, which their [`Stage::Build`] covers. Otherwise, with
+    /// so the work that follows times from it. While builds run (`busy`), the
+    /// loop was waiting on them, which their [`Stage::Build`] covers; while
+    /// requests are gathered, on them, which the snapshot's
+    /// [`Stage::Snapshot`] covers. Otherwise, with
     /// no snapshot running the wait is [`Stage::Idle`]; with one, the loop
     /// was waiting on its rows too, so it is the snapshot's [`Stage::Page`]
     /// (reported with its next batch). A wait that a run ended ends `until`
@@ -537,10 +420,10 @@ impl IngestEngine {
         since: Instant,
         until: Option<Instant>,
         snapshot: &mut Option<Snapshot>,
-        building: bool,
+        busy: bool,
     ) -> Instant {
         let now = Instant::now();
-        if building {
+        if busy {
             return now;
         }
         let waited = until
@@ -555,26 +438,9 @@ impl IngestEngine {
         now
     }
 
-    /// The rest of a stop, once the reader ended: finish the builds running,
-    /// build and publish what the reader read, wait until every lane
-    /// acknowledged it (confirming what landed as it moves), then close the
-    /// live stream so the final position reaches the source.
-    async fn wind_down(
-        &self,
-        runs: &mut Runs,
-        builds: &mut Builds,
-        lanes: &Lanes,
-        mut live: LiveStream,
-        live_ended: bool,
-        last_confirmed: &mut Option<Landed>,
-    ) -> Result<()> {
-        tracing::info!(
-            buffered = runs.changes(),
-            "stop requested: reading no further changes; landing what is in flight"
-        );
-        self.settle(runs, builds, lanes).await?;
-        drain_lanes(&*self.stream, &*self.source, &self.progress, last_confirmed).await;
-        tracing::info!(position = ?last_confirmed, "every sink acknowledged; closing the live stream");
+    /// The end of a stop, once every lane acknowledged what was built: close
+    /// the live stream so the final position reaches the source.
+    async fn close(&self, mut live: LiveStream, live_ended: bool) -> Result<()> {
         if live_ended || !self.source.close_live() {
             return Ok(());
         }
