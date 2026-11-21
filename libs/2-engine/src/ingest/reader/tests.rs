@@ -753,3 +753,127 @@ async fn an_untouched_index_is_handed_nothing() {
     );
     assert_eq!(progress.changes_read(), 4, "every change counts read");
 }
+
+/// 6b-2's lead over `orders` (queue 0) and `users` (queue 1): two documents
+/// per index, a hundred in all, `pending` for exempt indexes.
+fn exempting(pending: usize) -> Arc<Lead> {
+    Lead::exempting(
+        MaxWaiting {
+            per_index: 2,
+            total: 100,
+        },
+        0,
+        vec![orders(), users()],
+        pending,
+    )
+}
+
+/// `count` documents of `index` waiting, from `from`.
+fn mark_docs(progress: &Progress, index: IndexName, from: i64, count: i64) {
+    progress.mark_reads((from..from + count).map(|n| {
+        (
+            DocumentId {
+                index: index.clone(),
+                key: key(n),
+            },
+            Position::new(n as u64),
+            1,
+        )
+    }));
+}
+
+/// I8 (6b-2): an index at its cap stops the reading unless its builder is
+/// held; held, it is exempt, and the other index still counts.
+#[test]
+fn an_index_at_its_cap_is_exempt_only_while_its_builder_is_held() {
+    let progress = progress();
+    let lead = exempting(1000);
+    mark_docs(&progress, orders(), 0, 2);
+    assert!(lead.reached(&progress), "orders at its cap, not held");
+    lead.hold(0, true);
+    assert!(!lead.reached(&progress), "orders held at its cap: exempt");
+    mark_docs(&progress, orders(), 10, 5);
+    assert!(
+        !lead.reached(&progress),
+        "an exempt index has no per-index cap"
+    );
+    mark_docs(&progress, users(), 100, 2);
+    assert!(lead.reached(&progress), "users is not exempt");
+}
+
+/// I8: the latch clears when fewer than `max_waiting_per_index` wait, not
+/// when the builder stops being held; then the index paces the reading again.
+#[test]
+fn an_exemption_ends_below_max_waiting_per_index() {
+    let progress = progress();
+    let lead = exempting(1000);
+    mark_docs(&progress, orders(), 0, 3);
+    lead.hold(0, true);
+    assert!(!lead.reached(&progress));
+    lead.hold(0, false);
+    assert!(
+        !lead.reached(&progress),
+        "released with three waiting: still exempt until it drains below its cap"
+    );
+    progress.take(&orders(), 2, &|_| false).unwrap();
+    assert!(!lead.reached(&progress), "one waits: below the cap");
+    mark_docs(&progress, orders(), 10, 1);
+    assert!(
+        lead.reached(&progress),
+        "the latch cleared below the cap: two waiting and not held stop the reading"
+    );
+}
+
+/// I6 (6b-2): the exempt indexes together stop the reading for every index
+/// at `max_pending_documents`.
+#[test]
+fn exempt_documents_stop_the_reading_only_at_max_pending_documents() {
+    let progress = progress();
+    let lead = exempting(5);
+    lead.hold(0, true);
+    mark_docs(&progress, orders(), 0, 4);
+    assert!(!lead.reached(&progress), "four exempt documents of five");
+    mark_docs(&progress, orders(), 10, 1);
+    assert!(lead.reached(&progress), "five: every index stops");
+}
+
+/// I6: an exempt index's documents count toward no other bound: `users`
+/// alone decides the total.
+#[test]
+fn exempt_documents_count_toward_no_other_bound() {
+    let progress = progress();
+    let lead = Lead::exempting(
+        MaxWaiting {
+            per_index: 2,
+            total: 3,
+        },
+        0,
+        vec![orders(), users()],
+        1000,
+    );
+    lead.hold(0, true);
+    mark_docs(&progress, orders(), 0, 20);
+    mark_docs(&progress, users(), 100, 1);
+    assert!(!lead.reached(&progress), "users' one document of three");
+}
+
+/// D4: holding a builder wakes a reader waiting at its index's cap, which
+/// latches it and reads on with nothing else in flight.
+#[test]
+fn holding_a_builder_wakes_a_reader_waiting_at_its_cap() {
+    let lead = exempting(1000);
+    let woken = Arc::new(AtomicBool::new(false));
+    let waker = futures::task::waker(Arc::new(Flag(Arc::clone(&woken))));
+    lead.taken.register(&waker);
+    lead.waiting.store(true, Ordering::Relaxed);
+    lead.hold(0, true);
+    assert!(woken.load(Ordering::SeqCst), "the reader was woken");
+}
+
+struct Flag(Arc<AtomicBool>);
+
+impl futures::task::ArcWake for Flag {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.0.store(true, Ordering::SeqCst);
+    }
+}

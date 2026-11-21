@@ -269,6 +269,8 @@ impl IngestEngine {
     ) {
         let position = candidate.position;
         let backlog = builds.folding();
+        // A live grant ends the hold (§3.9 §5).
+        runs.lead().hold(runs.slot(), false);
         let (ids, taken, mut frontiers) = self.take_all(builds, admitted, position, backlog);
         if !backlog {
             // Documents a capped take left behind keep the candidate: a later
@@ -447,9 +449,14 @@ impl IngestEngine {
             }
             builds.leave_lines();
             if let Some(runs) = runs.as_deref_mut() {
+                // Held by a full lane until the publish goes through.
+                runs.lead().hold(runs.slot(), true);
                 super::builder::enter_fold(runs, builds);
             }
             publishing.await?;
+            if let Some(runs) = runs.as_deref_mut() {
+                runs.lead().hold(runs.slot(), false);
+            }
         }
         Ok(published)
     }

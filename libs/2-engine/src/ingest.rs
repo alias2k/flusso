@@ -97,6 +97,11 @@ type Lanes = BTreeMap<LaneKey, Box<dyn Producer<LaneItem>>>;
 /// The source's live change stream.
 type LiveStream = BoxStream<'static, source::Result<LiveChange>>;
 
+/// How many documents held indexes together may have waiting, by default,
+/// before reading stops for every index (`[concurrency]
+/// max_pending_documents`).
+pub const DEFAULT_MAX_PENDING_DOCUMENTS: usize = 1_000_000;
+
 /// The ingest engine over one source, one document builder, and one stream.
 #[derive(Debug)]
 pub struct IngestEngine {
@@ -112,6 +117,9 @@ pub struct IngestEngine {
     /// How far the reader may read ahead; derived from `batch` and `builds`
     /// when unset.
     max_waiting: Option<MaxWaiting>,
+    /// How many documents the exempt indexes together may have waiting
+    /// before the reader stops for every index (6b-2).
+    max_pending_documents: usize,
     budget: Option<Arc<Budget>>,
     /// The budget waits open across engine runs (see [`Builds::with_waits`]).
     budget_waits: Arc<std::sync::Mutex<builds::Waits>>,
@@ -157,6 +165,7 @@ impl IngestEngine {
             batch: BatchPolicy::default(),
             builds: 1,
             max_waiting: None,
+            max_pending_documents: DEFAULT_MAX_PENDING_DOCUMENTS,
             budget: None,
             budget_waits: Arc::default(),
             key_reads: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -250,6 +259,16 @@ impl IngestEngine {
             per_index: max.per_index.max(1),
             total: max.total.max(1),
         });
+        self
+    }
+
+    /// With two or more indexes, an index held by the budget or a full lane
+    /// with `max_waiting_per_index` documents waiting stops no other index's
+    /// reading: its documents keep waiting, up to `max` for every such index
+    /// together, where the reading stops for all (at least one; default
+    /// [`DEFAULT_MAX_PENDING_DOCUMENTS`]).
+    pub fn with_max_pending_documents(mut self, max: usize) -> Self {
+        self.max_pending_documents = max.max(1);
         self
     }
 
@@ -371,11 +390,25 @@ impl IngestEngine {
         // before this run's reader marks anything (R10): confirmation stayed
         // before all of it, so this run's stream replays it.
         self.progress.forget_all();
-        let lead = Lead::over(
-            self.max_waiting(),
-            self.progress.changes_read(),
-            builds.len(),
-        );
+        // With two or more builders a held index at its cap is exempt
+        // (6b-2); one builder keeps 6b-1b's lead.
+        let lead = if builds.len() > 1 {
+            Lead::exempting(
+                self.max_waiting(),
+                self.progress.changes_read(),
+                builds
+                    .iter()
+                    .filter_map(|builds| builds.index().cloned())
+                    .collect(),
+                self.max_pending_documents,
+            )
+        } else {
+            Lead::over(
+                self.max_waiting(),
+                self.progress.changes_read(),
+                builds.len(),
+            )
+        };
         // Each builder's slice channel, request inbox, signals and result,
         // in the lead's queue order.
         let signals: Vec<Signals> = builds.iter().map(|_| Signals::default()).collect();

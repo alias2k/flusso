@@ -86,6 +86,10 @@ impl Run {
 #[derive(Debug)]
 pub(super) struct Lead {
     max: MaxWaiting,
+    /// With two or more builders, each queue's index and the bound on the
+    /// exempt indexes' documents (6b-2, §3.9 §5); `None` with one builder,
+    /// which keeps 6b-1b's check.
+    exemption: Option<Exemption>,
     /// The reader's wake-up, woken after a live take while it waits: the
     /// lead may have room. One waiter, so no list and no lock.
     taken: AtomicWaker,
@@ -108,6 +112,24 @@ pub(super) struct Queue {
     oldest: AtomicU64,
     routed: AtomicU64,
     folding: AtomicBool,
+    /// Its builder is held (§3.9 §5): its live batch refused by the budget,
+    /// or a publish blocked on a full lane, since its last live grant.
+    /// Written by the builder.
+    held: AtomicBool,
+    /// The reader latched its index exempt: held with `max_waiting_per_index`
+    /// documents or more waiting, until fewer wait. Written by the reader.
+    exempt: AtomicBool,
+}
+
+/// What the reader needs to exempt a held index (6b-2).
+#[derive(Debug)]
+struct Exemption {
+    /// Each queue's index, in queue order.
+    indexes: Vec<IndexName>,
+    /// The exempt indexes together stop the reading at this many documents.
+    max_pending: usize,
+    /// The reader is stopped at `max_pending`: logged once per stretch.
+    at_cap: AtomicBool,
 }
 
 impl Lead {
@@ -120,8 +142,36 @@ impl Lead {
     /// A lead of `max` over `builders` builders, nothing read ahead past
     /// `read`.
     pub(super) fn over(max: MaxWaiting, read: u64, builders: usize) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new(Self::of(max, read, builders, None))
+    }
+
+    /// A lead of `max` over a builder per index of `indexes` (in queue
+    /// order), nothing read ahead past `read`, exempting a held index at its
+    /// cap: the exempt indexes together stop the reading at
+    /// `max_pending_documents` (6b-2).
+    pub(super) fn exempting(
+        max: MaxWaiting,
+        read: u64,
+        indexes: Vec<IndexName>,
+        max_pending_documents: usize,
+    ) -> Arc<Self> {
+        let builders = indexes.len();
+        Arc::new(Self::of(
             max,
+            read,
+            builders,
+            Some(Exemption {
+                indexes,
+                max_pending: max_pending_documents,
+                at_cap: AtomicBool::new(false),
+            }),
+        ))
+    }
+
+    fn of(max: MaxWaiting, read: u64, builders: usize, exemption: Option<Exemption>) -> Self {
+        Self {
+            max,
+            exemption,
             taken: AtomicWaker::new(),
             waiting: AtomicBool::new(false),
             ended_waiting: AtomicBool::new(false),
@@ -130,9 +180,23 @@ impl Lead {
                     oldest: AtomicU64::new(u64::MAX),
                     routed: AtomicU64::new(read),
                     folding: AtomicBool::new(false),
+                    held: AtomicBool::new(false),
+                    exempt: AtomicBool::new(false),
                 })
                 .collect(),
-        })
+        }
+    }
+
+    /// Builder `queue` is held, or no longer (§3.9 §5). Becoming held wakes
+    /// the reader: it may wait at that index's cap, which only it can turn
+    /// into an exemption (D4).
+    pub(super) fn hold(&self, queue: usize, held: bool) {
+        let Some(queue) = self.queues.get(queue) else {
+            return;
+        };
+        if queue.held.swap(held, Ordering::Relaxed) != held && held {
+            self.wake();
+        }
     }
 
     /// A live batch of the first builder through its change read `read`th
@@ -204,9 +268,20 @@ impl Lead {
     }
 
     /// Whether the reader is as far ahead as it may be.
-    fn reached(&self, progress: &Progress) -> bool {
-        if progress.most_waiting() >= self.max.per_index || progress.waiting() >= self.max.total {
-            return true;
+    pub(super) fn reached(&self, progress: &Progress) -> bool {
+        match &self.exemption {
+            None => {
+                if progress.most_waiting() >= self.max.per_index
+                    || progress.waiting() >= self.max.total
+                {
+                    return true;
+                }
+            }
+            Some(exemption) => {
+                if self.documents_reached(progress, exemption) {
+                    return true;
+                }
+            }
         }
         let read = progress.changes_read();
         self.queues.iter().any(|queue| {
@@ -215,6 +290,75 @@ impl Lead {
             let oldest = queue.oldest.load(Ordering::Relaxed);
             oldest != u64::MAX && read.saturating_sub(oldest - 1) >= self.max.total as u64
         })
+    }
+}
+
+impl Lead {
+    /// The documents bounds with exemption (§3.9 §5): each non-exempt index
+    /// at `max_waiting_per_index`, the non-exempt indexes together at
+    /// `max_waiting`, the exempt ones together at `max_pending_documents`.
+    fn documents_reached(&self, progress: &Progress, exemption: &Exemption) -> bool {
+        let mut others = 0;
+        let mut exempt = 0;
+        for (queue, index) in self.queues.iter().zip(&exemption.indexes) {
+            let waiting = progress.waiting_on(index);
+            if self.latched(queue, index, waiting) {
+                exempt += waiting;
+                continue;
+            }
+            if waiting >= self.max.per_index {
+                return true;
+            }
+            others += waiting;
+        }
+        if others >= self.max.total {
+            return true;
+        }
+        let full = exempt >= exemption.max_pending;
+        if exemption.at_cap.swap(full, Ordering::Relaxed) != full {
+            if full {
+                tracing::warn!(
+                    documents = exempt,
+                    max_pending_documents = exemption.max_pending,
+                    "reading stopped for every index: the exempt indexes have \
+                     max_pending_documents documents waiting to be built; it reads on as they are built"
+                );
+            } else {
+                tracing::info!(
+                    documents = exempt,
+                    "the exempt indexes are below max_pending_documents: reading on"
+                );
+            }
+        }
+        full
+    }
+
+    /// Whether `queue`'s index, with `waiting` documents, is exempt now:
+    /// latched while its builder is held at the cap, cleared below it.
+    fn latched(&self, queue: &Queue, index: &IndexName, waiting: usize) -> bool {
+        if waiting < self.max.per_index {
+            if queue.exempt.swap(false, Ordering::Relaxed) {
+                tracing::info!(
+                    %index,
+                    waiting,
+                    "index below max_waiting_per_index: no longer exempt; it paces the reading again"
+                );
+            }
+            return false;
+        }
+        if queue.held.load(Ordering::Relaxed) {
+            if !queue.exempt.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    %index,
+                    waiting,
+                    "index held at max_waiting_per_index: exempt, so reading goes on for the other \
+                     indexes; its changes are kept as documents waiting, up to max_pending_documents \
+                     for every exempt index, and the replication slot stays pinned by it, so WAL grows"
+                );
+            }
+            return true;
+        }
+        queue.exempt.load(Ordering::Relaxed)
     }
 }
 

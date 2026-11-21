@@ -62,6 +62,12 @@ pub enum EngineError {
     )]
     UnregisteredLiveItem(String),
 
+    /// Every builder returned with documents read and not built, named per
+    /// index: a run never ends `Ok` with a read change unbuilt (ADR 0012
+    /// stage 8a, §3.9 §8). The restart replays them.
+    #[error("the run ended with documents read and not built ({0}); the restart reads them again")]
+    DocumentsLeft(String),
+
     /// A live lane item (it carries a position) arrived with no
     /// [`ItemKey`](stream::ItemKey): it could be neither marked landed nor
     /// fenced, so the sink engine refuses it. Every live item the ingest engine

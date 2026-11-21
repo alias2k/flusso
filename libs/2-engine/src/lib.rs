@@ -17,7 +17,7 @@ pub use budget::{
     Admission, Budget, Charge, FLOOR, Held, Refusal, Reservation, document_bytes, value_bytes,
 };
 pub use error::*;
-pub use ingest::{IngestEngine, KEY_PAGE, document_id};
+pub use ingest::{DEFAULT_MAX_PENDING_DOCUMENTS, IngestEngine, KEY_PAGE, document_id};
 pub use observer::*;
 pub use policy::{Backoff, BackoffError, BatchPolicy, FailurePolicies, FailurePolicy, MaxWaiting};
 pub use progress::{Holds, Level, Listener, Pin, Progress, Step, Taken, Token};

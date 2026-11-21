@@ -321,7 +321,8 @@ async fn an_index_parked_at_its_lane_backstop_folds() {
 
 /// Finding 4 of the 6b-1c review: a folding builder's backlog take wakes
 /// the reader. `orders` folds behind its parked lane (two items, one in
-/// flight) with two documents waiting, `orders`' cap, so the reader waits.
+/// flight) with two documents waiting: held at its cap it is exempt (6b-2),
+/// and two documents are `max_pending_documents` here, so the reader waits.
 /// Once the lane drains, `orders` takes the oldest of them into a build
 /// that stays held: one document waits, the cap has room, and the reader
 /// reads `users`' changes at once, without waiting for the backlog to
@@ -352,6 +353,9 @@ async fn a_backlog_take_wakes_the_reader() {
                 per_index: 2,
                 total: 100,
             })
+            // Held at its cap, orders is exempt (6b-2): its two documents
+            // stop the reading at the pending cap instead.
+            .with_max_pending_documents(2)
             .with_stop(stop.clone())
     });
     let progress = deployment.ingest.progress();
@@ -394,4 +398,162 @@ async fn a_backlog_take_wakes_the_reader() {
             driver.await.unwrap();
         }
     }
+}
+
+/// `orders` (odd ids) changing `orders` distinct documents and `users` (even
+/// ids) changing `users`, interleaved, on two indexes whose lanes hold two
+/// items: `orders` refused (its lane parks) from the start.
+fn stuck_orders(orders: i64, users: i64) -> (Arc<Database>, Arc<Builder>, Arc<Recorder>) {
+    let log: Vec<Change> = (0..orders.max(users))
+        .flat_map(|n| {
+            let mut both = Vec::new();
+            if n < orders {
+                both.push(Change::upsert(2 * n + 1));
+            }
+            if n < users {
+                both.push(Change::upsert(2 * n));
+            }
+            both
+        })
+        .map(|change| change)
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(&db, Behaviour::default());
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    (db, builder, recorder)
+}
+
+fn orders_written(recorder: &Recorder) -> usize {
+    recorder.state().keys().filter(|id| *id % 2 == 1).count()
+}
+
+/// I12 (6b-2): the stream's end builds an exempt backlog. `orders` is held
+/// at its cap and exempt, so `users` is read and written to the end; the
+/// run doesn't end while `orders`' documents wait, and once `orders` is let
+/// through at 30 s every one of them lands and the run ends.
+#[tokio::test(start_paused = true)]
+async fn the_stream_end_builds_an_exempt_backlog() {
+    let (db, builder, recorder) = stuck_orders(20, 20);
+    let mut deployment = Deployment::with_lanes(Feed::new(&db), builder, Arc::clone(&recorder), 2)
+        .ingest(|ingest| ingest.with_batch(batch(1)).with_builds(2));
+    let started = tokio::time::Instant::now();
+    let release = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let users = recorder.state().keys().filter(|id| *id % 2 == 0).count();
+            recorder.refused_indexes.lock().unwrap().clear();
+            users
+        })
+    };
+    tokio::time::timeout(LIMIT * 2, deployment.run_to_end(0))
+        .await
+        .expect("the run ends once orders is let through");
+    assert!(
+        started.elapsed() >= Duration::from_secs(30),
+        "the run waited for orders' backlog"
+    );
+    assert_eq!(release.await.unwrap(), 20, "users was written to the end");
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// O3 (6b-2): a stop builds and lands everything read, an exempt backlog
+/// included. `orders` is exempt with its documents waiting when the stop
+/// comes; let through a second later, every `orders` document read lands
+/// and the stop ends cleanly.
+#[tokio::test(start_paused = true)]
+async fn a_stop_builds_and_lands_an_exempt_backlog_under_the_deadline() {
+    let (db, builder, recorder) = stuck_orders(20, 20);
+    let stop = Stop::new();
+    let mut deployment =
+        Deployment::with_lanes(Feed::new(&db).open(), builder, Arc::clone(&recorder), 2).ingest(
+            |ingest| {
+                ingest
+                    .with_batch(batch(1))
+                    .with_builds(2)
+                    .with_stop(stop.clone())
+            },
+        );
+    let progress = deployment.ingest.progress();
+    let sink = deployment.start_sink().await;
+    let driver = {
+        let (recorder, progress, stop) =
+            (Arc::clone(&recorder), Arc::clone(&progress), stop.clone());
+        tokio::spawn(async move {
+            until("every change is read", || progress.changes_read() == 40).await;
+            let waiting = progress.waiting();
+            stop.request();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            recorder.refused_indexes.lock().unwrap().clear();
+            waiting
+        })
+    };
+    tokio::time::timeout(LIMIT, deployment.ingest.run())
+        .await
+        .expect("the stop ends once orders is let through")
+        .expect("a clean stop");
+    assert!(
+        driver.await.unwrap() > 2,
+        "orders' backlog waited at the stop"
+    );
+    deployment.drained().await;
+    assert_eq!(
+        orders_written(&recorder),
+        20,
+        "every orders change read was built and landed"
+    );
+    assert_eq!(deployment.ingest.progress().waiting(), 0);
+    sink.abort();
+}
+
+/// O3, the other outcome: a stop with the exempt index still stuck can't
+/// build its backlog, so it doesn't end (the CLI's deadline exits 1, naming
+/// the index from `waiting_by_index`); it never ends `Ok` with read changes
+/// unbuilt.
+#[tokio::test(start_paused = true)]
+async fn a_stop_with_an_exempt_index_still_stuck_does_not_end() {
+    let (db, builder, recorder) = stuck_orders(20, 20);
+    let stop = Stop::new();
+    let mut deployment =
+        Deployment::with_lanes(Feed::new(&db).open(), builder, Arc::clone(&recorder), 2).ingest(
+            |ingest| {
+                ingest
+                    .with_batch(batch(1))
+                    .with_builds(2)
+                    .with_stop(stop.clone())
+            },
+        );
+    let progress = deployment.ingest.progress();
+    let sink = deployment.start_sink().await;
+    {
+        let (progress, stop) = (Arc::clone(&progress), stop.clone());
+        tokio::spawn(async move {
+            until("every change is read", || progress.changes_read() == 40).await;
+            stop.request();
+        });
+    }
+    let mut run = std::pin::pin!(deployment.ingest.run());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(30), &mut run)
+            .await
+            .is_err(),
+        "the stop waits for orders' backlog"
+    );
+    let left = progress.waiting_by_index();
+    assert!(
+        left.iter()
+            .any(|(index, count)| index.as_ref() == "orders" && *count > 0),
+        "what the deadline's log names: {left:?}"
+    );
+    recorder.refused_indexes.lock().unwrap().clear();
+    tokio::time::timeout(LIMIT, run)
+        .await
+        .expect("let through, the stop ends")
+        .expect("a clean stop");
+    sink.abort();
 }

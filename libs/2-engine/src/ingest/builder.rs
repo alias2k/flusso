@@ -313,6 +313,10 @@ impl IngestEngine {
         let Some(index) = builds.index() else {
             return;
         };
+        if builds.refused() == Some(Work::Live) {
+            // Held by the budget (§3.9 §5): what the reader's exemption reads.
+            runs.lead().hold(runs.slot(), true);
+        }
         if !builds.folding() && builds.refused() == Some(Work::Live) {
             enter_fold(runs, builds);
         } else if builds.folding() && self.progress.waiting_on(index) == 0 {
