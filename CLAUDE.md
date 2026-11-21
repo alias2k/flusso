@@ -725,19 +725,28 @@ is the one concrete piece.
   `--max-pending-documents` + `FLUSSO_MAX_PENDING_DOCUMENTS`, default 1,000,000, never in the lock,
   judged by `daemon::max_pending_documents`), where the reading stops for every index. **An exempt index
   grows only while it is held and some other index is free** (the exemption is there so others keep
-  going; `documents_reached`'s `someone_free`, read only while some index is held). **Free** = not held
+  going; `Lead::someone_free`, read only while some index is held). **Free** = not held
   and nothing of it waiting on a lane unacknowledged for `STUCK_AFTER` (5 s) with none acknowledged
   (`ingest/outstanding.rs`: a `Published` guard in every item's `Hold`, live and backfill, counts it from
-  publish until every lane let go of it; a quiet index with nothing outstanding is free). Latched but not
+  publish until every lane let go of it, one guard per item shared by its lanes, so a healthy sink's
+  acknowledgement doesn't free an index another sink holds; an index that publishes nothing is free). Latched but not
   growing (its hold ended, or no other index is free, e.g. a whole sink down within about 5 s) it is frozen
   at the count it stopped growing at and may only drain; with no index free none becomes exempt. A truly
   silent index stays free, so beside it the held ones read on to `max_pending_documents` (the slice's own
   case, which this cannot be told from). Either edge of a hold wakes the reader (D4), and the dispatcher's
-  1 s tick wakes a waiting reader while the lead exempts (`Lead::tick`: what lets it read on once an index
-  is acknowledged again). Each pair of exemption log lines (exempt / no longer; stopped at the cap /
-  reading on) is throttled together, one a minute, the current state logged at the next check once it
-  is over (`LogPair`); with one builder `Lead::hold` does nothing. The slot stays pinned by the exempt index (its oldest unbuilt document is its
-  lanes' backlog), so WAL grows; the reader logs each latch edge and the pending cap. One builder keeps
+  1 s tick wakes a waiting reader whenever there are two or more builders (`Lead::tick`: what lets it read
+  on once an index is acknowledged again). **The exemption's log lines** (per index: not exempt, exempt and
+  growing, exempt and frozen; and the pending cap's) are logged **only from that tick**, for every index
+  and the cap whatever the reader is doing (`Lead::deciding`: the latch's rule without its writes, so the
+  check changes nothing the reader reads), one line a minute per index and one for the cap, the current
+  state logged at the next tick once the minute is over; their state is the engine's
+  (`reader::ExemptionLog`, kept across engine runs like `Outstanding`), so within a minute and a second of
+  any change the last line names the current state, except while no engine run is live (a restart's
+  backoff). Guards: `ingest::tests::exemption`'s `on_an_idle_stream_the_last_lines_name_the_state_within_a_minute`,
+  `across_an_ingest_restart_the_last_line_names_the_state_within_a_minute`, `reader::tests`'
+  `an_index_after_one_over_its_bound_still_logs_its_state`; with one index the engine keeps neither record
+  (`IngestEngine.exemption` is `None`) and `Lead::hold` does nothing. The slot stays pinned by the exempt index (its oldest unbuilt document is its
+  lanes' backlog), so WAL grows. One builder keeps
   6b-1b's lead. A pending document costs 266 B held, 314 B at the peak (`tests/pending_memory.rs`, a
   counting allocator). Guards: `reader::tests`' `an_index_at_its_cap_is_exempt_only_while_its_builder_is_held`
   and siblings, `ingest::tests`' `a_parked_index_changing_many_documents_does_not_stop_the_reading` (slice
