@@ -377,7 +377,7 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   in `.config/nextest.toml` still hold per runner. `verdict` (named `clippy + tests`, `if: always()`) is green
   only when every job succeeded (a docs-only run may skip `lint`/`tests`) and the parts' JUnit artifacts
   (`nextest-junit-<part>`) sum to the build's listed count. Rust caches are saved from `main` only
-  (`build`: `tests`, `lint`: `lint`, `bench`'s `scenarios` + `in-process`: `bench`, fuzz, other-platforms,
+  (`build`: `test`, `lint`: `lint`, `bench`'s `scenarios` + `in-process`: `bench`, fuzz, other-platforms,
   postgres-matrix); pull requests restore and never save (the 10 GB quota). Match these before assuming green. A `CLI on <os> (check)` job runs `cargo check -p
   flusso-cli --locked` on `windows-latest` and `macos-latest`, the release targets beside Linux
   (`dist-workspace.toml`): a cross check from Linux can't build `ring`, and code that compiles only on

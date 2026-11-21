@@ -94,12 +94,14 @@ jobs:
       - uses: actions/checkout@v7
 
       # Shared with the postgres-matrix legs (postgres-matrix.yml). A docs-only
-      # run builds little: it must never be saved as the build cache.
+      # run builds little: it must never be saved as the build cache. The key
+      # `test` is the one the single `clippy + tests` job saved under, so the
+      # cache `main` already holds keeps serving until Cargo.lock changes.
       - uses: ./.github/actions/rust-test-setup
         if: needs.plan.outputs.docs_only != 'true' || needs.plan.outputs.cargo == 'true'
         with:
           components: clippy
-          shared-key: tests
+          shared-key: test
           save-if: ${{ github.ref == 'refs/heads/main' && needs.plan.outputs.docs_only != 'true' }}
 
       # Every test binary of the workspace, built once; the parts run them.
