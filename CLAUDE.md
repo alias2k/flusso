@@ -359,29 +359,40 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   process; the Postgres one is a single sequential test and each OpenSearch test uses its own
   sink name, so plain `cargo test` is safe too. An intermittent failure there is an env race
   from a new test sharing a variable, not a regression.
-- CI's `test` job runs, in order: `cargo fmt --all --check` → `cargo clippy --workspace` →
+- CI's required `clippy + tests` is a verdict job over parallel jobs (issue #444; `ci.yml`'s
+  `plan`/`build`/`lint`/`tests`/`verdict`). `lint` runs, in order: `cargo fmt --all --check` → `cargo clippy --workspace` →
   `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench`
   (compiles benches + examples, which clippy and nextest skip — clippy omits `--all-targets`,
   nextest only builds test targets; the features unlock the three feature-gated in-process bench targets) → `cargo check -p
   flusso-cli --no-default-features` (the server-only image build) → `.github/scripts/check-ahash-seed.py`
-  (`cargo tree --offline`: `ahash` keeps `runtime-rng` beside `compile-time-rng`, issue #355) → `cargo nextest run
-  --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
+  (`cargo tree --offline`: `ahash` keeps `runtime-rng` beside `compile-time-rng`, issue #355) → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
   --workspace --no-deps --document-private-items` (broken/ambiguous/redundant intra-doc links fail
-  the build). Match these before assuming green. A `CLI on <os> (check)` job runs `cargo check -p
+  the build). `build` runs `cargo nextest archive --workspace` once, and `test-parts.py check` lists the run
+  and each part (`--run-ignored all`) and fails on a test in no part or in two; then one `tests` job per part
+  runs `cargo nextest run --archive-file … --profile ci --run-ignored all -E <part>` (extracted into the
+  checkout, so `CARGO_BIN_EXE_*`/`CARGO_TARGET_TMPDIR` paths hold). The parts are
+  `.github/scripts/test-parts.py`'s `PARTS`, their one home: the `opensearch` group over three by measured
+  time (a new `opensearch`-group binary must be named in one, or `check` fails naming it), `boundary` alone,
+  `rest` the complement (unit, `docker` group, the trybuild `ui` harnesses, `consumer_lints`); the group caps
+  in `.config/nextest.toml` still hold per runner. `verdict` (named `clippy + tests`, `if: always()`) is green
+  only when every job succeeded (a docs-only run may skip `lint`/`tests`) and the parts' JUnit artifacts
+  (`nextest-junit-<part>`) sum to the build's listed count. Rust caches are saved from `main` only
+  (`build`: `tests`, `lint`: `lint`, `bench`'s `scenarios` + `in-process`: `bench`, fuzz, other-platforms,
+  postgres-matrix); pull requests restore and never save (the 10 GB quota). Match these before assuming green. A `CLI on <os> (check)` job runs `cargo check -p
   flusso-cli --locked` on `windows-latest` and `macos-latest`, the release targets beside Linux
   (`dist-workspace.toml`): a cross check from Linux can't build `ring`, and code that compiles only on
   Unix (`#[cfg(unix)]` the signal and `/proc` items) would otherwise fail only at a release tag. One scope note: on PRs confined to the query
-  release train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`) the nextest step swaps in a
-  filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
+  release train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`) every part is ANDed with a
+  filterset (`test-parts.py`'s `READ_SIDE_SCOPE`) that skips the Postgres/OpenSearch container suites those paths can't break (the
   query train's own `combined_search`, `cursor_paging`, `map_keys`, `tls`, `array_columns` + `read_time` live e2e still run); pushes to main always run everything.
   A second scope note (issue #402): a PR **into the default branch** whose every changed file (both
   sides of a rename; the whole PR as it would merge, `HEAD^1..HEAD` of the merge commit) is
-  documentation is **docs-only** (nothing under `.github/` is): `ci.yml`'s `test`, `fuzz`,
+  documentation is **docs-only** (nothing under `.github/` is): `ci.yml`'s `plan` (for `clippy + tests`), `fuzz`,
   `designer-frontend`, `other-platforms` and `bench.yml`'s `in-process` run
   `.github/actions/change-class` (fetch-depth 2; `.github/scripts/change-class.sh`) first and skip
   their heavy steps, so each still reports green under its name with a "docs-only: skipped …"
-  summary; `test` runs only the `DOC_TESTS` whose files changed and clippy + doctests + doc links of a
-  crate whose compiled README changed (clippy's doc lints read it), and saves no build cache; `docs`
+  summary; `clippy + tests`' `build` job runs only the `DOC_TESTS` whose files changed and clippy + doctests + doc links of a
+  crate whose compiled README changed (clippy's doc lints read it), and `lint`/`tests` are skipped; `docs`
   and `scripts` run in full. The action runs the **base's** `change-class.sh`, which runs the base's
   `change_class.py` (`git show HEAD^1:…`), never the PR's copies; everything runs when either is
   missing or fails, when the classifier's output doesn't end with `docs_only` (written last), or when
@@ -407,7 +418,7 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   Actions tab, not to the PR's checks list); it shares its setup with
   `clippy + tests` through `.github/actions/rust-test-setup`, and a failing nightly maintains one issue
   via `.github/scripts/postgres-matrix.py` (unit-tested in the `scripts` job); the `query.rs` proptests need no special
-  handling — they're ordinary tests caught by the nextest step. A `scripts` job runs the stdlib unit
+  handling — they're ordinary tests caught by the test parts. A `scripts` job runs the stdlib unit
   tests under `.github/scripts` (`python3 -m unittest discover -s .github/scripts -p 'test_*.py'`).
   Outside `ci.yml`, `audit.yml`'s
   `advisories (cargo deny)` job runs `cargo deny check advisories --all-features` weekly and on

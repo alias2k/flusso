@@ -1,7 +1,7 @@
 name: Rust test setup
 description: >-
   The toolchain, cargo-nextest and the build cache, shared by `ci.yml`'s
-  `clippy + tests` and the `postgres-matrix` legs so the two cannot drift.
+  `clippy + tests` jobs and the `postgres-matrix` legs so they cannot drift.
   Runs after `actions/checkout` (a local action needs the checkout first).
 
 inputs:
@@ -19,6 +19,12 @@ inputs:
     description: rust-cache's `save-if`, as a string (`"true"` saves).
     required: false
     default: "true"
+  cache:
+    description: >-
+      `"false"` skips the build cache, for a job that builds nothing (the
+      `clippy + tests` parts run a nextest archive).
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -32,6 +38,7 @@ runs:
       uses: taiki-e/install-action@nextest
 
     - name: Cache build artifacts
+      if: inputs.cache != 'false'
       uses: Swatinem/rust-cache@v2
       with:
         shared-key: ${{ inputs.shared-key }}

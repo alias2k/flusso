@@ -14,75 +14,57 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: clippy + tests
+  # `clippy + tests` runs in parts (issue #444; docs/src/contribute/testing.md):
+  #
+  #   plan     Docs-only? Read-side scope? The parts and their filters
+  #            (.github/scripts/test-parts.py, the one home of the split).
+  #   build    Builds every test binary once into a nextest archive, checks the
+  #            parts hold each test of the run exactly once, uploads it. On a
+  #            docs-only change, runs only what reads the changed docs.
+  #   lint     fmt, clippy, the two `cargo check`s, the hash-seed guard,
+  #            doctests, doc links.
+  #   tests    One job per part, from the archive: the `opensearch` group in
+  #            three, the derive's boundary test, and the rest.
+  #   clippy + tests
+  #            The required check: green only when every job above succeeded
+  #            and the parts' JUnit reports hold every test the build listed.
+  #
+  # Build caches are saved from `main` only and restored on pull requests (the
+  # repository's 10 GB cache quota): `build` saves the test build, `lint` its
+  # own; the parts restore none (they run the archive; the tests that compile
+  # with cargo build in their own target dirs, as before).
+  plan:
+    name: "tests: plan"
     runs-on: ubuntu-latest
-    # GitHub-hosted ubuntu runners ship a running Docker daemon, which the
-    # Postgres e2e tests (testcontainers) need.
+    outputs:
+      docs_only: ${{ steps.change.outputs.docs_only }}
+      cargo: ${{ steps.change.outputs.cargo }}
+      nextest_packages: ${{ steps.change.outputs.nextest_packages }}
+      nextest_filter: ${{ steps.change.outputs.nextest_filter }}
+      doc_packages: ${{ steps.change.outputs.doc_packages }}
+      read_side_only: ${{ steps.scope.outputs.read_side_only }}
+      parts: ${{ steps.parts.outputs.parts }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 2
 
-      # A docs-only pull request (issue #402) skips the steps below that
-      # documentation can't break; the job still reports under its name, and
-      # its summary says what was skipped. `fetch-depth: 2` gives the merge
-      # commit's base for the diff.
+      # A docs-only pull request (issue #402) skips what documentation can't
+      # break; `clippy + tests` still reports, and this job's summary says what
+      # was skipped. `fetch-depth: 2` gives the merge commit's base for the diff.
       - name: Docs-only?
         id: change
         uses: ./.github/actions/change-class
         with:
           job: test
 
-      # Shared with the postgres-matrix legs (postgres-matrix.yml).
-      # A docs-only run builds little: it must not save that as the PR's
-      # build cache, which later full runs would restore and build cold.
-      - uses: ./.github/actions/rust-test-setup
-        if: steps.change.outputs.docs_only != 'true' || steps.change.outputs.cargo == 'true'
-        with:
-          components: clippy
-          save-if: ${{ steps.change.outputs.docs_only != 'true' }}
-
-      - name: Format
-        if: steps.change.outputs.docs_only != 'true'
-        run: cargo fmt --all --check
-
-      # `--all-targets` is intentionally omitted from clippy: several test crates
-      # use `.unwrap()`, which the workspace lints deny on non-test targets.
-      - name: Clippy
-        if: steps.change.outputs.docs_only != 'true'
-        run: cargo clippy --workspace
-
-      # Clippy (above, no `--all-targets`) and nextest only compile lib/bin and
-      # test targets — benches and examples are built by neither, so a broken one
-      # would slip through. A plain `cargo check --all-targets` compiles them too;
-      # it's rustc (not clippy), so the `unwrap_used` clippy lint doesn't fire on
-      # the test/bench `.unwrap()`s.
-      # The `bench` features expose the crate-private decoder/renderer to the
-      # in-process benches; without them those two bench targets are skipped.
-      - name: Check all targets (benches, examples)
-        if: steps.change.outputs.docs_only != 'true'
-        run: cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench
-
-      # The Docker runtime image builds the CLI without the designer; make sure
-      # that server-only configuration keeps compiling.
-      - name: Check server-only build (no designer)
-        if: steps.change.outputs.docs_only != 'true'
-        run: cargo check -p flusso-cli --no-default-features
-
-      # Here, not in `scripts`: it reads the resolved features with `cargo tree
-      # --offline`, which needs this job's toolchain and fetched crates (under a
-      # second; `scripts` has neither). Its unit test runs in `scripts`.
-      - name: Check the binary keeps a per-process hash seed (issue #355)
-        if: steps.change.outputs.docs_only != 'true'
-        run: .github/scripts/check-ahash-seed.py
-
       # PRs confined to the query release train (sdk/query, sdk/query-derive,
       # dev/query-e2e — see release-plz.toml) skip the Postgres/OpenSearch e2e
-      # suites those paths can't break; everything else, and every push to
-      # main, runs the full set. Decided from the PR's own file list (REST,
-      # paginated — `gh pr view --json files` caps at 100 files). Fails open:
-      # any file outside those trees means the full run.
+      # suites those paths can't break (test-parts.py's READ_SIDE_SCOPE);
+      # everything else, and every push to main, runs the full set. Decided
+      # from the PR's own file list (REST, paginated — `gh pr view --json
+      # files` caps at 100 files). Fails open: any file outside those trees
+      # means the full run.
       - name: Decide e2e scope
         id: scope
         if: github.event_name == 'pull_request' && steps.change.outputs.docs_only != 'true'
@@ -94,49 +76,76 @@ jobs:
             echo "read_side_only=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # `--run-ignored all` includes the `#[ignore]`d container-backed e2e
-      # tests; the `ci` profile gives them retries and a longer timeout. The
-      # `query.rs` proptests are ordinary `#[test]`s, so they run here too.
-      - name: Test (unit + integration + e2e)
-        if: steps.change.outputs.docs_only != 'true' && steps.scope.outputs.read_side_only != 'true'
-        run: cargo nextest run --profile ci --workspace --run-ignored all
+      - name: The parts
+        id: parts
+        env:
+          READ_SIDE_ONLY: ${{ steps.scope.outputs.read_side_only }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/test-parts.py matrix ${READ_SIDE_ONLY:+--read-side-only} >>"$GITHUB_OUTPUT"
 
-      # Read-side-only PRs: the same run minus the container-backed
-      # Postgres/OpenSearch suites — every tests/ binary in those three crates
-      # is container e2e, so excluding them by kind is exact. The query train's
-      # own live e2e (dev/query-e2e's combined_search, cursor_paging, map_keys, tls, array_columns, geo_points, read_time) still run.
-      - name: Test (read-side scope — full unit/integration + query e2e)
-        if: steps.change.outputs.docs_only != 'true' && steps.scope.outputs.read_side_only == 'true'
-        run: cargo nextest run --profile ci --workspace --run-ignored all -E 'all() - (kind(test) & (package(flusso-source-postgres) + package(flusso-engine) + package(flusso-sink-opensearch)))'
+  build:
+    name: "tests: build (archive)"
+    needs: plan
+    runs-on: ubuntu-latest
+    outputs:
+      count: ${{ steps.check.outputs.count }}
+    steps:
+      - uses: actions/checkout@v7
 
-      # nextest does not run doctests; run them separately.
-      - name: Doctests
-        if: steps.change.outputs.docs_only != 'true'
-        run: cargo test --workspace --doc
+      # Shared with the postgres-matrix legs (postgres-matrix.yml). A docs-only
+      # run builds little: it must never be saved as the build cache.
+      - uses: ./.github/actions/rust-test-setup
+        if: needs.plan.outputs.docs_only != 'true' || needs.plan.outputs.cargo == 'true'
+        with:
+          components: clippy
+          shared-key: tests
+          save-if: ${{ github.ref == 'refs/heads/main' && needs.plan.outputs.docs_only != 'true' }}
 
-      # The crate docs are a living reference (lots of intra-doc `[`links`]`), so
-      # gate on them resolving: `-D warnings` turns a broken/ambiguous/redundant
-      # link into a build error. `--document-private-items` checks internal docs
-      # too, since much of the documentation is on private items.
-      - name: Doc links
-        if: steps.change.outputs.docs_only != 'true'
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+      # Every test binary of the workspace, built once; the parts run them.
+      - name: Build the test binaries (nextest archive)
+        if: needs.plan.outputs.docs_only != 'true'
+        run: cargo nextest archive --workspace --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst"
+
+      # Lists the run (`--run-ignored all`, under the read-side scope when it
+      # applies) and each part: every test must be in exactly one part, or this
+      # names it and says where to add its binary. Writes the count the
+      # `clippy + tests` verdict holds the parts' JUnit reports to.
+      - name: Check the parts hold every test once
+        id: check
+        if: needs.plan.outputs.docs_only != 'true'
+        env:
+          READ_SIDE_ONLY: ${{ needs.plan.outputs.read_side_only }}
+        run: |
+          .github/scripts/test-parts.py check ${READ_SIDE_ONLY:+--read-side-only} \
+            --summary "$GITHUB_STEP_SUMMARY" --output "$GITHUB_OUTPUT" -- --workspace
+
+      # Already zstd-compressed; kept a day, only this run's parts read it.
+      - name: Upload the archive
+        if: needs.plan.outputs.docs_only != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-archive
+          path: ${{ runner.temp }}/nextest-archive.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
 
       # Docs-only: only the tests that read the changed files (the selection
       # lives in change_class.py's DOC_TESTS), and clippy (its doc lints read a
       # README compiled with `include_str!`), the doctests and the doc links of
       # each crate whose compiled README changed.
       - name: Test what reads the changed docs
-        if: steps.change.outputs.docs_only == 'true' && steps.change.outputs.nextest_filter != ''
+        if: needs.plan.outputs.docs_only == 'true' && needs.plan.outputs.nextest_filter != ''
         env:
-          PACKAGES: ${{ steps.change.outputs.nextest_packages }}
-          FILTER: ${{ steps.change.outputs.nextest_filter }}
+          PACKAGES: ${{ needs.plan.outputs.nextest_packages }}
+          FILTER: ${{ needs.plan.outputs.nextest_filter }}
         run: cargo nextest run --profile ci $PACKAGES -E "$FILTER"
 
       - name: Clippy, doctests and doc links of the crates whose README changed
-        if: steps.change.outputs.docs_only == 'true' && steps.change.outputs.doc_packages != ''
+        if: needs.plan.outputs.docs_only == 'true' && needs.plan.outputs.doc_packages != ''
         env:
-          PACKAGES: ${{ steps.change.outputs.doc_packages }}
+          PACKAGES: ${{ needs.plan.outputs.doc_packages }}
         run: |
           set -euo pipefail
           for package in $PACKAGES; do
@@ -145,13 +154,147 @@ jobs:
             RUSTDOCFLAGS="-D warnings" cargo doc -p "$package" --no-deps --document-private-items
           done
 
+      - name: Upload the docs-only test report
+        if: always() && needs.plan.outputs.docs_only == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-junit-docs-only
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  lint:
+    name: "tests: lint (fmt, clippy, checks, docs)"
+    needs: plan
+    if: needs.plan.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Its own cache: check, clippy and rustdoc artifacts are not the test
+      # build's.
+      - uses: ./.github/actions/rust-test-setup
+        with:
+          components: clippy
+          shared-key: lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # `--all-targets` is intentionally omitted from clippy: several test crates
+      # use `.unwrap()`, which the workspace lints deny on non-test targets.
+      - name: Clippy
+        run: cargo clippy --workspace
+
+      # Clippy (above, no `--all-targets`) and nextest only compile lib/bin and
+      # test targets — benches and examples are built by neither, so a broken one
+      # would slip through. A plain `cargo check --all-targets` compiles them too;
+      # it's rustc (not clippy), so the `unwrap_used` clippy lint doesn't fire on
+      # the test/bench `.unwrap()`s.
+      # The `bench` features expose the crate-private decoder/renderer to the
+      # in-process benches; without them those two bench targets are skipped.
+      - name: Check all targets (benches, examples)
+        run: cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench
+
+      # The Docker runtime image builds the CLI without the designer; make sure
+      # that server-only configuration keeps compiling.
+      - name: Check server-only build (no designer)
+        run: cargo check -p flusso-cli --no-default-features
+
+      # Here, not in `scripts`: it reads the resolved features with `cargo tree
+      # --offline`, which needs this job's toolchain and fetched crates (under a
+      # second; `scripts` has neither). Its unit test runs in `scripts`.
+      - name: Check the binary keeps a per-process hash seed (issue #355)
+        run: .github/scripts/check-ahash-seed.py
+
+      # nextest does not run doctests; run them separately.
+      - name: Doctests
+        run: cargo test --workspace --doc
+
+      # The crate docs are a living reference (lots of intra-doc `[`links`]`), so
+      # gate on them resolving: `-D warnings` turns a broken/ambiguous/redundant
+      # link into a build error. `--document-private-items` checks internal docs
+      # too, since much of the documentation is on private items.
+      - name: Doc links
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+
+  tests:
+    name: "tests: ${{ matrix.part.name }}"
+    needs: [plan, build]
+    if: needs.plan.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(needs.plan.outputs.parts) }}
+    # GitHub-hosted ubuntu runners ship a running Docker daemon, which the
+    # Postgres and OpenSearch e2e tests (testcontainers) need.
+    steps:
+      # The tests read fixtures beside their crate, and the derive's ui,
+      # boundary and consumer_lints tests compile with cargo.
+      - uses: actions/checkout@v7
+
+      # The toolchain and nextest, no build cache: the binaries come from the
+      # archive, and the tests that run cargo build in their own target dirs.
+      - uses: ./.github/actions/rust-test-setup
+        with:
+          cache: "false"
+
+      - name: Download the archive
+        uses: actions/download-artifact@v8
+        with:
+          name: nextest-archive
+          path: ${{ runner.temp }}/archive
+
+      # Extracted into the checkout, so `target/` sits where the build job had
+      # it: `env!("CARGO_BIN_EXE_flusso")` and `CARGO_TARGET_TMPDIR` are paths
+      # baked in at compile time. `--run-ignored all` includes the `#[ignore]`d
+      # container-backed e2e tests; the `ci` profile gives them retries, test
+      # groups and a longer timeout. A part may hold no test under the
+      # read-side scope.
+      - name: Test
+        env:
+          FILTER: ${{ matrix.part.filter }}
+        run: |
+          cargo nextest run --archive-file "$RUNNER_TEMP/archive/nextest-archive.tar.zst" \
+            --extract-to "$GITHUB_WORKSPACE" --workspace-remap "$GITHUB_WORKSPACE" \
+            --profile ci --run-ignored all --no-tests=warn -E "$FILTER"
+
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: nextest-junit
+          name: nextest-junit-${{ matrix.part.id }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
+
+  verdict:
+    name: clippy + tests
+    needs: [plan, build, lint, tests]
+    # Runs whatever the parts did: a failed, cancelled or skipped part is red
+    # here, except the lint and test jobs a docs-only change skips.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: Download the parts' test reports
+        if: needs.plan.outputs.docs_only != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: nextest-junit-*
+          path: junit
+
+      - name: Verdict
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          COUNT: ${{ needs.build.outputs.count }}
+        run: |
+          python3 .github/scripts/test-parts.py verdict --needs "$NEEDS" --expected "$COUNT" \
+            --junit junit --summary "$GITHUB_STEP_SUMMARY"
 
   docs:
     name: manual (build + links)
@@ -202,8 +345,9 @@ jobs:
       # the reproducible-seed guard over recorded `cargo tree` output
       # (test_check_ahash_seed.py, issue #355; the guard itself runs in
       # `test`), and the docs-only rule against this checkout
-      # (test_change_class.py, issue #402), each picked up by the `test_*.py`
-      # pattern.
+      # (test_change_class.py, issue #402), and the split of `clippy + tests`
+      # into parts with its guards (test_test_parts.py, issue #444), each
+      # picked up by the `test_*.py` pattern.
       - name: Test the CI scripts
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 
@@ -255,11 +399,13 @@ jobs:
         with:
           tool: cargo-fuzz
 
+      # Saved from `main` only; pull requests restore it (issue #444).
       - name: Cache build artifacts
         if: steps.change.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: libs/2-adapters/source-postgres/fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # A time-boxed smoke run, not an exhaustive campaign: a regression that
       # makes the decoder panic on malformed bytes fails CI here. A crash is
@@ -311,9 +457,12 @@ jobs:
         if: steps.change.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
+      # Saved from `main` only; pull requests restore it (issue #444).
       - name: Cache build artifacts
         if: steps.change.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check the CLI
         if: steps.change.outputs.docs_only != 'true'

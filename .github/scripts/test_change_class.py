@@ -928,8 +928,9 @@ class Repo(unittest.TestCase):
     def test_a_docs_only_run_never_saves_the_build_cache(self) -> None:
         ci = (REPO / ".github/workflows/ci.yml").read_text()
         setup = ci.split("- uses: ./.github/actions/rust-test-setup", 1)[1].split("\n      - ", 1)[0]
-        self.assertIn("if: steps.change.outputs.docs_only != 'true' || steps.change.outputs.cargo == 'true'", setup)
-        self.assertIn("save-if: ${{ steps.change.outputs.docs_only != 'true' }}", setup)
+        # The first setup is `clippy + tests`' build job, which runs the docs-only tests.
+        self.assertIn("if: needs.plan.outputs.docs_only != 'true' || needs.plan.outputs.cargo == 'true'", setup)
+        self.assertIn("save-if: ${{ github.ref == 'refs/heads/main' && needs.plan.outputs.docs_only != 'true' }}", setup)
 
     def test_the_action_passes_the_base_and_the_default_branch(self) -> None:
         action = (REPO / ".github/actions/change-class/action.yml").read_text()
