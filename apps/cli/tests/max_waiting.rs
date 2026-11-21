@@ -75,9 +75,10 @@ fn check_build_and_run_refuse_the_same_bounds_alike() {
         ),
         (
             "below",
-            "max_waiting_per_index = 600",
-            "[concurrency] max_waiting = 512 (the default, 2 × builds × [batch] max_changes) is \
-             below max_waiting_per_index = 600",
+            "max_waiting_per_index = 600\nmax_waiting = 512",
+            "[concurrency] max_waiting = 512 (set in flusso.toml's [concurrency] max_waiting) is \
+             below max_waiting_per_index = 600 (set in flusso.toml's [concurrency] \
+             max_waiting_per_index)",
         ),
     ] {
         let dir = project(
@@ -89,6 +90,20 @@ fn check_build_and_run_refuse_the_same_bounds_alike() {
             assert!(!output.status.success(), "{args:?}: {}", text(&output));
             assert!(text(&output).contains(said), "{args:?}: {}", text(&output));
         }
+    }
+}
+
+/// Raising only the per-index bound past the derived total checks and
+/// builds: the total, unset, rises to it.
+#[test]
+fn raising_only_the_per_index_bound_is_accepted() {
+    let dir = project(
+        "raised",
+        "[batch]\nmax_changes = 64\n\n[concurrency]\nbuilds = 4\nmax_waiting_per_index = 600\n",
+    );
+    for args in [&["check", "--offline"][..], &["build"][..]] {
+        let output = flusso(&dir, args, &[]);
+        assert!(output.status.success(), "{args:?}: {}", text(&output));
     }
 }
 

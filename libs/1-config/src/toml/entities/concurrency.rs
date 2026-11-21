@@ -81,16 +81,19 @@ pub struct Concurrency {
     pub index_budget_share: Option<f64>,
     /// Documents one index may have waiting to be built before the ingest
     /// engine stops reading changes (default `2 × [batch] max_changes`,
-    /// 512): how far reading runs ahead of the builds, per index. A stop
-    /// builds what was read, so this bounds a stop's work too. At least 1;
-    /// `check`, `build` and `run` refuse 0.
+    /// 512, or `max_waiting` when that is set lower): how far reading runs
+    /// ahead of the builds, per index. A stop builds what was read, so this
+    /// bounds a stop's work too. At least 1; `check`, `build` and `run`
+    /// refuse 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_waiting_per_index: Option<u64>,
     /// Documents every index together may have waiting to be built, and
     /// changes read ahead of the builds, before the ingest engine stops
-    /// reading (default `2 × builds × [batch] max_changes`, 2,048). At least
-    /// `max_waiting_per_index`; `check`, `build` and `run` refuse 0 or less.
+    /// reading (default `2 × builds × [batch] max_changes`, 2,048, or
+    /// `max_waiting_per_index` when that is set higher). With both set, at
+    /// least `max_waiting_per_index`; `check`, `build` and `run` refuse 0 or
+    /// less.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_waiting: Option<u64>,

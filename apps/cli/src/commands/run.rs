@@ -183,7 +183,8 @@ pub(crate) struct RunArgs {
     /// reading changes: how far reading runs ahead of the builds, per index,
     /// and what a stop may have to build. Overrides
     /// `[concurrency].max_waiting_per_index` from config; defaults to twice
-    /// `--batch-max-changes` (512). At least 1. Never written into the lock.
+    /// `--batch-max-changes` (512), or `--max-waiting` when that is set lower.
+    /// At least 1. Never written into the lock.
     /// [env: FLUSSO_MAX_WAITING_PER_INDEX]
     #[arg(long, value_parser = config::parse_max_waiting)]
     max_waiting_per_index: Option<u64>,
@@ -191,8 +192,9 @@ pub(crate) struct RunArgs {
     /// Documents every index together may have waiting to be built, and
     /// changes read ahead of the builds, before flusso stops reading.
     /// Overrides `[concurrency].max_waiting` from config; defaults to
-    /// `2 × --builds × --batch-max-changes` (2,048). At least
-    /// `--max-waiting-per-index`. Never written into the lock.
+    /// `2 × --builds × --batch-max-changes` (2,048), or
+    /// `--max-waiting-per-index` when that is set higher. With both set, at
+    /// least `--max-waiting-per-index`. Never written into the lock.
     /// [env: FLUSSO_MAX_WAITING]
     #[arg(long, value_parser = config::parse_max_waiting)]
     max_waiting: Option<u64>,

@@ -200,7 +200,7 @@
           ],
           "format": "uint64",
           "minimum": 1,
-          "description": "Documents one index may have waiting to be built before the ingest\nengine stops reading changes (default `2 × [batch] max_changes`,\n512): how far reading runs ahead of the builds, per index. A stop\nbuilds what was read, so this bounds a stop's work too. At least 1;\n`check`, `build` and `run` refuse 0."
+          "description": "Documents one index may have waiting to be built before the ingest\nengine stops reading changes (default `2 × [batch] max_changes`,\n512, or `max_waiting` when that is set lower): how far reading runs\nahead of the builds, per index. A stop builds what was read, so this\nbounds a stop's work too. At least 1; `check`, `build` and `run`\nrefuse 0."
         },
         "max_waiting": {
           "type": [
@@ -209,7 +209,7 @@
           ],
           "format": "uint64",
           "minimum": 1,
-          "description": "Documents every index together may have waiting to be built, and\nchanges read ahead of the builds, before the ingest engine stops\nreading (default `2 × builds × [batch] max_changes`, 2,048). At least\n`max_waiting_per_index`; `check`, `build` and `run` refuse 0 or less."
+          "description": "Documents every index together may have waiting to be built, and\nchanges read ahead of the builds, before the ingest engine stops\nreading (default `2 × builds × [batch] max_changes`, 2,048, or\n`max_waiting_per_index` when that is set higher). With both set, at\nleast `max_waiting_per_index`; `check`, `build` and `run` refuse 0 or\nless."
         }
       },
       "description": "How much the pipeline does at once, from a `flusso.toml` `[concurrency]`\ntable. A property of the machine that runs flusso, not of the deployment:\nit is never written into `flusso.lock`, so `run --locked` takes it from\n`--writes` / `FLUSSO_WRITES` and `--builds` / `FLUSSO_BUILDS` or the\ndefaults. Every key is optional."

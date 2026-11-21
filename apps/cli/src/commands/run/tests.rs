@@ -361,12 +361,12 @@ fn a_waiting_bound_of_zero_or_a_total_below_one_index_is_refused_naming_where_ea
              max_waiting_per_index = 200 (set by --max-waiting-per-index)",
         ),
         (
-            "",
-            Some(4096),
+            "max_waiting_per_index = 300",
             None,
-            &[][..],
-            "max_waiting = 2048 (the default, 2 × builds × [batch] max_changes) is below \
-             max_waiting_per_index = 4096",
+            None,
+            &[("FLUSSO_MAX_WAITING", "200")][..],
+            "max_waiting = 200 (set by FLUSSO_MAX_WAITING) is below max_waiting_per_index = 300 \
+             (set in flusso.toml's [concurrency] max_waiting_per_index)",
         ),
     ] {
         let refused = waiting_laid(table, per_index, total, env).unwrap_err();
@@ -378,5 +378,36 @@ fn a_waiting_bound_of_zero_or_a_total_below_one_index_is_refused_naming_where_ea
             .to_string()
             .contains("FLUSSO_MAX_WAITING: `many` is not a whole number"),
         "{refused}"
+    );
+}
+
+#[test]
+fn an_unset_waiting_bound_follows_the_one_set() {
+    let config = waiting_laid("", Some(4096), None, &[]).unwrap();
+    assert_eq!(
+        daemon::max_waiting(&config).unwrap(),
+        daemon::MaxWaiting {
+            per_index: 4096,
+            total: 4096
+        },
+        "max_waiting, unset, rises to the per-index bound"
+    );
+    let config = waiting_laid("max_waiting = 100", None, None, &[]).unwrap();
+    assert_eq!(
+        daemon::max_waiting(&config).unwrap(),
+        daemon::MaxWaiting {
+            per_index: 100,
+            total: 100
+        },
+        "max_waiting_per_index, unset, falls to the total"
+    );
+    let config = waiting_laid("max_waiting = 4000", None, None, &[]).unwrap();
+    assert_eq!(
+        daemon::max_waiting(&config).unwrap(),
+        daemon::MaxWaiting {
+            per_index: 512,
+            total: 4000
+        },
+        "each keeps its default while the other leaves room"
     );
 }
