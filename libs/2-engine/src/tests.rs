@@ -1907,6 +1907,7 @@ async fn stop_policy_fails_the_ingest_engine_on_a_failed_document() {
     assert!(harness.source.confirmed.lock().unwrap().is_empty());
 }
 
+mod builders;
 mod busy;
 mod concurrent;
 mod gone;

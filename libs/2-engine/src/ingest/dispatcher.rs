@@ -1,33 +1,35 @@
 //! The dispatcher: the future of an engine run that owns its result (ADR
-//! 0012 stage 8a, §3.9 §2 and I10). It routes backfill requests to the
-//! builder without ever waiting on it, confirms to the source, ticks, signals
-//! the builder the end and the stop, and finishes the run: the wind-down's
-//! drain and close at a stop, the last confirmation at the stream's end, or
-//! the builder's error.
+//! 0012 stage 8a, §3.9 §2 and I10). It routes each backfill request to its
+//! index's builder without ever waiting on one, confirms to the source,
+//! ticks, signals the builders the end and the stop, and finishes the run:
+//! the wind-down's drain and close at a stop, the last confirmation at the
+//! stream's end, or the first error (a builder's, the reader's, its own).
 //!
-//! **Requests.** Every request ready on the request lane is forwarded to the
-//! builder's inbox each time the dispatcher is polled, so a builder that
+//! **Requests.** Every request ready on the request lane is forwarded to its
+//! index's builder each time the dispatcher is polled, so a builder that
 //! finds its inbox empty has every request that was ready (`main`'s "what is
-//! already queued still joins"). The builder coalesces them on a deadline
-//! (`builder.rs`); the dispatcher holds none. After the stop nothing more is
-//! forwarded: what stays on the lane is served on the next start.
+//! already queued still joins"). A request for an index no builder builds
+//! (no lane of it) is warned about and acknowledged. Each builder coalesces
+//! its own requests on a deadline (`builder.rs`); the dispatcher holds none.
+//! After the stop nothing more is forwarded: what stays on the lane is
+//! served on the next start.
 //!
 //! **Confirmation** runs once per poll in which something was registered
-//! ([`Progress::poll_registered`](crate::Progress::poll_registered): a run routed, a build's lanes, a release),
-//! after the future that registered, and on every tick, as 6a's builder
-//! confirmed after each of its arms and on the tick.
+//! ([`Progress::poll_registered`](crate::Progress::poll_registered): a run
+//! routed, a build's lanes, a release), after the future that registered,
+//! and on every tick.
 //!
-//! **The end.** The builder reports itself idle once the reader ended with
-//! its stream and nothing is left to serve. The dispatcher then forwards
-//! what is ready and signals the end once the request lane is empty, and
-//! forwards nothing after; the builder settles only while idle, so a request
+//! **The end.** A builder reports itself idle once the reader ended and
+//! nothing is left for it to serve. With every builder idle and the request
+//! lane empty the dispatcher signals the end to all of them and forwards
+//! nothing after; a builder settles only while idle itself, so a request
 //! forwarded just before is still served (CLAUDE.md: "a live stream that
 //! ends still drains queued requests").
 //!
 //! ```text
-//! request lane ─▶ dispatcher ──inbox──▶ builder ──result──▶ dispatcher ─▶ Ok / Err
-//!                    │  ▲                  ▲
-//!   registration ────┘  └── tick, stop, end┘
+//! request lane ─▶ dispatcher ──inbox (per index)──▶ builders ──results──▶ dispatcher ─▶ Ok / Err
+//!                    │  ▲                               ▲
+//!   registration ────┘  └────────── tick, stop, end ────┘
 //! ```
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,18 +37,20 @@ use std::task::{Context, Poll};
 
 use futures::FutureExt;
 use futures::task::AtomicWaker;
+use kernel::IndexName;
 use source::cdc::Landed;
 use stream::{Consumer, Delivery, Request};
 use tokio::sync::{mpsc, oneshot};
 
 use super::builder::BuilderEnd;
 use super::confirm::CONFIRM_TICK;
+use super::reader::{self, ReaderEnd};
 use super::snapshot::ClosedConsumer;
 use super::{Ended, IngestEngine};
 use crate::error::{EngineError, Result};
 use crate::stop::drain_lanes;
 
-/// What the dispatcher and the builder tell each other, inside the task.
+/// What the dispatcher and one builder tell each other, inside the task.
 #[derive(Debug, Default)]
 pub(super) struct Signals {
     /// Dispatcher → builder: settle and return.
@@ -58,17 +62,21 @@ pub(super) struct Signals {
     tick: AtomicBool,
     /// The builder's waker, for the end, the tick and the stop.
     builder: AtomicWaker,
-    /// The builder is idle at the stream's end (the reader ended with its
-    /// stream and nothing is left to serve) and said so; cleared when it
-    /// takes a request, so it says so once per time it goes idle.
+    /// The builder is idle at the stream's end (the reader ended and nothing
+    /// is left for it to serve) and said so; cleared when it takes a
+    /// request, so it says so once per time it goes idle.
     idle: AtomicBool,
-    /// Builder → dispatcher: it went idle since the dispatcher looked.
+}
+
+/// The builders' reports to the dispatcher: one flag and one waker for all.
+#[derive(Debug, Default)]
+pub(super) struct Reports {
+    /// A builder went idle since the dispatcher looked.
     reported: AtomicBool,
-    /// The dispatcher's waker, for the builder's report.
     dispatcher: AtomicWaker,
 }
 
-/// What wakes the builder from the dispatcher.
+/// What wakes a builder from the dispatcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Signal {
     /// A second passed.
@@ -105,20 +113,26 @@ impl Signals {
     }
 
     /// The builder is idle at the stream's end: tell the dispatcher once.
-    pub(super) fn report_idle(&self) {
+    pub(super) fn report_idle(&self, reports: &Reports) {
         if !self.idle.swap(true, Ordering::AcqRel) {
-            self.reported.store(true, Ordering::Release);
-            self.dispatcher.wake();
+            reports.reported.store(true, Ordering::Release);
+            reports.dispatcher.wake();
         }
     }
 
     /// Tell the builder to look: at the stop, or the end.
-    fn raise_builder(&self) {
+    fn raise(&self) {
         self.look.store(true, Ordering::Release);
         self.builder.wake();
     }
 
-    /// Ready once the builder reported itself idle since the last time.
+    fn is_idle(&self) -> bool {
+        self.idle.load(Ordering::Acquire)
+    }
+}
+
+impl Reports {
+    /// Ready once a builder reported itself idle since the last time.
     fn poll_idle(&self, cx: &mut Context<'_>) -> Poll<()> {
         self.dispatcher.register(cx.waker());
         if self.reported.swap(false, Ordering::AcqRel) {
@@ -133,40 +147,84 @@ impl Signals {
 enum Fed {
     /// The end was signalled: nothing more is forwarded.
     End,
-    /// The builder is gone; its result is on the way.
+    /// A builder is gone; its result is on the way.
     Gone,
 }
 
+/// One builder as the dispatcher sees it: its index's inbox, its signals,
+/// and its result once it returned.
+pub(super) struct Builder<'a> {
+    pub(super) index: IndexName,
+    pub(super) inbox: mpsc::UnboundedSender<Delivery<Request>>,
+    pub(super) signals: &'a Signals,
+    pub(super) result: oneshot::Receiver<Result<BuilderEnd>>,
+}
+
 impl IngestEngine {
-    /// The dispatcher of one engine run (see the module docs): `requests` in,
-    /// the builder's `inbox` and `signals` out, its `result` back.
+    /// The dispatcher of one engine run (see the module docs).
     pub(super) async fn dispatch(
         &self,
         mut requests: Box<dyn Consumer<Request>>,
-        inbox: mpsc::UnboundedSender<Delivery<Request>>,
-        mut result: oneshot::Receiver<Result<BuilderEnd>>,
-        signals: &Signals,
+        builders: Vec<Builder<'_>>,
+        reports: &Reports,
+        mut reader: ReaderEnd,
     ) -> Result<Ended> {
         let mut last_confirmed: Option<Landed> = None;
         let mut tick = tokio::time::interval(CONFIRM_TICK);
         let mut stopping = false;
+        let signals: Vec<&Signals> = builders.iter().map(|builder| builder.signals).collect();
+        let routes: Vec<(IndexName, mpsc::UnboundedSender<Delivery<Request>>)> = builders
+            .iter()
+            .map(|builder| (builder.index.clone(), builder.inbox.clone()))
+            .collect();
+        let mut results: Vec<oneshot::Receiver<Result<BuilderEnd>>> =
+            builders.into_iter().map(|builder| builder.result).collect();
+        let mut ends: Vec<Option<BuilderEnd>> = results.iter().map(|_| None).collect();
+        let mut reader_end: Option<reader::Ended> = None;
         // The request side, one future for the run (`feed`): it keeps the
         // lane's `recv` across polls, so a wake for a registration or the
         // tick creates no future and takes no lock there.
-        let mut feed = std::pin::pin!(feed(&mut requests, &inbox, signals));
+        let mut feed = std::pin::pin!(feed(&mut requests, &routes, &signals, reports));
         let mut fed = false;
         loop {
             if !stopping && self.stop.is_requested() {
                 stopping = true;
-                signals.raise_builder();
+                for builder in &signals {
+                    builder.raise();
+                }
+            }
+            if reader_end.is_some() && ends.iter().all(Option::is_some) {
+                let stopped = ends.iter().flatten().any(|end| end.stopped);
+                if let Some(ended) = reader_end.take() {
+                    return self.finish(stopped, ended, &mut last_confirmed).await;
+                }
             }
             tokio::select! {
-                ended = &mut result => {
-                    let ended = ended.unwrap_or_else(|_| Err(builder_gone()))?;
-                    return self.finish(ended, &mut last_confirmed).await;
+                // Every builder's result, as it comes: the first error ends
+                // the run, dropping the others in place.
+                returned = std::future::poll_fn(|cx| {
+                    let mut ready = false;
+                    for (result, end) in results.iter_mut().zip(ends.iter_mut()) {
+                        if end.is_none()
+                            && let Poll::Ready(outcome) = result.poll_unpin(cx)
+                        {
+                            *end = Some(match outcome {
+                                Ok(Ok(builder)) => builder,
+                                Ok(Err(error)) => return Poll::Ready(Err(error)),
+                                Err(_) => return Poll::Ready(Err(builder_gone())),
+                            });
+                            ready = true;
+                        }
+                    }
+                    if ready { Poll::Ready(Ok(())) } else { Poll::Pending }
+                }) => {
+                    returned?;
+                }
+                ended = reader.join(), if reader_end.is_none() => {
+                    reader_end = Some(ended?);
                 }
                 // The watch wakes the dispatcher when the stop is requested:
-                // the loop's top raises the builder.
+                // the loop's top raises the builders.
                 () = std::future::poll_fn(|_| {
                     if self.stop.is_requested() { Poll::Ready(()) } else { Poll::Pending }
                 }), if !stopping => {}
@@ -179,8 +237,6 @@ impl IngestEngine {
                     }
                     Poll::<()>::Pending
                 }) => {}
-                // Nothing more is forwarded at the stop: what stays on the
-                // lane is served on the next start.
                 outcome = &mut feed, if !stopping && !fed => {
                     fed = true;
                     if let Fed::End = outcome? {
@@ -189,83 +245,96 @@ impl IngestEngine {
                 }
                 _ = tick.tick() => {
                     self.confirm(&mut last_confirmed, true);
-                    signals.tick.store(true, Ordering::Release);
-                    signals.builder.wake();
+                    for builder in &signals {
+                        builder.tick.store(true, Ordering::Release);
+                        builder.builder.wake();
+                    }
                 }
             }
         }
     }
 
-    /// The run's end once the builder returned: at a stop, wait until every
-    /// lane acknowledged what was built (confirming as it moves) and close the
-    /// live stream; at the stream's end, confirm.
+    /// The run's end once every builder returned and the reader ended: at a
+    /// stop, wait until every lane acknowledged what was built (confirming as
+    /// it moves) and close the live stream; at the stream's end, confirm.
     async fn finish(
         &self,
-        ended: BuilderEnd,
+        stopped: bool,
+        reader: reader::Ended,
         last_confirmed: &mut Option<Landed>,
     ) -> Result<Ended> {
-        if !ended.stopped {
+        if !stopped {
             self.confirm(last_confirmed, false);
             return Ok(Ended::LiveEnded);
         }
         drain_lanes(&*self.stream, &*self.source, &self.progress, last_confirmed).await;
         tracing::info!(position = ?last_confirmed, "every sink acknowledged; closing the live stream");
-        self.close(ended.reader.live, ended.reader.stream_ended)
+        self.close(reader.live, reader.stream_ended)
             .await
             .map(|()| Ended::Stopped)
     }
 }
 
-/// Hand one request to the builder; a closed request lane is replaced by one
-/// that never yields, and warned about once. `false` once the builder is gone:
-/// the request goes back to its lane unacknowledged (its handle dropped), and
-/// nothing more is forwarded, or it would be received again at once, forever.
-fn forward(
+/// Hand one request to its index's builder; a request for an index no
+/// builder builds is warned about and acknowledged, and a closed request
+/// lane is replaced by one that never yields, warned about once. `false`
+/// once the builder is gone: the request goes back to its lane
+/// unacknowledged (its handle dropped), and nothing more is forwarded, or it
+/// would be received again at once, forever.
+async fn forward(
     request: Option<Delivery<Request>>,
     requests: &mut Box<dyn Consumer<Request>>,
-    inbox: &mpsc::UnboundedSender<Delivery<Request>>,
-) -> bool {
-    match request {
-        Some(delivery) => inbox.send(delivery).is_ok(),
+    routes: &[(IndexName, mpsc::UnboundedSender<Delivery<Request>>)],
+) -> Result<bool> {
+    let Some(delivery) = request else {
+        tracing::warn!("request lane closed; no further backfills can be served");
+        *requests = Box::new(ClosedConsumer);
+        return Ok(true);
+    };
+    let Request::Backfill { index, sink, .. } = delivery.item();
+    match routes.iter().find(|(own, _)| own == index) {
+        Some((_, inbox)) => Ok(inbox.send(delivery).is_ok()),
         None => {
-            tracing::warn!("request lane closed; no further backfills can be served");
-            *requests = Box::new(ClosedConsumer);
-            true
+            tracing::warn!(%index, %sink, "backfill requested for an index with no lane here; ignoring");
+            let (_, handle) = delivery.into_parts();
+            handle.ack().await?;
+            Ok(true)
         }
     }
 }
 
-/// Forward every request ready now, until the builder is gone.
-fn forward_ready(
+/// Forward every request ready now, until a builder is gone.
+async fn forward_ready(
     requests: &mut Box<dyn Consumer<Request>>,
-    inbox: &mpsc::UnboundedSender<Delivery<Request>>,
-) -> Result<()> {
+    routes: &[(IndexName, mpsc::UnboundedSender<Delivery<Request>>)],
+) -> Result<bool> {
     while !requests.is_empty() {
         match requests.recv().now_or_never() {
             Some(request) => {
-                if !forward(request?, requests, inbox) {
-                    break;
+                if !forward(request?, requests, routes).await? {
+                    return Ok(false);
                 }
             }
             None => break,
         }
     }
-    Ok(())
+    Ok(true)
 }
 
-/// The request side of a run: forward every request to the builder as it
-/// arrives, and on the builder's idle report forward what is ready and, with
-/// the lane empty, signal the end (see the module docs). Returns once the end
-/// is signalled or the builder is gone. The lane's `recv` lives across polls
-/// until it yields or the idle report comes first; then it is dropped (it is
-/// cancel-safe) and the lane is used directly.
+/// The request side of a run: forward every request to its builder as it
+/// arrives, and on an idle report forward what is ready and, with every
+/// builder idle and the lane empty, signal the end (see the module docs).
+/// Returns once the end is signalled or a builder is gone. The lane's `recv`
+/// lives across polls until it yields or a report comes first; then it is
+/// dropped (it is cancel-safe) and the lane is used directly.
 async fn feed(
     requests: &mut Box<dyn Consumer<Request>>,
-    inbox: &mpsc::UnboundedSender<Delivery<Request>>,
-    signals: &Signals,
+    routes: &[(IndexName, mpsc::UnboundedSender<Delivery<Request>>)],
+    signals: &[&Signals],
+    reports: &Reports,
 ) -> Result<Fed> {
     loop {
-        if inbox.is_closed() {
+        if routes.iter().any(|(_, inbox)| inbox.is_closed()) {
             return Ok(Fed::Gone);
         }
         let next = {
@@ -274,27 +343,32 @@ async fn feed(
                 if let Poll::Ready(request) = recv.as_mut().poll(cx) {
                     return Poll::Ready(Some(request));
                 }
-                signals.poll_idle(cx).map(|()| None)
+                reports.poll_idle(cx).map(|()| None)
             })
             .await
         };
         match next {
             Some(request) => {
-                if !forward(request?, requests, inbox) {
+                if !forward(request?, requests, routes).await?
+                    || !forward_ready(requests, routes).await?
+                {
                     return Ok(Fed::Gone);
                 }
-                forward_ready(requests, inbox)?;
             }
-            // The end, once nothing waits on the request lane. A request
-            // forwarded since the builder went idle is still served: the
-            // builder acts on the end only while idle itself.
+            // The end, once every builder is idle and nothing waits on the
+            // request lane. A request forwarded since a builder went idle is
+            // still served: a builder acts on the end only while idle itself.
             None => {
-                forward_ready(requests, inbox)?;
+                if !forward_ready(requests, routes).await? {
+                    return Ok(Fed::Gone);
+                }
                 // Drained just above; still not empty only while a sink's
                 // request is half published, which must not be left.
-                if requests.is_empty() && !inbox.is_closed() {
-                    signals.end.store(true, Ordering::Release);
-                    signals.raise_builder();
+                if requests.is_empty() && signals.iter().all(|builder| builder.is_idle()) {
+                    for builder in signals {
+                        builder.end.store(true, Ordering::Release);
+                        builder.raise();
+                    }
                     return Ok(Fed::End);
                 }
             }
@@ -304,7 +378,7 @@ async fn feed(
 
 fn builder_gone() -> EngineError {
     EngineError::Source(source::SourceError::Connection(
-        "the builder ended without an answer".to_owned(),
+        "a builder ended without an answer".to_owned(),
     ))
 }
 
@@ -368,7 +442,8 @@ mod tests {
         });
         let (inbox, gone) = mpsc::unbounded_channel();
         drop(gone);
-        forward_ready(&mut requests, &inbox).unwrap();
+        let routes = vec![(IndexName::try_new("users").unwrap(), inbox)];
+        forward_ready(&mut requests, &routes).await.unwrap();
         assert!(!requests.is_empty(), "the request is back on its lane");
     }
 }

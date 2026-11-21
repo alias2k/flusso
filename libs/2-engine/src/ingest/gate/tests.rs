@@ -906,3 +906,30 @@ fn a_pass_alone_hands_the_permit_to_the_other_kind_when_its_turn_is_refused() {
         "the refusal moved no count"
     );
 }
+
+/// G9′, round 2: a waiter whose batch grows keeps its refusal (a refusal is
+/// monotone in size: the larger batch is refused too); one whose batch
+/// shrinks has it cleared and is asked again, so a stale refusal by the
+/// limit holds no one back (G6).
+#[test]
+fn a_waiter_that_grows_keeps_its_refusal_and_one_that_shrinks_drops_it() {
+    let budget = Arc::new(Budget::new(64 * KIB));
+    // `users` holds live bytes already: no headroom past the limit for it.
+    let _users = held(&budget, "users", 60);
+    let gate = Gate::new(1, Arc::clone(&budget));
+    let mut waiter = gate.join(Work::Live, vec![(index("users"), 8 * KIB)]);
+    assert!(
+        matches!(waiter.try_grant(), Asked::Refused(_)),
+        "8 KiB past the limit"
+    );
+    waiter.set_parts(vec![(index("users"), 16 * KIB)]);
+    assert!(
+        matches!(waiter.try_grant(), Asked::NotNow(Some(_))),
+        "grown, it keeps its refusal and is not offered the permit"
+    );
+    waiter.set_parts(vec![(index("users"), 2 * KIB)]);
+    assert!(
+        matches!(waiter.try_grant(), Asked::Granted(..)),
+        "shrunk below the room left, its refusal is gone and it is granted"
+    );
+}

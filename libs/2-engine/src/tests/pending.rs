@@ -223,9 +223,10 @@ impl Observer for Events {
     }
 }
 
-/// A change that builds no document is published in slot order, as an
-/// empty batch was: after the batch granted before it, never ahead of it.
-/// It counts as committed once the sink has landed that batch, not before.
+/// A change that builds no document of an index with lanes goes to no
+/// builder (ADR 0012 stage 8a, 6b-1c): nothing is published for it, and it
+/// counts as committed once the sink has landed the batches read before it,
+/// not before.
 #[tokio::test(start_paused = true)]
 async fn a_change_that_builds_nothing_settles_after_the_batch_before_it() {
     let primary = sink_name("primary");
@@ -253,8 +254,8 @@ async fn a_change_that_builds_nothing_settles_after_the_batch_before_it() {
     run.await.unwrap().unwrap();
     assert_eq!(
         *events.0.lock().unwrap(),
-        ["built 2", "built 0"],
-        "the empty batch is published after the one granted before it"
+        ["built 1", "built 1"],
+        "one build per index of change 1, none for change 9"
     );
     assert_eq!(
         progress.committed(&primary),

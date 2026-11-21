@@ -135,15 +135,33 @@ struct Database {
     rows: i64,
     log: Vec<Change>,
     visible: AtomicUsize,
+    /// How many documents a live change to a row touches: the row's own
+    /// and `fan - 1` aliases (`id + k × ALIAS`), each holding the row.
+    fan: i64,
 }
+
+/// What separates a row's aliases: a multiple of every index count, so an
+/// alias is a document of its row's index.
+const ALIAS: i64 = 600_000;
 
 impl Database {
     fn new(rows: i64, log: Vec<Change>) -> Arc<Self> {
+        Self::fanned(rows, log, 1)
+    }
+
+    /// A database whose live changes each touch `fan` documents.
+    fn fanned(rows: i64, log: Vec<Change>, fan: i64) -> Arc<Self> {
         Arc::new(Self {
             rows,
             log,
             visible: AtomicUsize::new(0),
+            fan: fan.max(1),
         })
+    }
+
+    /// The documents a live change to `id` touches.
+    fn touched(&self, id: i64) -> impl Iterator<Item = i64> {
+        (0..self.fan).map(move |alias| id + alias * ALIAS)
     }
 
     fn reveal(&self, through: usize) {
@@ -151,7 +169,9 @@ impl Database {
     }
 
     /// `id`'s version as a read now sees it; `None` when the row is absent.
+    /// An alias reads its row.
     fn read(&self, id: i64) -> Option<u64> {
+        let id = id.rem_euclid(ALIAS);
         let visible = self.visible.load(Ordering::SeqCst);
         let mut version = (0..self.rows).contains(&id).then_some(0);
         for (at, change) in self.log.iter().enumerate().take(visible) {
@@ -165,7 +185,7 @@ impl Database {
     /// What every document should hold once everything has landed.
     fn expected(&self) -> BTreeMap<i64, u64> {
         let mut ids: HashSet<i64> = (0..self.rows).collect();
-        ids.extend(self.log.iter().map(|change| change.id));
+        ids.extend(self.log.iter().flat_map(|change| self.touched(change.id)));
         ids.into_iter()
             .filter_map(|id| self.read(id).map(|version| (id, version)))
             .collect()
@@ -243,9 +263,18 @@ impl Feed {
         self
     }
 
-    /// The next run's stream starts after `landed`, what every lane landed.
-    fn resume_after(&self, landed: Option<Position>) {
-        let from = landed.map_or(0, |position| position.seq as usize + 1);
+    /// The next run's stream starts after the newest position it was
+    /// confirmed, as a replication slot resumes: whatever an engine run
+    /// confirmed too early is never read again.
+    fn resume_after_confirmed(&self) {
+        let from = self
+            .confirmed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|position| position.seq as usize + 1)
+            .max()
+            .unwrap_or(0);
         self.from.store(from, Ordering::SeqCst);
     }
 }
@@ -565,10 +594,14 @@ impl DocumentBuilder for Builder {
         if self.behaviour.resolve_fails.lock().unwrap().contains(&id) {
             return Err(SourceError::Connection(format!("resolving {id} failed")));
         }
-        Ok(vec![DocumentId {
-            index: self.index_of(id),
-            key: key.clone(),
-        }])
+        Ok(self
+            .db
+            .touched(id)
+            .map(|id| DocumentId {
+                index: self.index_of(id),
+                key: crate::ingest::tests::key(id),
+            })
+            .collect())
     }
 
     async fn build(&self, id: &DocumentId) -> source::Result<Document> {
@@ -854,6 +887,9 @@ struct Spy {
 /// Every position published, per lane, in lane order.
 type Published = Arc<Mutex<BTreeMap<stream::LaneKey, Vec<u64>>>>;
 
+/// Where an engine run ended and the next began, in [`Published`].
+const RESTART: u64 = u64::MAX;
+
 #[derive(Debug)]
 struct SpyProducer {
     inner: Box<dyn stream::Producer<stream::LaneItem>>,
@@ -1072,6 +1108,14 @@ impl Deployment {
     /// Run the ingest engine on a stream that stays open until every change
     /// of `db` has landed, then stop it, restarting it after a failed run as
     /// [`run_to_end`](Self::run_to_end) does.
+    /// An engine run ended and the next starts: the positions published
+    /// after it are another run's (`RESTART` in the record).
+    fn restarted(&self) {
+        for positions in self.published.lock().unwrap().values_mut() {
+            positions.push(RESTART);
+        }
+    }
+
     async fn run_until_landed(&mut self, db: &Arc<Database>, stop: &Stop, most_restarts: usize) {
         let sink = self.start_sink().await;
         let watcher = {
@@ -1098,14 +1142,13 @@ impl Deployment {
                 Ok(()) => break,
                 Err(error) => {
                     failed += 1;
+                    self.restarted();
                     assert!(
                         failed <= most_restarts,
                         "the ingest engine failed {failed} times; the last: {error}"
                     );
                     self.drained().await;
-                    let landed = self.ingest.progress().landed();
-                    self.feed
-                        .resume_after(landed.covered_seq().map(Position::new));
+                    self.feed.resume_after_confirmed();
                 }
             }
         }
@@ -1117,7 +1160,7 @@ impl Deployment {
 
     /// Run the ingest engine until its live stream ends, restarting it after
     /// a failed run the way the daemon does: the stream resumes after what
-    /// every lane acknowledged. Returns how many runs failed.
+    /// the source was confirmed. Returns how many runs failed.
     async fn run_to_end(&mut self, most_restarts: usize) -> usize {
         let sink = self.start_sink().await;
         let mut failed = 0;
@@ -1126,15 +1169,14 @@ impl Deployment {
                 Ok(()) => break,
                 Err(error) => {
                     failed += 1;
+                    self.restarted();
                     assert!(
                         failed <= most_restarts,
                         "the ingest engine failed {failed} times; the last: {error}"
                     );
                     self.drained().await;
                     tokio::time::sleep(self.restart_delay).await;
-                    let landed = self.ingest.progress().landed();
-                    self.feed
-                        .resume_after(landed.covered_seq().map(Position::new));
+                    self.feed.resume_after_confirmed();
                 }
             }
         }
@@ -1145,6 +1187,7 @@ impl Deployment {
     }
 }
 
+mod builders;
 mod reading;
 
 fn instant(db: &Arc<Database>) -> Arc<Builder> {
@@ -1180,7 +1223,15 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
         })
         .collect();
     let max_changes = 1 + random.below(8) as usize;
-    let db = Database::new(rows, log);
+    // Every third seed fans each change out to up to four documents, so the
+    // document cap (O2) splits a change across builds, and a failure can
+    // end a run between its parts.
+    let fan = if seed % 3 == 0 {
+        1 + (seed / 3 % 4) as i64
+    } else {
+        1
+    };
+    let db = Database::fanned(rows, log, fan);
     // Every other seed over two indexes (odd ids `orders`', even `users'`):
     // a batch splits by index, each lane in its own order.
     let two = seed % 2 == 0;
@@ -1211,7 +1262,7 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
     }
 
     let context = format!(
-        "seed {seed}, builds {builds}, two indexes {two}, {changes} changes over {ids} ids, {rows} rows, max_changes {max_changes}"
+        "seed {seed}, builds {builds}, two indexes {two}, {changes} changes over {ids} ids, {rows} rows, max_changes {max_changes}, fan {fan}"
     );
     assert!(
         !builder.overlapped.load(Ordering::SeqCst),
@@ -1226,11 +1277,18 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
         regressed.is_empty(),
         "a document's version went down: {regressed:?} ({context})"
     );
+    // Within one engine run a lane's positions never go down; the parts of
+    // a change the document cap split share its position. A restart
+    // replays from the confirmed position, the least over the lanes, so a
+    // lane whose index was ahead of another's gets some of its positions
+    // again.
     for (lane, positions) in deployment.published.lock().unwrap().iter() {
-        assert!(
-            positions.windows(2).all(|pair| pair[0] < pair[1]),
-            "{lane}'s positions are out of order: {positions:?} ({context})"
-        );
+        for run in positions.split(|position| *position == RESTART) {
+            assert!(
+                run.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{lane}'s positions are out of order within a run: {positions:?} ({context})"
+            );
+        }
     }
     assert_eq!(
         deployment.recorder.state(),
@@ -1831,7 +1889,15 @@ async fn tiny_budget_schedule(seed: u64, builds: usize) {
         })
         .collect();
     let max_changes = 1 + random.below(8) as usize;
-    let db = Database::new(rows, log);
+    // Every third seed fans each change out to up to four documents, so the
+    // document cap (O2) splits a change across builds, and a failure can
+    // end a run between its parts.
+    let fan = if seed % 3 == 0 {
+        1 + (seed / 3 % 4) as i64
+    } else {
+        1
+    };
+    let db = Database::fanned(rows, log, fan);
     let builder = Builder::new(
         &db,
         Behaviour {

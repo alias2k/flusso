@@ -299,9 +299,10 @@ async fn run_two_indexes(
     progress
 }
 
-/// A batch touching two indexes reaches each index's lane with that index's
-/// documents alone; a batch touching one leaves the other's lane skipped, so
-/// that lane pins nothing.
+/// Each index is built by its own builder (ADR 0012 stage 8a, 6b-1c): its
+/// lane gets that index's documents alone, `users`' two changes in one batch
+/// of its own, and the quiet `orders` lane pins nothing: with nothing
+/// outstanding it answers through what the reader routed.
 #[tokio::test]
 async fn a_batch_is_split_by_index_and_a_quiet_index_pins_nothing() {
     let sink = Arc::new(ByIndex::default());
@@ -318,16 +319,15 @@ async fn a_batch_is_split_by_index_and_a_quiet_index_pins_nothing() {
         writes,
         [
             ("orders".to_owned(), vec!["2".to_owned()]),
-            ("users".to_owned(), vec!["1".to_owned()]),
-            ("users".to_owned(), vec!["3".to_owned()]),
+            ("users".to_owned(), vec!["1".to_owned(), "3".to_owned()]),
         ],
-        "one item per index of each batch"
+        "one item per batch of each index"
     );
     let lane = |index| LaneKey::new(index, sink_name("primary"));
     assert_eq!(
         progress.lane(&lane(orders()), Level::Applied),
         Some(Landed::Through(Position::new(2))),
-        "the last batch had nothing for orders: skipped, its lane is through it"
+        "orders has nothing outstanding: its lane is through the run's last change"
     );
     assert_eq!(progress.landed(), Landed::Through(Position::new(2)));
 }

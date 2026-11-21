@@ -61,6 +61,7 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::Notify;
@@ -69,6 +70,13 @@ use kernel::IndexName;
 
 use crate::budget::{Budget, Refusal, Reservation};
 use crate::observer::Work;
+
+// How many waiters this thread's gates took in, for a test that pins one
+// builder to G9's pass (it never joins a line).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static JOINS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// How many of every kind of contested grant go to backfill.
 const BACKFILL_EVERY: u64 = 4;
@@ -81,6 +89,9 @@ pub(crate) struct Gate {
     budget: Arc<Budget>,
     /// Every change of the state (G7).
     changed: Notify,
+    /// Moves with every change of the state: a waiter that asked at one
+    /// generation and looks again at another was changed in between.
+    generation: AtomicU64,
     #[cfg(test)]
     before_reserve: BeforeReserve,
 }
@@ -136,7 +147,7 @@ impl Drop for Permit {
             state.is_waiting()
         };
         if waiting {
-            self.gate.changed.notify_waiters();
+            self.gate.notify_changed();
         }
     }
 }
@@ -272,7 +283,7 @@ impl Drop for Waiter {
         }
         self.gate.budget.unwatch();
         if !self.granted {
-            self.gate.changed.notify_waiters();
+            self.gate.notify_changed();
         }
     }
 }
@@ -298,6 +309,29 @@ pub(crate) enum Asked {
 }
 
 impl Waiter {
+    /// Its batch is now `parts` (G9′, round 2): it keeps its place, and its
+    /// refusal while the batch grows (a refusal is monotone in size); a
+    /// batch that shrinks has its refusal cleared, or a stale refusal by the
+    /// limit would hold younger waiters behind it (G6).
+    pub(crate) fn set_parts(&mut self, parts: Vec<(IndexName, usize)>) {
+        let total =
+            |parts: &[(IndexName, usize)]| -> usize { parts.iter().map(|(_, bytes)| *bytes).sum() };
+        let shrinks = total(&parts) < total(&self.parts);
+        self.parts = parts;
+        if shrinks {
+            let cleared = {
+                let mut state = self.gate.state();
+                state
+                    .waiting_mut(self.work, self.id)
+                    .and_then(|waiting| waiting.refused.take())
+                    .is_some()
+            };
+            if cleared {
+                self.gate.notify_changed();
+            }
+        }
+    }
+
     /// Ask once, under the gate's lock: granted when a permit is free, this
     /// waiter is the one G4 offers it to, and the budget has room by G5–G6.
     /// Never waits.
@@ -337,7 +371,7 @@ impl Waiter {
                     state.line_mut(self.work).retain(|waiting| waiting.id != id);
                     self.granted = true;
                     drop(state);
-                    gate.changed.notify_waiters();
+                    gate.notify_changed();
                     return Asked::Granted(
                         Permit {
                             gate: Arc::clone(&gate),
@@ -351,7 +385,7 @@ impl Waiter {
                         waiting.behind = behind;
                     }
                     drop(state);
-                    gate.changed.notify_waiters();
+                    gate.notify_changed();
                     return Asked::Refused(refusal);
                 }
             }
@@ -373,9 +407,37 @@ impl Gate {
             }),
             budget,
             changed: Notify::new(),
+            generation: AtomicU64::new(0),
             #[cfg(test)]
             before_reserve: BeforeReserve::default(),
         })
+    }
+
+    /// A change of the state: every waiter is woken (G7).
+    fn notify_changed(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.changed.notify_waiters();
+    }
+
+    /// The state's generation now: what [`changed_since`](Self::changed_since)
+    /// waits past.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Ready once the state changed since `generation` (G9′: a builder's
+    /// waiter asks again then). Registered before the generation is read, so
+    /// a change between the two still wakes it.
+    pub(crate) async fn changed_since(&self, generation: u64) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.generation() != generation {
+                return;
+            }
+            changed.await;
+        }
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -493,6 +555,8 @@ impl Gate {
     /// budget when offered a permit (G2). The waiter watches the budget until
     /// it leaves the line, granted or dropped (G3, G8).
     pub(crate) fn join(self: &Arc<Self>, work: Work, parts: Vec<(IndexName, usize)>) -> Waiter {
+        #[cfg(test)]
+        JOINS.with(|joins| joins.set(joins.get() + 1));
         let id = {
             let mut state = self.state();
             let id = state.next_id;
@@ -505,7 +569,7 @@ impl Gate {
             });
             id
         };
-        self.changed.notify_waiters();
+        self.notify_changed();
         Waiter {
             gate: Arc::clone(self),
             work,

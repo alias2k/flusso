@@ -205,9 +205,12 @@ struct Registrations {
     waiter: AtomicWaker,
 }
 
-/// Whether a running build holds an index's document: what a take leaves
-/// waiting.
-pub type Holds<'a> = &'a dyn Fn(&IndexName, &RowKey) -> bool;
+/// The documents of an index running builds hold outside its pending set (a
+/// backfill build's): offered one by one to `found` until it answers
+/// `true`; whether it did. What a take leaves waiting, read from the builds'
+/// side so a check costs one lookup per held document, not a walk of what
+/// waits.
+pub type Holds<'a> = &'a dyn Fn(&IndexName, &mut dyn FnMut(&RowKey) -> bool) -> bool;
 
 /// What [`Progress::on_registered`] calls.
 pub type Listener = Arc<dyn Fn() + Send + Sync>;
@@ -240,7 +243,9 @@ struct Registry {
 struct Registered {
     unlanded: VecDeque<(ItemKey, Position, Option<Step>)>,
     unsearchable: VecDeque<(ItemKey, Position)>,
-    /// Every change through it that the lane needs is registered on it.
+    /// Every change through it that the lane needs is registered on it:
+    /// raised only by an item (or skip) whose index had every document
+    /// marked through it taken by then (see [`Progress::register`]).
     newest: Option<Position>,
     /// The steps routed to the lane that can still answer what it has
     /// committed, in order: the front is the newest it has committed, once
@@ -357,7 +362,7 @@ impl Progress {
     /// It counts toward no [`Step`]: a live build's item is registered with
     /// its step ([`published_build`](Self::published_build)).
     pub fn published(&self, lane: &LaneKey, key: ItemKey, oldest: Position, last: Position) {
-        self.register(lane, Some((key, oldest)), last, None);
+        self.register(lane, Some((key, oldest)), last, None, None);
         self.registered();
     }
 
@@ -371,21 +376,21 @@ impl Progress {
         last: Position,
         step: Step,
     ) {
-        self.register(lane, Some((key, oldest)), last, Some(step));
+        self.register(lane, Some((key, oldest)), last, Some(step), None);
         self.registered();
     }
 
     /// A batch through `last` had nothing for `lane`: the lane has every
     /// change through `last` it needs, once its earlier items are registered.
     pub fn skipped(&self, lane: &LaneKey, last: Position) {
-        self.register(lane, None, last, None);
+        self.register(lane, None, last, None, None);
         self.registered();
     }
 
     /// [`skipped`](Self::skipped), for the live build of `step`: the lane has
     /// every change of the step it needs, once its earlier items are.
     pub fn skipped_step(&self, lane: &LaneKey, last: Position, step: Step) {
-        self.register(lane, None, last, Some(step));
+        self.register(lane, None, last, Some(step), None);
         self.registered();
     }
 
@@ -403,7 +408,7 @@ impl Progress {
         token: Token,
         step: Step,
     ) {
-        self.register(lane, Some((key, oldest)), last, Some(step));
+        self.register(lane, Some((key, oldest)), last, Some(step), Some(token));
         self.settle_build(lane, token);
         self.registered();
     }
@@ -414,21 +419,35 @@ impl Progress {
     /// pending build `token`, if it took one, no longer holds that lane
     /// back, before the one notification.
     pub fn skipped_build(&self, lane: &LaneKey, last: Position, token: Option<Token>, step: Step) {
-        self.register(lane, None, last, Some(step));
+        self.register(lane, None, last, Some(step), token);
         if let Some(token) = token {
             self.settle_build(lane, token);
         }
         self.registered();
     }
 
+    /// Register `item` (or a skip) through `last` on `lane`, the item of
+    /// the pending build `token` if any. The lane's `newest` moves to `last`
+    /// only while its index has nothing marked at or before `last` that
+    /// waits or is in another build: a take cut by the cap (O2) or the
+    /// fold's backlog take leaves some of `last`'s documents behind, and
+    /// after a restart forgets them a lane answering through `last` would
+    /// let confirmation and a fence pass documents never written (the
+    /// invariant: a lane's `newest` names only positions whose every
+    /// document of the index has been taken).
     fn register(
         &self,
         lane: &LaneKey,
         item: Option<(ItemKey, Position)>,
         last: Position,
         step: Option<Step>,
+        token: Option<Token>,
     ) {
         let mut registry = lock(&self.registry);
+        let whole = self
+            .pending
+            .get(&lane.index)
+            .is_none_or(|pending| lock(pending).all_taken_through(last, token));
         if let (Some(registered), Some(marks)) =
             (registry.lanes.get_mut(lane), self.marks.get(lane))
         {
@@ -441,7 +460,9 @@ impl Progress {
                 registered.unlanded.push_back((key, oldest, step));
                 registered.unsearchable.push_back((key, oldest));
             }
-            registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
+            if whole {
+                registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
+            }
         }
     }
 
@@ -559,6 +580,7 @@ impl Progress {
                     let pending = lock(pending);
                     (pending.sent_to(&lane.sink), pending.backlog_for(&lane.sink))
                 });
+
             let own = registered
                 .outstanding(marks, level)
                 .into_iter()
@@ -723,6 +745,33 @@ impl Progress {
         self.take_from(index, usize::MAX, Some(through), held)
     }
 
+    /// [`take_through`](Self::take_through) at most `max` ids, oldest first
+    /// (one index's build takes at most `max_changes` documents, O2).
+    pub fn take_through_at_most(
+        &self,
+        index: &IndexName,
+        through: Position,
+        max: usize,
+        held: &dyn Fn(&RowKey) -> bool,
+    ) -> Option<Taken> {
+        self.take_from(index, max, Some(through), held)
+    }
+
+    /// The newest position among `index`'s documents waiting: where a take
+    /// of its backlog ends.
+    pub fn newest_waiting(&self, index: &IndexName) -> Option<Position> {
+        self.pending
+            .get(index)
+            .and_then(|pending| lock(pending).newest_waiting())
+    }
+
+    /// How many of `index`'s documents wait to be taken.
+    pub fn waiting_on(&self, index: &IndexName) -> usize {
+        self.waiting_on
+            .get(index)
+            .map_or(0, |waiting| waiting.load(Ordering::Relaxed))
+    }
+
     fn take_from(
         &self,
         index: &IndexName,
@@ -760,11 +809,9 @@ impl Progress {
     /// behind.
     pub fn any_waiting_held(&self, held: Option<Holds<'_>>) -> bool {
         self.pending.iter().any(|(index, pending)| {
-            let held = held.map(|held| move |key: &RowKey| held(index, key));
-            lock(pending).any_held(
-                held.as_ref().map(|held| held as &dyn Fn(&RowKey) -> bool),
-                None,
-            )
+            let held =
+                held.map(|held| move |found: &mut dyn FnMut(&RowKey) -> bool| held(index, found));
+            lock(pending).any_held(held.as_ref().map(|held| held as pending::Held<'_>), None)
         })
     }
 
@@ -804,9 +851,9 @@ impl Progress {
             read => Some(read),
         };
         for (index, pending) in &self.pending {
-            let (forgotten, unbuilt) = lock(pending).forget();
-            self.stopped_waiting(index, forgotten);
-            least = least.into_iter().chain(unbuilt).min();
+            let forgotten = lock(pending).forget();
+            self.stopped_waiting(index, forgotten.waiting);
+            least = least.into_iter().chain(forgotten.least_read).min();
         }
         #[cfg(test)]
         tests::while_forgetting();
@@ -884,6 +931,19 @@ impl Progress {
     ) -> BTreeMap<IndexName, Step> {
         let mut registry = lock(&self.registry);
         let number = Self::next_step(&mut registry, 0).number;
+        // A step closed after a restart lifts the cap of every lane whose
+        // index has nothing waiting or building: no builder of it would
+        // ever register a step of its own (the rule in `forget_all`'s doc).
+        for (lane, registered) in registry.lanes.iter_mut() {
+            if registered.restart.is_some()
+                && self
+                    .pending
+                    .get(&lane.index)
+                    .is_none_or(|pending| lock(pending).is_idle())
+            {
+                registered.restart = None;
+            }
+        }
         frontiers
             .into_iter()
             .map(|(index, read)| (index, Step { number, read }))
@@ -921,13 +981,17 @@ impl Progress {
                 continue;
             };
             let landed = registered.committed(marks).map_or(0, |step| step.read);
-            let idle = registered.unlanded.is_empty()
-                && self
+            // With nothing unlanded, every read below the index's oldest
+            // unbuilt one (a document waiting, a build not yet released) is
+            // landed on the lane or had nothing for it (ADR 0012 stage 8a,
+            // 6b-1c: a lane is registered only with its own index's steps).
+            let caught_up = if registered.unlanded.is_empty() {
+                let unbuilt = self
                     .pending
                     .get(&lane.index)
-                    .is_none_or(|pending| lock(pending).is_idle());
-            let caught_up = if idle {
-                registered.restart.map_or(readable, |cap| cap.min(readable))
+                    .and_then(|pending| lock(pending).least_unbuilt());
+                let reach = unbuilt.map_or(readable, |least| least.saturating_sub(1).min(readable));
+                registered.restart.map_or(reach, |cap| cap.min(reach))
             } else {
                 0
             };
@@ -1003,13 +1067,34 @@ impl Progress {
         through: Position,
         held: Option<Holds<'_>>,
     ) -> Option<Vec<(IndexName, usize)>> {
+        self.waiting_of(None, through, held, usize::MAX)
+    }
+
+    /// [`waiting_through`](Self::waiting_through) on `index` alone, or on
+    /// every index when `None`, each count stopped at `most`: what one
+    /// index's builder takes. Its work is one lookup per document building
+    /// or held and at most `most` waiting entries per index, never a walk of
+    /// everything waiting.
+    pub fn waiting_of(
+        &self,
+        only: Option<&IndexName>,
+        through: Position,
+        held: Option<Holds<'_>>,
+        most: usize,
+    ) -> Option<Vec<(IndexName, usize)>> {
         let mut waiting: Vec<(Position, IndexName, usize)> = Vec::new();
-        for (index, pending) in &self.pending {
-            let held = held.map(|held| move |key: &RowKey| held(index, key));
+        for (index, pending) in self
+            .pending
+            .iter()
+            .filter(|(index, _)| only.is_none_or(|only| *index == only))
+        {
+            let held =
+                held.map(|held| move |found: &mut dyn FnMut(&RowKey) -> bool| held(index, found));
             let pending = lock(pending);
             let count = pending.scan(
                 through,
-                held.as_ref().map(|held| held as &dyn Fn(&RowKey) -> bool),
+                held.as_ref().map(|held| held as pending::Held<'_>),
+                most,
             )?;
             if count > 0
                 && let Some(oldest) = pending.oldest_waiting()
@@ -1024,6 +1109,15 @@ impl Progress {
                 .map(|(_, index, count)| (index, count))
                 .collect(),
         )
+    }
+
+    /// Whether `index` (any index for `None`) has a document marked at or
+    /// before `through` waiting: one look at each set's oldest.
+    pub fn waits_through(&self, only: Option<&IndexName>, through: Position) -> bool {
+        self.pending
+            .iter()
+            .filter(|(index, _)| only.is_none_or(|only| *index == only))
+            .any(|(_, pending)| lock(pending).waits_through(through))
     }
 
     /// How many items routed to `lane` it hasn't landed.

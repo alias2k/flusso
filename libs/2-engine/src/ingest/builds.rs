@@ -50,7 +50,7 @@ use source::document::{Document, DocumentBuilder, DocumentId};
 use tokio::task::AbortHandle;
 use tokio::time::{Duration, Instant};
 
-use super::gate::{Gate, Permit};
+use super::gate::{Asked, Gate, Permit, Waiter};
 use super::snapshot::Snapshot;
 use crate::budget::{Budget, Charge, Reservation, document_bytes};
 use crate::error::{EngineError, Result};
@@ -74,9 +74,6 @@ pub(super) enum Job {
         /// Each index's step at the grant, with its own frontier: its lanes
         /// are registered with it.
         steps: BTreeMap<IndexName, Step>,
-        /// The indexes with documents waiting that the budget left out:
-        /// their lanes get nothing from this build, not even a step.
-        deferred: Vec<IndexName>,
     },
     /// A snapshot batch, to each lane the slice it asked for, each index's
     /// slice carrying how far its walk got (the batch's greatest key of it).
@@ -97,7 +94,7 @@ pub(super) struct Built {
 /// What [`Builds::start`] hands a build: the ids, given back when it ends,
 /// and the heap its documents hold per index when the budget counts them.
 pub(super) struct Output {
-    ids: Vec<DocumentId>,
+    ids: Arc<Vec<DocumentId>>,
     built: Built,
     bytes: BTreeMap<IndexName, usize>,
 }
@@ -158,6 +155,10 @@ struct Wait {
     /// Kept across engine runs until a grant ends the hold, so a refusal of
     /// the same hold in the next run isn't counted again.
     counted: bool,
+    /// The builders held by the budget now, by their index (`None`: a lone
+    /// `Builds` of every index). Overlapping holds of several builders are
+    /// one wait (§3.9 §9): it ends when none is held.
+    held: std::collections::BTreeSet<Option<IndexName>>,
 }
 
 impl Waits {
@@ -186,18 +187,14 @@ pub(super) struct LiveCandidate<L> {
     pub(super) documents: Vec<(IndexName, usize)>,
     /// The live run is full: a build may start beside a running live one.
     pub(super) full: bool,
-    /// Changes were read since the last grant: a build that takes nothing
-    /// still settles them.
-    pub(super) changes: bool,
 }
 
 /// Which kind of batch a free slot goes to; a live grant carries back what
 /// the live candidate was offered with and the indexes it may take.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Grant<L> {
-    /// What the live candidate was offered with, the indexes taken, and the
-    /// indexes the budget left waiting.
-    Live(L, Vec<IndexName>, Vec<IndexName>),
+    /// What the live candidate was offered with, and the indexes taken.
+    Live(L, Vec<IndexName>),
     Backfill,
 }
 
@@ -210,14 +207,20 @@ pub(super) struct Builds {
     flights: Flights<'static, (u64, Option<Output>)>,
     /// The sorted id hashes of each running build, by slot number.
     holding: Vec<(u64, Vec<u64>)>,
+    /// The ids of each running backfill build, by slot number, shared with
+    /// the build: a live grant check looks each up in the pending set
+    /// instead of walking what waits (a live build's ids are in the pending
+    /// set already).
+    backfilling: Vec<(u64, Arc<Vec<DocumentId>>)>,
     /// The slot numbers of the live builds running on their own tasks.
     live_running: Vec<u64>,
     /// The permits every build holds while it runs (ADR 0012 §5).
     gate: Arc<Gate>,
-    /// The permit the last choice took, for the build it granted.
+    /// The permit the last choice took, for the build it granted: the
+    /// build holds it while it runs and drops it as it ends, on its own
+    /// task, so a builder blocked publishing holds none for a finished
+    /// build (§3.9 §6).
     granted: Option<Permit>,
-    /// Each running build's permit, by slot number.
-    permits: Vec<(u64, Permit)>,
     /// A build failed: nothing more is granted.
     halted: bool,
     spare: Vec<Vec<DocumentId>>,
@@ -227,10 +230,6 @@ pub(super) struct Builds {
     per_document: PerDocument,
     /// What the last choice reserved for the build it granted.
     reserved: Vec<Reservation>,
-    /// The most documents an index may leave waiting while a live build
-    /// takes the others (ADR 0012 stage 8a slice 4); `None` lets none wait:
-    /// a live batch then goes whole or not at all, as with one index.
-    defer_below: Option<usize>,
     /// The last choice found a batch the budget alone refused (for live,
     /// some index it left waiting).
     refused: Option<Work>,
@@ -249,6 +248,23 @@ pub(super) struct Builds {
     /// Told when a live build lands, so its documents leave admission there
     /// too (the pending take reads it).
     progress: Option<Arc<Progress>>,
+    /// The index this builder builds (ADR 0012 stage 8a, 6b-1c); `None`
+    /// builds every index (tests of a lone `Builds`).
+    index: Option<IndexName>,
+    /// The builder folds (§3.9 I7): held by the budget, it queues no slice
+    /// and takes its backlog oldest first instead of R3's batches.
+    folding: bool,
+    /// Other builders ask the gate too (G9′): a batch a pass didn't grant
+    /// keeps a waiter in its kind's line, so a freed permit has someone to
+    /// wake and G4, G6 hold across builders. Alone, a builder asks with G9's
+    /// pass: nobody else can stand in a line.
+    several: bool,
+    /// Its waiters, one per kind at most, while it has a batch of that kind
+    /// ready and a slot to run it.
+    waiters: Vec<(Work, Waiter)>,
+    /// The gate's generation when it last asked: a change past it is its
+    /// turn to ask again.
+    asked_at: u64,
 }
 
 impl Drop for Builds {
@@ -257,7 +273,12 @@ impl Drop for Builds {
     /// before the next run doesn't stretch it; the hold stays counted.
     fn drop(&mut self) {
         for work in [Work::Live, Work::Backfill] {
-            let since = lock(&self.waits).of(work).since.take();
+            let since = {
+                let mut waits = lock(&self.waits);
+                let wait = waits.of(work);
+                wait.held.clear();
+                wait.since.take()
+            };
             if let Some(since) = since {
                 self.observer
                     .on_budget_wait(work, Wake::Settle, since.elapsed());
@@ -287,6 +308,7 @@ impl Builds {
             front: 0,
             flights: Flights::new(),
             holding: Vec::new(),
+            backfilling: Vec::new(),
             live_running: Vec::new(),
             gate: Gate::new(
                 limit,
@@ -295,13 +317,11 @@ impl Builds {
                     .unwrap_or_else(|| Arc::new(Budget::unlimited())),
             ),
             granted: None,
-            permits: Vec::new(),
             halted: false,
             spare: Vec::new(),
             budget,
             per_document: PerDocument::default(),
             reserved: Vec::new(),
-            defer_below: None,
             refused: None,
             refused_generation: 0,
             waits: Arc::default(),
@@ -309,7 +329,72 @@ impl Builds {
             observer: Arc::new(crate::observer::NoopObserver),
             spawned: Vec::new(),
             progress: None,
+            index: None,
+            folding: false,
+            several: false,
+            waiters: Vec::new(),
+            asked_at: 0,
         }
+    }
+
+    /// Ask the gate beside other builders (G9′): see `several`.
+    pub(super) fn beside_others(mut self, several: bool) -> Self {
+        self.several = several;
+        self
+    }
+
+    /// Whether other builders ask the gate beside it.
+    pub(super) fn several(&self) -> bool {
+        self.several
+    }
+
+    /// Whether it waits in a line of the gate.
+    pub(super) fn in_line(&self) -> bool {
+        !self.waiters.is_empty()
+    }
+
+    /// Ready once the gate changed since it last asked: its waiters may be
+    /// offered a permit now (G7, G9′). Owned, so the builder's loop polls it
+    /// beside the arms that borrow the builds.
+    pub(super) fn turn(&self) -> impl Future<Output = ()> + Send + 'static {
+        let gate = Arc::clone(&self.gate);
+        let asked_at = self.asked_at;
+        async move { gate.changed_since(asked_at).await }
+    }
+
+    /// Leave every line: no batch ready, no slot, or an await outside the
+    /// builder's loop is about to pend (G9′: a waiter that can't ask holds no
+    /// place).
+    pub(super) fn leave_lines(&mut self) {
+        self.waiters.clear();
+    }
+
+    /// Ask `gate` for permits, the one every builder of the engine run
+    /// shares, instead of a gate of its own.
+    pub(super) fn with_gate(mut self, gate: Arc<Gate>) -> Self {
+        self.gate = gate;
+        self
+    }
+
+    /// Build `index` alone.
+    pub(super) fn of_index(mut self, index: IndexName) -> Self {
+        self.index = Some(index);
+        self
+    }
+
+    /// The index this builder builds; `None` for every index.
+    pub(super) fn index(&self) -> Option<&IndexName> {
+        self.index.as_ref()
+    }
+
+    /// Whether the builder folds (§3.9 I7).
+    pub(super) fn folding(&self) -> bool {
+        self.folding
+    }
+
+    /// Enter or leave the fold.
+    pub(super) fn set_folding(&mut self, folding: bool) {
+        self.folding = folding;
     }
 
     /// Keep the budget waits in `waits`, which outlives this engine run: a
@@ -318,14 +403,6 @@ impl Builds {
     /// counting the hold again.
     pub(super) fn with_waits(mut self, waits: Arc<std::sync::Mutex<Waits>>) -> Self {
         self.waits = waits;
-        self
-    }
-
-    /// Let a live build take the indexes the budget has room for while each
-    /// index left out has fewer than `below` documents waiting; past that,
-    /// or without this, the batch waits whole.
-    pub(super) fn with_deferral(mut self, below: Option<usize>) -> Self {
-        self.defer_below = below;
         self
     }
 
@@ -409,6 +486,7 @@ impl Builds {
         let first = {
             let mut waits = lock(&self.waits);
             let wait = waits.of(work);
+            wait.held.insert(self.index.clone());
             wait.since.get_or_insert_with(Instant::now);
             !std::mem::replace(&mut wait.counted, true)
         };
@@ -425,6 +503,9 @@ impl Builds {
         live: Option<Vec<(IndexName, usize)>>,
         backfill: Option<Vec<(IndexName, usize)>>,
     ) -> Option<Work> {
+        if self.several {
+            return self.ask_in_lines(live, backfill);
+        }
         let passed = self.gate.pass(live, backfill);
         for (work, refusal) in passed.refused {
             self.refuse(work, refusal.generation);
@@ -433,6 +514,59 @@ impl Builds {
         self.granted = Some(permit);
         self.reserved = reserved;
         Some(work)
+    }
+
+    /// [`ask`](Self::ask) beside other builders (G9′): each kind ready keeps
+    /// its waiter, joined at the back of its line the first time and asked
+    /// with its current parts after; a kind not ready leaves its line. A
+    /// granted waiter has left its line already.
+    fn ask_in_lines(
+        &mut self,
+        live: Option<Vec<(IndexName, usize)>>,
+        backfill: Option<Vec<(IndexName, usize)>>,
+    ) -> Option<Work> {
+        self.asked_at = self.gate.generation();
+        for (work, parts) in [(Work::Live, live), (Work::Backfill, backfill)] {
+            let at = self.waiters.iter().position(|(kind, _)| *kind == work);
+            match (parts, at) {
+                (Some(parts), Some(at)) => {
+                    if let Some((_, waiter)) = self.waiters.get_mut(at) {
+                        waiter.set_parts(parts);
+                    }
+                }
+                (Some(parts), None) => {
+                    let waiter = self.gate.join(work, parts);
+                    self.waiters.push((work, waiter));
+                }
+                (None, Some(at)) => {
+                    self.waiters.remove(at);
+                }
+                (None, None) => {}
+            }
+        }
+        for work in [Work::Live, Work::Backfill, Work::Live] {
+            let Some(at) = self.waiters.iter().position(|(kind, _)| *kind == work) else {
+                continue;
+            };
+            let Some((_, waiter)) = self.waiters.get_mut(at) else {
+                continue;
+            };
+            match waiter.try_grant() {
+                Asked::Granted(permit, reserved) => {
+                    self.waiters.remove(at);
+                    self.granted = Some(permit);
+                    self.reserved = reserved;
+                    return Some(work);
+                }
+                Asked::Refused(refusal) => self.refuse(work, refusal.generation),
+                // Still refused at the budget's generation: a release, not a
+                // change of the gate, lets it go, so the builder waits on the
+                // budget for it.
+                Asked::NotNow(Some(generation)) => self.refuse(work, generation),
+                Asked::NotNow(None) => {}
+            }
+        }
+        None
     }
 
     /// Whether a live build runs: only a full live batch may start beside
@@ -463,9 +597,25 @@ impl Builds {
             .any(|(_, held)| share_any(held, &hashes))
     }
 
-    /// Whether any running build holds a document.
-    pub(super) fn holds_some(&self) -> bool {
-        !self.holding.is_empty()
+    /// Whether a running backfill build holds a document: then a live
+    /// grant check also looks up what it holds
+    /// ([`held_by_backfill`](Self::held_by_backfill)).
+    pub(super) fn backfill_holds_some(&self) -> bool {
+        !self.backfilling.is_empty()
+    }
+
+    /// Offer `index`'s documents the running backfill builds hold to
+    /// `found` until it answers `true`; whether it did.
+    pub(super) fn held_by_backfill(
+        &self,
+        index: &IndexName,
+        found: &mut dyn FnMut(&source::RowKey) -> bool,
+    ) -> bool {
+        self.backfilling.iter().any(|(_, ids)| {
+            ids.iter()
+                .filter(|id| id.index == *index)
+                .any(|id| found(&id.key))
+        })
     }
 
     /// Whether a running build holds `index`'s document `key`: a live take
@@ -493,87 +643,73 @@ impl Builds {
     ) -> Option<Grant<L>> {
         self.refused = None;
         if !self.has_room() {
+            self.leave_lines();
             return None;
         }
         let live = live
             .filter(|candidate| self.live_running.is_empty() || candidate.full)
             .and_then(|candidate| {
-                let taken = self.live_part(&candidate.documents, candidate.changes)?;
+                let taken = self.live_part(&candidate.documents)?;
                 Some((candidate.live, taken))
             });
         let backfill = backfill.and_then(|ids| {
             let documents = per_index(ids);
-            (!self.holds_any(ids) && self.affordable(Work::Backfill, &documents).is_some())
-                .then_some(documents)
+            (!self.holds_any(ids)
+                && (self.several || self.affordable(Work::Backfill, &documents).is_some()))
+            .then_some(documents)
         });
         let live_parts = live
             .as_ref()
-            .map(|(_, (taken, _))| self.reserving(Work::Live, taken));
+            .map(|(_, taken)| self.reserving(Work::Live, taken));
         let backfill_parts = backfill
             .as_ref()
             .map(|documents| self.reserving(Work::Backfill, documents));
         match (self.ask(live_parts, backfill_parts)?, live) {
-            (Work::Live, Some((live, (taken, left)))) => Some(Grant::Live(
+            (Work::Live, Some((live, taken))) => Some(Grant::Live(
                 live,
                 taken.into_iter().map(|(index, _)| index).collect(),
-                left.into_iter().map(|(index, _)| index).collect(),
             )),
             (Work::Backfill, _) => Some(Grant::Backfill),
             (Work::Live, None) => None,
         }
     }
 
-    /// Which of the live batch's `documents` (per index, oldest waiting
+    /// Whether the live batch's `documents` (per index, oldest waiting
     /// first) could be granted ignoring the rule that a second live build
-    /// waits for a full batch: for the last batch of a run, with the indexes
-    /// the budget left waiting. `None` when none.
+    /// waits for a full batch: for the last batch of a run. The indexes it
+    /// takes, `None` when it waits.
     pub(super) fn can_take_last(
         &mut self,
         documents: &[(IndexName, usize)],
-    ) -> Option<(Vec<IndexName>, Vec<IndexName>)> {
+    ) -> Option<Vec<IndexName>> {
         self.refused = None;
         if !self.has_room() {
+            self.leave_lines();
             return None;
         }
-        let (taken, left) = self.live_part(documents, false)?;
+        let taken = self.live_part(documents)?;
         let parts = self.reserving(Work::Live, &taken);
         self.ask(Some(parts), None)?;
-        Some((
-            taken.into_iter().map(|(index, _)| index).collect(),
-            left.into_iter().map(|(index, _)| index).collect(),
-        ))
+        Some(taken.into_iter().map(|(index, _)| index).collect())
     }
 
-    /// The part of a live batch's `documents` (per index, oldest waiting
-    /// first) a build may take now: the indexes the budget has room for,
-    /// when every index left out may wait (see
-    /// [`with_deferral`](Self::with_deferral)) and the build takes
-    /// something, or settles `changes` read since the last grant; with the
-    /// part left waiting. `None` when the batch waits.
-    #[allow(clippy::type_complexity)]
-    fn live_part(
-        &mut self,
-        documents: &[(IndexName, usize)],
-        changes: bool,
-    ) -> Option<(Vec<(IndexName, usize)>, Vec<(IndexName, usize)>)> {
-        let admitted = self.affordable(Work::Live, documents);
-        let admitted = match (admitted, self.defer_below) {
-            (Some(admitted), _) => admitted,
-            (None, Some(_)) if changes => Vec::new(),
-            (None, _) => return None,
-        };
-        let (taken, left): (Vec<_>, Vec<_>) = documents
-            .iter()
-            .cloned()
-            .partition(|(index, _)| admitted.contains(index));
-        let may_wait = left.is_empty()
-            || self
-                .defer_below
-                .is_some_and(|below| left.iter().all(|(_, waiting)| *waiting < below));
-        if !may_wait || (taken.is_empty() && !left.is_empty() && !changes) {
-            return None;
+    /// A live batch's `documents` (per index, oldest waiting first) when the
+    /// budget has room for all of them; `None` when the batch waits whole
+    /// (each builder builds one index: no index is left out while others
+    /// build).
+    ///
+    /// Beside other builders the gate decides (G5): a batch the budget
+    /// refuses keeps its waiter in the line, so a younger builder reserves
+    /// behind it (G6) and small batches of other indexes can't starve it.
+    fn live_part(&mut self, documents: &[(IndexName, usize)]) -> Option<Vec<(IndexName, usize)>> {
+        if self.several {
+            return Some(documents.to_vec());
         }
-        Some((taken, left))
+        let admitted = self.affordable(Work::Live, documents)?;
+        documents
+            .iter()
+            .all(|(index, _)| admitted.contains(index))
+            .then(|| documents.to_vec())
     }
 
     /// An empty id list to fill, reusing one a finished build gave back.
@@ -603,21 +739,20 @@ impl Builds {
         halts: &(dyn Fn(&Built) -> bool + Sync),
     ) {
         let seq = self.front + self.slots.len() as u64;
-        if let Some(permit) = self.granted.take() {
-            self.permits.push((seq, permit));
-        }
+        let permit = self.granted.take();
         let live = matches!(job, Job::Live { .. });
         let work = if live { Work::Live } else { Work::Backfill };
-        // A live grant that leaves an index waiting for the budget doesn't
-        // end the live wait: one index held back while others build is one
-        // wait, from its first refusal to the grant that takes it.
-        let still_waiting = matches!(&job, Job::Live { deferred, .. } if !deferred.is_empty());
-        if !still_waiting {
+        {
             let since = {
                 let mut waits = lock(&self.waits);
                 let wait = waits.of(work);
-                wait.counted = false;
-                wait.since.take()
+                wait.held.remove(&self.index);
+                if wait.held.is_empty() {
+                    wait.counted = false;
+                    wait.since.take()
+                } else {
+                    None
+                }
             };
             if let Some(since) = since {
                 self.observer
@@ -635,11 +770,14 @@ impl Builds {
         // With one build at a time nothing is ever compared, so nothing is
         // hashed.
         let held = (self.limit > 1).then(|| hashes(&ids));
+        let ids = Arc::new(ids);
+        let backfilling = (self.limit > 1 && !live).then(|| Arc::clone(&ids));
         let documents = Arc::clone(documents);
         let mut build: BoxFuture<'static, Output> = Box::pin(async move {
             let started = Instant::now();
             let documents = documents.build_many(&ids).await.map_err(EngineError::from);
             let took = started.elapsed();
+            drop(permit);
             // Measured here, on the build's own task when it was spawned.
             let mut bytes: BTreeMap<IndexName, usize> = BTreeMap::new();
             if let (Ok(documents), true) = (&documents, measure) {
@@ -664,6 +802,9 @@ impl Builds {
         }
         if let Some(held) = held {
             self.holding.push((seq, held));
+        }
+        if let Some(ids) = backfilling {
+            self.backfilling.push((seq, ids));
         }
         let handle = tokio::spawn(build);
         self.spawned.push((seq, handle.abort_handle()));
@@ -692,14 +833,14 @@ impl Builds {
         if let Some(at) = self.holding.iter().position(|(held, _)| *held == seq) {
             self.holding.swap_remove(at);
         }
+        if let Some(at) = self.backfilling.iter().position(|(held, _)| *held == seq) {
+            self.backfilling.swap_remove(at);
+        }
         if let Some(at) = self.live_running.iter().position(|live| *live == seq) {
             self.live_running.swap_remove(at);
         }
         if let Some(at) = self.spawned.iter().position(|(spawned, _)| *spawned == seq) {
             self.spawned.swap_remove(at);
-        }
-        if let Some(at) = self.permits.iter().position(|(held, _)| *held == seq) {
-            self.permits.swap_remove(at);
         }
         let Some(slot) = seq
             .checked_sub(self.front)
@@ -713,11 +854,7 @@ impl Builds {
             }
         }
         let built = match output {
-            Some(Output {
-                mut ids,
-                built,
-                bytes,
-            }) => {
+            Some(Output { ids, built, bytes }) => {
                 let documents = per_index(&ids);
                 for reservation in std::mem::take(&mut slot.reservations) {
                     let Some(index) = reservation.index().cloned() else {
@@ -733,8 +870,10 @@ impl Builds {
                     slot.charges
                         .insert(index, Arc::new(reservation.settle(landed)));
                 }
-                ids.clear();
-                self.spare.push(ids);
+                if let Ok(mut ids) = Arc::try_unwrap(ids) {
+                    ids.clear();
+                    self.spare.push(ids);
+                }
                 built
             }
             None => Built {
@@ -766,8 +905,8 @@ impl Builds {
     pub(super) async fn abandon(&mut self) {
         self.halted = true;
         while self.flights.next().await.is_some() {}
-        self.permits.clear();
         self.holding.clear();
+        self.backfilling.clear();
         self.slots.clear();
     }
 }
@@ -905,7 +1044,6 @@ mod tests {
             position: Position::new(0),
             changes: 0,
             steps: BTreeMap::new(),
-            deferred: Vec::new(),
         };
         run.start(&documents, Vec::new(), job, &|_| false).await;
         assert_eq!(budget.refused(Work::Live), 1, "one hold, counted once");
@@ -942,42 +1080,99 @@ mod tests {
             live: (),
             documents: vec![(index("users"), 1)],
             full: true,
-            changes: true,
         }
     }
 
-    /// ADR 0012 stage 8a's acceptance test for R5: the builder's live batch
-    /// would fit by the limit, but a waiter the limit refused is in the live
-    /// line ahead of it, so it reserves behind (G6) and takes no room by the
-    /// limit: refused. With that waiter gone it is granted.
+    /// ADR 0012 stage 8a's acceptance test for R5, across two builders
+    /// (G9′): `orders`' live batch is refused by the limit and waits in the
+    /// live line; `users`' batch would fit by the limit, but `orders` is
+    /// ahead of it, so it reserves behind (G6) and takes no room by the
+    /// limit: refused. Once `orders` leaves the line, `users` is granted.
     #[tokio::test(start_paused = true)]
     async fn no_build_takes_room_by_the_limit_ahead_of_a_waiter_the_limit_refused() {
         let budget = Arc::new(Budget::new(64 * 1024));
         let _x = held(&budget, "x", 36);
         let _users = held(&budget, "users", 8);
         let _orders = held(&budget, "orders", 4);
-        let mut builds = Builds::new(2, Some(Arc::clone(&budget)));
-        let gate = Arc::clone(&builds.gate);
-        let older = tokio::spawn(async move {
-            gate.acquire(Work::Live, &[(index("orders"), 24 * 1024)])
-                .await
-        });
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        let gate = Gate::new(2, Arc::clone(&budget));
+        let builder = |name: &str| {
+            Builds::new(2, Some(Arc::clone(&budget)))
+                .with_gate(Arc::clone(&gate))
+                .of_index(index(name))
+                .beside_others(true)
+        };
+        let mut orders = builder("orders");
+        let mut users = builder("users");
+        let two_orders = LiveCandidate {
+            live: (),
+            documents: vec![(index("orders"), 2)],
+            full: true,
+        };
         assert!(
-            !older.is_finished(),
-            "orders is refused by the limit (72 of 64 KiB)"
+            orders.choose(Some(two_orders), None).is_none(),
+            "orders is refused by the limit (80 of 64 KiB)"
         );
+        assert!(orders.in_line(), "orders waits in the live line");
         let held_before = budget.held();
         assert!(
-            builds.choose(Some(one_user()), None).is_none(),
+            users.choose(Some(one_user()), None).is_none(),
             "users would fit by the limit (64 of 64 KiB), but not behind orders"
         );
         assert_eq!(budget.held(), held_before, "nothing reserved");
-        older.abort();
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        orders.leave_lines();
         assert!(
-            builds.choose(Some(one_user()), None).is_some(),
+            users.choose(Some(one_user()), None).is_some(),
             "with orders gone, users fits"
+        );
+    }
+
+    /// G4 across builders (G9′): one permit, `orders` with a live batch
+    /// ready and `users` with a backfill batch ready, both waiting in their
+    /// lines each time the permit is freed. Every fourth contested grant
+    /// goes to `users`' backfill, the others to `orders`' live batch.
+    #[tokio::test(start_paused = true)]
+    async fn every_fourth_contested_grant_goes_to_another_builders_backfill() {
+        let gate = Gate::new(1, Arc::new(Budget::unlimited()));
+        let builder = |name: &str| {
+            Builds::new(1, None)
+                .with_gate(Arc::clone(&gate))
+                .of_index(index(name))
+                .beside_others(true)
+        };
+        let mut orders = builder("orders");
+        let mut users = builder("users");
+        let live = || LiveCandidate {
+            live: (),
+            documents: vec![(index("orders"), 1)],
+            full: true,
+        };
+        let ids = [DocumentId {
+            index: index("users"),
+            key: source::RowKey(Vec::new()),
+        }];
+        assert!(orders.choose(Some(live()), None).is_some(), "alone: live");
+        let mut permit = orders.granted.take();
+        let mut grants = Vec::new();
+        for _ in 0..8 {
+            assert!(orders.choose(Some(live()), None).is_none());
+            assert!(users.choose::<()>(None, Some(&ids)).is_none());
+            assert!(orders.in_line() && users.in_line(), "both wait");
+            drop(permit.take());
+            let to_users = users.choose::<()>(None, Some(&ids)).is_some();
+            let to_orders = orders.choose(Some(live()), None).is_some();
+            assert!(to_users != to_orders, "one grant per freed permit");
+            grants.push(if to_users { "backfill" } else { "live" });
+            permit = if to_users {
+                users.granted.take()
+            } else {
+                orders.granted.take()
+            };
+        }
+        assert_eq!(
+            grants,
+            [
+                "live", "live", "live", "backfill", "live", "live", "live", "backfill"
+            ]
         );
     }
 

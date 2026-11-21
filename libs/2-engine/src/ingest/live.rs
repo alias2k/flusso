@@ -35,6 +35,8 @@ pub(super) struct Runs {
     max_changes: usize,
     max_delay: Duration,
     lead: Arc<Lead>,
+    /// Which of the lead's queues is this builder's.
+    slot: usize,
     /// The reader's hand-over: drained before any batch is formed, so no
     /// batch misses a change already read (R3, review round 4).
     handed: mpsc::UnboundedReceiver<Run>,
@@ -58,6 +60,25 @@ pub(super) struct Candidate {
     end: Option<(usize, usize)>,
 }
 
+impl Candidate {
+    /// The same batch, full: a build of it may start beside a running one.
+    pub(super) fn filled(self) -> Self {
+        Self { full: true, ..self }
+    }
+
+    /// A folding builder's standing candidate: its backlog, through
+    /// `position`, settling no change of a queue (§3.9 I7).
+    pub(super) fn backlog(position: Position, full: bool) -> Self {
+        Self {
+            position,
+            read: 0,
+            changes: 0,
+            full,
+            end: None,
+        }
+    }
+}
+
 impl Runs {
     pub(super) fn new(
         max_changes: usize,
@@ -76,9 +97,38 @@ impl Runs {
             max_changes: max_changes.max(1),
             max_delay,
             lead,
+            slot: 0,
             handed,
             observer,
         }
+    }
+
+    /// The builder's queue in the lead is its `queue`th.
+    pub(super) fn of_queue(mut self, slot: usize) -> Self {
+        self.slot = slot;
+        self
+    }
+
+    /// Which of the lead's queues is this builder's.
+    pub(super) fn slot(&self) -> usize {
+        self.slot
+    }
+
+    /// The lead the reader waits on.
+    pub(super) fn lead(&self) -> &Lead {
+        &self.lead
+    }
+
+    /// Drop every run queued and not granted, those handed over included
+    /// (entering the fold, §3.9 I7): their documents stay waiting, and the
+    /// backlog takes them.
+    pub(super) fn clear(&mut self) {
+        self.drain();
+        self.queue.clear();
+        self.taken = 0;
+        self.queued = 0;
+        self.short = false;
+        self.kept = None;
     }
 
     /// The reader's next run, `None` once it ended. Not queued yet: the
@@ -149,7 +199,7 @@ impl Runs {
             .queue
             .front()
             .and_then(|run| run.changes.get(self.taken))
-            .map(|(_, at)| *at);
+            .map(|(_, at, _)| *at);
         let Some(first) = first else {
             return self.kept.map(|kept| Candidate {
                 changes: 0,
@@ -163,15 +213,15 @@ impl Runs {
         let mut count = 0;
         'runs: for (at_run, run) in self.queue.iter().enumerate() {
             let skip = if at_run == 0 { self.taken } else { 0 };
-            for (at_change, (position, read_at)) in run.changes.iter().enumerate().skip(skip) {
+            for (at_change, (position, read_at, read)) in run.changes.iter().enumerate().skip(skip)
+            {
                 if count == self.max_changes || (deadline && count > 0 && *read_at >= closes) {
                     break 'runs;
                 }
                 count += 1;
-                let unread_after = (run.changes.len() - at_change - 1) as u64;
                 candidate = Some(Candidate {
                     position: *position,
-                    read: run.read - unread_after,
+                    read: *read,
                     changes: count,
                     full: count == self.max_changes,
                     end: Some((at_run, at_change + 1)),
@@ -179,6 +229,18 @@ impl Runs {
             }
         }
         candidate
+    }
+
+    /// What the last grant kept for documents its cap or the budget left
+    /// waiting, whatever is queued: a later grant takes them through it,
+    /// settling no change.
+    pub(super) fn kept(&self) -> Option<Candidate> {
+        self.kept.map(|kept| Candidate {
+            changes: 0,
+            full: false,
+            end: None,
+            ..kept
+        })
     }
 
     /// `candidate` was granted and its documents taken: its changes leave
@@ -203,7 +265,12 @@ impl Runs {
         }
         self.last_grant = Some(Instant::now());
         self.kept = waiting.then_some(candidate);
-        self.lead.granted(candidate.read);
+        let next = self
+            .queue
+            .front()
+            .and_then(|run| run.changes.get(self.taken))
+            .map(|(_, _, read)| *read);
+        self.lead.queued(self.slot, next);
     }
 }
 
@@ -257,7 +324,7 @@ mod tests {
 
     fn run(seq: u64, read: u64) -> Run {
         Run {
-            changes: vec![(Position::new(seq), Instant::now())],
+            changes: vec![(Position::new(seq), Instant::now(), read)],
             read,
             resolved: Duration::ZERO,
         }

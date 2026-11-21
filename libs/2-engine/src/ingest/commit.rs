@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::task::Poll;
 
 use chrono::Utc;
 use futures::future::try_join_all;
@@ -62,8 +63,11 @@ impl IngestEngine {
             // taken. Its estimate counts distinct documents.
             // Beside a running live build only a full batch may start, so a
             // hand-over that can't fill one costs no walk.
-            let candidate = if builds.live_running() {
+            let candidate = if builds.folding() {
+                self.backlog(builds)
+            } else if builds.live_running() {
                 runs.full_candidate()
+                    .or_else(|| self.full_leftover(runs, builds))
             } else {
                 runs.candidate(true)
             };
@@ -72,7 +76,6 @@ impl IngestEngine {
                     live: candidate,
                     documents: self.waiting(builds, candidate.position)?,
                     full: candidate.full,
-                    changes: candidate.changes > 0,
                 })
             });
             let backfill = snapshot
@@ -80,9 +83,8 @@ impl IngestEngine {
                 .filter(|active| active.batch.count > 0 && (active.batch.is_full() || active.done))
                 .map(|active| active.batch.ids.as_slice());
             match builds.choose(live, backfill) {
-                Some(Grant::Live(candidate, admitted, deferred)) => {
-                    self.start_live(runs, builds, candidate, &admitted, deferred)
-                        .await;
+                Some(Grant::Live(candidate, admitted)) => {
+                    self.start_live(runs, builds, candidate, &admitted).await;
                 }
                 Some(Grant::Backfill) => {
                     if let Some(active) = snapshot.as_mut() {
@@ -90,7 +92,7 @@ impl IngestEngine {
                     }
                 }
                 None => {
-                    if !self.publish_ready(builds, lanes).await? {
+                    if !self.publish_ready(builds, lanes, Some(&mut *runs)).await? {
                         return Ok(());
                     }
                 }
@@ -126,45 +128,125 @@ impl IngestEngine {
     ) -> Result<()> {
         builds.woke(Wake::Settle);
         loop {
-            self.publish_ready(builds, lanes).await?;
-            let live = runs.candidate(false);
-            if let Some(candidate) = live
-                && let Some(documents) = self.waiting(builds, candidate.position)
-                && let Some((admitted, deferred)) = builds.can_take_last(&documents)
-            {
-                self.start_live(runs, builds, candidate, &admitted, deferred)
-                    .await;
-                continue;
+            self.publish_ready(builds, lanes, None).await?;
+            let live = if builds.folding() {
+                builds
+                    .index()
+                    .and_then(|index| self.progress.newest_waiting(index))
+                    .map(|position| Candidate::backlog(position, true))
+            } else {
+                runs.candidate(false)
+            };
+            let documents = live.and_then(|candidate| self.waiting(builds, candidate.position));
+            match &documents {
+                Some(documents) => {
+                    if let (Some(candidate), Some(admitted)) =
+                        (live, builds.can_take_last(documents))
+                    {
+                        self.start_live(runs, builds, candidate, &admitted).await;
+                        continue;
+                    }
+                }
+                // Nothing this pass could ask for: no place in a line, or a
+                // turn would wake it to ask for nothing, again and again.
+                None => builds.leave_lines(),
             }
             if builds.running() == 0 {
                 // Nothing builds: what holds the last batch back is the
                 // budget, which the sinks' acknowledgements free.
                 match (live.is_some(), builds.refused(), self.budget.as_deref()) {
                     (true, Some(_), Some(budget)) => {
-                        // The release wakes this; the timeout is a backstop
-                        // should one ever go unheard.
+                        // The release wakes this, or its turn at the gate
+                        // (a waiter that can't ask holds a freed permit
+                        // back); the timeout is a backstop should either go
+                        // unheard.
                         let since = builds.refused_since();
-                        let _ =
-                            tokio::time::timeout(CONFIRM_TICK, budget.released_since(since)).await;
+                        let turn = turn_or_never(builds);
+                        let _ = tokio::time::timeout(CONFIRM_TICK, async {
+                            tokio::select! {
+                                () = budget.released_since(since) => {}
+                                () = turn => {}
+                            }
+                        })
+                        .await;
+                        continue;
+                    }
+                    // Another builder holds the permits: its turn comes when
+                    // one is freed (G9′). The tick is a backstop should a
+                    // change of the gate ever go unheard.
+                    (true, _, _) if builds.in_line() => {
+                        let _ = tokio::time::timeout(CONFIRM_TICK, builds.turn()).await;
                         continue;
                     }
                     _ => return Ok(()),
                 }
             }
-            match builds.next().await {
-                Some((seq, output)) => builds.land(seq, output, &|built| self.halts(built)),
-                None => return Ok(()),
+            // Its turn at the gate is heard while a build runs: a waiter
+            // that doesn't ask would hold a freed permit back from every
+            // other builder until this build lands (G9′).
+            let turn = turn_or_never(builds);
+            tokio::select! {
+                landed = builds.next() => match landed {
+                    Some((seq, output)) => builds.land(seq, output, &|built| self.halts(built)),
+                    None => return Ok(()),
+                },
+                () = turn => {}
             }
         }
     }
 
-    /// Each index's documents waiting through `through`, oldest waiting
-    /// first, or `None` while a running build holds one of them: a take now
-    /// would leave it behind, so the live batch waits, as `main`'s did.
+    /// Each index's documents waiting through `through` (the builder's own
+    /// index alone), oldest waiting first, or `None` while a running build
+    /// holds one of them: a take now would leave it behind, so the live
+    /// batch waits, as `main`'s did.
+    ///
+    /// A builder of one index takes at most `max_changes` of them (O2), so
+    /// that is what its grant counts and reserves.
     fn waiting(&self, builds: &Builds, through: Position) -> Option<Vec<(IndexName, usize)>> {
-        let held = |index: &IndexName, key: &source::RowKey| builds.holds(index, key);
-        let held: Option<Holds<'_>> = builds.holds_some().then_some(&held);
-        self.progress.waiting_through(through, held)
+        let held = |index: &IndexName, found: &mut dyn FnMut(&source::RowKey) -> bool| {
+            builds.held_by_backfill(index, found)
+        };
+        let held: Option<Holds<'_>> = builds.backfill_holds_some().then_some(&held);
+        self.progress
+            .waiting_of(builds.index(), through, held, self.most(builds))
+    }
+
+    /// The most documents one of `builds`' takes may take: `max_changes` for
+    /// a builder of one index (O2), all for a lone `Builds` of every index.
+    fn most(&self, builds: &Builds) -> usize {
+        if builds.index().is_some() {
+            self.batch.max_changes
+        } else {
+            usize::MAX
+        }
+    }
+
+    /// What the last grant's cap left waiting, as a full candidate while
+    /// `max_changes` or more of its documents are left (F2): its parts
+    /// build beside one another, up to `builds`. `None` with no leftover,
+    /// for a builder of every index (it takes all), or while fewer wait.
+    fn full_leftover(&self, runs: &Runs, builds: &Builds) -> Option<Candidate> {
+        let kept = runs.kept()?;
+        let index = builds.index()?;
+        let left: usize = self
+            .progress
+            .waiting_of(Some(index), kept.position, None, self.batch.max_changes)?
+            .iter()
+            .map(|(_, count)| count)
+            .sum();
+        (left >= self.batch.max_changes).then(|| kept.filled())
+    }
+
+    /// While the builder folds (§3.9 I7), its standing candidate: the
+    /// documents waiting on its index, through the newest of them, full
+    /// once `max_changes` wait (a full one may start beside a running live
+    /// build). `None` with nothing waiting.
+    fn backlog(&self, builds: &Builds) -> Option<Candidate> {
+        let index = builds.index()?;
+        let waiting = self.progress.waiting_on(index);
+        let position = self.progress.newest_waiting(index)?;
+        let full = waiting >= self.batch.max_changes;
+        (!builds.live_running() || full).then_some(Candidate::backlog(position, full))
     }
 
     /// Take the documents waiting through `candidate`'s last change of every
@@ -173,28 +255,39 @@ impl IngestEngine {
     /// a running build). A batch whose changes touched no document any lane
     /// receives is an empty build, as on `main`: its slot settles those
     /// changes in grant order. The batch carries the candidate's newest
-    /// change, and its step closes at the candidate's read count, so a
-    /// newer run's change, whose documents it doesn't take, falls in a later
-    /// step (R4). An index left waiting is **deferred**: its lanes are not
-    /// registered with this build's step, so no change of it counts as
-    /// committed before its documents land, and the candidate is kept so a
-    /// later grant takes them.
+    /// change, and its index's frontier at the take, so a newer run's
+    /// change, whose documents it doesn't take, is not counted through it
+    /// (R4). One index's build takes at most `max_changes` documents (O2):
+    /// what a capped take leaves keeps the candidate, so a later grant takes
+    /// it whether or not a change comes.
     async fn start_live(
         &self,
         runs: &mut Runs,
         builds: &mut Builds,
         candidate: Candidate,
         admitted: &[IndexName],
-        deferred: Vec<IndexName>,
     ) {
         let position = candidate.position;
-        let (ids, taken, mut frontiers) = self.take_all(builds, admitted, position);
-        runs.granted(candidate, !deferred.is_empty());
-        // Every other index with lanes is registered with its frontier now,
-        // at the grant: computed at publish, it could cover documents a
-        // later grant takes, whose item comes after this one (§3.9 I5).
+        let backlog = builds.folding();
+        let (ids, taken, mut frontiers) = self.take_all(builds, admitted, position, backlog);
+        if !backlog {
+            // Documents a capped take left behind keep the candidate: a later
+            // grant takes them whether or not a change comes (F2).
+            let left = self.progress.waits_through(builds.index(), position);
+            runs.granted(candidate, left);
+        } else {
+            // Fewer documents wait on the index: the reader may be waiting
+            // at its cap.
+            runs.lead().wake();
+        }
+        // Every other index this builder builds is registered with its
+        // frontier now, at the grant: computed at publish, it could cover
+        // documents a later grant takes, whose item comes after this one
+        // (§3.9 I5). A builder of one index registers only its own.
         for index in self.progress.indexes() {
-            if !deferred.contains(index) && !frontiers.iter().any(|(taken, _)| taken == index) {
+            if builds.index().is_none_or(|own| own == index)
+                && !frontiers.iter().any(|(taken, _)| taken == index)
+            {
                 frontiers.push((index.clone(), self.progress.frontier(index)));
             }
         }
@@ -204,7 +297,6 @@ impl IngestEngine {
             position,
             changes: candidate.changes,
             steps,
-            deferred,
         };
         builds
             .start(&self.documents, ids, job, &|built| self.halts(built))
@@ -219,6 +311,7 @@ impl IngestEngine {
         builds: &mut Builds,
         admitted: &[IndexName],
         through: Position,
+        backlog: bool,
     ) -> (
         Vec<DocumentId>,
         Vec<(IndexName, Token, Position)>,
@@ -232,10 +325,15 @@ impl IngestEngine {
             .indexes()
             .filter(|index| admitted.contains(index))
         {
-            if let Some(take) = self
-                .progress
-                .take_through(index, through, &|key| builds.holds(index, key))
-            {
+            let held = |key: &source::RowKey| builds.holds(index, key);
+            let most = self.most(builds);
+            let take = if backlog {
+                self.progress.take(index, most, &held)
+            } else {
+                self.progress
+                    .take_through_at_most(index, through, most, &held)
+            };
+            if let Some(take) = take {
                 ids.extend(take.ids);
                 taken.push((index.clone(), take.token, take.oldest));
                 frontiers.push((index.clone(), take.frontier));
@@ -251,7 +349,19 @@ impl IngestEngine {
             builds.spare(self.batch.max_changes),
         );
         snapshot.batch.clear();
-        let marks = self.walk_marks(&ids).await;
+        let marks = {
+            let marks = self.walk_marks(&ids);
+            tokio::pin!(marks);
+            match futures::poll!(marks.as_mut()) {
+                Poll::Ready(marks) => marks,
+                Poll::Pending => {
+                    // A database read outside the builder's loop: no place
+                    // in a line while it can't ask (§3.9 §6).
+                    builds.leave_lines();
+                    marks.await
+                }
+            }
+        };
         let job = Job::Backfill {
             requested: snapshot.lanes_now(),
             marks,
@@ -315,51 +425,82 @@ impl IngestEngine {
     /// Publish every slot at the front that is ready, in order. Returns
     /// whether it published any. A failed build's slot returns its error,
     /// with nothing after it published.
-    async fn publish_ready(&self, builds: &mut Builds, lanes: &Lanes) -> Result<bool> {
+    ///
+    /// Each slot's publish is polled once before it is awaited: one that
+    /// pends is blocked on a full lane, so the builder leaves every line
+    /// (it can't ask while it waits) and, given its `runs`, is held and
+    /// folds (§3.9 §5, §6). Its builds' permits went back as they ended.
+    async fn publish_ready(
+        &self,
+        builds: &mut Builds,
+        lanes: &Lanes,
+        mut runs: Option<&mut Runs>,
+    ) -> Result<bool> {
         let mut published = false;
         while let Some((job, built, charges)) = builds.pop_ready() {
             published = true;
-            // Every lane's item of an index shares the index's one charge:
-            // its bytes come back when the last copy is dropped (every lane
-            // of the index acknowledged it, and no ledger can redeliver it).
-            let holds: BTreeMap<IndexName, Hold> = charges
-                .into_iter()
-                .map(|(index, charge)| (index, Hold::new(charge)))
-                .collect();
-            match (job, built) {
-                (Job::Complete(mut finished), _) => {
-                    let started = Instant::now();
-                    self.finish_snapshot(&mut finished, lanes).await?;
-                    self.observer.on_stage(
-                        StageTiming::new(Stage::Snapshot, started.elapsed()).work(Work::Backfill),
-                    );
-                }
-                (
-                    Job::Live {
-                        taken,
-                        position,
-                        changes,
-                        steps,
-                        deferred,
-                    },
-                    Some(built),
-                ) => {
-                    let granted = Granted {
-                        position,
-                        changes,
-                        steps,
-                    };
-                    self.publish_live(built, &taken, &deferred, granted, &holds, lanes)
-                        .await?;
-                }
-                (Job::Backfill { requested, marks }, Some(built)) => {
-                    self.publish_backfill(built, &requested, &marks, &holds, lanes)
-                        .await?;
-                }
-                (_, None) => {}
+            let publishing = self.publish_slot(job, built, charges, lanes);
+            tokio::pin!(publishing);
+            if let Poll::Ready(result) = futures::poll!(publishing.as_mut()) {
+                result?;
+                continue;
             }
+            builds.leave_lines();
+            if let Some(runs) = runs.as_deref_mut() {
+                super::builder::enter_fold(runs, builds);
+            }
+            publishing.await?;
         }
         Ok(published)
+    }
+
+    /// Publish one slot: its live or snapshot batch, or its snapshot's end.
+    async fn publish_slot(
+        &self,
+        job: Job,
+        built: Option<Built>,
+        charges: super::builds::Charges,
+        lanes: &Lanes,
+    ) -> Result<()> {
+        // Every lane's item of an index shares the index's one charge: its
+        // bytes come back when the last copy is dropped (every lane of the
+        // index acknowledged it, and no ledger can redeliver it).
+        let holds: BTreeMap<IndexName, Hold> = charges
+            .into_iter()
+            .map(|(index, charge)| (index, Hold::new(charge)))
+            .collect();
+        match (job, built) {
+            (Job::Complete(mut finished), _) => {
+                let started = Instant::now();
+                self.finish_snapshot(&mut finished, lanes).await?;
+                self.observer.on_stage(
+                    StageTiming::new(Stage::Snapshot, started.elapsed()).work(Work::Backfill),
+                );
+            }
+            (
+                Job::Live {
+                    taken,
+                    position,
+                    changes,
+                    steps,
+                },
+                Some(built),
+            ) => {
+                let granted = Granted {
+                    position,
+                    changes,
+                    steps,
+                };
+                self.publish_live(built, &taken, granted, &holds, lanes)
+                    .await?;
+            }
+            (Job::Backfill { requested, marks }, Some(built)) => {
+                self.publish_backfill(built, &requested, &marks, &holds, lanes)
+                    .await?;
+            }
+            (_, None) => {}
+        }
+        Ok(())
     }
 
     /// A live batch to every lane with the batch's position, concurrently,
@@ -371,7 +512,6 @@ impl IngestEngine {
         &self,
         built: Built,
         taken: &[(IndexName, Token, Position)],
-        deferred: &[IndexName],
         granted: Granted,
         holds: &BTreeMap<IndexName, Hold>,
         lanes: &Lanes,
@@ -400,15 +540,12 @@ impl IngestEngine {
         // (the same on each of its lanes; lanes are ordered by index, so an
         // index's lanes are adjacent). Every lane, with an item or not, is
         // registered with its index's step (what a sink's committed count
-        // follows), except a deferred index's: its documents still wait.
+        // follows).
         let mut by_lane: Vec<Item<'_>> = Vec::new();
         let mut skipped: Vec<(&LaneKey, Step)> = Vec::new();
         let mut keyed: Option<(&IndexName, ItemKey)> = None;
         let groups = group_by_index(envelopes);
         for (lane, producer) in lanes {
-            if deferred.contains(&lane.index) {
-                continue;
-            }
             let Some(step) = steps.get(&lane.index).copied() else {
                 continue;
             };
@@ -605,6 +742,18 @@ impl IngestEngine {
                 failure: Box::new(failure),
             }),
             FailurePolicy::Skip => Ok(()),
+        }
+    }
+}
+
+/// Ready on `builds`' turn at the gate while it waits in a line; never
+/// otherwise.
+fn turn_or_never(builds: &Builds) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let turn = builds.in_line().then(|| builds.turn());
+    async move {
+        match turn {
+            Some(turn) => turn.await,
+            None => std::future::pending().await,
         }
     }
 }

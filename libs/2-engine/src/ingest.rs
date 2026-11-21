@@ -77,9 +77,9 @@ use crate::stop::Stop;
 use builder::Building;
 use builds::Builds;
 use confirm::Furthest;
-use dispatcher::Signals;
+use dispatcher::{Reports, Signals};
 use live::Runs;
-use reader::{Lead, Reader, ReaderEnd};
+use reader::{Lead, Reader};
 pub use snapshot::KEY_PAGE;
 use snapshot::Snapshot;
 use together::together;
@@ -310,25 +310,48 @@ impl IngestEngine {
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
-        // An index the shared budget leaves out may wait while the others
-        // build, up to the lead per index (ADR 0012 stage 8a, slices 4 and
-        // 6a); past that the live batch waits whole, and the reader stops at
-        // the same number, as with one index.
-        let defer_below = self
-            .budget
-            .as_ref()
-            .and_then(|budget| budget.index_share())
-            .map(|_| self.max_waiting().per_index);
-        let mut builds = Builds::new(self.builds, self.budget.clone())
-            .with_observer(Arc::clone(&self.observer))
-            .with_progress(Arc::clone(&self.progress))
-            .with_deferral(defer_below)
-            .with_waits(Arc::clone(&self.budget_waits));
+        // A builder per index with lanes, each with its own builds and
+        // slots, every one asking one gate for its permits (ADR 0012 stage
+        // 8a, 6b-1c).
+        let gate = gate::Gate::new(
+            self.builds,
+            self.budget
+                .clone()
+                .unwrap_or_else(|| Arc::new(Budget::unlimited())),
+        );
+        // Each index's lanes, moved to its builder.
+        let mut by_index: BTreeMap<IndexName, Lanes> = BTreeMap::new();
+        for (lane, producer) in lanes {
+            by_index
+                .entry(lane.index.clone())
+                .or_default()
+                .insert(lane, producer);
+        }
+        let by_index: Vec<(IndexName, Lanes)> = by_index.into_iter().collect();
+        let builds: Vec<Builds> = by_index
+            .iter()
+            .map(|(index, _)| {
+                Builds::new(self.builds, self.budget.clone())
+                    .with_gate(Arc::clone(&gate))
+                    .of_index(index.clone())
+                    .with_observer(Arc::clone(&self.observer))
+                    .with_progress(Arc::clone(&self.progress))
+                    .with_waits(Arc::clone(&self.budget_waits))
+            })
+            .collect();
+        let several = builds.len() > 1;
+        let mut builds: Vec<Builds> = builds
+            .into_iter()
+            .map(|builds| builds.beside_others(several))
+            .collect();
+        let lanes: Vec<Lanes> = by_index.into_iter().map(|(_, lanes)| lanes).collect();
         let ended = self
             .follow(&lanes, requests, &scopes, live, &mut builds)
             .await;
         if ended.is_err() {
-            builds.abandon().await;
+            for builds in &mut builds {
+                builds.abandon().await;
+            }
         }
         ended
     }
@@ -338,18 +361,74 @@ impl IngestEngine {
     /// 8a, §3.8, §3.9).
     async fn follow(
         &self,
-        lanes: &Lanes,
+        by_index: &[Lanes],
         requests: Box<dyn Consumer<Request>>,
         scopes: &HashSet<IndexName>,
         live: LiveStream,
-        builds: &mut Builds,
+        builds: &mut [Builds],
     ) -> Result<Ended> {
         // What an earlier run marked and never published is forgotten
         // before this run's reader marks anything (R10): confirmation stayed
         // before all of it, so this run's stream replays it.
         self.progress.forget_all();
-        let lead = Lead::new(self.max_waiting(), self.progress.changes_read());
-        let (sender, handed) = tokio::sync::mpsc::unbounded_channel();
+        let lead = Lead::over(
+            self.max_waiting(),
+            self.progress.changes_read(),
+            builds.len(),
+        );
+        // Each builder's slice channel, request inbox, signals and result,
+        // in the lead's queue order.
+        let signals: Vec<Signals> = builds.iter().map(|_| Signals::default()).collect();
+        let reports = Reports::default();
+        let several = builds.len() > 1;
+        let walks = Arc::new(tokio::sync::Semaphore::new(1));
+        let clock = IdleClock::new(builds.len());
+        let mut senders = Vec::new();
+        let mut futures = Vec::new();
+        let mut dispatched = Vec::new();
+        for (slot, ((builds, lanes), signals)) in builds
+            .iter_mut()
+            .zip(by_index.iter())
+            .zip(signals.iter())
+            .enumerate()
+        {
+            let Some(index) = builds.index().cloned() else {
+                continue;
+            };
+            let (sender, handed) = tokio::sync::mpsc::unbounded_channel();
+            senders.push((index.clone(), sender));
+            let runs = Runs::new(
+                self.batch.max_changes,
+                self.batch.max_delay,
+                Arc::clone(&lead),
+                handed,
+                Arc::clone(&self.observer),
+            )
+            .of_queue(slot);
+            let (inbox, delivered) = tokio::sync::mpsc::unbounded_channel();
+            let (done, result) = tokio::sync::oneshot::channel();
+            futures.push(self.build(
+                Building {
+                    runs,
+                    inbox: delivered,
+                    signals,
+                    reports: &reports,
+                    several,
+                    walks: &walks,
+                    clock: several.then_some((&clock, slot)),
+                    lanes,
+                    scopes,
+                    builds,
+                },
+                done,
+            ));
+            dispatched.push(dispatcher::Builder {
+                index,
+                inbox,
+                signals,
+                result,
+            });
+        }
         let (reading, reader) = reader::reading(
             Reader {
                 resolver: Arc::clone(&self.resolver),
@@ -357,8 +436,8 @@ impl IngestEngine {
                 observer: Arc::clone(&self.observer),
                 stop: self.stop.clone(),
                 batch: self.batch,
-                lead: Arc::clone(&lead),
-                runs: sender,
+                lead,
+                runs: senders,
                 #[cfg(test)]
                 handing: None,
                 #[cfg(test)]
@@ -366,43 +445,12 @@ impl IngestEngine {
             },
             live,
         );
-        let runs = Runs::new(
-            self.batch.max_changes,
-            self.batch.max_delay,
-            lead,
-            handed,
-            Arc::clone(&self.observer),
-        );
-        let signals = Signals::default();
-        let (inbox, delivered) = tokio::sync::mpsc::unbounded_channel();
-        let (done, result) = tokio::sync::oneshot::channel();
-        let building = self.build(
-            Building {
-                runs,
-                reader,
-                inbox: delivered,
-                signals: &signals,
-                lanes,
-                scopes,
-                builds,
-            },
-            done,
-        );
-        let dispatching = self.dispatch(requests, inbox, result, &signals);
-        // One task, three futures (§3.9 I1). The run ends with the
-        // dispatcher; returning drops the reader and the builder in place
-        // (R9), so nothing of them outlives the run, the next run's
-        // `forget_all` included.
-        together(reading, dispatching, vec![building], self.stop.requested()).await
-    }
-
-    /// The reader's end once the stop is requested: every run it hands over
-    /// on the way queued, then its join (R7).
-    async fn reader_end(&self, reader: &mut ReaderEnd, runs: &mut Runs) -> Result<reader::Ended> {
-        while let Some(run) = runs.next().await {
-            runs.push(run);
-        }
-        reader.join().await
+        let dispatching = self.dispatch(requests, dispatched, &reports, reader);
+        // One task: the reader, the dispatcher and a builder per index
+        // (§3.9 I1). The run ends with the dispatcher; returning drops the
+        // reader and the builders in place (R9), so nothing of them outlives
+        // the run, the next run's `forget_all` included.
+        together(reading, dispatching, futures, self.stop.requested()).await
     }
 
     /// Close the wait since `since` as the loop wakes, and return the moment,
@@ -421,19 +469,24 @@ impl IngestEngine {
         until: Option<Instant>,
         snapshot: &mut Option<Snapshot>,
         busy: bool,
+        clock: Option<(&IdleClock, usize)>,
     ) -> Instant {
         let now = Instant::now();
         if busy {
             return now;
         }
-        let waited = until
-            .map_or(now, |until| until.min(now))
-            .saturating_duration_since(since);
-        match snapshot {
-            Some(active) => active.page_wait += waited,
-            None => self
+        let end = until.map_or(now, |until| until.min(now));
+        let waited = end.saturating_duration_since(since);
+        match (snapshot, clock) {
+            (Some(active), _) => active.page_wait += waited,
+            (None, None) => self
                 .observer
                 .on_stage(StageTiming::new(Stage::Idle, waited)),
+            (None, Some((clock, slot))) => {
+                if let Some(idle) = clock.woke(slot, end) {
+                    self.observer.on_stage(StageTiming::new(Stage::Idle, idle));
+                }
+            }
         }
         now
     }
@@ -476,6 +529,49 @@ impl IngestEngine {
             ))
             .into()),
         }
+    }
+}
+
+/// The engine's idle time over several builders (ADR 0012 stage 8a, 6b-1c):
+/// [`Stage::Idle`] is the wall time no builder is busy. Each builder marks
+/// itself idle from the end of its last work, when the wait it starts is
+/// idle (nothing building, no snapshot), and tells the clock when it wakes;
+/// the first to wake while every builder was idle reports the span since
+/// the last of them went idle. One builder reports its own waits, as 6b-1b
+/// did, with no clock.
+#[derive(Debug)]
+pub(crate) struct IdleClock(Mutex<Vec<Option<Instant>>>);
+
+impl IdleClock {
+    fn new(builders: usize) -> Self {
+        Self(Mutex::new(vec![None; builders]))
+    }
+
+    /// Builder `slot` is idle from `since` (`None`: its wait isn't idle).
+    pub(crate) fn idle(&self, slot: usize, since: Option<Instant>) {
+        let mut idle = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = idle.get_mut(slot) {
+            *at = since;
+        }
+    }
+
+    /// Builder `slot` woke at `end`: the engine's idle span that ends here,
+    /// if every builder was idle.
+    fn woke(&self, slot: usize, end: Instant) -> Option<Duration> {
+        let mut idle = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let all = idle.iter().all(Option::is_some);
+        let start = idle.iter().flatten().max().copied();
+        if let Some(at) = idle.get_mut(slot) {
+            *at = None;
+        }
+        all.then(|| start.map(|start| end.saturating_duration_since(start)))
+            .flatten()
     }
 }
 

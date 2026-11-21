@@ -11,7 +11,7 @@ Today one ingest task builds every index in turn, and each sink writes one batch
 **Decision.**
 
 - **One reader task** reads changes, resolves each one once on its own connection, and marks the documents it touches as *pending* on their index.
-- **One task per index** builds its pending documents and its backfill in batches, and publishes each batch to one lane per `(index, sink)`.
+- **One builder per index**, each a future of the ingest engine's task, builds its pending documents and its backfill in batches, and publishes each batch to one lane per `(index, sink)`. Its builds and key reads run on tasks of their own. Independence holds wherever a builder waits (a lane, the budget, a permit, a key page, a build), not for CPU work on the shared task, which is bounded per poll. Until slice 8 of stage 8a, a failure or a panic in one builder still ends the run for every index. Builders keep separate state, so they can move to tasks of their own later, if a measurement with many indexes shows the coordination is the bottleneck. (Amended by stage 8a's question O1: a task of its own per index was the first design; slice 6a measured +54% for a hand-over across threads per change.)
 - **One task per sink** writes its lanes with several bulk requests in flight, live items first.
 - **Order holds per document**: never built twice at once, never written twice at once, a later build lands after an earlier one. No versioned writes.
 - **A position describes itself**, so the source keeps no map of every change. The engine's `Progress` confirms the slot up to the oldest change some lane hasn't landed.
@@ -67,7 +67,7 @@ ChangeCapture ─▶ reader ──┼─ pending(orders) ▶ index task(orders) 
 
 **Backfill requests** are per index (`Request::Backfill { sink }`) and coalesce across sinks, as today.
 
-### Why a task per index building batches, not a task per document
+### Why a builder per index building batches, not a task per document
 
 `build_many` fetches up to 512 documents in one query, so the joins run once per batch. All three `reference` indexes (62,000 documents), load average 22–26, three runs, documents/s:
 

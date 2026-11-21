@@ -46,7 +46,7 @@ From Rust, `flusso-query` runs the steps below itself: see [Reading your own wri
 ## Options and variations
 
 - **Name the sink the reader uses.** Without `sink`, the wait covers every sink, so a second sink that has stalled holds up readers of a healthy one. All parameters are in [HTTP endpoints](../reference/http.md#get-waitpositionposition).
-- **Name the indexes the read touches.** Each `(index, sink)` pair is its own lane, so without `index` the wait covers every index, and one slow index (a backfill, a reindex) holds up reads of all the others. A sink stopped by a refused document (`on_error = "stop"`) or a missing index holds up every index on it either way. With `index=users` only the `users` lane decides. `flusso-query` sends the read's own indexes.
+- **Name the indexes the read touches.** Each `(index, sink)` pair is its own lane, so without `index` the wait covers every index, and one slow index (a backfill, a reindex) holds up reads of all the others. A sink stopped by a refused document (`on_error = "stop"`) or a missing index holds up every index on it either way. With `index=users` only the `users` lane decides. Indexes move independently, so one commit can be in `users` before `orders`: a read of both names both. `flusso-query` sends the read's own indexes.
 - **Related tables are covered.** A write to a table an index only joins rebuilds the parent documents; the fence passes once those are in.
 - **Several writes, one wait.** Read the position once after the last commit. It covers everything before it.
 - **Watch the positions.** `/status` reports `applied_position` and `searchable_position` per sink and per lane (`sinks.<sink>.lanes.<index>`), comparable with `pg_current_wal_lsn()`.
