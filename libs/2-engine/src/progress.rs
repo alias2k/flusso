@@ -119,8 +119,11 @@
 mod pending;
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::task::{Context, Poll};
+
+use futures::task::AtomicWaker;
 
 use kernel::{IndexName, Position, SinkName};
 use source::RowKey;
@@ -188,6 +191,18 @@ pub struct Progress {
     unmarked: AtomicU64,
     /// Called after every registration: a fence waiter may pass now.
     listener: OnceLock<Listener>,
+    /// Raised after every registration, for the engine run's dispatcher to
+    /// confirm (ADR 0012 stage 8a, §3.9 §2): the listener's one slot is the
+    /// fence's.
+    registrations: Registrations,
+}
+
+/// A flag raised after every registration, and the waker of whoever waits on
+/// it. Only the first raise since the waiter last looked wakes it.
+#[derive(Debug, Default)]
+struct Registrations {
+    raised: AtomicBool,
+    waiter: AtomicWaker,
 }
 
 /// Whether a running build holds an index's document: what a take leaves
@@ -285,6 +300,7 @@ impl Progress {
             read: AtomicU64::new(0),
             unmarked: AtomicU64::new(u64::MAX),
             listener: OnceLock::new(),
+            registrations: Registrations::default(),
         }
     }
 
@@ -436,8 +452,24 @@ impl Progress {
     }
 
     fn registered(&self) {
+        if !self.registrations.raised.swap(true, Ordering::AcqRel) {
+            self.registrations.waiter.wake();
+        }
         if let Some(listener) = self.listener.get() {
             listener();
+        }
+    }
+
+    /// Ready once something was registered since it was last ready: a run
+    /// routed, a build's lane registered, a build released. The engine run's
+    /// dispatcher confirms then, after the future that registered (ADR 0012
+    /// stage 8a, §3.9 §2). One waiter at a time.
+    pub(crate) fn poll_registered(&self, cx: &mut Context<'_>) -> Poll<()> {
+        self.registrations.waiter.register(cx.waker());
+        if self.registrations.raised.swap(false, Ordering::AcqRel) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
         }
     }
 

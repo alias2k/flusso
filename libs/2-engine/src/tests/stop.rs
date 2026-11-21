@@ -479,6 +479,55 @@ async fn a_snapshot_waiting_on_a_page_is_abandoned_and_its_request_served_again_
     }
 }
 
+/// ADR 0012 stage 8a, slice 6b-1b: the stop's fan-out. The live stream
+/// ended, so no reader's end can wake the builder, and its snapshot waits on
+/// a page that never comes: the dispatcher raises the builder at the stop,
+/// which ends the run at once, not at the dispatcher's next tick (6a's
+/// builder registered on the stop once its reader ended).
+#[tokio::test(start_paused = true)]
+async fn a_stop_reaches_a_builder_whose_stream_ended_while_its_snapshot_waits_on_a_page() {
+    let (source, feed) = ClosableSource::new();
+    let source = Arc::new(source);
+    let hanging = Arc::new(HangingKeys::default());
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
+    let sink = Arc::new(RecordingSink::seeded(false));
+    let sinks = spawn_sinks(
+        &stream,
+        &progress,
+        vec![(sink_name("primary"), sink as Arc<dyn Sink>)],
+    )
+    .await;
+    let stop = Stop::new();
+    let engine = ingest(
+        &source,
+        Arc::clone(&hanging) as Arc<dyn DocumentBuilder>,
+        &stream,
+        &progress,
+        &["primary"],
+        &stop,
+    );
+    let run = tokio::spawn(async move { engine.run().await });
+    super::wait_for(|| hanging.asked.load(Ordering::SeqCst)).await;
+    drop(feed);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let stopped = tokio::time::Instant::now();
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("the stop ended the run")
+        .unwrap()
+        .unwrap();
+    assert!(
+        stopped.elapsed() < Duration::from_millis(500),
+        "the stop took {:?}: the builder heard it at the tick",
+        stopped.elapsed()
+    );
+    for task in sinks {
+        task.abort();
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_stalled_sink_does_not_keep_the_other_from_landing_its_lane_and_holds_only_the_end() {
     let (source, feed) = ClosableSource::new();

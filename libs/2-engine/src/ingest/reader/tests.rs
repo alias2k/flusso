@@ -150,9 +150,14 @@ impl ReaderTask {
         let stop = reader.stop.clone();
         let (reading, mut end) = reading(reader, live);
         Self(tokio::spawn(async move {
-            together(reading, async move { end.join().await }, async move {
-                stop.requested().await;
-            })
+            together(
+                reading,
+                async move { end.join().await },
+                Vec::<std::future::Pending<()>>::new(),
+                async move {
+                    stop.requested().await;
+                },
+            )
             .await
         }))
     }
@@ -528,6 +533,7 @@ async fn dropping_the_run_drops_the_reader_and_its_stream_at_once() {
         async move {
             let _ = end.join().await;
         },
+        Vec::<std::future::Pending<()>>::new(),
         std::future::pending::<()>(),
     ));
     assert!(futures::poll!(run.as_mut()).is_pending());
