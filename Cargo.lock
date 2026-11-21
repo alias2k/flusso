@@ -1341,7 +1341,7 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
- "syn 2.0.119",
+ "syn 3.0.10",
  "trybuild",
 ]
 
@@ -1380,7 +1380,7 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
- "syn 2.0.119",
+ "syn 3.0.10",
  "toml",
  "trybuild",
 ]
