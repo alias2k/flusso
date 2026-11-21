@@ -710,3 +710,46 @@ async fn a_run_cut_before_its_marks_counts_no_sooner_than_the_first_grant() {
     progress.forget_all();
     assert_eq!(progress.committed(&sink), 0, "none of the three was built");
 }
+
+/// I2 (6b-1c): with a builder per index each is handed only the changes
+/// that touched its index, each change with its read number, and a change
+/// touching no index with a builder (`elsewhere`) goes to no builder. A
+/// builder whose index a run left untouched is handed nothing for it.
+#[tokio::test(start_paused = true)]
+async fn an_untouched_index_is_handed_nothing() {
+    let progress = progress();
+    let (to_users, mut users_runs) = mpsc::unbounded_channel();
+    let (to_orders, mut orders_runs) = mpsc::unbounded_channel();
+    let mut task = ReaderTask::spawn(
+        Reader {
+            resolver: Arc::new(Resolver::default()),
+            progress: Arc::clone(&progress),
+            observer: Arc::new(NoopObserver),
+            stop: Stop::new(),
+            batch: BatchPolicy {
+                max_changes: 10,
+                max_delay: Duration::from_secs(60),
+            },
+            lead: Lead::over(plenty(), 0, 2),
+            runs: vec![(users(), to_users), (orders(), to_orders)],
+            handing: None,
+            checked: None,
+        },
+        stream_of(&[0, 2, 1000, 4], false),
+    );
+    let ended = tokio::time::timeout(LIMIT, task.join())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(ended.stream_ended);
+    let users_got: Vec<(u64, u64)> = received(&mut users_runs)
+        .iter()
+        .flat_map(|run| run.changes.iter().map(|(at, _, read)| (at.seq, *read)))
+        .collect();
+    assert_eq!(users_got, [(0, 1), (2, 2), (4, 4)]);
+    assert!(
+        received(&mut orders_runs).is_empty(),
+        "no change touched orders"
+    );
+    assert_eq!(progress.changes_read(), 4, "every change counts read");
+}

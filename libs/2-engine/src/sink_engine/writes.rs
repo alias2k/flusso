@@ -98,8 +98,12 @@
 //! one such as stdout) gets its items one write at a time, whatever `writes`
 //! says, each lane in exact lane order: the next item is the live lane front
 //! with the lowest position, backfill fronts taking every fourth turn when
-//! live ones wait. So a reader sees each document's builds in order, and live
-//! changes across indexes in position order.
+//! live ones wait. So a reader sees each document's builds in order, and
+//! each index's live changes in position order. Across indexes the order is
+//! the lowest front's, not the changes' own: each index has its own builder
+//! (ADR 0012 stage 8a, 6b-1c), so one index's item can reach its lane after
+//! a newer change of another index's, and a change the document cap split
+//! reaches a lane as several items of one position.
 //!
 //! **After a failed run, and on a fresh engine,** each lane the failure is
 //! blamed on (every lane, for a fresh engine or a failure no lane caused)

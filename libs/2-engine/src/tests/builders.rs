@@ -928,3 +928,29 @@ async fn a_capped_takes_leftovers_build_at_once_up_to_builds() {
         .unwrap();
     running.sink.abort();
 }
+
+/// I13 (until slice 8): a build error in one builder ends the run for every
+/// index at once, while another builder still has work outstanding (its
+/// sink holds `orders`' write) and its stream is open; the run's future
+/// drops that builder in place rather than waiting for it.
+#[tokio::test(start_paused = true)]
+async fn a_build_error_ends_the_run_and_drops_every_builder_in_place() {
+    let sink = Gated::holding_index(orders());
+    let stop = Stop::new();
+    let running = start(
+        vec![orders(), users()],
+        vec![change("orders", 2), change("users", 1)],
+        1,
+        Fanning::failing_once_on(1, 100) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        &stop,
+    )
+    .await;
+    let ended = tokio::time::timeout(Duration::from_secs(5), running.run)
+        .await
+        .expect("the error ended the run beside the orders builder")
+        .unwrap();
+    assert!(ended.is_err(), "users' build failed");
+    sink.release();
+    running.sink.abort();
+}

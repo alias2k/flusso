@@ -1096,6 +1096,56 @@ mod tests {
         );
     }
 
+    /// G4 across builders (G9′): one permit, `orders` with a live batch
+    /// ready and `users` with a backfill batch ready, both waiting in their
+    /// lines each time the permit is freed. Every fourth contested grant
+    /// goes to `users`' backfill, the others to `orders`' live batch.
+    #[tokio::test(start_paused = true)]
+    async fn every_fourth_contested_grant_goes_to_another_builders_backfill() {
+        let gate = Gate::new(1, Arc::new(Budget::unlimited()));
+        let builder = |name: &str| {
+            Builds::new(1, None)
+                .with_gate(Arc::clone(&gate))
+                .of_index(index(name))
+                .beside_others(true)
+        };
+        let mut orders = builder("orders");
+        let mut users = builder("users");
+        let live = || LiveCandidate {
+            live: (),
+            documents: vec![(index("orders"), 1)],
+            full: true,
+        };
+        let ids = [DocumentId {
+            index: index("users"),
+            key: source::RowKey(Vec::new()),
+        }];
+        assert!(orders.choose(Some(live()), None).is_some(), "alone: live");
+        let mut permit = orders.granted.take();
+        let mut grants = Vec::new();
+        for _ in 0..8 {
+            assert!(orders.choose(Some(live()), None).is_none());
+            assert!(users.choose::<()>(None, Some(&ids)).is_none());
+            assert!(orders.in_line() && users.in_line(), "both wait");
+            drop(permit.take());
+            let to_users = users.choose::<()>(None, Some(&ids)).is_some();
+            let to_orders = orders.choose(Some(live()), None).is_some();
+            assert!(to_users != to_orders, "one grant per freed permit");
+            grants.push(if to_users { "backfill" } else { "live" });
+            permit = if to_users {
+                users.granted.take()
+            } else {
+                orders.granted.take()
+            };
+        }
+        assert_eq!(
+            grants,
+            [
+                "live", "live", "live", "backfill", "live", "live", "live", "backfill"
+            ]
+        );
+    }
+
     /// R5: a grant pass joins the lines only for the batches it has ready
     /// and leaves them before it returns, granted or not, so the builder
     /// never holds a place it can't use.
