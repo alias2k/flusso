@@ -241,6 +241,12 @@ jobs:
         with:
           cache: "false"
 
+      # The derive's boundary and consumer_lints tests and the trybuild `ui`
+      # harnesses run cargo `--offline`: they need the locked crates on disk,
+      # which the build job had and this runner doesn't.
+      - name: Fetch the locked crates
+        run: cargo fetch --locked
+
       - name: Download the archive
         uses: actions/download-artifact@v8
         with:
