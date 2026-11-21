@@ -66,6 +66,8 @@ Precedence is flag (`--batch-max-changes` / `--batch-max-delay-ms`), then `FLUSS
 | `builds` | integer 1–32 | `4` | Batches of documents the ingest engine builds at once. `1` builds one batch at a time. The source's document builder keeps `builds` + 2 Postgres connections. |
 | `max_built_mib` | integer 16–1,048,576 | `512` | MiB of built documents held until every sink acknowledges them. Past it the ingest engine builds nothing more until a sink acknowledges some. |
 | `index_budget_share` | number above 0, at most 1 | `0.5` | The share of `max_built_mib` one index's live documents may hold while two or more indexes run. With one index it does nothing. |
+| `max_waiting_per_index` | integer ≥ 1 | `2 × [batch] max_changes` (`512`) | Documents one index may have waiting to be built before flusso stops reading changes. See [Reading ahead](#reading-ahead). |
+| `max_waiting` | integer ≥ `max_waiting_per_index` | `2 × builds × [batch] max_changes` (`2048`) | Documents every index together may have waiting to be built, and changes read but not yet built, before flusso stops reading. |
 
 Several writes run at once, but never two holding the same document, so each document's later version still lands after its earlier one. Live changes go before backfill pages, except every fourth write slot both could take, so a backfill can't stall live indexing and live traffic can't starve a backfill.
 
@@ -73,12 +75,12 @@ End to end on the `reference` benchmark, 2 and 4 writes backfilled about 1.4× f
 
 Several builds run at once, but never two holding the same document, and each sink gets the built batches in the order they were started, so a document's later version still lands after its earlier one. Live batches go before backfill batches, except every fourth build slot both could take. A second live build starts only while the batch waiting behind the first is full, so a trickle of changes still batches itself. A backfill gains while building is what holds it back. On the `reference` benchmark, 2 and 4 builds backfilled about 15% faster than one; past that the sink's writes bound it. Peak memory rose there, from about 120 to 300–400 MiB, because built batches wait in the sink's lane. Each build holds a Postgres connection; behind PgBouncer count `builds` + 2 server connections in transaction mode. Up to `2 × builds` built batches wait behind a slow one before nothing more starts.
 
-**The memory budget.** A built batch is counted from its build until the last sink acknowledges it, in heap bytes (a document holds about 8–10× its JSON), at least 1 KiB a batch. A backfill holds at most half of `max_built_mib` (past the one batch a backfill holding nothing is always granted), so live changes always have room beside it. A batch larger than the whole budget still builds: a backfill batch once no backfill is held, a live batch once its own index holds no live documents. A sink that stops acknowledging fills the budget, and then ingest waits: the slowest sink paces ingest, as a full queue did before 0.18. The budget can be passed by the batches being built at the moment it fills, each by what it really built: up to `2 × builds` batches, plus one live batch per index and one backfill batch, since an index holding no live documents, and a backfill holding nothing, always get one. With two or more indexes one index's live batch can hold the documents of up to `3 × [batch] max_changes` changes (what waited for its share, plus the latest changes). It doesn't count a sink's request bodies (`writes` × one rendered `_bulk` per sink) or the source's read-ahead (`[batch] max_changes` × 16 changes with their row images). Plan the process's memory as `max_built_mib` + `2 × builds` batches + one live batch per index + one backfill batch + those two + about 100 MiB, plus 10–20% for the allocator. On Linux, `run` warns at start when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one. `/status` reports what is held (`memory`) and `flusso.memory.built` plots it ([Metrics](metrics.md)).
+**The memory budget.** A built batch is counted from its build until the last sink acknowledges it, in heap bytes (a document holds about 8–10× its JSON), at least 1 KiB a batch. A backfill holds at most half of `max_built_mib` (past the one batch a backfill holding nothing is always granted), so live changes always have room beside it. A batch larger than the whole budget still builds: a backfill batch once no backfill is held, a live batch once its own index holds no live documents. A sink that stops acknowledging fills the budget, and then ingest waits: the slowest sink paces ingest, as a full queue did before 0.18. The budget can be passed by the batches being built at the moment it fills, each by what it really built: up to `2 × builds` batches, plus one live batch per index and one backfill batch, since an index holding no live documents, and a backfill holding nothing, always get one. With two or more indexes one index's live batch can hold the documents of up to `max_waiting_per_index` + `[batch] max_changes` changes (what waited for its share, plus the latest changes; 768 at the defaults). It doesn't count a sink's request bodies (`writes` × one rendered `_bulk` per sink), the source's read-ahead (`[batch] max_changes` × 16 changes with their row images), or the documents [waiting to be built](#reading-ahead) (an id and a position each, not a document). Plan the process's memory as `max_built_mib` + `2 × builds` batches + one live batch per index + one backfill batch + those two + about 100 MiB, plus 10–20% for the allocator. On Linux, `run` warns at start when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one. `/status` reports what is held (`memory`) and `flusso.memory.built` plots it ([Metrics](metrics.md)).
 
-**One index's share.** With two or more indexes, one index's live documents hold at most `index_budget_share` of the budget: 256 MiB of the default 512. An index whose sink falls behind in a burst stops at its share, and the other indexes keep building in the rest. Its backfill counts with every other backfill against half the budget, not against its share, so an index being backfilled or reindexed keeps building its live changes beside it, as in 0.18. An index holding no live documents always gets one live batch, even with the budget full, so one index stuck at its share (a lane parked for hours) leaves the others building until it has `2 × [batch] max_changes` distinct documents waiting (512 by default); then reading stops for every index, as before 0.19.
+**One index's share.** With two or more indexes, one index's live documents hold at most `index_budget_share` of the budget: 256 MiB of the default 512. An index whose sink falls behind in a burst stops at its share, and the other indexes keep building in the rest. Its backfill counts with every other backfill against half the budget, not against its share, so an index being backfilled or reindexed keeps building its live changes beside it, as in 0.18. An index holding no live documents always gets one live batch, even with the budget full, so one index stuck at its share (a lane parked for hours) leaves the others building until it has [`max_waiting_per_index`](#reading-ahead) distinct documents waiting (512 by default); then reading stops for every index, as before 0.19.
 
 - **While it waits at its share**, that index's documents wait to be built, and the stream keeps being read for the others.
-- **Up to a point.** Once the waiting index has `2 × [batch] max_changes` distinct documents to build (512 by default), reading stops for every index until that index's sink acknowledges some, as when the whole budget is full. A burst that rewrites the same few documents never gets there; one over thousands of distinct rows of one index still pauses the others. A parked lane never acknowledges, so this is also how long one stuck index leaves the others running: until 512 distinct documents of it have changed.
+- **Up to a point.** Once the waiting index has `max_waiting_per_index` distinct documents to build (512 by default), reading stops for every index until that index's sink acknowledges some, as when the whole budget is full. A burst that rewrites the same few documents never gets there; one over thousands of distinct rows of one index still pauses the others. A parked lane never acknowledges, so this is also how long one stuck index leaves the others running: until `max_waiting_per_index` distinct documents of it have changed. Raising it keeps the others running longer; the stuck index then has that many more documents to build once its lane opens.
 - **With one index** it holds the whole budget, whatever the share says.
 
 **When to change it.** The default, 512 MiB, keeps the tail of visible latency short while a backfill runs beside live changes.
@@ -92,7 +94,7 @@ Several builds run at once, but never two holding the same document, and each si
 
 Watch `flusso.memory.refused`: if it grows steadily while the sinks are healthy, the budget sets the pace and raising it helps. If it grows only while a sink is down, the budget is doing its job.
 
-The table is a property of the machine that runs flusso, so it is **never written into `flusso.lock`**: `run` with a `flusso.toml` reads it, `run --locked` takes the flag or the env var, else the default. Precedence is flag (`--writes`, `--builds`, `--max-built-mib`, `--index-budget-share`), then `FLUSSO_WRITES` / `FLUSSO_BUILDS` / `FLUSSO_MAX_BUILT_MIB` / `FLUSSO_INDEX_BUDGET_SHARE`, then this table, then the default. See [CLI](cli.md#run).
+The table is a property of the machine that runs flusso, so it is **never written into `flusso.lock`**: `run` with a `flusso.toml` reads it, `run --locked` takes the flag or the env var, else the default. Precedence is flag (`--writes`, `--builds`, `--max-built-mib`, `--index-budget-share`, `--max-waiting-per-index`, `--max-waiting`), then `FLUSSO_WRITES` / `FLUSSO_BUILDS` / `FLUSSO_MAX_BUILT_MIB` / `FLUSSO_INDEX_BUDGET_SHARE` / `FLUSSO_MAX_WAITING_PER_INDEX` / `FLUSSO_MAX_WAITING`, then this table, then the default. See [CLI](cli.md#run).
 
 **A share outside (0, 1] is refused**, `nan` included, by `check`, `build` and `run`, before anything connects. The message names where the value came from and every way to set it:
 
@@ -101,6 +103,45 @@ The table is a property of the machine that runs flusso, so it is **never writte
 ```
 
 A flag or a variable that isn't a number is refused as `` `half` is not a number; give a share above 0, at most 1 ``.
+
+### Reading ahead
+
+flusso reads changes ahead of the builds, up to a bound, then waits. While a batch builds, the next changes are already read, resolved to the documents they touch, and queued. A document waits there until a build takes it; one changed again while it waits is still built once.
+
+Reading pauses while any of these holds, and goes on as soon as a build takes documents:
+
+- one index has `max_waiting_per_index` documents waiting to be built (512 by default);
+- every index together has `max_waiting` documents waiting (2,048 by default);
+- `max_waiting` changes are read and not yet in a build, changes that touch no document included.
+
+That bound is the **lead**. A run of changes read at once can pass it by its own size, once.
+
+- **The defaults follow the batch and the builds.** Unset, `max_waiting_per_index` is `2 × [batch] max_changes` and `max_waiting` is `2 × builds × [batch] max_changes`, with both as `run` resolves them, flags and variables included: `--batch-max-changes 100 --builds 2` gives 200 and 400.
+- **A stop builds the lead.** A stop reads nothing more, then builds and writes everything already read before it exits ([Stopping](cli.md#stopping)). Under a backlog that's the lead plus the run being read, so a stop can take a little longer, within `--shutdown-timeout-secs`.
+- **Nothing is confirmed early.** A change read but not yet built is neither confirmed to the slot nor covered by a [fence](http.md#get-waitpositionposition), so what a restart reads again is unchanged.
+- **Memory.** A waiting document is an id and the position of its oldest change, not a built document, and isn't counted in `max_built_mib`. At the defaults that's noise; a lead in the hundreds of thousands keeps that many ids in memory.
+
+**When to change it.** The defaults leave room for two batches per index and two per build, so the next batch is read while one builds.
+
+- **Raise `max_waiting_per_index` to let one stuck index leave the others running longer.** An index held at its [share](#concurrency) stops reading for every index at this many documents waiting. The cost: that index has more to build once its sink recovers, and a stop meanwhile has more to build. Raise `max_waiting` with it; a total below the per-index bound is refused.
+- **Raise `max_waiting` when many indexes change at once.** At the defaults, four indexes with 512 documents waiting each reach it, and reading pauses for all of them.
+- **Lower both to bound a stop's work**, when builds are slow and `--shutdown-timeout-secs` is short. A smaller lead leaves less overlap between reading and building.
+
+**Refused at start**, by `check`, `build` and `run`, before anything connects. The message names where each value came from, the default included, and every way to set it. `check` and `build` judge the file; `run` lays its flags and variables over it first.
+
+- **`0`**, for either key:
+
+  ```text
+  [concurrency] max_waiting_per_index = 0 (set in flusso.toml's [concurrency] max_waiting_per_index) would stop the reading for good: it is how many documents may wait to be built before flusso stops reading changes. Set at least 1 with flusso.toml's [concurrency] max_waiting_per_index, --max-waiting-per-index or FLUSSO_MAX_WAITING_PER_INDEX; a flag wins over its variable, a variable over the file
+  ```
+
+- **`max_waiting` below `max_waiting_per_index`**, a default total included. Raising the per-index bound past 2,048 alone does it:
+
+  ```text
+  [concurrency] max_waiting = 2048 (the default, 2 × builds × [batch] max_changes) is below max_waiting_per_index = 4096 (set in flusso.toml's [concurrency] max_waiting_per_index): the documents every index together may have waiting can't be fewer than one index's. Raise max_waiting with flusso.toml's [concurrency] max_waiting, --max-waiting or FLUSSO_MAX_WAITING or lower max_waiting_per_index with flusso.toml's [concurrency] max_waiting_per_index, --max-waiting-per-index or FLUSSO_MAX_WAITING_PER_INDEX; a flag wins over its variable, a variable over the file
+  ```
+
+- **A flag or a variable that isn't a whole number**: `` `lots` is not a whole number of documents, at least 1 ``, after the variable's name when a variable set it (`FLUSSO_MAX_WAITING: …`).
 
 ## backoff
 
