@@ -381,6 +381,8 @@ impl IngestEngine {
         let signals: Vec<Signals> = builds.iter().map(|_| Signals::default()).collect();
         let reports = Reports::default();
         let several = builds.len() > 1;
+        let walks = Arc::new(tokio::sync::Semaphore::new(1));
+        let clock = IdleClock::new(builds.len());
         let mut senders = Vec::new();
         let mut futures = Vec::new();
         let mut dispatched = Vec::new();
@@ -412,6 +414,8 @@ impl IngestEngine {
                     signals,
                     reports: &reports,
                     several,
+                    walks: &walks,
+                    clock: several.then_some((&clock, slot)),
                     lanes,
                     scopes,
                     builds,
@@ -465,19 +469,24 @@ impl IngestEngine {
         until: Option<Instant>,
         snapshot: &mut Option<Snapshot>,
         busy: bool,
+        clock: Option<(&IdleClock, usize)>,
     ) -> Instant {
         let now = Instant::now();
         if busy {
             return now;
         }
-        let waited = until
-            .map_or(now, |until| until.min(now))
-            .saturating_duration_since(since);
-        match snapshot {
-            Some(active) => active.page_wait += waited,
-            None => self
+        let end = until.map_or(now, |until| until.min(now));
+        let waited = end.saturating_duration_since(since);
+        match (snapshot, clock) {
+            (Some(active), _) => active.page_wait += waited,
+            (None, None) => self
                 .observer
                 .on_stage(StageTiming::new(Stage::Idle, waited)),
+            (None, Some((clock, slot))) => {
+                if let Some(idle) = clock.woke(slot, end) {
+                    self.observer.on_stage(StageTiming::new(Stage::Idle, idle));
+                }
+            }
         }
         now
     }
@@ -520,6 +529,49 @@ impl IngestEngine {
             ))
             .into()),
         }
+    }
+}
+
+/// The engine's idle time over several builders (ADR 0012 stage 8a, 6b-1c):
+/// [`Stage::Idle`] is the wall time no builder is busy. Each builder marks
+/// itself idle from the end of its last work, when the wait it starts is
+/// idle (nothing building, no snapshot), and tells the clock when it wakes;
+/// the first to wake while every builder was idle reports the span since
+/// the last of them went idle. One builder reports its own waits, as 6b-1b
+/// did, with no clock.
+#[derive(Debug)]
+pub(crate) struct IdleClock(Mutex<Vec<Option<Instant>>>);
+
+impl IdleClock {
+    fn new(builders: usize) -> Self {
+        Self(Mutex::new(vec![None; builders]))
+    }
+
+    /// Builder `slot` is idle from `since` (`None`: its wait isn't idle).
+    pub(crate) fn idle(&self, slot: usize, since: Option<Instant>) {
+        let mut idle = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = idle.get_mut(slot) {
+            *at = since;
+        }
+    }
+
+    /// Builder `slot` woke at `end`: the engine's idle span that ends here,
+    /// if every builder was idle.
+    fn woke(&self, slot: usize, end: Instant) -> Option<Duration> {
+        let mut idle = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let all = idle.iter().all(Option::is_some);
+        let start = idle.iter().flatten().max().copied();
+        if let Some(at) = idle.get_mut(slot) {
+            *at = None;
+        }
+        all.then(|| start.map(|start| end.saturating_duration_since(start)))
+            .flatten()
     }
 }
 
