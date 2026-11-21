@@ -47,10 +47,14 @@
 //!   wakes only while someone waits.
 //! - **G8.** A waiter dropped before its grant leaves its line and wakes the
 //!   others; a permit dropped gives itself back, once.
-//! - **G9.** The one task of today doesn't wait in a line: at each grant point
-//!   it asks [`Gate::choose`] with the kinds it has ready, and gets a permit by
-//!   G4 only while no eligible waiter is in a line. With one task that is
-//!   always, so the order of grants is the same as before the lines.
+//! - **G9.** Every build goes through the lines (ADR 0012 stage 8a, 6a): a
+//!   task's grant pass ([`Gate::pass`]) puts each batch it has ready, with a
+//!   slot to run it, in its kind's line, asks once, and leaves before the
+//!   pass ends, so it holds a place only while it can use a permit now, and
+//!   every reservation obeys G5 and G6. With both kinds ready it is in both
+//!   lines at once, so G4's count moves as it did. With no waiter in either
+//!   line the pass is decided in one hold of the lock, as joining at the
+//!   front of empty lines would decide it.
 //!
 //! ```text
 //! both kinds ready, one permit at a time:  live, live, live, backfill, live, …
@@ -238,16 +242,27 @@ struct Standing {
     behind: bool,
 }
 
-/// A waiter's place in its line: dropped before its grant, it leaves the
-/// line and wakes the others (G8).
-struct Place<'a> {
-    gate: &'a Gate,
+/// A waiter in a line ([`Gate::join`]): dropped before its grant, it leaves
+/// the line and wakes the others (G8).
+pub(crate) struct Waiter {
+    gate: Arc<Gate>,
     work: Work,
     id: u64,
+    /// What it reserves from the gate's budget when offered a permit.
+    parts: Vec<(IndexName, usize)>,
     granted: bool,
 }
 
-impl Drop for Place<'_> {
+impl std::fmt::Debug for Waiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Waiter")
+            .field("work", &self.work)
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Waiter {
     fn drop(&mut self) {
         if !self.granted {
             self.gate
@@ -258,6 +273,88 @@ impl Drop for Place<'_> {
         self.gate.budget.unwatch();
         if !self.granted {
             self.gate.changed.notify_waiters();
+        }
+    }
+}
+
+/// What a grant pass got ([`Gate::pass`]).
+#[derive(Debug, Default)]
+pub(crate) struct Passed {
+    /// The kind granted, its permit and the reservation of its batch.
+    pub(crate) granted: Option<(Work, Permit, Vec<Reservation>)>,
+    /// Every refusal of the pass, with its kind.
+    pub(crate) refused: Vec<(Work, Refusal)>,
+}
+
+/// What one ask of a waiter got ([`Waiter::try_grant`]).
+pub(crate) enum Asked {
+    /// The permit, and the reservation of the waiter's parts.
+    Granted(Permit, Vec<Reservation>),
+    /// Offered the permit, refused by the budget now: it keeps its place.
+    Refused(Refusal),
+    /// Not offered: no permit is free, or another waiter goes first. Carries
+    /// the generation of a refusal it still holds, if any.
+    NotNow(Option<u64>),
+}
+
+impl Waiter {
+    /// Ask once, under the gate's lock: granted when a permit is free, this
+    /// waiter is the one G4 offers it to, and the budget has room by G5–G6.
+    /// Never waits.
+    pub(crate) fn try_grant(&mut self) -> Asked {
+        loop {
+            let gate = Arc::clone(&self.gate);
+            let mut state = gate.state();
+            let now = gate.budget.generation();
+            if state.free == 0 || state.selected(now) != Some((self.work, self.id)) {
+                return Asked::NotNow(
+                    state
+                        .waiting_mut(self.work, self.id)
+                        .and_then(|waiting| waiting.refused)
+                        .map(|refusal| refusal.generation)
+                        .filter(|&generation| generation == now),
+                );
+            }
+            let behind = state.is_behind(self.work, self.id, now);
+            #[cfg(test)]
+            if let Some(hook) = gate
+                .before_reserve
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+            {
+                hook();
+            }
+            match gate.budget.reserve_at(self.work, &self.parts, behind, now) {
+                None => continue,
+                Some(Ok(reserved)) => {
+                    if state.is_contested(now) {
+                        state.contested += 1;
+                    }
+                    state.free -= 1;
+                    let id = self.id;
+                    state.line_mut(self.work).retain(|waiting| waiting.id != id);
+                    self.granted = true;
+                    drop(state);
+                    gate.changed.notify_waiters();
+                    return Asked::Granted(
+                        Permit {
+                            gate: Arc::clone(&gate),
+                        },
+                        reserved,
+                    );
+                }
+                Some(Err(refusal)) => {
+                    if let Some(waiting) = state.waiting_mut(self.work, self.id) {
+                        waiting.refused = Some(refusal);
+                        waiting.behind = behind;
+                    }
+                    drop(state);
+                    gate.changed.notify_waiters();
+                    return Asked::Refused(refusal);
+                }
+            }
         }
     }
 }
@@ -295,28 +392,127 @@ impl Gate {
             .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(hook));
     }
 
-    /// A permit for one of the kinds the caller has ready, by G4, or `None`
-    /// when none is free or an eligible waiter is in a line (G9: it was there
-    /// first).
-    pub(crate) fn choose(self: &Arc<Self>, live: bool, backfill: bool) -> Option<(Work, Permit)> {
+    /// How many waiters are in the lines.
+    #[cfg(test)]
+    pub(crate) fn waiters(&self) -> usize {
+        let state = self.state();
+        state.live.len() + state.backfill.len()
+    }
+
+    /// One grant pass of a task with a batch of each kind it has ready and a
+    /// slot to run (G9): the permit and the reservation of the batch G4 gives
+    /// it, if any, and every refusal the budget gave it. With no waiter in
+    /// either line (one task, as in slice 6a) this is one hold of the gate's
+    /// lock: the pass's own batches stand where joining would put them, at
+    /// the front of empty lines, so G4 picks between them, G5 asks the
+    /// budget (a refusal hands the permit to the other kind, without moving
+    /// the count), and no one is behind (G6); nothing joins, watches or
+    /// wakes. Otherwise each batch joins its line, is asked once, and leaves.
+    pub(crate) fn pass(
+        self: &Arc<Self>,
+        live: Option<Vec<(IndexName, usize)>>,
+        backfill: Option<Vec<(IndexName, usize)>>,
+    ) -> Passed {
         let mut state = self.state();
-        if state.free == 0
-            || (state.is_waiting() && state.selected(self.budget.generation()).is_some())
-        {
-            return None;
+        if state.is_waiting() {
+            drop(state);
+            return self.pass_in_lines(live, backfill);
         }
-        let work = state.turn(live, backfill)?;
-        if live && backfill {
-            state.contested += 1;
+        let mut passed = Passed::default();
+        let (mut live, mut backfill) = (live, backfill);
+        while state.free > 0 {
+            let contested = live.is_some() && backfill.is_some();
+            let Some(work) = state.turn(live.is_some(), backfill.is_some()) else {
+                break;
+            };
+            let parts = match work {
+                Work::Live => live.take(),
+                Work::Backfill => backfill.take(),
+            }
+            .unwrap_or_default();
+            // Nothing to reserve (no budget counts these documents) is
+            // always admitted and adds nothing: no budget lock for it.
+            let reserved = if parts.is_empty() {
+                Ok(Vec::new())
+            } else {
+                self.budget.reserve_behind(work, &parts, false)
+            };
+            match reserved {
+                Ok(reserved) => {
+                    if contested {
+                        state.contested += 1;
+                    }
+                    state.free -= 1;
+                    drop(state);
+                    passed.granted = Some((
+                        work,
+                        Permit {
+                            gate: Arc::clone(self),
+                        },
+                        reserved,
+                    ));
+                    return passed;
+                }
+                Err(refusal) => passed.refused.push((work, refusal)),
+            }
         }
-        state.free -= 1;
-        drop(state);
-        Some((
+        passed
+    }
+
+    /// [`pass`](Self::pass) beside waiters: each batch joins its line, is
+    /// asked once (the live one again after the backfill one, should a
+    /// refusal of the backfill batch have moved the offer on to it), and
+    /// leaves before the pass returns.
+    fn pass_in_lines(
+        self: &Arc<Self>,
+        live: Option<Vec<(IndexName, usize)>>,
+        backfill: Option<Vec<(IndexName, usize)>>,
+    ) -> Passed {
+        let mut live = live.map(|parts| self.join(Work::Live, parts));
+        let mut backfill = backfill.map(|parts| self.join(Work::Backfill, parts));
+        let mut passed = Passed::default();
+        for work in [Work::Live, Work::Backfill, Work::Live] {
+            let waiter = match work {
+                Work::Live => live.as_mut(),
+                Work::Backfill => backfill.as_mut(),
+            };
+            let Some(waiter) = waiter else { continue };
+            match waiter.try_grant() {
+                Asked::Granted(permit, reserved) => {
+                    passed.granted = Some((work, permit, reserved));
+                    return passed;
+                }
+                Asked::Refused(refusal) => passed.refused.push((work, refusal)),
+                Asked::NotNow(_) => {}
+            }
+        }
+        passed
+    }
+
+    /// Join the back of `work`'s line, to reserve `parts` from the gate's
+    /// budget when offered a permit (G2). The waiter watches the budget until
+    /// it leaves the line, granted or dropped (G3, G8).
+    pub(crate) fn join(self: &Arc<Self>, work: Work, parts: Vec<(IndexName, usize)>) -> Waiter {
+        let id = {
+            let mut state = self.state();
+            let id = state.next_id;
+            state.next_id += 1;
+            self.budget.watch();
+            state.line_mut(work).push_back(Waiting {
+                id,
+                refused: None,
+                behind: false,
+            });
+            id
+        };
+        self.changed.notify_waiters();
+        Waiter {
+            gate: Arc::clone(self),
             work,
-            Permit {
-                gate: Arc::clone(self),
-            },
-        ))
+            id,
+            parts,
+            granted: false,
+        }
     }
 
     /// Wait in `work`'s line for a permit and a reservation of `parts` from
@@ -328,7 +524,7 @@ impl Gate {
         not(test),
         expect(
             dead_code,
-            reason = "the index tasks of ADR 0012 stage 8a's 6a/6b wait here"
+            reason = "the index tasks of ADR 0012 stage 8a's 6b wait here"
         )
     )]
     pub(crate) async fn acquire(
@@ -336,82 +532,17 @@ impl Gate {
         work: Work,
         parts: &[(IndexName, usize)],
     ) -> (Permit, Vec<Reservation>) {
-        let mut place = {
-            let mut state = self.state();
-            let id = state.next_id;
-            state.next_id += 1;
-            self.budget.watch();
-            state.line_mut(work).push_back(Waiting {
-                id,
-                refused: None,
-                behind: false,
-            });
-            Place {
-                gate: self,
-                work,
-                id,
-                granted: false,
-            }
-        };
-        self.changed.notify_waiters();
+        let mut waiter = self.join(work, parts.to_vec());
         loop {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let standing_refusal = {
-                let mut state = self.state();
-                let now = self.budget.generation();
-                if state.free > 0 && state.selected(now) == Some((work, place.id)) {
-                    let behind = state.is_behind(work, place.id, now);
-                    #[cfg(test)]
-                    if let Some(hook) = self
-                        .before_reserve
-                        .0
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .take()
-                    {
-                        hook();
-                    }
-                    match self.budget.reserve_at(work, parts, behind, now) {
-                        None => continue,
-                        Some(Ok(reserved)) => {
-                            if state.is_contested(now) {
-                                state.contested += 1;
-                            }
-                            state.free -= 1;
-                            state
-                                .line_mut(work)
-                                .retain(|waiting| waiting.id != place.id);
-                            place.granted = true;
-                            drop(state);
-                            self.changed.notify_waiters();
-                            return (
-                                Permit {
-                                    gate: Arc::clone(self),
-                                },
-                                reserved,
-                            );
-                        }
-                        Some(Err(refusal)) => {
-                            if let Some(waiting) = state.waiting_mut(work, place.id) {
-                                waiting.refused = Some(refusal);
-                                waiting.behind = behind;
-                            }
-                            drop(state);
-                            self.changed.notify_waiters();
-                            Some(refusal.generation)
-                        }
-                    }
-                } else {
-                    state
-                        .waiting_mut(work, place.id)
-                        .and_then(|waiting| waiting.refused)
-                        .map(|refusal| refusal.generation)
-                        .filter(|&generation| generation == now)
-                }
+            let standing = match waiter.try_grant() {
+                Asked::Granted(permit, reserved) => return (permit, reserved),
+                Asked::Refused(refusal) => Some(refusal.generation),
+                Asked::NotNow(standing) => standing,
             };
-            match standing_refusal {
+            match standing {
                 Some(generation) => {
                     tokio::select! {
                         () = &mut changed => {}

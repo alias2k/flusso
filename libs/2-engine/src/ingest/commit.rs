@@ -7,12 +7,14 @@
 //! snapshot took keys or finished its walk, after a build landed. It grants
 //! what the gate allows and publishes every slot that is ready, in order.
 //!
-//! The run's documents are marked pending on their indexes in the
-//! [`Progress`](crate::Progress) as the loop grants, and the live batch is
-//! offered only while none of them is in a running build (ADR 0012 stage 8a).
-//! A grant takes every index's waiting documents into one build; until each
-//! lane registers its item (or is told it was skipped), that build holds the
-//! lane's confirmation and fences before its oldest change.
+//! The reader marks each run's documents pending on their indexes in the
+//! [`Progress`](crate::Progress) before handing the run over; the live batch
+//! is the runs a grant may join ([`Runs::candidate`]), offered only while
+//! none of its documents is in a running build (ADR 0012 stage 8a, R3–R4). A
+//! grant takes, from each index the budget admits, the documents marked
+//! through the batch's last change into one build; until each lane registers
+//! its item (or is told it was skipped), that build holds the lane's
+//! confirmation and fences before its oldest change.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,7 +28,7 @@ use tokio::time::Instant;
 
 use super::builds::{Builds, Built, Grant, Job, LiveCandidate};
 use super::confirm::CONFIRM_TICK;
-use super::live::LiveRun;
+use super::live::{Candidate, Runs};
 use super::snapshot::Snapshot;
 use super::{IngestEngine, Lanes, document_id};
 use crate::error::{EngineError, Result};
@@ -39,7 +41,7 @@ impl IngestEngine {
     /// ready, until neither moves.
     pub(super) async fn grant(
         &self,
-        pending: &mut LiveRun,
+        runs: &mut Runs,
         snapshot: &mut Option<Snapshot>,
         builds: &mut Builds,
         lanes: &Lanes,
@@ -54,27 +56,33 @@ impl IngestEngine {
                     builds.complete(finished);
                 }
             }
-            self.mark_run(pending);
-            // The live batch is every index's waiting documents, offered
-            // only once none of them is in a running build: `main`'s
-            // admission, checked before a permit is taken. Its estimate
-            // counts distinct documents.
-            let live = pending
-                .position
-                .filter(|_| !self.waiting_held(builds))
-                .map(|position| LiveCandidate {
-                    live: position,
-                    documents: self.progress.waiting_by_index(),
-                    full: pending.is_full(),
-                    changes: pending.count > 0,
-                });
+            // The live batch is every index's documents waiting through the
+            // candidate's last change, offered only once none of them is in
+            // a running build: `main`'s admission, checked before a permit is
+            // taken. Its estimate counts distinct documents.
+            // Beside a running live build only a full batch may start, so a
+            // hand-over that can't fill one costs no walk.
+            let candidate = if builds.live_running() {
+                runs.full_candidate()
+            } else {
+                runs.candidate(true)
+            };
+            let live = candidate.and_then(|candidate| {
+                Some(LiveCandidate {
+                    live: candidate,
+                    documents: self.waiting(builds, candidate.position)?,
+                    full: candidate.full,
+                    changes: candidate.changes > 0,
+                })
+            });
             let backfill = snapshot
                 .as_ref()
                 .filter(|active| active.batch.count > 0 && (active.batch.is_full() || active.done))
                 .map(|active| active.batch.ids.as_slice());
             match builds.choose(live, backfill) {
-                Some(Grant::Live(position, admitted)) => {
-                    self.start_live(pending, builds, position, &admitted).await;
+                Some(Grant::Live(candidate, admitted, deferred)) => {
+                    self.start_live(runs, builds, candidate, &admitted, deferred)
+                        .await;
                 }
                 Some(Grant::Backfill) => {
                     if let Some(active) = snapshot.as_mut() {
@@ -95,7 +103,7 @@ impl IngestEngine {
     pub(super) async fn landed(
         &self,
         landed: Option<(u64, Option<super::builds::Output>)>,
-        pending: &mut LiveRun,
+        runs: &mut Runs,
         snapshot: &mut Option<Snapshot>,
         builds: &mut Builds,
         lanes: &Lanes,
@@ -103,28 +111,29 @@ impl IngestEngine {
         if let Some((seq, output)) = landed {
             builds.land(seq, output, &|built| self.halts(built));
         }
-        self.grant(pending, snapshot, builds, lanes).await
+        self.grant(runs, snapshot, builds, lanes).await
     }
 
-    /// The end of a run: grant the buffered live batch once its documents
-    /// are free, finish every build, and publish everything in order. A
-    /// snapshot batch not yet granted is not built.
+    /// The end of a run, once the reader ended: grant every run it handed
+    /// over, in `main`'s batches, once their documents are free, finish
+    /// every build, and publish everything in order. A snapshot batch not
+    /// yet granted is not built.
     pub(super) async fn settle(
         &self,
-        pending: &mut LiveRun,
+        runs: &mut Runs,
         builds: &mut Builds,
         lanes: &Lanes,
     ) -> Result<()> {
         builds.woke(Wake::Settle);
         loop {
             self.publish_ready(builds, lanes).await?;
-            self.mark_run(pending);
-            let live = pending.position;
-            if let Some(position) = live
-                && !self.waiting_held(builds)
-                && let Some(admitted) = builds.can_take_last(&self.progress.waiting_by_index())
+            let live = runs.candidate(false);
+            if let Some(candidate) = live
+                && let Some(documents) = self.waiting(builds, candidate.position)
+                && let Some((admitted, deferred)) = builds.can_take_last(&documents)
             {
-                self.start_live(pending, builds, position, &admitted).await;
+                self.start_live(runs, builds, candidate, &admitted, deferred)
+                    .await;
                 continue;
             }
             if builds.running() == 0 {
@@ -149,64 +158,43 @@ impl IngestEngine {
         }
     }
 
-    /// Mark the live run's documents pending on their indexes, deduplicated
-    /// there. A document waits between its live run's marking and the grant
-    /// that takes its index: the live run's own, or a later one when the
-    /// budget left the index waiting (the run's position is kept until
-    /// then). What an earlier engine run left behind is forgotten as an
-    /// engine run starts.
-    fn mark_run(&self, pending: &mut LiveRun) {
-        if !pending.marks.is_empty() {
-            self.progress.mark(pending.marks.drain(..));
-        }
-        debug_assert!(
-            pending.position.is_some() || self.progress.waiting() == 0,
-            "documents wait with no live run to grant them"
-        );
-    }
-
-    /// Whether a running build holds one of the waiting documents: a take
-    /// now would leave it behind, so the live batch waits, as `main`'s did.
-    fn waiting_held(&self, builds: &Builds) -> bool {
+    /// Each index's documents waiting through `through`, oldest waiting
+    /// first, or `None` while a running build holds one of them: a take now
+    /// would leave it behind, so the live batch waits, as `main`'s did.
+    fn waiting(&self, builds: &Builds, through: Position) -> Option<Vec<(IndexName, usize)>> {
         let held = |index: &IndexName, key: &source::RowKey| builds.holds(index, key);
         let held: Option<Holds<'_>> = builds.holds_some().then_some(&held);
-        self.progress.any_waiting_held(held)
+        self.progress.waiting_through(through, held)
     }
 
-    /// Take the waiting documents of every index in `admitted` (the ones the
-    /// budget has room for) into one build, as one batch over those indexes
-    /// (the grant checked none is in a running build). A run whose changes
-    /// touched no document any lane receives is an empty build, as on
-    /// `main`: its slot settles those changes in grant order. The batch
-    /// carries `position`, its live run's newest change: every document it
-    /// takes was marked at or before it. An index left waiting is
-    /// **deferred**: its lanes are not registered with this build's step, so
-    /// no change of it counts as committed before its documents land, and
-    /// the live run keeps its position so a later grant takes them.
+    /// Take the documents waiting through `candidate`'s last change of every
+    /// index in `admitted` (the ones the budget has room for) into one
+    /// build, as one batch over those indexes (the grant checked none is in
+    /// a running build). A batch whose changes touched no document any lane
+    /// receives is an empty build, as on `main`: its slot settles those
+    /// changes in grant order. The batch carries the candidate's newest
+    /// change, and its step closes at the candidate's read count, so a
+    /// newer run's change, whose documents it doesn't take, falls in a later
+    /// step (R4). An index left waiting is **deferred**: its lanes are not
+    /// registered with this build's step, so no change of it counts as
+    /// committed before its documents land, and the candidate is kept so a
+    /// later grant takes them.
     async fn start_live(
         &self,
-        pending: &mut LiveRun,
+        runs: &mut Runs,
         builds: &mut Builds,
-        position: Position,
+        candidate: Candidate,
         admitted: &[IndexName],
+        deferred: Vec<IndexName>,
     ) {
-        let (ids, taken) = self.take_all(builds, admitted);
-        let changes = pending.count;
-        let deferred: Vec<IndexName> = self
-            .progress
-            .waiting_by_index()
-            .into_iter()
-            .map(|(index, _)| index)
-            .collect();
-        pending.clear();
-        if !deferred.is_empty() {
-            pending.position = Some(position);
-        }
-        let step = self.progress.close_step();
+        let position = candidate.position;
+        let (ids, taken) = self.take_all(builds, admitted, position);
+        runs.granted(candidate, !deferred.is_empty());
+        let step = self.progress.close_step_through(candidate.read);
         let job = Job::Live {
             taken,
             position,
-            changes,
+            changes: candidate.changes,
             step,
             deferred,
         };
@@ -221,6 +209,7 @@ impl IngestEngine {
         &self,
         builds: &mut Builds,
         admitted: &[IndexName],
+        through: Position,
     ) -> (Vec<DocumentId>, Vec<(IndexName, Token, Position)>) {
         let mut ids = builds.spare(self.batch.max_changes);
         let mut taken = Vec::new();
@@ -231,7 +220,7 @@ impl IngestEngine {
         {
             if let Some(take) = self
                 .progress
-                .take(index, usize::MAX, &|key| builds.holds(index, key))
+                .take_through(index, through, &|key| builds.holds(index, key))
             {
                 ids.extend(take.ids);
                 taken.push((index.clone(), take.token, take.oldest));

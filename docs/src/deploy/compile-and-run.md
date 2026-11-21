@@ -32,7 +32,7 @@ You have a validated config and want to run it, locally or in a deployment. The 
 
 4. **Restart without a backfill.** Once seeded, a restart skips the backfill on its own because the sink remembers. `--skip-backfill` forces that even when the sink disagrees; it exists for recovery, not routine use.
 
-5. **Stop.** `SIGTERM`, `SIGINT` or `SIGHUP` drains: nothing new is read, what is in flight lands on every sink and is confirmed to Postgres, then flusso exits `0`, within 30 seconds by default. The same sender twice within half a second (Ctrl-C pressed twice), or three signals within a second, exit at once; whatever wasn't confirmed is read again on the next start. The sequence, deadline and exit codes are in [Stopping](../reference/cli.md#stopping).
+5. **Stop.** `SIGTERM`, `SIGINT` or `SIGHUP` drains: nothing new is read, what was already read is built, lands on every sink and is confirmed to Postgres, then flusso exits `0`, within 30 seconds by default. The same sender twice within half a second (Ctrl-C pressed twice), or three signals within a second, exit at once; whatever wasn't confirmed is read again on the next start. The sequence, deadline and exit codes are in [Stopping](../reference/cli.md#stopping).
 
 ## Options and variations
 

@@ -1303,16 +1303,45 @@ async fn reports_lifecycle_and_progress_to_the_observer() {
     harness.ingest = harness.ingest.with_observer(Arc::clone(&observer_dyn));
     let harness = harness.map_sinks(move |engine| engine.with_observer(Arc::clone(&observer_dyn)));
     harness.run(Continuity::Resumed).await;
-    let events = observer.events.lock().unwrap();
+    // The confirm tick's first tick is immediate and races the reader's
+    // first run to the builder: it may close an idle wait of its own
+    // before the first run or after its batch. So the ingest side's idle
+    // waits are checked apart: one comes before the first resolve; the
+    // rest of the events are `main`'s, in `main`'s order.
+    let events = observer.events.lock().unwrap().clone();
+    let at = |name: &str| events.iter().position(|event| event == name);
+    let (first_resolve, publish) = (at("stage resolve live"), at("stage publish live"));
+    let idles: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| *event == "stage idle")
+        .map(|(position, _)| position)
+        .collect();
+    assert!(
+        idles
+            .first()
+            .is_some_and(|first| Some(*first) < first_resolve),
+        "an idle wait before the first resolve: {events:?}"
+    );
+    assert!(
+        idles.len() <= 2
+            && idles
+                .iter()
+                .all(|idle| Some(*idle) < first_resolve || Some(*idle) > publish),
+        "at most the wait before the run and the tick's: {events:?}"
+    );
+    let events: Vec<String> = events
+        .into_iter()
+        .filter(|event| event != "stage idle")
+        .collect();
     assert_eq!(
-        *events,
+        events,
         [
             "startup stage primary",
             "sink started primary",
             "startup prepare",
             "startup open_live",
             "live",
-            "stage idle",
             "stage resolve live",
             "stage build live",
             "stage lane_wait live primary",

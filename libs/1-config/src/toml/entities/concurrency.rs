@@ -79,6 +79,24 @@ pub struct Concurrency {
     )]
     #[schemars(extend("exclusiveMinimum" = 0, "maximum" = 1))]
     pub index_budget_share: Option<f64>,
+    /// Documents one index may have waiting to be built before the ingest
+    /// engine stops reading changes (default `2 × [batch] max_changes`,
+    /// 512, or `max_waiting` when that is set lower): how far reading runs
+    /// ahead of the builds, per index. A stop builds what was read, so this
+    /// bounds a stop's work too. At least 1; `check`, `build` and `run`
+    /// refuse 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_waiting_per_index: Option<u64>,
+    /// Documents every index together may have waiting to be built, and
+    /// changes read ahead of the builds, before the ingest engine stops
+    /// reading (default `2 × builds × [batch] max_changes`, 2,048, or
+    /// `max_waiting_per_index` when that is set higher). With both set, at
+    /// least `max_waiting_per_index`; `check`, `build` and `run` refuse 0 or
+    /// less.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_waiting: Option<u64>,
 }
 
 /// A number as written, whole or not: the range is the daemon's to judge,
@@ -104,6 +122,15 @@ pub fn parse_index_budget_share(text: &str) -> Result<f64, String> {
     text.trim()
         .parse()
         .map_err(|_| format!("`{text}` is not a number; give a share above 0, at most 1"))
+}
+
+/// `max_waiting_per_index` or `max_waiting` from a flag or an env var: a
+/// whole number. Zero, and a total below the per-index bound, are judged
+/// with the file's values, naming where each came from.
+pub fn parse_max_waiting(text: &str) -> Result<u64, String> {
+    text.trim()
+        .parse()
+        .map_err(|_| format!("`{text}` is not a whole number of documents, at least 1"))
 }
 
 /// `max_built_mib`, refused outside [`MIN_BUILT_MIB`]..=[`MAX_BUILT_MIB`].
@@ -197,5 +224,7 @@ impl Concurrency {
             && self.builds.is_none()
             && self.max_built_mib.is_none()
             && self.index_budget_share.is_none()
+            && self.max_waiting_per_index.is_none()
+            && self.max_waiting.is_none()
     }
 }

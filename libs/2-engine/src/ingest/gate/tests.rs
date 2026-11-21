@@ -31,6 +31,30 @@ fn unlimited() -> Arc<Budget> {
     Arc::new(Budget::unlimited())
 }
 
+/// A permit taken through the lines as the builder takes one (G9): join,
+/// ask once, leave.
+fn take(gate: &Arc<Gate>, work: Work) -> Option<Permit> {
+    let mut waiter = gate.join(work, Vec::new());
+    match waiter.try_grant() {
+        Asked::Granted(permit, _) => Some(permit),
+        _ => None,
+    }
+}
+
+/// A permit taken with both kinds ready, the builder in both lines at once
+/// (G4, G9): the kind granted.
+fn take_either(gate: &Arc<Gate>) -> Option<(Work, Permit)> {
+    let mut live = gate.join(Work::Live, Vec::new());
+    let mut backfill = gate.join(Work::Backfill, Vec::new());
+    if let Asked::Granted(permit, _) = live.try_grant() {
+        return Some((Work::Live, permit));
+    }
+    match backfill.try_grant() {
+        Asked::Granted(permit, _) => Some((Work::Backfill, permit)),
+        _ => None,
+    }
+}
+
 /// Let every runnable task run.
 async fn settle() {
     for _ in 0..20 {
@@ -58,11 +82,11 @@ fn waiter(
 }
 
 #[test]
-fn choose_takes_live_first_but_every_fourth_contested_grant_is_backfill() {
+fn both_kinds_ready_take_live_first_but_every_fourth_contested_grant_is_backfill() {
     let gate = Gate::new(1, unlimited());
     let mut kinds = Vec::new();
     for _ in 0..8 {
-        let (work, permit) = gate.choose(true, true).unwrap();
+        let (work, permit) = take_either(&gate).unwrap();
         kinds.push(work);
         drop(permit);
     }
@@ -80,7 +104,7 @@ fn choose_takes_live_first_but_every_fourth_contested_grant_is_backfill() {
         ]
     );
     assert_eq!(
-        gate.choose(false, true).map(|(work, _)| work),
+        take(&gate, Work::Backfill).map(|_| Work::Backfill),
         Some(Work::Backfill),
         "uncontested: no count moves"
     );
@@ -89,11 +113,11 @@ fn choose_takes_live_first_but_every_fourth_contested_grant_is_backfill() {
 #[test]
 fn no_permit_beyond_the_count_and_a_dropped_one_comes_back() {
     let gate = Gate::new(2, unlimited());
-    let a = gate.choose(true, false).unwrap();
-    let _b = gate.choose(true, false).unwrap();
-    assert!(gate.choose(true, false).is_none());
+    let a = take(&gate, Work::Live).unwrap();
+    let _b = take(&gate, Work::Live).unwrap();
+    assert!(take(&gate, Work::Live).is_none());
     drop(a);
-    assert!(gate.choose(true, false).is_some());
+    assert!(take(&gate, Work::Live).is_some());
 }
 
 /// G2, G7: waiters of one kind are granted oldest first, each woken by the
@@ -101,7 +125,7 @@ fn no_permit_beyond_the_count_and_a_dropped_one_comes_back() {
 #[tokio::test(start_paused = true)]
 async fn a_freed_permit_goes_to_the_oldest_live_waiter() {
     let gate = Gate::new(1, unlimited());
-    let (_, held) = gate.choose(true, false).unwrap();
+    let held = take(&gate, Work::Live).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let mut waiters = Vec::new();
     for name in ["first", "second", "third"] {
@@ -129,7 +153,7 @@ async fn a_freed_permit_goes_to_the_oldest_live_waiter() {
 #[tokio::test(start_paused = true)]
 async fn every_fourth_contested_grant_goes_to_the_oldest_backfill_waiter() {
     let gate = Gate::new(1, unlimited());
-    let (_, held) = gate.choose(true, false).unwrap();
+    let held = take(&gate, Work::Live).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let mut waiters = Vec::new();
     for name in ["l1", "l2", "l3", "l4", "l5", "l6"] {
@@ -280,7 +304,7 @@ async fn a_waiter_refused_by_its_share_holds_no_one_back() {
 #[tokio::test(start_paused = true)]
 async fn a_waiter_dropped_before_its_grant_gives_its_place_to_the_next() {
     let gate = Gate::new(1, unlimited());
-    let (_, held) = gate.choose(true, false).unwrap();
+    let held = take(&gate, Work::Live).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let first = waiter(&gate, Work::Live, "first", &granted, Duration::ZERO);
     settle().await;
@@ -296,26 +320,23 @@ async fn a_waiter_dropped_before_its_grant_gives_its_place_to_the_next() {
     assert_eq!(*granted.lock().unwrap(), ["second"]);
 }
 
-/// G9: the one task asking synchronously gets no permit while an eligible
-/// waiter is in a line, even with one free.
+/// G2 and G9: the builder, joining a line for its grant pass, gets no permit
+/// ahead of an eligible waiter that joined first, even with one free.
 #[tokio::test(start_paused = true)]
-async fn the_one_task_gets_no_permit_ahead_of_an_eligible_waiter() {
+async fn a_grant_pass_gets_no_permit_ahead_of_an_eligible_waiter() {
     let gate = Gate::new(1, unlimited());
-    let (_, held) = gate.choose(true, false).unwrap();
+    let held = take(&gate, Work::Live).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let waiting = waiter(&gate, Work::Live, "waiter", &granted, Duration::ZERO);
     settle().await;
     drop(held);
-    assert!(
-        gate.choose(true, true).is_none(),
-        "the waiter was there first"
-    );
+    assert!(take_either(&gate).is_none(), "the waiter was there first");
     tokio::time::timeout(Duration::from_secs(5), waiting)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(*granted.lock().unwrap(), ["waiter"]);
-    assert!(gate.choose(true, false).is_some(), "no one waits now");
+    assert!(take(&gate, Work::Live).is_some(), "no one waits now");
 }
 
 /// G1, G7, G8: many waiters of both kinds, holding their permits for random
@@ -381,7 +402,7 @@ async fn the_reservation_a_waiter_makes_is_handed_back_with_its_permit() {
     drop(parts);
     drop(permit);
     assert_eq!(budget.held().total, 0);
-    assert!(gate.choose(true, false).is_some());
+    assert!(take(&gate, Work::Live).is_some());
 }
 
 /// A waiter reserving `kib` of live documents of `name` from the gate's
@@ -430,7 +451,7 @@ async fn a_waiter_refused_for_being_behind_is_eligible_again_when_the_one_ahead_
 #[tokio::test(start_paused = true)]
 async fn an_uncontested_grant_does_not_move_the_count() {
     let gate = Gate::new(1, unlimited());
-    let (_, held) = gate.choose(true, false).unwrap();
+    let held = take(&gate, Work::Live).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let mut waiters = vec![
         waiter(&gate, Work::Live, "a1", &granted, Duration::from_millis(10)),
@@ -481,7 +502,7 @@ async fn a_refusal_does_not_move_the_count() {
         .reserve(Work::Backfill, &[(index("other"), 32 * KIB)])
         .unwrap();
     let gate = Gate::new(1, Arc::clone(&budget));
-    let (_, held) = gate.choose(true, false).unwrap();
+    let held = take(&gate, Work::Live).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let live = |name: &'static str| {
         let (gate, granted) = (Arc::clone(&gate), Arc::clone(&granted));
@@ -514,7 +535,7 @@ async fn a_refusal_does_not_move_the_count() {
     );
     // Hold the permit while l7 and l8 join and the release makes b1 eligible
     // (an uncontested grant: only live asked).
-    let (_, again) = gate.choose(true, false).unwrap();
+    let again = take(&gate, Work::Live).unwrap();
     tasks.push(live("l7"));
     tasks.push(live("l8"));
     settle().await;
@@ -540,7 +561,7 @@ async fn a_refusal_does_not_move_the_count() {
 #[tokio::test(start_paused = true)]
 async fn a_selected_waiter_dropped_before_it_runs_wakes_the_next() {
     let gate = Gate::new(1, unlimited());
-    let (_, held) = gate.choose(true, false).unwrap();
+    let held = take(&gate, Work::Live).unwrap();
     let mut first = Box::pin(gate.acquire(Work::Live, &[]));
     assert!(futures::poll!(first.as_mut()).is_pending());
     let granted = Arc::new(Mutex::new(Vec::new()));
@@ -564,8 +585,8 @@ async fn a_selected_waiter_dropped_before_it_runs_wakes_the_next() {
 #[tokio::test(start_paused = true)]
 async fn a_grant_wakes_the_waiter_behind_for_the_permit_left() {
     let gate = Gate::new(2, unlimited());
-    let (_, one) = gate.choose(true, false).unwrap();
-    let (_, two) = gate.choose(true, false).unwrap();
+    let one = take(&gate, Work::Live).unwrap();
+    let two = take(&gate, Work::Live).unwrap();
     let mut first = Box::pin(gate.acquire(Work::Live, &[]));
     assert!(futures::poll!(first.as_mut()).is_pending());
     let granted = Arc::new(Mutex::new(Vec::new()));
@@ -600,7 +621,7 @@ async fn a_refusal_wakes_the_waiter_behind() {
     let budget = Arc::new(Budget::new(64 * KIB).with_index_share(2, 0.5));
     let _users = held(&budget, "users", 30);
     let gate = Gate::new(1, Arc::clone(&budget));
-    let (_, held_permit) = gate.choose(true, false).unwrap();
+    let held_permit = take(&gate, Work::Live).unwrap();
     let users_batch = [(index("users"), 8 * KIB)];
     let mut refused = Box::pin(gate.acquire(Work::Live, &users_batch));
     assert!(futures::poll!(refused.as_mut()).is_pending());
@@ -820,10 +841,68 @@ async fn with_no_waiter_an_add_moves_no_generation() {
     .await
     .expect("orders fits");
     drop((permit, parts));
-    let (_, held_permit) = gate.choose(true, false).unwrap();
+    let held_permit = take(&gate, Work::Live).unwrap();
     let mut dropped = Box::pin(gate.acquire(Work::Live, &[]));
     assert!(futures::poll!(dropped.as_mut()).is_pending());
     drop(dropped);
     drop(held_permit);
     adds_move_nothing(&budget);
+}
+
+/// The kind a pass with both kinds ready and nothing to reserve is granted.
+fn pass_both(gate: &Arc<Gate>) -> Option<(Work, Permit)> {
+    gate.pass(Some(Vec::new()), Some(Vec::new()))
+        .granted
+        .map(|(work, permit, _)| (work, permit))
+}
+
+/// G4 and G9 with no one in the lines: a pass is decided as joining at the
+/// front of empty lines would decide it: live first, every fourth contested
+/// grant to backfill, an uncontested grant moving no count.
+#[test]
+fn a_pass_alone_takes_live_first_but_every_fourth_contested_grant_is_backfill() {
+    let gate = Gate::new(1, unlimited());
+    let kinds: Vec<Work> = (0..8)
+        .map(|_| pass_both(&gate).map(|(work, _)| work).unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [Work::Live, Work::Live, Work::Live, Work::Backfill].repeat(2)
+    );
+    let alone = gate.pass(None, Some(Vec::new()));
+    assert!(matches!(alone.granted, Some((Work::Backfill, _, _))));
+    drop(alone);
+    assert_eq!(
+        pass_both(&gate).map(|(work, _)| work),
+        Some(Work::Live),
+        "the uncontested grant moved no count"
+    );
+}
+
+/// G5 and G9 with no one in the lines: the budget refuses the live batch
+/// whose turn it is, so the permit goes to the backfill batch in the same
+/// pass, and the count doesn't move (the live batch was not eligible).
+#[test]
+fn a_pass_alone_hands_the_permit_to_the_other_kind_when_its_turn_is_refused() {
+    let budget = Arc::new(Budget::new(64 * KIB));
+    let users = held(&budget, "users", 60);
+    let gate = Gate::new(1, Arc::clone(&budget));
+    let passed = gate.pass(
+        Some(vec![(index("users"), 16 * KIB)]),
+        Some(vec![(index("orders"), 8 * KIB)]),
+    );
+    assert_eq!(passed.refused.len(), 1);
+    assert_eq!(passed.refused[0].0, Work::Live);
+    let Some((Work::Backfill, permit, reserved)) = passed.granted else {
+        panic!("the backfill batch takes the permit");
+    };
+    drop((permit, reserved, users));
+    let kinds: Vec<Work> = (0..4)
+        .map(|_| pass_both(&gate).map(|(work, _)| work).unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [Work::Live, Work::Live, Work::Live, Work::Backfill],
+        "the refusal moved no count"
+    );
 }

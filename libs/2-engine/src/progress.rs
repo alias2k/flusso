@@ -162,6 +162,9 @@ pub struct Progress {
     pending: BTreeMap<IndexName, Mutex<Pending>>,
     /// How many ids wait, over every index.
     waiting: AtomicUsize,
+    /// How many ids wait on each index: what the reader's lead reads
+    /// without taking an index's lock.
+    waiting_on: BTreeMap<IndexName, AtomicUsize>,
     /// How many live changes have been read, over every engine run.
     read: AtomicU64,
     /// Called after every registration: a fence waiter may pass now.
@@ -242,6 +245,10 @@ impl Progress {
             .keys()
             .map(|lane| (lane.index.clone(), Mutex::new(Pending::default())))
             .collect();
+        let waiting_on = marks
+            .keys()
+            .map(|lane| (lane.index.clone(), AtomicUsize::new(0)))
+            .collect();
         Self {
             registry: Mutex::new(Registry {
                 lanes: marks
@@ -254,6 +261,7 @@ impl Progress {
             keys,
             pending,
             waiting: AtomicUsize::new(0),
+            waiting_on,
             read: AtomicU64::new(0),
             listener: OnceLock::new(),
         }
@@ -545,29 +553,53 @@ impl Progress {
     /// Returns how many ids were kept.
     pub fn mark(&self, ids: impl IntoIterator<Item = (DocumentId, Position)>) -> usize {
         let mut kept = 0;
-        let mut started = 0;
-        let mut current: Option<(&IndexName, MutexGuard<'_, Pending>)> = None;
+        let mut current: Option<(&IndexName, MutexGuard<'_, Pending>, usize)> = None;
         for (id, at) in ids {
             let same = current
                 .as_ref()
-                .is_some_and(|(index, _)| **index == id.index);
+                .is_some_and(|(index, _, _)| **index == id.index);
             if !same {
-                current = None;
+                if let Some((index, pending, started)) = current.take() {
+                    drop(pending);
+                    self.started_waiting(index, started);
+                }
                 if let Some((index, pending)) = self.pending.get_key_value(&id.index) {
-                    current = Some((index, lock(pending)));
+                    current = Some((index, lock(pending), 0));
                 }
             }
-            let Some((_, pending)) = current.as_mut() else {
+            let Some((_, pending, started)) = current.as_mut() else {
                 continue;
             };
             kept += 1;
             if pending.mark(id.key, at) {
-                started += 1;
+                *started += 1;
             }
         }
-        drop(current);
-        self.waiting.fetch_add(started, Ordering::Relaxed);
+        if let Some((index, pending, started)) = current {
+            drop(pending);
+            self.started_waiting(index, started);
+        }
         kept
+    }
+
+    fn started_waiting(&self, index: &IndexName, started: usize) {
+        if started == 0 {
+            return;
+        }
+        self.waiting.fetch_add(started, Ordering::Relaxed);
+        if let Some(waiting) = self.waiting_on.get(index) {
+            waiting.fetch_add(started, Ordering::Relaxed);
+        }
+    }
+
+    fn stopped_waiting(&self, index: &IndexName, stopped: usize) {
+        if stopped == 0 {
+            return;
+        }
+        self.waiting.fetch_sub(stopped, Ordering::Relaxed);
+        if let Some(waiting) = self.waiting_on.get(index) {
+            waiting.fetch_sub(stopped, Ordering::Relaxed);
+        }
     }
 
     /// Take up to `max` of `index`'s waiting ids for one build, oldest
@@ -579,8 +611,30 @@ impl Progress {
         max: usize,
         held: &dyn Fn(&RowKey) -> bool,
     ) -> Option<Taken> {
-        let taken = lock(self.pending.get(index)?).take(index, max, held)?;
-        self.waiting.fetch_sub(taken.ids.len(), Ordering::Relaxed);
+        self.take_from(index, max, None, held)
+    }
+
+    /// [`take`](Self::take) every waiting id of `index` marked at or before
+    /// `through`, and none marked after: a build of the runs through
+    /// `through` takes no newer run's document (ADR 0012 stage 8a, R4).
+    pub fn take_through(
+        &self,
+        index: &IndexName,
+        through: Position,
+        held: &dyn Fn(&RowKey) -> bool,
+    ) -> Option<Taken> {
+        self.take_from(index, usize::MAX, Some(through), held)
+    }
+
+    fn take_from(
+        &self,
+        index: &IndexName,
+        max: usize,
+        through: Option<Position>,
+        held: &dyn Fn(&RowKey) -> bool,
+    ) -> Option<Taken> {
+        let taken = lock(self.pending.get(index)?).take(index, max, through, held)?;
+        self.stopped_waiting(index, taken.ids.len());
         Some(taken)
     }
 
@@ -606,7 +660,10 @@ impl Progress {
     pub fn any_waiting_held(&self, held: Option<Holds<'_>>) -> bool {
         self.pending.iter().any(|(index, pending)| {
             let held = held.map(|held| move |key: &RowKey| held(index, key));
-            lock(pending).any_held(held.as_ref().map(|held| held as &dyn Fn(&RowKey) -> bool))
+            lock(pending).any_held(
+                held.as_ref().map(|held| held as &dyn Fn(&RowKey) -> bool),
+                None,
+            )
         })
     }
 
@@ -635,15 +692,22 @@ impl Progress {
                 self.close(&mut registry);
             }
         }
-        for pending in self.pending.values() {
+        for (index, pending) in &self.pending {
             let forgotten = lock(pending).forget();
-            self.waiting.fetch_sub(forgotten, Ordering::Relaxed);
+            self.stopped_waiting(index, forgotten);
         }
     }
 
     /// One more live change was read.
     pub fn change_read(&self) {
-        self.read.fetch_add(1, Ordering::Relaxed);
+        self.read_changes(1);
+    }
+
+    /// `changes` more live changes were read, their documents marked:
+    /// returns how many have been read in all, what a step through them
+    /// closes at ([`close_step_through`](Self::close_step_through)).
+    pub fn read_changes(&self, changes: u64) -> u64 {
+        self.read.fetch_add(changes, Ordering::Relaxed) + changes
     }
 
     /// How many live changes have been read, over every engine run.
@@ -659,8 +723,23 @@ impl Progress {
         self.close(&mut registry)
     }
 
+    /// Close the step of the changes read through the `read`th
+    /// ([`read_changes`](Self::read_changes)'s answer for the batch's last
+    /// run): a change read after it, whose documents may not be taken yet,
+    /// is left to a later step (ADR 0012 stage 8a, R4). Never closes before
+    /// the last step.
+    pub fn close_step_through(&self, read: u64) -> Step {
+        let mut registry = lock(&self.registry);
+        let read = read.max(registry.steps.read);
+        self.close_at(&mut registry, read)
+    }
+
     fn close(&self, registry: &mut Registry) -> Step {
         let read = self.read.load(Ordering::Relaxed);
+        self.close_at(registry, read)
+    }
+
+    fn close_at(&self, registry: &mut Registry, read: u64) -> Step {
         let step = Step {
             number: registry.steps.next,
             read,
@@ -734,6 +813,49 @@ impl Progress {
     /// How many ids wait to be taken, over every index.
     pub fn waiting(&self) -> usize {
         self.waiting.load(Ordering::Relaxed)
+    }
+
+    /// The most ids waiting on any one index: what the reader's lead per
+    /// index reads. One atomic load per index, no lock.
+    pub fn most_waiting(&self) -> usize {
+        self.waiting_on
+            .values()
+            .map(|waiting| waiting.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Each index's documents waiting that were marked at or before
+    /// `through`, how many, oldest waiting first: what a take through it
+    /// would reach. `None` when one of them is building or `held` says a
+    /// running build holds it (a take now would leave it behind). One lock
+    /// and at most one walk per index.
+    pub fn waiting_through(
+        &self,
+        through: Position,
+        held: Option<Holds<'_>>,
+    ) -> Option<Vec<(IndexName, usize)>> {
+        let mut waiting: Vec<(Position, IndexName, usize)> = Vec::new();
+        for (index, pending) in &self.pending {
+            let held = held.map(|held| move |key: &RowKey| held(index, key));
+            let pending = lock(pending);
+            let count = pending.scan(
+                through,
+                held.as_ref().map(|held| held as &dyn Fn(&RowKey) -> bool),
+            )?;
+            if count > 0
+                && let Some(oldest) = pending.oldest_waiting()
+            {
+                waiting.push((oldest, index.clone(), count));
+            }
+        }
+        waiting.sort();
+        Some(
+            waiting
+                .into_iter()
+                .map(|(_, index, count)| (index, count))
+                .collect(),
+        )
     }
 
     /// How many items routed to `lane` it hasn't landed.

@@ -187,6 +187,12 @@ struct Feed {
     bursts: Option<(usize, Duration)>,
     open: bool,
     confirmed: Mutex<Vec<Position>>,
+    /// When each change arrives, from the stream's opening, whenever it is
+    /// polled: a source's own clock, not a gap after each poll.
+    arrivals: Option<Arc<Vec<Duration>>>,
+    /// Hand the changes over through a tokio channel, whose receiving end
+    /// spends the task's cooperative budget, as a real source's does.
+    through_channel: bool,
 }
 
 impl Feed {
@@ -199,7 +205,16 @@ impl Feed {
             bursts: None,
             open: false,
             confirmed: Mutex::default(),
+            arrivals: None,
+            through_channel: false,
         }
+    }
+
+    /// Read through a tokio channel, which spends the reading task's
+    /// cooperative budget per change.
+    fn through_a_tokio_channel(mut self) -> Self {
+        self.through_channel = true;
+        self
     }
 
     fn with_delay(mut self, delay: Duration) -> Self {
@@ -214,6 +229,12 @@ impl Feed {
 
     fn with_gaps(mut self, seed: u64) -> Self {
         self.gaps = Some(Arc::new(Mutex::new(Rng::new(seed))));
+        self
+    }
+
+    /// Change `n` arrives `arrivals[n]` after the stream opens.
+    fn with_arrivals(mut self, arrivals: Vec<Duration>) -> Self {
+        self.arrivals = Some(Arc::new(arrivals));
         self
     }
 
@@ -245,10 +266,14 @@ impl ChangeCapture for Feed {
         let delay = self.delay;
         let bursts = self.bursts;
         let open = self.open;
+        let arrivals = self.arrivals.clone();
+        let opened = tokio::time::Instant::now();
         let from = self.from.load(Ordering::SeqCst);
-        Ok(Box::pin(futures::stream::unfold(from, move |next| {
+        let through_channel = self.through_channel;
+        let changes = Box::pin(futures::stream::unfold(from, move |next| {
             let db = Arc::clone(&db);
             let gaps = gaps.clone();
+            let arrivals = arrivals.clone();
             async move {
                 let Some(change) = db.log.get(next).copied() else {
                     if open {
@@ -258,6 +283,9 @@ impl ChangeCapture for Feed {
                 };
                 if let Some(delay) = delay {
                     tokio::time::sleep(delay).await;
+                }
+                if let Some(at) = arrivals.as_ref().and_then(|arrivals| arrivals.get(next)) {
+                    tokio::time::sleep_until(opened + *at).await;
                 }
                 if let Some((every, pause)) = bursts
                     && next % every == 0
@@ -273,6 +301,21 @@ impl ChangeCapture for Feed {
                 db.reveal(next + 1);
                 Some((Ok((Position::new(next as u64), change.event())), next + 1))
             }
+        }));
+        if !through_channel {
+            return Ok(changes);
+        }
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut changes = changes;
+            while let Some(change) = futures::StreamExt::next(&mut changes).await {
+                if sender.send(change).is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(Box::pin(futures::stream::poll_fn(move |cx| {
+            receiver.poll_recv(cx)
         })))
     }
 
@@ -306,6 +349,16 @@ struct Behaviour {
     keys_delay: Option<Duration>,
     /// Every upsert carries this many bytes of padding.
     padding: usize,
+    /// Every resolve takes this long.
+    resolve_delay: Option<Duration>,
+    /// Resolving this id requests this stop.
+    stop_on_resolve: Mutex<Option<(i64, Stop)>>,
+    /// Resolving one of these ids fails.
+    resolve_fails: Mutex<HashSet<i64>>,
+    /// Resolving the first id releases the builds holding the second.
+    release_on_resolve: Option<(i64, i64)>,
+    /// Resolving this id panics.
+    resolve_panics: Option<i64>,
 }
 
 /// Builds documents from the [`Database`], reading each version when the
@@ -491,8 +544,29 @@ impl DocumentBuilder for Builder {
         _before: Option<&RowImage>,
         _after: Option<&RowImage>,
     ) -> source::Result<Vec<DocumentId>> {
+        let id = id_of(key);
+        if let Some(delay) = self.behaviour.resolve_delay {
+            tokio::time::sleep(delay).await;
+        }
+        if let Some((at, stop)) = &*self.behaviour.stop_on_resolve.lock().unwrap()
+            && *at == id
+        {
+            stop.request();
+        }
+        assert!(
+            self.behaviour.resolve_panics != Some(id),
+            "resolving {id} panicked"
+        );
+        if let Some((at, held)) = self.behaviour.release_on_resolve
+            && at == id
+        {
+            self.release(held);
+        }
+        if self.behaviour.resolve_fails.lock().unwrap().contains(&id) {
+            return Err(SourceError::Connection(format!("resolving {id} failed")));
+        }
         Ok(vec![DocumentId {
-            index: self.index_of(id_of(key)),
+            index: self.index_of(id),
             key: key.clone(),
         }])
     }
@@ -1070,6 +1144,8 @@ impl Deployment {
         failed
     }
 }
+
+mod reading;
 
 fn instant(db: &Arc<Database>) -> Arc<Builder> {
     Builder::new(db, Behaviour::default())
@@ -1909,11 +1985,14 @@ async fn a_dropped_engine_aborts_its_running_builds() {
     sink.abort();
 }
 
-/// A batch that can take no more changes and waits for a build stops the
-/// reading, and a stop is still noticed then: the buffered batch is built
-/// and published once the build before it lands, and nothing more is read.
+/// The reader at its lead behind a held build stops the reading, and a stop
+/// is still noticed then: what it read is built and published, in `main`'s
+/// batches, once the build before it lands, and nothing more is read. Until
+/// ADR 0012 stage 8a's slice 6a a closed batch stopped the reading one change
+/// sooner (grants `[[0], [1]]`, two changes read); the lead at
+/// `max_changes = 1` is two documents waiting.
 #[tokio::test(start_paused = true)]
-async fn a_stop_while_a_closed_batch_waits_for_a_build_ends_the_run() {
+async fn a_stop_while_the_reader_waits_at_its_lead_ends_the_run() {
     let db = Database::new(0, (0..5).map(Change::upsert).collect());
     let builder = Builder::new(
         &db,
@@ -1939,8 +2018,9 @@ async fn a_stop_while_a_closed_batch_waits_for_a_build_ends_the_run() {
         let builder = Arc::clone(&builder);
         let db = Arc::clone(&db);
         tokio::spawn(async move {
-            // Change 1 is buffered behind the held build of 0, its batch full.
-            while db.visible.load(Ordering::SeqCst) < 2 {
+            // Changes 1 and 2 wait behind the held build of 0: the reader's
+            // lead at `max_changes = 1` (two documents waiting) is reached.
+            while db.visible.load(Ordering::SeqCst) < 3 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1956,7 +2036,7 @@ async fn a_stop_while_a_closed_batch_waits_for_a_build_ends_the_run() {
     sink.abort();
 
     assert!(result.is_ok(), "{result:?}");
-    assert_eq!(builder.grants(), vec![vec![0], vec![1]]);
+    assert_eq!(builder.grants(), vec![vec![0], vec![1], vec![2]]);
     assert_eq!(
         deployment
             .published
@@ -1965,12 +2045,13 @@ async fn a_stop_while_a_closed_batch_waits_for_a_build_ends_the_run() {
             .values()
             .cloned()
             .collect::<Vec<_>>(),
-        [vec![0, 1]]
+        [vec![0, 1, 2]],
+        "what the reader read is built and published, in `main`'s batches"
     );
     assert_eq!(
         db.visible.load(Ordering::SeqCst),
-        2,
-        "nothing is read after the stop"
+        3,
+        "nothing is read after the stop, nor past the lead before it"
     );
 }
 
@@ -2542,25 +2623,23 @@ async fn bursting_schedule(seed: u64, builds: usize) {
 /// One index's reindex behind a slow sink beside two steady live streams:
 /// `orders` (odd ids) backfills 2000 rows of about 8 KiB through a sink
 /// writing one item per 200 ms, while `users` and `orders` change every
-/// 2 ms, 200 distinct `orders` documents among them. Run twice on paused
-/// time: on the shared budget, and on this branch's budget with the share
-/// off (`main`'s budget rules, not `main`'s code). The requirement is that an
-/// index being reindexed keeps building its live documents no worse than
-/// there; the check that tells it: `orders`' last live document is built no
-/// later than with the share off, and before its backfill completes. With the
-/// share counting `orders`' backfill bytes, as before review round 2, it was
-/// built about a quarter later and fails. The test sink costs a fixed time
-/// per item whatever its size, so the two arms' other timings (the reading's
-/// end above all) are not a performance comparison and are not asserted.
+/// 2 ms, 200 distinct `orders` documents among them, on the shared budget.
+/// The requirement: an index being reindexed keeps building its live
+/// documents beside its backfill. Checked: `orders`' last live document is
+/// built before its backfill completes.
+///
+/// Until ADR 0012 stage 8a's slice 6a this also compared the run with one on
+/// the budget with the share off, as a stand-in for `main`'s rules. With the
+/// reader reading ahead, the test sink's fixed cost per item makes that
+/// order a matter of how items are cut: both arms land `orders`' live
+/// documents about three times sooner than before (21.2 s shared and 17.6 s
+/// share off, against 59.2 s and 66.8 s), and the bug the comparison was
+/// written for (the share counting the index's backfill bytes) passes it
+/// (17.2 s). The budget's own guards catch that bug
+/// (`an_index_backfilling_keeps_the_live_room_main_gave_it` among five).
 #[tokio::test(start_paused = true)]
 async fn an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building() {
     let (orders_live, seeded) = reindex_beside_live(Some(2), 8 * KIB).await;
-    let (unshared_orders_live, _) = reindex_beside_live(None, 8 * KIB).await;
-    assert!(
-        orders_live <= unshared_orders_live,
-        "orders' live documents were built by {orders_live:?}, by {unshared_orders_live:?} \
-         with the share off"
-    );
     assert!(
         orders_live < seeded,
         "orders' live documents kept building beside its backfill: built by {orders_live:?}, \
@@ -2990,6 +3069,9 @@ async fn a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting
         let recorder = Arc::clone(&recorder);
         tokio::spawn(async move {
             let mut seen = Vec::new();
+            // Half a second off the bursts: a sample on a burst's own
+            // instant races the reader's task for it.
+            tokio::time::sleep(Duration::from_millis(500)).await;
             for _ in 0..60 {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 seen.push((progress.changes_read(), progress.waiting_by_index()));

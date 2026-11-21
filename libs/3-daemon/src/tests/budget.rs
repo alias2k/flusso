@@ -79,3 +79,32 @@ async fn a_share_outside_zero_to_one_stops_the_start() {
         "{error}"
     );
 }
+
+/// ADR 0012 stage 8a, slice 6a: a reader's lead `run` would refuse stops
+/// `Daemon::start` too, naming where each value came from.
+#[tokio::test]
+async fn a_waiting_bound_below_one_index_stops_the_start() {
+    let mut config = two_indexes();
+    config.concurrency.max_waiting_per_index = Some(config::CountValue {
+        count: 300,
+        origin: config::Origin::Flag,
+    });
+    config.concurrency.max_waiting = Some(config::CountValue::from_file(200));
+    let (source, _end) = scripted(vec![]);
+    let sink: Arc<dyn sink::Sink> = Arc::new(super::RecordingSink::seeded());
+    let error = Daemon::new(
+        config,
+        backends_over(Arc::new(source), vec![(primary(), sink)]),
+    )
+    .start()
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains(
+            "max_waiting = 200 (set in flusso.toml's [concurrency] max_waiting) is below \
+             max_waiting_per_index = 300 (set by --max-waiting-per-index)"
+        ),
+        "{error}"
+    );
+}

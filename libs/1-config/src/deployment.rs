@@ -142,6 +142,35 @@ pub struct ConcurrencyConfig {
     /// indexes, with where it was set (the file, then `--index-budget-share`
     /// / `FLUSSO_INDEX_BUDGET_SHARE` laid over it by the binary).
     pub index_budget_share: Option<ShareValue>,
+    /// Documents one index may have waiting to be built before reading
+    /// stops, with where it was set (the file, then `--max-waiting-per-index`
+    /// / `FLUSSO_MAX_WAITING_PER_INDEX` laid over it by the binary).
+    pub max_waiting_per_index: Option<CountValue>,
+    /// Documents every index together may have waiting, and changes read
+    /// ahead, with where it was set (`--max-waiting` / `FLUSSO_MAX_WAITING`
+    /// over the file).
+    pub max_waiting: Option<CountValue>,
+}
+
+/// A `[concurrency]` count and where it was set. Taken as it is written: the
+/// daemon's judge (`daemon::max_waiting`) refuses 0, and a total below the
+/// per-index bound, naming this origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CountValue {
+    /// The count.
+    pub count: u64,
+    /// Where it was set.
+    pub origin: Origin,
+}
+
+impl CountValue {
+    /// `count`, set in `flusso.toml`.
+    pub fn from_file(count: u64) -> Self {
+        Self {
+            count,
+            origin: Origin::File,
+        }
+    }
 }
 
 /// The `[backoff]` knobs, in milliseconds, each with where it was set: the
@@ -176,8 +205,8 @@ impl BackoffValue {
 }
 
 /// Where a setting of the machine that runs flusso (`[backoff]`,
-/// `[concurrency] index_budget_share`) was set, so a refusal can say how to
-/// change it.
+/// `[concurrency] index_budget_share`, `max_waiting_per_index`,
+/// `max_waiting`) was set, so a refusal can say how to change it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// `flusso.toml`.
