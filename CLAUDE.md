@@ -627,25 +627,32 @@ is the one concrete piece.
   owns the live stream and the resolver, reads a run as `main`'s `drain_ready` did (cut at
   `max_changes`, `max_delay`, would-block, the stop), resolves it, **marks** its documents
   (`Progress::mark`), **counts** it (`Progress::read_changes`), then **hands it over** (`Run`, unbounded
-  channel), in that order. The **builder** (the engine's own task) owns everything else: it forms the
-  live batch from queued runs as `main` formed one (`ingest/live.rs`'s `Runs::candidate`: runs joined
-  within `max_changes` and the first run's deadline; full at `max_changes` or when the next run doesn't
-  fit), takes only documents marked through the batch's last change (`Progress::take_through`) and
+  channel, each change with the instant it was read), in that order. The **builder** (the engine's own
+  task) owns everything else: it cuts the live batch from the queued changes as `main` cut one
+  (`ingest/live.rs`'s `Runs::candidate`: every change read before `max(the first one's read, the last
+  live grant) + max_delay`, up to `max_changes`, cut inside a run where needed; full at `max_changes`;
+  no deadline in `settle`; checked against `main_batches`, a model of `main`'s loop, in
+  `ingest::tests::reading`), takes only documents marked through the batch's last change (`Progress::take_through`) and
   closes its step there (`close_step_through`), so no step claims a newer run's change. **The lead**:
   before each run the reader waits while one index has `max_waiting_per_index` documents waiting, all
   indexes `max_waiting`, or `max_waiting` changes are read and not granted (`engine::MaxWaiting`;
   `[concurrency]` keys, `--max-waiting-per-index`/`--max-waiting` + `FLUSSO_MAX_WAITING*`, never in the
-  lock, defaults `2 × max_changes` and `2 × builds × max_changes`, judged by `daemon::max_waiting` in
-  `check`/`build`/`run`/`Daemon::start`: 0 or a total below the per-index bound refused naming each
-  origin); the deferral cap of slice 4 is the same per-index number. **The stop**: the reader hands over
+  lock, defaults `2 × max_changes` and `2 × builds × max_changes`, an unset one following the other
+  as `[backoff]`'s pair does, judged by `daemon::max_waiting` in `check`/`build`/`run`/`Daemon::start`:
+  0, or both set with the total below the per-index bound, refused naming each origin); the deferral
+  cap of slice 4 is the same per-index number. **The stop**: the reader hands over
   its cut run, ends and returns the stream; the builder waits for that (the barrier), builds and
   publishes every run handed over, drains, then `close_live`. A reader error or panic ends the run
-  (the panic resumed in the builder), a builder error aborts the reader, and an engine restart forgets
-  the old marks before the new reader starts. `Idle` ends where the reader began the run that woke the
+  (the panic resumed in the builder), a builder error aborts the reader **and awaits it** before the
+  run returns (`ReaderTask::abort_and_wait`), and an engine restart forgets the old marks before the new
+  reader starts. A change read always counts read: the run being read is a guard that counts what wasn't
+  handed over when it drops, so `changes_captured` and the read count move together. `Idle` ends where the reader began the run that woke the
   builder; the run's `Resolve` is reported by the builder after it. Guards: `reader::tests` (marked
   and counted before the hand-over, the lead per index, in all and in changes, the stop in a run and at
   the lead, an error, a panic, the abort), `ingest::tests::reading` (batches as `main` cut them, a
-  trickle beside a running build, nothing committed ahead, confirmation pinned, the stop mid-run and
+  paced trickle and bursts behind slow builds against `main_batches`, a stop's batches of
+  `max_changes`, captured equal to read when a build error aborts the reader, a trickle beside a
+  running build, nothing committed ahead, confirmation pinned, the stop mid-run and
   far ahead, both errors, the idle/resolve split, a parked lane bounding pending memory), the CLI's
   `max_waiting` binary and `run::tests`, the daemon's `a_waiting_bound_below_one_index_stops_the_start`.
 
@@ -1014,10 +1021,11 @@ is the one concrete piece.
   budget and asks it itself (`Gate::new(permits, budget)`, `acquire(work, parts)`), only at the
   generation it chose the waiter at (`Budget::reserve_at`: moved since, it chooses again). The gate
   tests run on paused time, where a loop that never yields stops tokio's timeouts too, so
-  `.config/nextest.toml` ends each after 30 s in both profiles. **Every build waits in a line**
-  (slice 6a; `Gate::choose` is gone): in a grant pass the builder joins the line of each kind it has a
-  batch ready for and a slot to run (`Gate::join`), asks once (`Waiter::try_grant`), and leaves before
-  the pass ends, so G4's count and G6 hold for every build (guards: `builds::tests`'
+  `.config/nextest.toml` ends each after 30 s in both profiles, and every other engine unit test after
+  3 minutes. **Every build goes through the lines** (slice 6a; `Gate::choose` is gone): a grant pass
+  (`Gate::pass`) puts each batch ready, with a slot, in its kind's line, asks once and leaves, so G4's
+  count and G6 hold for every build; with no waiter in either line it is one hold of the gate's lock,
+  nothing joined or woken (guards: `gate::tests`' `a_pass_alone_*`, `builds::tests`'
   `no_build_takes_room_by_the_limit_ahead_of_a_waiter_the_limit_refused`,
   `the_builder_leaves_the_lines_after_each_grant_pass`). Key reads (a page or an index's bound) take
   one shared `tokio::sync::Semaphore` permit held inside the walk's stored fetch (K1). Guards:

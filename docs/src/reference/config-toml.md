@@ -66,8 +66,8 @@ Precedence is flag (`--batch-max-changes` / `--batch-max-delay-ms`), then `FLUSS
 | `builds` | integer 1–32 | `4` | Batches of documents the ingest engine builds at once. `1` builds one batch at a time. The source's document builder keeps `builds` + 2 Postgres connections. |
 | `max_built_mib` | integer 16–1,048,576 | `512` | MiB of built documents held until every sink acknowledges them. Past it the ingest engine builds nothing more until a sink acknowledges some. |
 | `index_budget_share` | number above 0, at most 1 | `0.5` | The share of `max_built_mib` one index's live documents may hold while two or more indexes run. With one index it does nothing. |
-| `max_waiting_per_index` | integer ≥ 1 | `2 × [batch] max_changes` (`512`) | Documents one index may have waiting to be built before flusso stops reading changes. See [Reading ahead](#reading-ahead). |
-| `max_waiting` | integer ≥ `max_waiting_per_index` | `2 × builds × [batch] max_changes` (`2048`) | Documents every index together may have waiting to be built, and changes read but not yet built, before flusso stops reading. |
+| `max_waiting_per_index` | integer ≥ 1 | `2 × [batch] max_changes` (`512`), or `max_waiting` when that is set lower | Documents one index may have waiting to be built before flusso stops reading changes. See [Reading ahead](#reading-ahead). |
+| `max_waiting` | integer ≥ `max_waiting_per_index` | `2 × builds × [batch] max_changes` (`2048`), or `max_waiting_per_index` when that is set higher | Documents every index together may have waiting to be built, and changes read but not yet built, before flusso stops reading. |
 
 Several writes run at once, but never two holding the same document, so each document's later version still lands after its earlier one. Live changes go before backfill pages, except every fourth write slot both could take, so a backfill can't stall live indexing and live traffic can't starve a backfill.
 
@@ -117,17 +117,18 @@ Reading pauses while any of these holds, and goes on as soon as a build takes do
 That bound is the **lead**. A run of changes read at once can pass it by its own size, once.
 
 - **The defaults follow the batch and the builds.** Unset, `max_waiting_per_index` is `2 × [batch] max_changes` and `max_waiting` is `2 × builds × [batch] max_changes`, with both as `run` resolves them, flags and variables included: `--batch-max-changes 100 --builds 2` gives 200 and 400.
+- **Setting one alone is always valid.** An unset `max_waiting` rises to a `max_waiting_per_index` set above its default, and an unset `max_waiting_per_index` falls to a `max_waiting` set below its default, as `[backoff]`'s `max_ms` follows `initial_ms`.
 - **A stop builds the lead.** A stop reads nothing more, then builds and writes everything already read before it exits ([Stopping](cli.md#stopping)). Under a backlog that's the lead plus the run being read, so a stop can take a little longer, within `--shutdown-timeout-secs`.
 - **Nothing is confirmed early.** A change read but not yet built is neither confirmed to the slot nor covered by a [fence](http.md#get-waitpositionposition), so what a restart reads again is unchanged.
 - **Memory.** A waiting document is an id and the position of its oldest change, not a built document, and isn't counted in `max_built_mib`. At the defaults that's noise; a lead in the hundreds of thousands keeps that many ids in memory.
 
 **When to change it.** The defaults leave room for two batches per index and two per build, so the next batch is read while one builds.
 
-- **Raise `max_waiting_per_index` to let one stuck index leave the others running longer.** An index held at its [share](#concurrency) stops reading for every index at this many documents waiting. The cost: that index has more to build once its sink recovers, and a stop meanwhile has more to build. Raise `max_waiting` with it; a total below the per-index bound is refused.
+- **Raise `max_waiting_per_index` to let one stuck index leave the others running longer.** An index held at its [share](#concurrency) stops reading for every index at this many documents waiting. The cost: that index has more to build once its sink recovers, and a stop meanwhile has more to build. Past 2,048 the total rises with it unless `max_waiting` is set too.
 - **Raise `max_waiting` when many indexes change at once.** At the defaults, four indexes with 512 documents waiting each reach it, and reading pauses for all of them.
 - **Lower both to bound a stop's work**, when builds are slow and `--shutdown-timeout-secs` is short. A smaller lead leaves less overlap between reading and building.
 
-**Refused at start**, by `check`, `build` and `run`, before anything connects. The message names where each value came from, the default included, and every way to set it. `check` and `build` judge the file; `run` lays its flags and variables over it first.
+**Refused at start**, by `check`, `build` and `run`, before anything connects. The message names where each value came from and every way to set it. `check` and `build` judge the file; `run` lays its flags and variables over it first.
 
 - **`0`**, for either key:
 
@@ -135,10 +136,10 @@ That bound is the **lead**. A run of changes read at once can pass it by its own
   [concurrency] max_waiting_per_index = 0 (set in flusso.toml's [concurrency] max_waiting_per_index) would stop the reading for good: it is how many documents may wait to be built before flusso stops reading changes. Set at least 1 with flusso.toml's [concurrency] max_waiting_per_index, --max-waiting-per-index or FLUSSO_MAX_WAITING_PER_INDEX; a flag wins over its variable, a variable over the file
   ```
 
-- **`max_waiting` below `max_waiting_per_index`**, a default total included. Raising the per-index bound past 2,048 alone does it:
+- **`max_waiting` below `max_waiting_per_index`, both set**, wherever each was set. A total from `FLUSSO_MAX_WAITING=1000` under a file's `max_waiting_per_index = 4096`:
 
   ```text
-  [concurrency] max_waiting = 2048 (the default, 2 × builds × [batch] max_changes) is below max_waiting_per_index = 4096 (set in flusso.toml's [concurrency] max_waiting_per_index): the documents every index together may have waiting can't be fewer than one index's. Raise max_waiting with flusso.toml's [concurrency] max_waiting, --max-waiting or FLUSSO_MAX_WAITING or lower max_waiting_per_index with flusso.toml's [concurrency] max_waiting_per_index, --max-waiting-per-index or FLUSSO_MAX_WAITING_PER_INDEX; a flag wins over its variable, a variable over the file
+  [concurrency] max_waiting = 1000 (set by FLUSSO_MAX_WAITING) is below max_waiting_per_index = 4096 (set in flusso.toml's [concurrency] max_waiting_per_index): the documents every index together may have waiting can't be fewer than one index's. Raise max_waiting with flusso.toml's [concurrency] max_waiting, --max-waiting or FLUSSO_MAX_WAITING or lower max_waiting_per_index with flusso.toml's [concurrency] max_waiting_per_index, --max-waiting-per-index or FLUSSO_MAX_WAITING_PER_INDEX, or leave one unset (it then follows the other); a flag wins over its variable, a variable over the file
   ```
 
 - **A flag or a variable that isn't a whole number**: `` `lots` is not a whole number of documents, at least 1 ``, after the variable's name when a variable set it (`FLUSSO_MAX_WAITING: …`).
