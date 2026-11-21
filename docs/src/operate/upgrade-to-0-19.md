@@ -13,10 +13,11 @@
 - **One index's live documents hold at most half of the memory budget** by default, with two or more indexes, so the others keep building beside one in a burst; `[concurrency] index_budget_share` sets the share: [Each index has a share of the memory budget](#each-index-has-a-share-of-the-memory-budget).
 - **flusso reads ahead of its builds**, up to `[concurrency] max_waiting_per_index` and `max_waiting`, and a stop builds everything it read before it exits: [Reading runs ahead of the builds](#reading-runs-ahead-of-the-builds).
 - **Batches are per index**, so a slow index no longer delays a fast one's writes; one build takes at most `[batch] max_changes` documents; a change can be searchable in one index before another, and the stdout sink's `seq` is ordered per index only: [Batches are per index](#batches-are-per-index).
+- **A stuck index stops only itself**: with two or more indexes, the others keep being read and written while its changes wait as documents to build, up to `[concurrency] max_pending_documents`; the slot, and so the WAL, still waits for it: [A stuck index stops only itself](#a-stuck-index-stops-only-itself).
 
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index**: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`**: [For code embedding the crates](#for-code-embedding-the-crates).
 
 ## One index's failure parks its own lane
 
@@ -42,7 +43,7 @@ A refused or blocked lane is **parked**: it writes its oldest batch again alone 
 
 **What to know.**
 
-- **Memory.** A parked lane keeps its built documents until they land, and the documents queued behind it hold part of the [memory budget](../reference/config-toml.md#concurrency). With two or more indexes it fills only that index's [share](#each-index-has-a-share-of-the-memory-budget), and the other indexes keep building. Parked long enough, its changes pile up past what may wait, reading stops, and the other indexes stall too, as with a stalled sink in 0.18.
+- **Memory.** A parked lane keeps its built documents until they land, and the documents queued behind it hold part of the [memory budget](../reference/config-toml.md#concurrency). With two or more indexes it fills only that index's [share](#each-index-has-a-share-of-the-memory-budget), and the other indexes keep building. Parked long enough, its later changes wait as documents to build while the others keep going, up to `max_pending_documents` ([A stuck index stops only itself](#a-stuck-index-stops-only-itself)).
 - **A stop with a parked lane exits `1`.** The stop probes every parked lane once more at once, so a block lifted meanwhile still drains. A lane that still can't land holds the drain until `--shutdown-timeout-secs`, and the exit message names it: `primary: 3 changes in flight, lane users blocked since … (blocked: index [users_…] blocked by: [FORBIDDEN/8/index write (api)];)`. The next start writes the parked batches again first.
 - **Not yet.** A refused lane writes the same batch on each probe; rebuilding it from the current row first is a later release, as are a reindex of one index without pausing the sink's other writes, and dropping a stalled index automatically ([#394](https://github.com/alias2k/flusso/issues/394)).
 
@@ -161,7 +162,7 @@ It applies to `/status` (`changes_in_flight`, and `sinks.<sink>.changes_committe
 | --- | --- | --- |
 | One index in a burst, its sink behind | fills the whole budget; the others wait | its live documents stop at its share; the others keep building |
 | The share | none | `[concurrency] index_budget_share`, default `0.5` (256 MiB of the default 512) |
-| A burst over many distinct documents of one index, or one index stuck behind a parked lane | reading pauses for every index once the budget is full | the others keep building until that index has [`max_waiting_per_index`](#reading-runs-ahead-of-the-builds) documents waiting to be built (512 by default), then reading pauses for every index |
+| A burst over many distinct documents of one index, or one index stuck behind a parked lane | reading pauses for every index once the budget is full | the others keep building and reading; that index's changes wait as documents to build, up to [`max_pending_documents`](#a-stuck-index-stops-only-itself) (a million by default), then reading pauses for every index |
 | One index | the whole budget | unchanged |
 
 The share has a flag and a variable, like the table's other keys:
@@ -176,7 +177,7 @@ The share has a flag and a variable, like the table's other keys:
 
 1. **Nothing, usually.** Bursts of one index stop holding up the others.
 2. **Raise `index_budget_share` towards `1`** if one index does nearly all the work and should keep using the whole budget, as in 0.18. `1` is the old behaviour.
-3. **Check the memory headroom.** An index holding no live documents always gets one live batch, even with the budget full, so one index stuck at its share leaves the others building until it has `max_waiting_per_index` distinct documents waiting (512 by default); raise it to keep them building longer. Plan for one live batch per index, plus one backfill batch, above `max_built_mib` ([sizing](../reference/config-toml.md#concurrency)); 0.18 needed one live batch in all.
+3. **Check the memory headroom.** An index holding no live documents always gets one live batch, even with the budget full, so one index stuck at its share leaves the others building ([how long](#a-stuck-index-stops-only-itself)). Plan for one live batch per index, plus one backfill batch, above `max_built_mib` ([sizing](../reference/config-toml.md#concurrency)); 0.18 needed one live batch in all.
 
 **What to know.**
 
@@ -193,7 +194,7 @@ The share has a flag and a variable, like the table's other keys:
 | `[concurrency] max_waiting` | `--max-waiting` | `FLUSSO_MAX_WAITING` | `2 × builds × [batch] max_changes` (2,048) |
 
 - **A stop builds what was read.** 0.18 landed the batch being built and the builds in flight. 0.19 builds and lands everything already read, up to the lead plus the run being read, so a stop under a backlog can take a little longer, within `--shutdown-timeout-secs`.
-- **An index held at its share** stops the reading for every index at `max_waiting_per_index` documents waiting ([above](#each-index-has-a-share-of-the-memory-budget)).
+- **An index held at its share, or behind a full lane, stops nobody at `max_waiting_per_index`**: it becomes exempt ([below](#a-stuck-index-stops-only-itself)).
 
 **Who is affected.** Nobody needs to change a deployment that sets neither key: the defaults follow `[batch] max_changes` and `builds`. A short `--shutdown-timeout-secs` with slow builds may now pass its deadline under a backlog.
 
@@ -201,7 +202,7 @@ The share has a flag and a variable, like the table's other keys:
 
 1. **Nothing, usually.**
 2. **Under a tight stop deadline**, give the stop more time, or lower both keys.
-3. **To leave the others running longer beside a stuck index**, raise `max_waiting_per_index`, and `max_waiting` with it.
+3. **To leave the others running longer beside a stuck index**, raise `max_pending_documents` ([below](#a-stuck-index-stops-only-itself)).
 
 **What to know.**
 
@@ -222,7 +223,7 @@ The share has a flag and a variable, like the table's other keys:
 
 - **After an ingest engine restart**, reading resumes from the change the furthest-behind index still needs, so an index that was ahead of another receives some changes again. Writes are idempotent: the index ends in the same state, but OpenSearch's `_version` of those documents moves.
 - **`/wait` is unchanged.** A wait naming an index passes once that index has the commit; one without `index` waits for every index, as before ([`/wait`](../reference/http.md#get-waitpositionposition)).
-- **Unchanged too:** an index held at its share still stops the reading for every index at `max_waiting_per_index` documents waiting, and backfills of several indexes still run one at a time.
+- **Unchanged too:** backfills of several indexes still run one at a time.
 
 **Who is affected.**
 
@@ -235,6 +236,37 @@ The share has a flag and a variable, like the table's other keys:
 1. **Read several indexes after a commit through a fence that names them all**, or none: `index=users&index=orders`, or the `flusso-query` client, which names a read's own indexes ([Read your own writes](read-your-writes.md)).
 2. **Track stdout progress per index**, from the last `seq` inclusive ([Order](../reference/sink-stdout.md#order)).
 3. **Nothing to configure for large fan-out.** `_bulk` requests stay at most `max_changes` documents of an index, and each part holds at most that many documents in memory.
+
+## A stuck index stops only itself
+
+**What changed.** In 0.18 a stuck index stopped every index once the memory budget filled. In 0.19, with two or more indexes, an index that is **held** (the budget refuses its live batch, or a batch of it waits on a full lane) and has `max_waiting_per_index` documents waiting becomes **exempt**. It stops pacing the reading: its changes are kept as documents to build, each once, and the other indexes keep being read, built and written. One new key bounds what the exempt indexes keep together ([A stuck index](../reference/config-toml.md#a-stuck-index)):
+
+| `flusso.toml` | Flag | Variable | Default |
+| --- | --- | --- | --- |
+| `[concurrency] max_pending_documents` | `--max-pending-documents` | `FLUSSO_MAX_PENDING_DOCUMENTS` | `1000000` |
+
+| | 0.18 | 0.19 |
+| --- | --- | --- |
+| One index's lane parked for hours, beside other indexes | every index stops once the budget fills | the others keep being read and written |
+| A `/wait` naming only the other indexes | times out once reading stops | answers |
+| The WAL the slot keeps | grows | grows, unchanged: the slot waits for the stuck index |
+| An index that is slow but keeps landing | paces ingest | paces the reading at `max_waiting_per_index` |
+| The exempt indexes reach `max_pending_documents` | — | reading stops for every index until some are built |
+| One index | — | unchanged |
+
+**Who is affected.** Deployments running two or more indexes, when one of them gets stuck: a parked lane, or an index whose sink stops acknowledging. A single index sees no change.
+
+**What to do.**
+
+1. **Nothing, usually.**
+2. **Keep alerting on the WAL.** The other indexes looking healthy doesn't mean the slot moves: watch `flusso_replication_slot_lag_bytes` and `pinned_by` as before ([When one index is stuck beside others](stalled-lane.md#when-one-index-is-stuck-beside-others)).
+3. **Plan memory for the backlog**: about 270 B a waiting document, 270–320 MB at the default. Lower `max_pending_documents` on a tight host ([sizing](../reference/config-toml.md#concurrency)).
+
+**What to know.**
+
+- **The log is the only sign yet.** A warning names the index when it becomes exempt, another says when reading stops at the cap. `/status` and the metrics have no per-index view of it.
+- **A stop builds the backlog too**, within `--shutdown-timeout-secs`. When it can't, flusso exits `1` naming each index left with documents read and not built (`orders: 1200 documents read and not built`), and the next start reads them again ([Stopping](../reference/cli.md#stopping)).
+- **Refused at start.** `check`, `build` and `run` refuse `0`, and a flag or variable that isn't a whole number, naming where the value came from. A value below `max_waiting_per_index` is accepted. Like the rest of `[concurrency]`, it is never written into `flusso.lock`. The designer's config form sets it.
 
 ## For code embedding the crates
 
@@ -255,6 +287,8 @@ The share has a flag and a variable, like the table's other keys:
 - **`engine::Budget` serves many reservers and is shared per index.** Removed: `fits`, `want_release` and `released`. New: `admit(work, parts)` answers an `engine::Admission` (`admitted`, `refused`, `generation`, `grants()`); `reserve(work, parts)` admits and reserves in one step, one `Reservation` per index, or `Err` with the refusal's generation; `released_since(generation)` waits for a release after it. `with_index_share(indexes, share)` caps one index's live bytes at `share` of the limit when `indexes` is 2 or more; `held_by`, `index_share`, `generation` and `Reservation::index` read the state. `try_reserve` stays, counted toward no index.
 - **`[concurrency] index_budget_share`** is `ConcurrencyConfig.index_budget_share: Option<config::ShareValue>` (`share`, `origin`), and `ConcurrencyConfig` no longer derives `Eq`. `daemon::index_budget_share(&Config)` resolves and checks it (`daemon::DEFAULT_INDEX_BUDGET_SHARE` is `0.5`), and `Daemon::start` fails on a share outside (0, 1]. `config::parse_index_budget_share` parses a flag's or a variable's value. New `Progress::waiting_by_index`.
 - **`[concurrency] max_waiting_per_index` and `max_waiting`** are `ConcurrencyConfig.max_waiting_per_index` and `max_waiting: Option<config::CountValue>` (`count`, `origin`): a struct literal of `ConcurrencyConfig` must set them. `daemon::max_waiting(&Config)` resolves and checks them into an `engine::MaxWaiting { per_index, total }` (re-exported by `daemon`; `MaxWaiting::derived(batch, builds)` gives the defaults), and `Daemon::start` fails on the refusals above. `IngestEngine::with_max_waiting` sets the lead, `max_waiting()` reads it. `config::parse_max_waiting` parses a flag's or a variable's value. New on `Progress`: `take_through`, `waiting_through`, `read_changes`, `most_waiting`, and for one index's builds `take_through_at_most` (a take capped at a number of documents), `waiting_of` (each index's count stopped at a limit, `most`), `waiting_on`, `newest_waiting` and `waits_through` (whether a document marked at or before a position still waits). New `engine::Holds`, what `waiting_through` and `waiting_of` take: a visitor offered the documents running builds hold, one at a time, until it answers `true`.
+- **`[concurrency] max_pending_documents`** is `ConcurrencyConfig.max_pending_documents: Option<config::CountValue>`: a struct literal of `ConcurrencyConfig` must set it. `daemon::max_pending_documents(&Config)` resolves and checks it (`engine::DEFAULT_MAX_PENDING_DOCUMENTS` is 1,000,000), and `Daemon::start` fails on `0`. `IngestEngine::with_max_pending_documents` sets it (at least 1); `config::parse_max_waiting` parses its flag or variable. New `EngineError::DocumentsLeft`: every builder returned with documents read and not built, named per index. New `daemon::Status::waiting_by_index`.
+- **Lane items are keyed per index.** New `stream::ItemKey`, and `stream::Batch` gains `key: Option<ItemKey>` (`None` on snapshot rows; a serialized item without it still reads). `Progress::published(lane, key, oldest, last)` takes the item's key, and `Progress::applied` and `Progress::searchable` take an `ItemKey` instead of a `Position`; the new `published_step` and `published_build` take it too. `Progress::next_key(index)` numbers an index's next item, the same on every lane of the index.
 - **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.
 
 ## Related
