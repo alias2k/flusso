@@ -174,10 +174,19 @@ impl IngestEngine {
     /// index alone), oldest waiting first, or `None` while a running build
     /// holds one of them: a take now would leave it behind, so the live
     /// batch waits, as `main`'s did.
+    ///
+    /// A builder of one index takes at most `max_changes` of them (O2), so
+    /// that is what its grant counts and reserves.
     fn waiting(&self, builds: &Builds, through: Position) -> Option<Vec<(IndexName, usize)>> {
         let held = |index: &IndexName, key: &source::RowKey| builds.holds(index, key);
         let held: Option<Holds<'_>> = builds.holds_some().then_some(&held);
-        self.progress.waiting_of(builds.index(), through, held)
+        let mut waiting = self.progress.waiting_of(builds.index(), through, held)?;
+        if builds.index().is_some() {
+            for (_, count) in &mut waiting {
+                *count = (*count).min(self.batch.max_changes);
+            }
+        }
+        Some(waiting)
     }
 
     /// While the builder folds (§3.9 I7), its standing candidate: the
