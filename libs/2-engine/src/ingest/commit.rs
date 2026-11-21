@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::task::Poll;
 
 use chrono::Utc;
 use futures::future::try_join_all;
@@ -90,7 +91,7 @@ impl IngestEngine {
                     }
                 }
                 None => {
-                    if !self.publish_ready(builds, lanes).await? {
+                    if !self.publish_ready(builds, lanes, Some(&mut *runs)).await? {
                         return Ok(());
                     }
                 }
@@ -126,7 +127,7 @@ impl IngestEngine {
     ) -> Result<()> {
         builds.woke(Wake::Settle);
         loop {
-            self.publish_ready(builds, lanes).await?;
+            self.publish_ready(builds, lanes, None).await?;
             let live = if builds.folding() {
                 builds
                     .index()
@@ -308,7 +309,19 @@ impl IngestEngine {
             builds.spare(self.batch.max_changes),
         );
         snapshot.batch.clear();
-        let marks = self.walk_marks(&ids).await;
+        let marks = {
+            let marks = self.walk_marks(&ids);
+            tokio::pin!(marks);
+            match futures::poll!(marks.as_mut()) {
+                Poll::Ready(marks) => marks,
+                Poll::Pending => {
+                    // A database read outside the builder's loop: no place
+                    // in a line while it can't ask (§3.9 §6).
+                    builds.leave_lines();
+                    marks.await
+                }
+            }
+        };
         let job = Job::Backfill {
             requested: snapshot.lanes_now(),
             marks,
@@ -372,50 +385,82 @@ impl IngestEngine {
     /// Publish every slot at the front that is ready, in order. Returns
     /// whether it published any. A failed build's slot returns its error,
     /// with nothing after it published.
-    async fn publish_ready(&self, builds: &mut Builds, lanes: &Lanes) -> Result<bool> {
+    ///
+    /// Each slot's publish is polled once before it is awaited: one that
+    /// pends is blocked on a full lane, so the builder leaves every line
+    /// (it can't ask while it waits) and, given its `runs`, is held and
+    /// folds (§3.9 §5, §6). Its builds' permits went back as they ended.
+    async fn publish_ready(
+        &self,
+        builds: &mut Builds,
+        lanes: &Lanes,
+        mut runs: Option<&mut Runs>,
+    ) -> Result<bool> {
         let mut published = false;
         while let Some((job, built, charges)) = builds.pop_ready() {
             published = true;
-            // Every lane's item of an index shares the index's one charge:
-            // its bytes come back when the last copy is dropped (every lane
-            // of the index acknowledged it, and no ledger can redeliver it).
-            let holds: BTreeMap<IndexName, Hold> = charges
-                .into_iter()
-                .map(|(index, charge)| (index, Hold::new(charge)))
-                .collect();
-            match (job, built) {
-                (Job::Complete(mut finished), _) => {
-                    let started = Instant::now();
-                    self.finish_snapshot(&mut finished, lanes).await?;
-                    self.observer.on_stage(
-                        StageTiming::new(Stage::Snapshot, started.elapsed()).work(Work::Backfill),
-                    );
-                }
-                (
-                    Job::Live {
-                        taken,
-                        position,
-                        changes,
-                        steps,
-                    },
-                    Some(built),
-                ) => {
-                    let granted = Granted {
-                        position,
-                        changes,
-                        steps,
-                    };
-                    self.publish_live(built, &taken, granted, &holds, lanes)
-                        .await?;
-                }
-                (Job::Backfill { requested, marks }, Some(built)) => {
-                    self.publish_backfill(built, &requested, &marks, &holds, lanes)
-                        .await?;
-                }
-                (_, None) => {}
+            let publishing = self.publish_slot(job, built, charges, lanes);
+            tokio::pin!(publishing);
+            if let Poll::Ready(result) = futures::poll!(publishing.as_mut()) {
+                result?;
+                continue;
             }
+            builds.leave_lines();
+            if let Some(runs) = runs.as_deref_mut() {
+                super::builder::enter_fold(runs, builds);
+            }
+            publishing.await?;
         }
         Ok(published)
+    }
+
+    /// Publish one slot: its live or snapshot batch, or its snapshot's end.
+    async fn publish_slot(
+        &self,
+        job: Job,
+        built: Option<Built>,
+        charges: super::builds::Charges,
+        lanes: &Lanes,
+    ) -> Result<()> {
+        // Every lane's item of an index shares the index's one charge: its
+        // bytes come back when the last copy is dropped (every lane of the
+        // index acknowledged it, and no ledger can redeliver it).
+        let holds: BTreeMap<IndexName, Hold> = charges
+            .into_iter()
+            .map(|(index, charge)| (index, Hold::new(charge)))
+            .collect();
+        match (job, built) {
+            (Job::Complete(mut finished), _) => {
+                let started = Instant::now();
+                self.finish_snapshot(&mut finished, lanes).await?;
+                self.observer.on_stage(
+                    StageTiming::new(Stage::Snapshot, started.elapsed()).work(Work::Backfill),
+                );
+            }
+            (
+                Job::Live {
+                    taken,
+                    position,
+                    changes,
+                    steps,
+                },
+                Some(built),
+            ) => {
+                let granted = Granted {
+                    position,
+                    changes,
+                    steps,
+                };
+                self.publish_live(built, &taken, granted, &holds, lanes)
+                    .await?;
+            }
+            (Job::Backfill { requested, marks }, Some(built)) => {
+                self.publish_backfill(built, &requested, &marks, &holds, lanes)
+                    .await?;
+            }
+            (_, None) => {}
+        }
+        Ok(())
     }
 
     /// A live batch to every lane with the batch's position, concurrently,

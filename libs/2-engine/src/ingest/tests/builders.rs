@@ -192,3 +192,129 @@ async fn a_held_index_rewriting_one_document_holds_no_bound_and_no_memory_per_ch
         );
     }
 }
+
+/// §3.9 §6: a builder blocked on a full lane holds no place in a line and
+/// no permit. `orders`' lane is parked (two items, every document refused
+/// under `stop`) and its builder blocks publishing; with two permits and a
+/// 10 ms build, `users`' changes are built and land at once. Holding a
+/// permit for a build that finished, or a waiter it can't ask with, the
+/// blocked builder would leave `users` waiting for as long as `orders` is
+/// parked.
+#[tokio::test(start_paused = true)]
+async fn a_builder_awaiting_outside_its_loop_holds_no_place_in_a_line() {
+    let log: Vec<Change> = (0..12)
+        .map(|n| Change::upsert(2 * n + 1))
+        .chain((0..4).map(|n| Change::upsert(2 * n)))
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            delay: Some(Duration::from_millis(10)),
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let stop = Stop::new();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_delay(Duration::from_millis(1)).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        2,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(2)
+            // The waiting caps would stop the reading behind the parked
+            // index (6b-2 lifts that): out of the way, so only the gate
+            // can hold `users` back.
+            .with_max_waiting(crate::MaxWaiting {
+                per_index: 100,
+                total: 100,
+            })
+            .with_stop(stop.clone())
+    });
+    let driver = {
+        let recorder = Arc::clone(&recorder);
+        async move {
+            until("users' changes land beside the parked orders", || {
+                let state = recorder.state();
+                [0, 2, 4, 6].iter().all(|id| state.contains_key(id))
+            })
+            .await;
+            recorder.refused_indexes.lock().unwrap().clear();
+        }
+    };
+    let mut driver = tokio::spawn(tokio::time::timeout(Duration::from_secs(10), driver));
+    let run = tokio::time::timeout(LIMIT, deployment.run_until_landed(&db, &stop, 0));
+    tokio::pin!(run);
+    tokio::select! {
+        ended = &mut driver => {
+            ended.unwrap().expect("users' changes landed within ten seconds");
+            run.await.expect("the run ends");
+        }
+        ran = &mut run => {
+            ran.expect("the run ends");
+            driver.await.unwrap().expect("users' changes landed within ten seconds");
+        }
+    }
+}
+
+/// §3.9 §5: a publish blocked on a full lane holds its builder like the
+/// budget does, so the builder folds. `orders` is parked at its lane's
+/// backstop (two items, every document refused) with no budget hold,
+/// rewriting one document beside `users`' bursts: folded, it queues no
+/// change and counts toward no bound, so the reading never stops (without
+/// the fold its queue holds the reader `max_waiting` changes in). Then
+/// `orders` is let through and everything converges.
+#[tokio::test(start_paused = true)]
+async fn an_index_parked_at_its_lane_backstop_folds() {
+    let log: Vec<Change> = (0..960)
+        .map(|n| {
+            if n % 16 == 0 {
+                Change::upsert(1001)
+            } else {
+                Change::upsert(2 * (n % 20))
+            }
+        })
+        .collect();
+    let total = log.len() as u64;
+    let db = Database::new(0, log);
+    let builder = Builder::two(&db, Behaviour::default());
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_bursts(16, Duration::from_secs(1)),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        2,
+    )
+    .ingest(|ingest| ingest.with_batch(batch(4)).with_builds(2));
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(70)).await;
+            let read = progress.changes_read();
+            recorder.refused_indexes.lock().unwrap().clear();
+            read
+        })
+    };
+    deployment.run_to_end(0).await;
+    assert_eq!(
+        watcher.await.unwrap(),
+        total,
+        "the reading stopped behind the parked orders"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}

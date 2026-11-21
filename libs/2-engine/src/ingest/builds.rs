@@ -211,10 +211,11 @@ pub(super) struct Builds {
     live_running: Vec<u64>,
     /// The permits every build holds while it runs (ADR 0012 §5).
     gate: Arc<Gate>,
-    /// The permit the last choice took, for the build it granted.
+    /// The permit the last choice took, for the build it granted: the
+    /// build holds it while it runs and drops it as it ends, on its own
+    /// task, so a builder blocked publishing holds none for a finished
+    /// build (§3.9 §6).
     granted: Option<Permit>,
-    /// Each running build's permit, by slot number.
-    permits: Vec<(u64, Permit)>,
     /// A build failed: nothing more is granted.
     halted: bool,
     spare: Vec<Vec<DocumentId>>,
@@ -310,7 +311,6 @@ impl Builds {
                     .unwrap_or_else(|| Arc::new(Budget::unlimited())),
             ),
             granted: None,
-            permits: Vec::new(),
             halted: false,
             spare: Vec::new(),
             budget,
@@ -335,6 +335,11 @@ impl Builds {
     pub(super) fn beside_others(mut self, several: bool) -> Self {
         self.several = several;
         self
+    }
+
+    /// Whether other builders ask the gate beside it.
+    pub(super) fn several(&self) -> bool {
+        self.several
     }
 
     /// Whether it waits in a line of the gate.
@@ -699,9 +704,7 @@ impl Builds {
         halts: &(dyn Fn(&Built) -> bool + Sync),
     ) {
         let seq = self.front + self.slots.len() as u64;
-        if let Some(permit) = self.granted.take() {
-            self.permits.push((seq, permit));
-        }
+        let permit = self.granted.take();
         let live = matches!(job, Job::Live { .. });
         let work = if live { Work::Live } else { Work::Backfill };
         {
@@ -737,6 +740,7 @@ impl Builds {
             let started = Instant::now();
             let documents = documents.build_many(&ids).await.map_err(EngineError::from);
             let took = started.elapsed();
+            drop(permit);
             // Measured here, on the build's own task when it was spawned.
             let mut bytes: BTreeMap<IndexName, usize> = BTreeMap::new();
             if let (Ok(documents), true) = (&documents, measure) {
@@ -794,9 +798,6 @@ impl Builds {
         }
         if let Some(at) = self.spawned.iter().position(|(spawned, _)| *spawned == seq) {
             self.spawned.swap_remove(at);
-        }
-        if let Some(at) = self.permits.iter().position(|(held, _)| *held == seq) {
-            self.permits.swap_remove(at);
         }
         let Some(slot) = seq
             .checked_sub(self.front)
@@ -863,7 +864,6 @@ impl Builds {
     pub(super) async fn abandon(&mut self) {
         self.halted = true;
         while self.flights.next().await.is_some() {}
-        self.permits.clear();
         self.holding.clear();
         self.slots.clear();
     }

@@ -314,9 +314,7 @@ impl IngestEngine {
             return;
         };
         if !builds.folding() && builds.refused() == Some(Work::Live) {
-            runs.clear();
-            builds.set_folding(true);
-            runs.lead().fold(runs.slot(), true);
+            enter_fold(runs, builds);
         } else if builds.folding() && self.progress.waiting_on(index) == 0 {
             builds.set_folding(false);
             runs.lead().fold(runs.slot(), false);
@@ -368,6 +366,18 @@ impl IngestEngine {
         );
         Ok(snapshot)
     }
+}
+
+/// Enter the fold (§3.9 I7): drop the queued slices (their documents stay
+/// waiting; the backlog takes them) and have the reader hand the builder
+/// nothing. A builder alone, or of every index, never folds.
+pub(super) fn enter_fold(runs: &mut Runs, builds: &mut Builds) {
+    if !builds.several() || builds.index().is_none() || builds.folding() {
+        return;
+    }
+    runs.clear();
+    builds.set_folding(true);
+    runs.lead().fold(runs.slot(), true);
 }
 
 /// Whether every sink with a lane asked (`main`'s rule: requests come one per
