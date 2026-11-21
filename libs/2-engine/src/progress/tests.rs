@@ -1508,6 +1508,42 @@ mod restart {
         );
     }
 
+    /// 6b-1c: a builder registers only its own index's lanes, so a quiet
+    /// index's lanes may never get a step of their own after a restart. A
+    /// step closed by another index's builder lifts their cap while their
+    /// index has nothing waiting or building, so they catch up.
+    #[test]
+    fn after_a_restart_a_quiet_indexs_lanes_catch_up_with_no_step_of_their_own() {
+        let users = lane("users", "a");
+        let orders = lane("orders", "a");
+        let progress = Progress::new([users.clone(), orders.clone()]);
+        mark(&progress, "users", 1, 1);
+        read_through(&progress, 1);
+        progress.forget_all();
+        mark(&progress, "users", 1, 2);
+        read_through(&progress, 2);
+        let taken = progress
+            .take(&users.index, usize::MAX, &nothing_held)
+            .unwrap();
+        let steps = progress.close_steps([(users.index.clone(), taken.frontier)]);
+        let key = progress.next_key(&users.index).unwrap();
+        progress.published_build(
+            &users,
+            key,
+            taken.oldest,
+            p(2),
+            taken.token,
+            steps[&users.index],
+        );
+        progress.release(&users.index, taken.token);
+        progress.applied(&users, key);
+        assert_eq!(
+            progress.committed(&name("a")),
+            2,
+            "orders had nothing for either read: its lane caught up once users' step closed"
+        );
+    }
+
     /// The intermediate count: an ended run's unbuilt read counts no sooner
     /// than the new run's first live grant, through the replay's marks.
     #[test]

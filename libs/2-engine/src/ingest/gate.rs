@@ -71,6 +71,13 @@ use kernel::IndexName;
 use crate::budget::{Budget, Refusal, Reservation};
 use crate::observer::Work;
 
+// How many waiters this thread's gates took in, for a test that pins one
+// builder to G9's pass (it never joins a line).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static JOINS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// How many of every kind of contested grant go to backfill.
 const BACKFILL_EVERY: u64 = 4;
 
@@ -548,6 +555,8 @@ impl Gate {
     /// budget when offered a permit (G2). The waiter watches the budget until
     /// it leaves the line, granted or dropped (G3, G8).
     pub(crate) fn join(self: &Arc<Self>, work: Work, parts: Vec<(IndexName, usize)>) -> Waiter {
+        #[cfg(test)]
+        JOINS.with(|joins| joins.set(joins.get() + 1));
         let id = {
             let mut state = self.state();
             let id = state.next_id;
