@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-design-v0.18.0...flusso-design-v0.19.0) - 2026-11-21
+
+### Added
+
+- *(cli)* [concurrency] max_waiting_per_index and max_waiting, with flags and FLUSSO_* variables
+- *(engine)* share the memory budget per index, for many reservers
+- *(config)* a [backoff] table sets the engines' retry schedule
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-design-v0.17.0...flusso-design-v0.18.0) - 2026-11-19
 
 ### Added

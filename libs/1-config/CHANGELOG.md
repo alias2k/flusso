@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-config-v0.18.0...flusso-config-v0.19.0) - 2026-11-21
+
+### Added
+
+- *(cli)* [concurrency] max_waiting_per_index and max_waiting, with flags and FLUSSO_* variables
+- *(engine)* share the memory budget per index, for many reservers
+- *(config)* a [backoff] table sets the engines' retry schedule
+
+### Fixed
+
+- *(cli)* an unset max_waiting rises to max_waiting_per_index, and the other way round
+- *(engine)* the share bounds an index's live bytes, and nothing per index passes the limit
+- *(cli)* one judge for [backoff], and an unset cap rises with the first wait
+
+### Other
+
+- *(config)* regenerate the editor schema for the [backoff] doc comments
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-config-v0.17.0...flusso-config-v0.18.0) - 2026-11-19
 
 ### Added

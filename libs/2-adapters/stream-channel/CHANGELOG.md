@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-stream-channel-v0.18.0...flusso-stream-channel-v0.19.0) - 2026-11-21
+
+### Fixed
+
+- *(engine)* a backfill whose target was created anew no longer seeds it
+
+### Other
+
+- *(engine)* drop the change counts nothing reads
+- *(engine)* [**breaking**] key lane items per index, not by their position
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-stream-channel-v0.17.0...flusso-stream-channel-v0.18.0) - 2026-11-19
 
 ### Added
