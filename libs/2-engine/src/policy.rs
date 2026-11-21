@@ -54,6 +54,38 @@ impl Default for BatchPolicy {
     }
 }
 
+/// How far the ingest engine's reader may read ahead of its builds (ADR 0012
+/// stage 8a, R2): before reading a run it waits while one index has
+/// `per_index` documents waiting to be built, every index together has
+/// `total`, or `total` changes are read and not yet in a granted batch.
+/// What a stop builds is bounded by it too. The deferral cap of an index the
+/// budget leaves out is `per_index`.
+///
+/// ```
+/// use engine::{BatchPolicy, MaxWaiting};
+///
+/// let derived = MaxWaiting::derived(BatchPolicy::default(), 4);
+/// assert_eq!(derived, MaxWaiting { per_index: 512, total: 2048 });
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaxWaiting {
+    /// Documents waiting on one index.
+    pub per_index: usize,
+    /// Documents waiting on every index together, and changes read ahead.
+    pub total: usize,
+}
+
+impl MaxWaiting {
+    /// The defaults: two batches per index, two per build in all.
+    pub fn derived(batch: BatchPolicy, builds: usize) -> Self {
+        let per_index = batch.max_changes.max(1).saturating_mul(2);
+        Self {
+            per_index,
+            total: per_index.saturating_mul(builds.max(1)),
+        }
+    }
+}
+
 /// How long the engines wait before trying again: a failed engine's restart,
 /// a parked lane's probe, a re-staged lane's next staging. The first wait is
 /// `initial`, each next one doubles, up to `max`; equal values wait a constant

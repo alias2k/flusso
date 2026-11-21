@@ -1303,9 +1303,13 @@ async fn reports_lifecycle_and_progress_to_the_observer() {
     harness.ingest = harness.ingest.with_observer(Arc::clone(&observer_dyn));
     let harness = harness.map_sinks(move |engine| engine.with_observer(Arc::clone(&observer_dyn)));
     harness.run(Continuity::Resumed).await;
-    let events = observer.events.lock().unwrap();
+    // The confirm tick's first tick is immediate: it may close an idle wait
+    // of its own before the reader, on its own task, hands the first run
+    // over. Adjacent idle waits are one wait here.
+    let mut events = observer.events.lock().unwrap().clone();
+    events.dedup();
     assert_eq!(
-        *events,
+        events,
         [
             "startup stage primary",
             "sink started primary",

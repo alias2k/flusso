@@ -1,143 +1,111 @@
-//! The live side of a batch: buffering ready changes, resolving them, and
-//! the batch they fill.
+//! The builder's side of live changes: the runs the reader handed over,
+//! formed into batches as `main` formed them (ADR 0012 stage 8a, R3).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 
-use futures::{FutureExt, StreamExt};
 use kernel::Position;
-use source::cdc::{ChangeEvent, LiveChange};
 use source::document::DocumentId;
-use tokio::time::Instant;
+use tokio::time::Duration;
 
-use crate::error::Result;
-use crate::stop::Stop;
+use super::reader::{Lead, Run};
 
-use super::{IngestEngine, LiveStream};
-
-impl IngestEngine {
-    /// Buffer every change the live stream has ready *right now*, stopping at
-    /// a full batch, the batch's deadline, or the moment the stream would
-    /// block. Returns whether the stream ended. The caller commits on return
-    /// either way: a change on a quiet stream has nothing to batch with, so
-    /// waiting out `max_delay` would only add latency, while a burst keeps the
-    /// stream ready and fills the batch — for at most `max_delay`.
-    pub(super) async fn drain_ready(
-        &self,
-        live: &mut LiveStream,
-        pending: &mut LiveRun,
-    ) -> Result<bool> {
-        while pending.is_open() && !self.stop.is_requested() {
-            match live.next().now_or_never() {
-                None => return Ok(false),
-                Some(None) => return Ok(true),
-                Some(Some(Err(error))) => return Err(error.into()),
-                Some(Some(Ok((position, event)))) => {
-                    self.buffer_live(pending, position, event).await?;
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    /// Resolve one live change into the run: the documents it touches, each
-    /// with its position, and the run's position.
-    pub(super) async fn buffer_live(
-        &self,
-        pending: &mut LiveRun,
-        position: Position,
-        event: ChangeEvent,
-    ) -> Result<()> {
-        self.observer.on_change_captured();
-        self.progress.change_read();
-        let affected = self
-            .resolver
-            .resolve(event.table(), event.key(), event.before(), event.after())
-            .await?;
-        tracing::trace!(documents = affected.len(), "change resolved to documents");
-        pending
-            .marks
-            .extend(affected.into_iter().map(|id| (id, position)));
-        pending.count += 1;
-        pending.position = Some(position);
-        if pending.deadline.is_none() {
-            pending.deadline = Some(Instant::now() + self.batch.max_delay);
-        }
-        Ok(())
-    }
-}
-
-/// What the live arm of the loop got.
-pub(super) enum Next {
-    /// The stop was requested first; nothing was read.
-    Stopped,
-    Change(Option<source::Result<LiveChange>>),
-}
-
-/// The next live change, unless the stop is requested first: checked before
-/// the stream on every poll, so a stop is never raced by a ready change. The
-/// check is an atomic load; the stop's waker is registered only when the
-/// stream would wait, so a busy stream pays nothing more.
-pub(super) async fn next_live(live: &mut LiveStream, stop: &Stop) -> Next {
-    let notified = stop.notified();
-    tokio::pin!(notified);
-    std::future::poll_fn(|cx| {
-        if stop.is_requested() {
-            return std::task::Poll::Ready(Next::Stopped);
-        }
-        if let std::task::Poll::Ready(change) = live.poll_next_unpin(cx) {
-            return std::task::Poll::Ready(Next::Change(change));
-        }
-        match notified.as_mut().poll(cx) {
-            std::task::Poll::Ready(()) => std::task::Poll::Ready(Next::Stopped),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    })
-    .await
-}
-
-/// The live changes read since the last grant: the documents they touch,
-/// each with the change's position (marked pending on their indexes when the
-/// next live build is granted, which deduplicates them), how many changes,
-/// the run's last position and its deadline. A run cut at `max_changes`
-/// changes or its deadline stops the reading until a build takes it, as one
-/// batch did.
+/// The runs handed over and not yet granted, oldest first, and the position
+/// a grant kept for documents the budget left waiting.
 #[derive(Debug)]
-pub(super) struct LiveRun {
-    pub(super) marks: Vec<(DocumentId, Position)>,
-    pub(super) count: usize,
-    pub(super) position: Option<Position>,
-    pub(super) deadline: Option<Instant>,
-    capacity: usize,
+pub(super) struct Runs {
+    queue: VecDeque<Run>,
+    /// The last grant's candidate, kept while the budget leaves some of its
+    /// documents waiting: a later grant takes them even if no run comes.
+    kept: Option<Candidate>,
+    max_changes: usize,
+    max_delay: Duration,
+    lead: Arc<Lead>,
 }
 
-impl LiveRun {
-    pub(super) fn new(capacity: usize) -> Self {
+/// The live batch a grant would take: through which change, how many
+/// changes it settles, and how many queued runs it covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Candidate {
+    /// Its newest change: the take reaches no document marked after it.
+    pub(super) position: Position,
+    /// How many changes had been read through it: its step closes there.
+    pub(super) read: u64,
+    /// The changes of its runs.
+    pub(super) changes: usize,
+    runs: usize,
+    /// It can't grow: `max_changes` changes, or the next run doesn't fit.
+    pub(super) full: bool,
+}
+
+impl Runs {
+    pub(super) fn new(max_changes: usize, max_delay: Duration, lead: Arc<Lead>) -> Self {
         Self {
-            marks: Vec::with_capacity(capacity),
-            count: 0,
-            position: None,
-            deadline: None,
-            capacity,
+            queue: VecDeque::new(),
+            kept: None,
+            max_changes: max_changes.max(1),
+            max_delay,
+            lead,
         }
     }
 
-    pub(super) fn is_full(&self) -> bool {
-        self.count >= self.capacity
+    pub(super) fn push(&mut self, run: Run) {
+        self.queue.push_back(run);
     }
 
-    /// Still accepting changes: neither full nor past its deadline.
-    pub(super) fn is_open(&self) -> bool {
-        !self.is_full()
-            && self
-                .deadline
-                .is_none_or(|deadline| Instant::now() < deadline)
+    /// The changes handed over and not yet granted.
+    pub(super) fn changes(&self) -> usize {
+        self.queue.iter().map(|run| run.changes).sum()
     }
 
-    pub(super) fn clear(&mut self) {
-        self.marks.clear();
-        self.count = 0;
-        self.position = None;
-        self.deadline = None;
+    /// The batch a grant would take now: the oldest run, joined by each
+    /// next run while the changes stay within `max_changes` and the run's
+    /// first change arrived before the batch's deadline (its first run's
+    /// first change plus `max_delay`); or, with no run queued, what the last
+    /// grant kept for the budget's leftovers.
+    pub(super) fn candidate(&self) -> Option<Candidate> {
+        let Some(first) = self.queue.front() else {
+            return self.kept.map(|kept| Candidate {
+                changes: 0,
+                runs: 0,
+                full: false,
+                ..kept
+            });
+        };
+        let deadline = first.started + self.max_delay;
+        let mut candidate = Candidate {
+            position: first.position,
+            read: first.read,
+            changes: first.changes,
+            runs: 1,
+            full: first.changes >= self.max_changes,
+        };
+        for run in self.queue.iter().skip(1) {
+            if candidate.full || run.started >= deadline {
+                break;
+            }
+            if candidate.changes + run.changes > self.max_changes {
+                candidate.full = true;
+                break;
+            }
+            candidate.changes += run.changes;
+            candidate.position = run.position;
+            candidate.read = run.read;
+            candidate.runs += 1;
+            candidate.full = candidate.changes >= self.max_changes;
+        }
+        Some(candidate)
+    }
+
+    /// `candidate` was granted and its documents taken: its runs leave the
+    /// queue, the reader may read on, and when the budget left some of its
+    /// documents `waiting`, it is kept for them.
+    pub(super) fn granted(&mut self, candidate: Candidate, waiting: bool) {
+        for _ in 0..candidate.runs {
+            self.queue.pop_front();
+        }
+        self.kept = waiting.then_some(candidate);
+        self.lead.granted(candidate.read);
     }
 }
 

@@ -50,7 +50,7 @@ use source::document::{Document, DocumentBuilder, DocumentId};
 use tokio::task::AbortHandle;
 use tokio::time::{Duration, Instant};
 
-use super::gate::{Gate, Permit};
+use super::gate::{Asked, Gate, Permit, Waiter};
 use super::snapshot::Snapshot;
 use crate::budget::{Budget, Charge, Reservation, document_bytes};
 use crate::error::{EngineError, Result};
@@ -354,6 +354,15 @@ impl Builds {
         self.refused_generation
     }
 
+    /// What a waiter for `documents` of `work` reserves: each index's
+    /// estimate, or nothing when no budget counts them.
+    fn reserving(&self, work: Work, documents: &[(IndexName, usize)]) -> Vec<(IndexName, usize)> {
+        if self.budget.is_none() {
+            return Vec::new();
+        }
+        self.parts(work, documents)
+    }
+
     /// Each index's estimate for `documents` documents of `work`.
     fn parts(&self, work: Work, documents: &[(IndexName, usize)]) -> Vec<(IndexName, usize)> {
         documents
@@ -404,23 +413,30 @@ impl Builds {
         }
     }
 
-    /// Reserve what the gate just granted: `documents` of `work`, per index.
-    /// Decided again under the budget's lock, so a reserver elsewhere taking
-    /// the room meanwhile only makes this a refusal. `false` when refused.
-    fn reserve(&mut self, work: Work, documents: &[(IndexName, usize)]) -> bool {
-        let Some(budget) = self.budget.clone() else {
-            return true;
-        };
-        match budget.reserve(work, &self.parts(work, documents)) {
-            Ok(reservations) => {
-                self.reserved = reservations;
-                true
-            }
-            Err(generation) => {
-                self.refuse(work, generation);
-                false
+    /// Ask the gate once for each waiter joined in this grant pass (the
+    /// live one again after the backfill one, should a refusal of the
+    /// backfill batch have moved the offer on to it), keeping the permit and
+    /// the reservation of the first granted. Every refusal is recorded as a
+    /// hold. The waiters not granted leave their lines when the caller drops
+    /// them, at the end of the pass (ADR 0012 stage 8a, R5).
+    fn ask(&mut self, live: &mut Option<Waiter>, backfill: &mut Option<Waiter>) -> Option<Work> {
+        for work in [Work::Live, Work::Backfill, Work::Live] {
+            let waiter = match work {
+                Work::Live => live.as_mut(),
+                Work::Backfill => backfill.as_mut(),
+            };
+            let Some(waiter) = waiter else { continue };
+            match waiter.try_grant() {
+                Asked::Granted(permit, reserved) => {
+                    self.granted = Some(permit);
+                    self.reserved = reserved;
+                    return Some(work);
+                }
+                Asked::Refused(refusal) => self.refuse(work, refusal.generation),
+                Asked::NotNow(_) => {}
             }
         }
+        None
     }
 
     /// Builds running on their own tasks.
@@ -488,20 +504,22 @@ impl Builds {
             (!self.holds_any(ids) && self.affordable(Work::Backfill, &documents).is_some())
                 .then_some(documents)
         });
-        let (work, permit) = self.gate.choose(live.is_some(), backfill.is_some())?;
-        let granted = match (work, live, backfill) {
-            (Work::Live, Some((live, taken)), _) => self
-                .reserve(Work::Live, &taken)
-                .then(|| Grant::Live(live, taken.into_iter().map(|(index, _)| index).collect())),
-            (Work::Backfill, _, Some(documents)) => self
-                .reserve(Work::Backfill, &documents)
-                .then_some(Grant::Backfill),
-            _ => None,
-        };
-        if granted.is_some() {
-            self.granted = Some(permit);
+        let mut live_waiter = live.as_ref().map(|(_, taken)| {
+            let parts = self.reserving(Work::Live, taken);
+            self.gate.join(Work::Live, parts)
+        });
+        let mut backfill_waiter = backfill.as_ref().map(|documents| {
+            let parts = self.reserving(Work::Backfill, documents);
+            self.gate.join(Work::Backfill, parts)
+        });
+        match (self.ask(&mut live_waiter, &mut backfill_waiter)?, live) {
+            (Work::Live, Some((live, taken))) => Some(Grant::Live(
+                live,
+                taken.into_iter().map(|(index, _)| index).collect(),
+            )),
+            (Work::Backfill, _) => Some(Grant::Backfill),
+            (Work::Live, None) => None,
         }
-        granted
     }
 
     /// Which of the live batch's `documents` (per index, oldest waiting
@@ -516,11 +534,11 @@ impl Builds {
             return None;
         }
         let taken = self.live_part(documents, false)?;
-        let (_, permit) = self.gate.choose(true, false)?;
-        if !self.reserve(Work::Live, &taken) {
-            return None;
-        }
-        self.granted = Some(permit);
+        let mut live = Some(
+            self.gate
+                .join(Work::Live, self.reserving(Work::Live, &taken)),
+        );
+        self.ask(&mut live, &mut None)?;
         Some(taken.into_iter().map(|(index, _)| index).collect())
     }
 
@@ -900,6 +918,80 @@ mod tests {
             [Duration::from_secs(2), Duration::from_secs(5)],
             "each run's wait, not the hour between them"
         );
+    }
+
+    fn index(name: &str) -> IndexName {
+        IndexName::try_new(name).unwrap()
+    }
+
+    /// `kib` of live documents of `name`, settled.
+    fn held(budget: &Arc<Budget>, name: &str, kib: usize) -> Vec<Charge> {
+        budget
+            .reserve(Work::Live, &[(index(name), kib * 1024)])
+            .unwrap()
+            .into_iter()
+            .map(|part| part.settle(kib * 1024))
+            .collect()
+    }
+
+    fn one_user() -> LiveCandidate<()> {
+        LiveCandidate {
+            live: (),
+            documents: vec![(index("users"), 1)],
+            full: true,
+            changes: true,
+        }
+    }
+
+    /// ADR 0012 stage 8a's acceptance test for R5: the builder's live batch
+    /// would fit by the limit, but a waiter the limit refused is in the live
+    /// line ahead of it, so it reserves behind (G6) and takes no room by the
+    /// limit: refused. With that waiter gone it is granted.
+    #[tokio::test(start_paused = true)]
+    async fn no_build_takes_room_by_the_limit_ahead_of_a_waiter_the_limit_refused() {
+        let budget = Arc::new(Budget::new(64 * 1024));
+        let _x = held(&budget, "x", 36);
+        let _users = held(&budget, "users", 8);
+        let _orders = held(&budget, "orders", 4);
+        let mut builds = Builds::new(2, Some(Arc::clone(&budget)));
+        let gate = Arc::clone(&builds.gate);
+        let older = tokio::spawn(async move {
+            gate.acquire(Work::Live, &[(index("orders"), 24 * 1024)])
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(
+            !older.is_finished(),
+            "orders is refused by the limit (72 of 64 KiB)"
+        );
+        let held_before = budget.held();
+        assert!(
+            builds.choose(Some(one_user()), None).is_none(),
+            "users would fit by the limit (64 of 64 KiB), but not behind orders"
+        );
+        assert_eq!(budget.held(), held_before, "nothing reserved");
+        older.abort();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(
+            builds.choose(Some(one_user()), None).is_some(),
+            "with orders gone, users fits"
+        );
+    }
+
+    /// R5: a grant pass joins the lines only for the batches it has ready
+    /// and leaves them before it returns, granted or not, so the builder
+    /// never holds a place it can't use.
+    #[tokio::test(start_paused = true)]
+    async fn the_builder_leaves_the_lines_after_each_grant_pass() {
+        let mut builds = Builds::new(1, None);
+        let ids = [DocumentId {
+            index: index("users"),
+            key: source::RowKey(Vec::new()),
+        }];
+        assert!(builds.choose(Some(one_user()), Some(&ids)).is_some());
+        assert_eq!(builds.gate.waiters(), 0, "granted: both waiters left");
+        assert!(builds.choose(Some(one_user()), Some(&ids)).is_none());
+        assert_eq!(builds.gate.waiters(), 0, "no permit free: both left");
     }
 
     #[derive(Debug)]

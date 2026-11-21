@@ -46,6 +46,7 @@ mod commit;
 mod confirm;
 mod gate;
 mod live;
+mod reader;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -68,13 +69,14 @@ use crate::error::{EngineError, Result};
 use crate::observer::{
     EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Wake, Work,
 };
-use crate::policy::{BatchPolicy, FailurePolicies};
+use crate::policy::{BatchPolicy, FailurePolicies, MaxWaiting};
 use crate::progress::Progress;
 use crate::stop::{Stop, drain_lanes};
 
 use builds::Builds;
 use confirm::{CONFIRM_TICK, Furthest};
-use live::{LiveRun, Next, next_live};
+use live::Runs;
+use reader::{Lead, Reader, ReaderTask};
 pub use snapshot::KEY_PAGE;
 use snapshot::{ClosedConsumer, Snapshot, Step, next_snapshot_step};
 
@@ -103,6 +105,9 @@ pub struct IngestEngine {
     observer: Arc<dyn Observer>,
     batch: BatchPolicy,
     builds: usize,
+    /// How far the reader may read ahead; derived from `batch` and `builds`
+    /// when unset.
+    max_waiting: Option<MaxWaiting>,
     budget: Option<Arc<Budget>>,
     /// The budget waits open across engine runs (see [`Builds::with_waits`]).
     budget_waits: Arc<std::sync::Mutex<builds::Waits>>,
@@ -147,6 +152,7 @@ impl IngestEngine {
             observer: Arc::new(NoopObserver),
             batch: BatchPolicy::default(),
             builds: 1,
+            max_waiting: None,
             budget: None,
             budget_waits: Arc::default(),
             key_reads: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -232,6 +238,23 @@ impl IngestEngine {
         self
     }
 
+    /// Let the reader read ahead of the builds up to `max` (each bound at
+    /// least one); unset, [`MaxWaiting::derived`] from the batch policy and
+    /// the builds.
+    pub fn with_max_waiting(mut self, max: MaxWaiting) -> Self {
+        self.max_waiting = Some(MaxWaiting {
+            per_index: max.per_index.max(1),
+            total: max.total.max(1),
+        });
+        self
+    }
+
+    /// The reader's lead this engine runs with.
+    pub fn max_waiting(&self) -> MaxWaiting {
+        self.max_waiting
+            .unwrap_or_else(|| MaxWaiting::derived(self.batch, self.builds))
+    }
+
     /// Prepare the source, open the live stream, and run until it ends (`Ok`)
     /// or a source, builder, or stream error stops the engine (`Err`).
     ///
@@ -284,14 +307,14 @@ impl IngestEngine {
         self.observer.on_live_started();
 
         // An index the shared budget leaves out may wait while the others
-        // build, up to two runs of documents (ADR 0012 stage 8a slice 4); past
-        // that the live batch waits whole, and a full one stops the reading,
-        // as with one index.
+        // build, up to the lead per index (ADR 0012 stage 8a, slices 4 and
+        // 6a); past that the live batch waits whole, and the reader stops at
+        // the same number, as with one index.
         let defer_below = self
             .budget
             .as_ref()
             .and_then(|budget| budget.index_share())
-            .map(|_| self.batch.max_changes.saturating_mul(2));
+            .map(|_| self.max_waiting().per_index);
         let mut builds = Builds::new(self.builds, self.budget.clone())
             .with_observer(Arc::clone(&self.observer))
             .with_progress(Arc::clone(&self.progress))
@@ -306,34 +329,58 @@ impl IngestEngine {
         ended
     }
 
-    /// The run's loop, from an open live stream to its end or a stop.
+    /// The run's loop, from an open live stream to its end or a stop: the
+    /// builder, with the reader on its own task (ADR 0012 stage 8a, §3.8).
     async fn follow(
         &self,
         lanes: &Lanes,
         mut requests: Box<dyn Consumer<Request>>,
         scopes: &HashSet<IndexName>,
-        mut live: LiveStream,
+        live: LiveStream,
         builds: &mut Builds,
     ) -> Result<Ended> {
-        let mut pending = LiveRun::new(self.batch.max_changes);
+        // What an earlier run marked and never published is forgotten
+        // before this run's reader marks anything (R10): confirmation stayed
+        // before all of it, so this run's stream replays it.
+        self.progress.forget_all();
+        let lead = Lead::new(self.max_waiting(), self.progress.changes_read());
+        let (sender, mut handed) = tokio::sync::mpsc::unbounded_channel();
+        let mut reader = ReaderTask::spawn(
+            Reader {
+                resolver: Arc::clone(&self.resolver),
+                progress: Arc::clone(&self.progress),
+                observer: Arc::clone(&self.observer),
+                stop: self.stop.clone(),
+                batch: self.batch,
+                lead: Arc::clone(&lead),
+                runs: sender,
+                #[cfg(test)]
+                handing: None,
+                #[cfg(test)]
+                checked: None,
+            },
+            live,
+        );
+        let mut runs = Runs::new(self.batch.max_changes, self.batch.max_delay, lead);
         let mut snapshot: Option<Snapshot> = None;
         let mut last_confirmed: Option<Landed> = None;
         let mut confirm_tick = tokio::time::interval(CONFIRM_TICK);
-        let mut live_ended = false;
+        // The reader's end, once joined: the stream to close, and whether
+        // it ended by itself.
+        let mut ended: Option<reader::Ended> = None;
         // Where the last arm's work ended: every arm times its wait from here,
         // so the loop reads no clock of its own.
         let mut mark = Instant::now();
-        // What an earlier run marked and never published is forgotten:
-        // confirmation stayed before all of it, so this run's stream replays
-        // it and it is marked again, batched as it is read.
-        self.progress.forget_all();
 
         loop {
             // A live stream that ends while a snapshot runs or requests wait
             // (a sink staged its backfill before this engine started) still
             // gets those served; the run ends once nothing is left to do.
-            if live_ended && snapshot.is_none() && requests.is_empty() {
-                self.settle(&mut pending, builds, lanes).await?;
+            if ended.as_ref().is_some_and(|ended| ended.stream_ended)
+                && snapshot.is_none()
+                && requests.is_empty()
+            {
+                self.settle(&mut runs, builds, lanes).await?;
                 self.confirm(&mut last_confirmed, false);
                 return Ok(Ended::LiveEnded);
             }
@@ -345,45 +392,54 @@ impl IngestEngine {
                          served again on the next start"
                     );
                 }
+                // The barrier (R7): the reader hands over what it read and
+                // ends before anything is settled.
+                let ended = match ended.take() {
+                    Some(ended) => ended,
+                    None => self.reader_end(&mut reader, &mut handed, &mut runs).await?,
+                };
                 self.wind_down(
-                    &mut pending,
+                    &mut runs,
                     builds,
                     lanes,
-                    live,
-                    live_ended,
+                    ended.live,
+                    ended.stream_ended,
                     &mut last_confirmed,
                 )
                 .await?;
                 return Ok(Ended::Stopped);
             }
-            // A batch that can't take more changes (full, or past its
-            // deadline) and waits for a build stops the reading: the stream
-            // waits, as it did while a build ran.
-            let open = pending.is_open();
             let building = builds.running() > 0;
             tokio::select! {
-                // While the live stream is read, `next_live` watches the stop.
-                () = self.stop.requested(), if live_ended || !open => {
-                    mark = self.waited(mark, &mut snapshot, building);
+                // While the reader runs, its end (the channel closing) is what
+                // a stop wakes this loop with.
+                () = self.stop.requested(), if ended.is_some() => {
+                    mark = self.waited(mark, None, &mut snapshot, building);
                 }
-                change = next_live(&mut live, &self.stop), if !live_ended && open => match change {
-                    Next::Stopped => {
-                        mark = self.waited(mark, &mut snapshot, building);
+                run = handed.recv(), if ended.is_none() => match run {
+                    None => {
+                        let end = reader.join().await?;
+                        mark = if end.waiting {
+                            self.waited(mark, None, &mut snapshot, building)
+                        } else {
+                            Instant::now()
+                        };
+                        ended = Some(end);
                     }
-                    Next::Change(None) => {
-                        mark = self.waited(mark, &mut snapshot, building);
-                        live_ended = true;
-                    }
-                    Next::Change(Some(Err(error))) => return Err(error.into()),
-                    Next::Change(Some(Ok((position, event)))) => {
-                        let started = self.waited(mark, &mut snapshot, building);
-                        self.buffer_live(&mut pending, position, event).await?;
-                        live_ended = self.drain_ready(&mut live, &mut pending).await?;
+                    Some(run) => {
+                        self.waited(mark, Some(run.started), &mut snapshot, building);
                         self.observer.on_stage(
-                            StageTiming::new(Stage::Resolve, started.elapsed()).work(Work::Live),
+                            StageTiming::new(Stage::Resolve, run.resolved).work(Work::Live),
                         );
+                        runs.push(run);
+                        while let Ok(run) = handed.try_recv() {
+                            self.observer.on_stage(
+                                StageTiming::new(Stage::Resolve, run.resolved).work(Work::Live),
+                            );
+                            runs.push(run);
+                        }
                         builds.woke(Wake::Change);
-                        self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                        self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                         self.confirm(&mut last_confirmed, false);
                         mark = Instant::now();
                     }
@@ -392,13 +448,13 @@ impl IngestEngine {
                     if builds.refused().is_some() =>
                 {
                     builds.woke(Wake::Released);
-                    self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                    self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                     self.confirm(&mut last_confirmed, false);
                     mark = Instant::now();
                 }
                 landed = builds.next(), if building => {
                     builds.woke(Wake::Landed);
-                    self.landed(landed, &mut pending, &mut snapshot, builds, lanes).await?;
+                    self.landed(landed, &mut runs, &mut snapshot, builds, lanes).await?;
                     self.confirm(&mut last_confirmed, false);
                     mark = Instant::now();
                 }
@@ -417,17 +473,17 @@ impl IngestEngine {
                         Ok(Step::Done) => active.done = true,
                     }
                     builds.woke(Wake::Page);
-                    self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                    self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                     mark = Instant::now();
                 },
                 request = requests.recv(), if snapshot.is_none() => match request? {
                     None => {
-                        mark = self.waited(mark, &mut snapshot, building);
+                        mark = self.waited(mark, None, &mut snapshot, building);
                         tracing::warn!("request lane closed; no further backfills can be served");
                         requests = Box::new(ClosedConsumer);
                     }
                     Some(first) => {
-                        let started = self.waited(mark, &mut snapshot, building);
+                        let started = self.waited(mark, None, &mut snapshot, building);
                         let deliveries = self.collect_requests(first, &mut requests, lanes).await?;
                         snapshot = self.start_snapshot(deliveries, scopes, lanes).await?;
                         mark = Instant::now();
@@ -437,14 +493,14 @@ impl IngestEngine {
                     }
                 },
                 _ = confirm_tick.tick() => {
-                    mark = self.waited(mark, &mut snapshot, building);
+                    mark = self.waited(mark, None, &mut snapshot, building);
                     // A backstop, not the mechanism: a batch the budget held
                     // back is granted on a release (the arm above). Should a
                     // release ever go unheard, the next tick still grants it,
                     // so it costs a second, never the run.
                     if builds.refused().is_some() {
                         builds.woke(Wake::Tick);
-                        self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                        self.grant(&mut runs, &mut snapshot, builds, lanes).await?;
                         mark = Instant::now();
                     }
                     self.confirm(&mut last_confirmed, true);
@@ -453,33 +509,58 @@ impl IngestEngine {
         }
     }
 
+    /// The reader's end once the stop is requested: every run it hands over
+    /// on the way queued, then its join (R7).
+    async fn reader_end(
+        &self,
+        reader: &mut ReaderTask,
+        handed: &mut tokio::sync::mpsc::UnboundedReceiver<reader::Run>,
+        runs: &mut Runs,
+    ) -> Result<reader::Ended> {
+        while let Some(run) = handed.recv().await {
+            runs.push(run);
+        }
+        reader.join().await
+    }
+
     /// Close the wait since `since` as the loop wakes, and return the moment,
     /// so the work that follows times from it. While builds run, the loop was
     /// waiting on them, which their [`Stage::Build`] covers. Otherwise, with
     /// no snapshot running the wait is [`Stage::Idle`]; with one, the loop
     /// was waiting on its rows too, so it is the snapshot's [`Stage::Page`]
-    /// (reported with its next batch).
-    fn waited(&self, since: Instant, snapshot: &mut Option<Snapshot>, building: bool) -> Instant {
+    /// (reported with its next batch). A wait that a run ended ends `until`
+    /// the run's first change arrived: from there the reader was resolving
+    /// it, which its [`Stage::Resolve`] covers.
+    fn waited(
+        &self,
+        since: Instant,
+        until: Option<Instant>,
+        snapshot: &mut Option<Snapshot>,
+        building: bool,
+    ) -> Instant {
         let now = Instant::now();
         if building {
             return now;
         }
+        let waited = until
+            .map_or(now, |until| until.min(now))
+            .saturating_duration_since(since);
         match snapshot {
-            Some(active) => active.page_wait += now - since,
+            Some(active) => active.page_wait += waited,
             None => self
                 .observer
-                .on_stage(StageTiming::new(Stage::Idle, now - since)),
+                .on_stage(StageTiming::new(Stage::Idle, waited)),
         }
         now
     }
 
-    /// The rest of a stop: finish the builds running, build and publish the
-    /// buffered batch, wait until every lane
+    /// The rest of a stop, once the reader ended: finish the builds running,
+    /// build and publish what the reader read, wait until every lane
     /// acknowledged it (confirming what landed as it moves), then close the
     /// live stream so the final position reaches the source.
     async fn wind_down(
         &self,
-        pending: &mut LiveRun,
+        runs: &mut Runs,
         builds: &mut Builds,
         lanes: &Lanes,
         mut live: LiveStream,
@@ -487,10 +568,10 @@ impl IngestEngine {
         last_confirmed: &mut Option<Landed>,
     ) -> Result<()> {
         tracing::info!(
-            buffered = pending.count,
+            buffered = runs.changes(),
             "stop requested: reading no further changes; landing what is in flight"
         );
-        self.settle(pending, builds, lanes).await?;
+        self.settle(runs, builds, lanes).await?;
         drain_lanes(&*self.stream, &*self.source, &self.progress, last_confirmed).await;
         tracing::info!(position = ?last_confirmed, "every sink acknowledged; closing the live stream");
         if live_ended || !self.source.close_live() {

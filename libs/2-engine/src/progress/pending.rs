@@ -114,17 +114,18 @@ impl Pending {
     }
 
     /// Move up to `max` waiting ids of `index`, oldest first, to a new build,
-    /// skipping ids building and ids `held` says a running build holds.
+    /// skipping ids building and ids `held` says a running build holds, and
+    /// ids marked after `through` (a newer run's: ADR 0012 stage 8a, R4).
     /// `None` when nothing could be taken.
     pub(crate) fn take(
         &mut self,
         index: &IndexName,
         max: usize,
+        through: Option<Position>,
         held: &dyn Fn(&RowKey) -> bool,
     ) -> Option<Taken> {
         let chosen: Vec<(u64, u64)> = self
-            .order
-            .iter()
+            .through(through)
             .filter(|(_, key)| !self.building.contains(*key) && !held(key))
             .take(max)
             .map(|(at, _)| *at)
@@ -270,20 +271,46 @@ impl Pending {
             .min()
     }
 
-    /// Whether some waiting id is building, or `held` says a running build
-    /// holds it: a take now would leave it behind.
-    pub(crate) fn any_held(&self, held: Option<&dyn Fn(&RowKey) -> bool>) -> bool {
+    /// The waiting ids marked at or before `through` (every one for
+    /// `None`), oldest first.
+    fn through(
+        &self,
+        through: Option<Position>,
+    ) -> std::collections::btree_map::Range<'_, (u64, u64), Arc<RowKey>> {
+        let last = through.map_or(u64::MAX, |position| position.seq);
+        self.order.range(..=(last, u64::MAX))
+    }
+
+    /// Whether some waiting id marked at or before `through` is building, or
+    /// `held` says a running build holds it: a take now would leave it
+    /// behind.
+    pub(crate) fn any_held(
+        &self,
+        held: Option<&dyn Fn(&RowKey) -> bool>,
+        through: Option<Position>,
+    ) -> bool {
         if self.building.is_empty() && held.is_none() {
             return false;
         }
-        self.order
-            .values()
-            .any(|key| self.building.contains(key) || held.is_some_and(|held| held(key)))
+        self.through(through)
+            .any(|(_, key)| self.building.contains(key) || held.is_some_and(|held| held(key)))
     }
 
     /// How many ids wait.
     pub(crate) fn waiting(&self) -> usize {
         self.waiting.len()
+    }
+
+    /// How many ids wait that were marked at or before `through`: every one,
+    /// at no cost, when none was marked after it.
+    pub(crate) fn waiting_through(&self, through: Option<Position>) -> usize {
+        let newest = self.order.last_key_value().map(|((seq, _), _)| *seq);
+        match (through, newest) {
+            (Some(through), Some(newest)) if newest > through.seq => {
+                self.through(Some(through)).count()
+            }
+            _ => self.waiting.len(),
+        }
     }
 
     /// The position of the oldest waiting id; `None` while none waits.
@@ -332,7 +359,7 @@ mod tests {
         assert!(!pending.mark(key(1), p(5)));
         assert_eq!(pending.waiting(), 1);
         assert_eq!(pending.minimum(), Some(p(3)));
-        let taken = pending.take(&index(), usize::MAX, &none).unwrap();
+        let taken = pending.take(&index(), usize::MAX, None, &none).unwrap();
         assert_eq!(ids(&taken), [key(1)]);
         assert_eq!(taken.oldest, p(3));
     }
@@ -343,7 +370,7 @@ mod tests {
         pending.mark(key(2), p(4));
         pending.mark(key(1), p(1));
         pending.mark(key(3), p(1));
-        let taken = pending.take(&index(), 2, &none).unwrap();
+        let taken = pending.take(&index(), 2, None, &none).unwrap();
         assert_eq!(ids(&taken), [key(1), key(3)]);
         assert_eq!(pending.waiting(), 1);
         assert_eq!(pending.minimum(), Some(p(1)), "the build holds change 1");
@@ -356,16 +383,16 @@ mod tests {
     fn a_mark_while_its_document_builds_waits_for_the_next_build() {
         let mut pending = Pending::default();
         pending.mark(key(1), p(1));
-        let first = pending.take(&index(), usize::MAX, &none).unwrap();
+        let first = pending.take(&index(), usize::MAX, None, &none).unwrap();
         assert!(pending.mark(key(1), p(3)));
         assert!(
-            pending.take(&index(), usize::MAX, &none).is_none(),
+            pending.take(&index(), usize::MAX, None, &none).is_none(),
             "never built twice at once"
         );
         assert_eq!(pending.minimum(), Some(p(1)));
         assert_eq!(pending.release(first.token), 1);
         assert_eq!(pending.minimum(), Some(p(3)));
-        let second = pending.take(&index(), usize::MAX, &none).unwrap();
+        let second = pending.take(&index(), usize::MAX, None, &none).unwrap();
         assert_eq!(second.oldest, p(3));
     }
 
@@ -375,7 +402,7 @@ mod tests {
         pending.mark(key(1), p(1));
         pending.mark(key(2), p(2));
         let held = |key_: &RowKey| *key_ == key(1);
-        let taken = pending.take(&index(), usize::MAX, &held).unwrap();
+        let taken = pending.take(&index(), usize::MAX, None, &held).unwrap();
         assert_eq!(ids(&taken), [key(2)]);
         assert_eq!(pending.minimum(), Some(p(1)), "1 still waits");
     }
@@ -384,13 +411,13 @@ mod tests {
     fn forgetting_leaves_nothing_waiting_or_building() {
         let mut pending = Pending::default();
         pending.mark(key(1), p(1));
-        let taken = pending.take(&index(), usize::MAX, &none).unwrap();
+        let taken = pending.take(&index(), usize::MAX, None, &none).unwrap();
         pending.mark(key(2), p(2));
         assert_eq!(pending.forget(), 1);
         assert_eq!(pending.minimum(), None);
         assert_eq!(pending.release(taken.token), 0, "the build is gone");
         pending.mark(key(1), p(3));
-        let again = pending.take(&index(), usize::MAX, &none).unwrap();
+        let again = pending.take(&index(), usize::MAX, None, &none).unwrap();
         assert_eq!(again.oldest, p(3), "marked afresh by the replay");
         assert_ne!(again.token, taken.token);
     }
@@ -401,11 +428,11 @@ mod tests {
     fn a_landed_build_lets_its_documents_be_taken_again() {
         let mut pending = Pending::default();
         pending.mark(key(1), p(1));
-        let first = pending.take(&index(), usize::MAX, &none).unwrap();
+        let first = pending.take(&index(), usize::MAX, None, &none).unwrap();
         pending.mark(key(1), p(2));
-        assert!(pending.take(&index(), usize::MAX, &none).is_none());
+        assert!(pending.take(&index(), usize::MAX, None, &none).is_none());
         pending.land(first.token);
-        let second = pending.take(&index(), usize::MAX, &none).unwrap();
+        let second = pending.take(&index(), usize::MAX, None, &none).unwrap();
         assert_eq!(second.oldest, p(2));
         pending.release(first.token);
         assert_eq!(
@@ -414,7 +441,7 @@ mod tests {
             "the second build still holds it"
         );
         assert!(
-            pending.take(&index(), usize::MAX, &none).is_none(),
+            pending.take(&index(), usize::MAX, None, &none).is_none(),
             "releasing the first leaves the second's document building"
         );
     }
@@ -424,14 +451,43 @@ mod tests {
         let mut pending = Pending::default();
         assert_eq!(pending.minimum(), None);
         pending.mark(key(1), p(4));
-        let taken = pending.take(&index(), usize::MAX, &none).unwrap();
+        let taken = pending.take(&index(), usize::MAX, None, &none).unwrap();
         pending.mark(key(2), p(6));
         assert_eq!(pending.minimum(), Some(p(4)));
         pending.release(taken.token);
         assert_eq!(pending.minimum(), Some(p(6)));
-        let last = pending.take(&index(), usize::MAX, &none).unwrap();
+        let last = pending.take(&index(), usize::MAX, None, &none).unwrap();
         pending.release(last.token);
         assert_eq!(pending.minimum(), None);
         assert_eq!(pending.release(last.token), 0, "a token is released once");
+    }
+
+    /// R4 of ADR 0012 stage 8a: a take reaches no id marked after its
+    /// candidate's last position, so a step closed through that run never
+    /// claims a newer run's change. An id a newer run marks again keeps its
+    /// older mark, and so is taken: the build reads it after both changes.
+    #[test]
+    fn a_take_through_a_position_leaves_newer_marks_waiting() {
+        let mut pending = Pending::default();
+        pending.mark(key(1), p(1));
+        pending.mark(key(2), p(2));
+        pending.mark(key(3), p(5));
+        pending.mark(key(1), p(6));
+        assert_eq!(pending.waiting_through(Some(p(2))), 2);
+        assert_eq!(pending.waiting_through(Some(p(5))), 3);
+        assert_eq!(pending.waiting_through(None), 3);
+        assert!(!pending.any_held(Some(&|k: &RowKey| *k == key(3)), Some(p(2))));
+        assert!(pending.any_held(Some(&|k: &RowKey| *k == key(3)), Some(p(5))));
+        let taken = pending
+            .take(&index(), usize::MAX, Some(p(2)), &none)
+            .unwrap();
+        assert_eq!(ids(&taken), [key(1), key(2)]);
+        assert_eq!(pending.waiting(), 1, "3, a newer run's, waits");
+        assert_eq!(pending.waiting_through(Some(p(4))), 0);
+        assert!(
+            pending
+                .take(&index(), usize::MAX, Some(p(4)), &none)
+                .is_none()
+        );
     }
 }

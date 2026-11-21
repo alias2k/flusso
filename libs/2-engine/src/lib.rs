@@ -19,7 +19,7 @@ pub use budget::{
 pub use error::*;
 pub use ingest::{IngestEngine, KEY_PAGE, document_id};
 pub use observer::*;
-pub use policy::{Backoff, BackoffError, BatchPolicy, FailurePolicies, FailurePolicy};
+pub use policy::{Backoff, BackoffError, BatchPolicy, FailurePolicies, FailurePolicy, MaxWaiting};
 pub use progress::{Holds, Level, Listener, Pin, Progress, Step, Taken, Token};
 pub use sink_engine::{LaneHealth, ParkReason, ProbeOutcome, SinkControl, SinkEngine};
 pub use stop::{Stop, drain_lanes};
