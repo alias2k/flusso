@@ -50,6 +50,9 @@ class Part:
     group: str | None = None
     # Everything no other part takes, and no test of a group the parts divide by name.
     rest: bool = False
+    # Whether a test in it runs cargo (the derive's boundary and consumer_lints, the trybuild
+    # `ui` harnesses): such a part fetches the locked crates first.
+    cargo: bool = True
 
 
 # The `opensearch` group runs one test at a time on each runner, so its binaries are split by
@@ -68,6 +71,7 @@ PARTS = (
             "flusso-query-e2e::combined_search",
         ),
         group="opensearch",
+        cargo=False,
     ),
     Part(
         "opensearch-2",
@@ -78,6 +82,7 @@ PARTS = (
             "flusso-sink-opensearch::reindex",
         ),
         group="opensearch",
+        cargo=False,
     ),
     Part(
         "opensearch-3",
@@ -94,6 +99,7 @@ PARTS = (
             "flusso-query-e2e::array_columns",
         ),
         group="opensearch",
+        cargo=False,
     ),
     # Compiles thousands of cases with cargo: alone, so it has the runner's cores.
     Part("boundary", "derive boundary", ("flusso-query-derive::boundary",)),
@@ -140,7 +146,12 @@ def scoped(filter: str, read_side_only: bool) -> str:
 
 def matrix(parts: tuple[Part, ...], nextest_toml: str, read_side_only: bool) -> list[dict]:
     return [
-        {"id": p.id, "name": p.name, "filter": scoped(part_filter(p, parts, nextest_toml), read_side_only)}
+        {
+            "id": p.id,
+            "name": p.name,
+            "filter": scoped(part_filter(p, parts, nextest_toml), read_side_only),
+            "cargo": p.cargo,
+        }
         for p in parts
     ]
 
@@ -273,13 +284,17 @@ def verdict(needs: dict, expected: int | None, junit: dict[str, int]) -> list[st
 def verdict_main(args: argparse.Namespace) -> int:
     needs = json.loads(args.needs)
     junit = {}
+    unreadable = []
     root = pathlib.Path(args.junit)
     for part in PARTS:
         report = root / f"nextest-junit-{part.id}" / "junit.xml"
         if report.is_file():
-            junit[part.id] = junit_count(report)
+            try:
+                junit[part.id] = junit_count(report)
+            except (ET.ParseError, ValueError) as error:
+                unreadable.append(f"the JUnit report of part {part.id} can't be read: {error}")
     expected = int(args.expected) if args.expected else None
-    found = verdict(needs, expected, junit)
+    found = unreadable + verdict(needs, expected, junit)
     lines = ["| Job | Result |", "| --- | --- |"]
     lines += [f"| {name} | {need.get('result')} |" for name, need in sorted(needs.items())]
     if junit:

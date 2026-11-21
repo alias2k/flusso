@@ -192,6 +192,48 @@ class Verdict(unittest.TestCase):
         self.assertEqual(found, [f"the parts ran {self.EXPECTED - 2} tests, the whole run lists {self.EXPECTED}"])
 
 
+class VerdictCli(unittest.TestCase):
+    """`verdict` end to end over JUnit reports laid out as download-artifact writes them."""
+
+    NEEDS = {
+        "plan": {"result": "success", "outputs": {"docs_only": "false"}},
+        "build": {"result": "success", "outputs": {"count": "10"}},
+        "lint": {"result": "success", "outputs": {}},
+        "doctests": {"result": "success", "outputs": {}},
+        "tests": {"result": "success", "outputs": {}},
+    }
+
+    def run_verdict(self, reports: dict[str, str]) -> subprocess.CompletedProcess:
+        with tempfile.TemporaryDirectory() as tmp:
+            for part, text in reports.items():
+                folder = pathlib.Path(tmp) / f"nextest-junit-{part}"
+                folder.mkdir()
+                (folder / "junit.xml").write_text(text)
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), "verdict", "--needs", json.dumps(self.NEEDS), "--expected", "10", "--junit", tmp],
+                capture_output=True,
+                text=True,
+            )
+
+    @staticmethod
+    def report(tests: int) -> str:
+        return f'<?xml version="1.0"?><testsuites name="nextest-run" tests="{tests}"></testsuites>'
+
+    def test_reports_holding_the_listed_count_are_green(self) -> None:
+        reports = {p.id: self.report(2) for p in parts.PARTS}
+        result = self.run_verdict(reports)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_truncated_report_is_an_error_line_not_a_traceback(self) -> None:
+        reports = {p.id: self.report(2) for p in parts.PARTS}
+        reports["rest"] = self.report(2)[:40]
+        result = self.run_verdict(reports)
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("::error::the JUnit report of part rest can't be read", result.stderr)
+        self.assertIn("::error::the parts ran 8 tests, the whole run lists 10", result.stderr)
+
+
 class Cli(unittest.TestCase):
     """The script end to end over a fake `cargo` that answers `nextest list` from a table."""
 
@@ -281,6 +323,13 @@ class Repo(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
         for needed in ("name: nextest-junit-${{ matrix.part.id }}", "name: clippy + tests", "test-parts.py verdict"):
             self.assertTrue(needed in workflow, f"ci.yml lacks {needed!r}")
+        # A re-run part replaces its report, so the verdict reads the latest attempt's.
+        upload = workflow.split("name: nextest-junit-${{ matrix.part.id }}", 1)[1].split("\n      - ", 1)[0]
+        self.assertIn("overwrite: true", upload)
+
+    def test_only_the_parts_that_run_cargo_fetch_the_crates(self) -> None:
+        for part in parts.PARTS:
+            self.assertEqual(part.cargo, part.group != "opensearch", part.id)
 
 
 if __name__ == "__main__":
