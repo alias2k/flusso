@@ -230,7 +230,7 @@ To page on them, add a rule of your own on `flusso_index_down`, `flusso_index_ba
 max by (index) (flusso_index_down) > 0 or max by (index) (flusso_index_backfill_retrying) > 0
 ```
 
-**Read why.** `last_error` holds the index's last failure, whatever its kind, and stays after it recovered ([fields](../reference/http.md#per-index-ingest-state)):
+**Read why.** `last_error` holds the index's last failure of each kind, `live` and `backfill`, and stays after it recovered ([fields](../reference/http.md#per-index-ingest-state)):
 
 ```sh
 curl -s localhost:9464/indexes/orders/status | jq '{state, down_since, last_error, restarts, backfill}'

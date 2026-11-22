@@ -76,9 +76,9 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
   "phase": "live",
   "ingest": {
     "indexes": {
-      "orders": { "documents_waiting": 0, "backlog_seconds": 0.0, "state": "running", "last_error": null, "restarts": { "live": 0, "backfill": 0 }, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false },
-      "products": { "documents_waiting": 0, "backlog_seconds": 0.0, "state": "running", "last_error": null, "restarts": { "live": 0, "backfill": 0 }, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false },
-      "users": { "documents_waiting": 0, "backlog_seconds": 0.0, "state": "running", "last_error": null, "restarts": { "live": 0, "backfill": 0 }, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false }
+      "orders": { "documents_waiting": 0, "backlog_seconds": 0.0, "state": "running", "last_error": { "live": null, "backfill": null }, "restarts": { "live": 0, "backfill": 0 }, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false },
+      "products": { "documents_waiting": 0, "backlog_seconds": 0.0, "state": "running", "last_error": { "live": null, "backfill": null }, "restarts": { "live": 0, "backfill": 0 }, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false },
+      "users": { "documents_waiting": 0, "backlog_seconds": 0.0, "state": "running", "last_error": { "live": null, "backfill": null }, "restarts": { "live": 0, "backfill": 0 }, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false }
     }
   },
   "uptime_seconds": 412,
@@ -126,7 +126,7 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
 | `backlog_seconds` | number | How long ago the index's oldest change not built yet was read (waiting, or in a build not yet handed to a sink). `0` when there is none. Grows only while the index is stuck or exempt: [below](#what-backlog_seconds-shows). |
 | `state` | `running` \| `down` | `down` from a failure of the index's live work until it restarts alone ([A failing index](config-toml.md#a-failing-index)); `running` otherwise. Always `running` with one index, where a failure restarts the whole ingest engine. |
 | `down_since` | string, absent | When its live work failed (RFC 3339, UTC). A restart clears it, so in a loop of failures it is the latest one's time: `restarts.live` counts the loop. Absent while `running`. |
-| `last_error` | object or null | The index's last failure of either kind: `{"kind": "live" \| "backfill", "message", "at"}`, `at` in RFC 3339, UTC. Kept after it recovered, for the life of the process. `message` is the error as logged, cut at 4 KiB with ` … (cut)` appended. Null before any failure, and always with one index. |
+| `last_error` | object | The index's last failure of each kind: `{"live": …, "backfill": …}`. Each is `null` before any failure of that kind, else `{"message", "at"}`, `at` in RFC 3339, UTC. One kind never hides the other. Kept after the index recovered, for the life of the process. `message` is the error as logged, cut at 4 KiB with ` … (cut)` appended. Both stay `null` with one index. |
 | `restarts` | object | `{"live": n, "backfill": n}`: how often the index restarted after a live failure, and its backfill started again after a backfill failure, since the process started. A failure that ends the whole run restarts nothing here. Always `0` with one index. |
 | `exemption` | `none` \| `exempt` \| `frozen` | `exempt`: held at `max_waiting_per_index` while another index works, so reading goes on for the others; its documents count only toward `max_pending_documents`. `frozen`: exempt, but its hold ended or no other index works, so it may drain but not grow. Always `none` with one index, and between engine runs. See [A stuck index](config-toml.md#a-stuck-index). |
 | `exemption_since` | string, absent | When it entered that state (RFC 3339, UTC), to within a second. Absent while `none`. |
@@ -142,7 +142,7 @@ An index that is exempt and waits on a full lane of `primary`:
 ```json
 "users": {
   "documents_waiting": 48211, "backlog_seconds": 734.0,
-  "state": "running", "last_error": null, "restarts": { "live": 0, "backfill": 0 },
+  "state": "running", "last_error": { "live": null, "backfill": null }, "restarts": { "live": 0, "backfill": 0 },
   "exemption": "exempt", "exemption_since": "2026-11-19T12:03:14Z",
   "working": false,
   "held_by": "lane", "held_sinks": ["primary"], "held_since": "2026-11-19T12:03:09Z",
@@ -156,7 +156,7 @@ An index that is down after a document failed under `on_error = "stop"`, restart
 "orders": {
   "documents_waiting": 1840, "backlog_seconds": 312.0,
   "state": "down", "down_since": "2026-11-19T12:08:41Z",
-  "last_error": { "kind": "live", "message": "document `42` in index `orders` could not be built: …", "at": "2026-11-19T12:08:41Z" },
+  "last_error": { "live": { "message": "document `42` in index `orders` could not be built: …", "at": "2026-11-19T12:08:41Z" }, "backfill": null },
   "restarts": { "live": 2, "backfill": 0 },
   "exemption": "exempt", "exemption_since": "2026-11-19T12:04:02Z",
   "working": false, "held_by": null, "backfill": null, "pacing_reader": false
