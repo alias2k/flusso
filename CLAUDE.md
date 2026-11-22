@@ -789,11 +789,18 @@ is the one concrete piece.
   running build, nothing committed ahead, confirmation pinned, the stop mid-run and
   far ahead, both errors, a reader panic, a burst past tokio's cooperative budget, the idle/resolve split, a parked lane bounding pending memory), the CLI's
   `max_waiting` binary and `run::tests`, the daemon's `a_waiting_bound_below_one_index_stops_the_start`.
-- **A failure of one index's own work restarts its builder alone (ADR 0012 stage 8a, slice 8-1; the
-  stage note's §3.10).** With two or more builders, an `EngineError::Source` or `DocumentFailed` a
-  builder returns (a build that failed or panicked, inline included through `catch_unwind` on its first
-  poll; a document under `on_error = "stop"`; its walk's key read, failed or panicked on its own task)
-  is its index's (`ingest/restart.rs`'s `restarts_alone`, the one predicate); a lane or request-lane
+- **A failure of one index's own work restarts its builder alone, or its walk alone (ADR 0012 stage
+  8a, slice 8-1; the stage note's §3.10).** With two or more builders, a failure of the builder's
+  **walk** (a key read failed or panicked on its own task; a backfill batch's build failed or panicked,
+  or one of its documents failed under `on_error = "stop"`) is taken in the builder's loop, no error
+  returned (fix round 2): the snapshot is dropped, that walk's unpublished slots discarded
+  (`Builds::fail_walk`, `Job::Discarded`, the walk known by its `reached` record; `land` halts no grant
+  for a backfill slot beside other builders), its requests kept with each lane resumed after the last
+  mark published to it, gathered as a coalescing set held until the walk's retry time (`retry: true`:
+  "every sink asked" doesn't start it, a new request joins it), and the index's live work goes on, not
+  held, not folding. An `EngineError::Source` or `DocumentFailed` a builder returns (a live build that
+  failed or panicked, inline included through `catch_unwind` on its first poll; a live document under
+  `on_error = "stop"`) is its index's (`ingest/restart.rs`'s `restarts_alone`, the one predicate); a lane or request-lane
   error, a bug variant, the reader, the dispatcher, any failure while stopping and any failure of a lone
   builder end the run as before (one index keeps the whole-run restart and its replay, and pays nothing;
   a build panicking at its first poll is a failed build there too, so the daemon restarts the run where
@@ -814,10 +821,12 @@ is the one concrete piece.
   is free, 6b-2's mechanism), clears its budget hold, takes fresh `Builds` (whose drop removes only its
   own index from the shared budget wait, ending it only when no builder is held), and waits its
   `Retry` (`[backoff]` via `IngestEngine::with_backoff`, 1 s doubling to `max_ms`, one schedule per
-  kind: a live failure's starts over once a live item of the index was numbered since the last
-  restart, a walk failure's (its key read, a backfill slot: `walk_failed`, `Builds::publishing`) once a
-  walk of the index completed (`IngestEngine::walks`); a stop cuts it short: one more try under the
-  stop, O3). The restarted builder folds and asks for its backlog once as it starts (nothing else
+  kind, each started over once its kind moved since its last failure: a live item of the index
+  numbered, or a backfill batch carrying a walk mark published (`IngestEngine::walk_batches`; a source
+  that can't mark walks never moves it, its retries starting from the first key); a stop cuts a live
+  wait short: one more try under the stop, O3; a walk's wait it drops with the held set, the request
+  served on the next start). `down` keeps a held set as it is and calls `Builds::restarting` (the index
+  leaves the budget's held set; once none is held, the wait ends and the next refusal is counted). The restarted builder folds and asks for its backlog once as it starts (nothing else
   would: the reader hands a folding builder nothing); leaving the fold with nothing waiting and nothing
   refused ends its hold (a quiet index makes no live grant to end it). A backlog candidate never carries a position
   older than the builder's last live grant (`Runs::backlog`, the floor), so a lane's positions never go
@@ -828,7 +837,10 @@ is the one concrete piece.
   `Through`, exempt past its cap while down, the waits doubling and starting over, a stop cutting the
   wait, a failure while stopping ending the run, an inline build panic, one index ending the run, an
   open stream's backlog and walk served after the restart, a lane's positions never going down across
-  a restart, a quiet restarted index free again, a failure beside a slow build held at once, a walk
+  a restart, a quiet restarted index free again, `ingest::tests::walk_failures` (a walk failing alone
+  over two sinks: live documents flowing, later backfill slots discarded, a request joining the retry, a
+  stop during the wait, a live failure keeping the walk's retry, one-off failures each waiting the first
+  wait, the random two-sink schedules), `builds::tests`' `a_hold_after_a_lone_held_index_restarted_is_counted`, a failure beside a slow build held at once, a walk
   resuming where its lanes are, a poison backfill row backing off beside live traffic, one budget wait
   across another index's restart, two builds of one document given back at the older change, a lane
   failure ending the run; the review of #456's guards `nothing_counts_or_fences_past_a_given_back_change`,
