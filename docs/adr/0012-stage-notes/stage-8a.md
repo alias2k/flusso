@@ -2397,8 +2397,10 @@ Checked against `c3b6233b` (6b-2 after its three fix rounds). What the paper (§
 - **The stop, a failure, a drop.** A stop drops every builder's snapshot, unacknowledged (its requests
   redelivered on the next start), as today, now for every walk at once; a failure ends the run and drops
   every builder in place; an aborted run drops them too. Each drop aborts the walk's read task, so none
-  outlives the run (an aborted task is dropped at its next poll; a read awaiting the database is
-  cancelled there).
+  outlives the run **by more than one poll**: `abort()` is asynchronous, so an aborted task is dropped
+  at its next poll; a read awaiting the database (on another worker, say) stops at its next await, its
+  query left to the connection's drop. The tests wait for it (alive tasks and reads back to where they
+  were, within 5 s).
 - **The exemption with walks at once.** An index only backfilling on a dead sink is not free after 5 s
   (built in 6b-2: backfill items carry the outstanding guard). A walk adds nothing to
   `max_pending_documents` or the lead: its documents are the snapshot's batch, never marked waiting in
@@ -2528,6 +2530,35 @@ reference pages):
 **Expected gain**, restated: initial backfills of several indexes overlap (key reads of one beside builds
 and publishes of another, a small index not waiting for a large one's whole walk); builds at once stay
 ≤ `builds` and key reads ≤ 1. One index: unchanged, at its old cost.
+
+#### 6b-3, fix round 1 (the review of `6285e679`)
+
+| Finding | Fix | Tests (fail before the fix, or under the mutation) |
+| --- | --- | --- |
+| 1: the loosened keyset e2e (8–12 pages) let `live_items` read up to 4 pages past its own bound unseen, and checked built-once on `items` only | the test records, per walk, the full pages added before its bound was read and the full pages it read, and asserts each walk read exactly the 4 pages there at the start plus those; built-once on both indexes | `keyset_backfill`'s `rows_added_ahead_of_the_walk_end_it_where_it_began_and_are_built_once` (the reviewer's check, on the test's own plan rather than a `static`, so tests sharing a process can't mix) |
+| 2: "no read ahead" rested on nothing | — | `a_walk_holds_one_page_and_reads_no_further_until_it_is_taken` (inline and apart; the reviewer's) |
+| 3: the abort of a read waiting for the permit was pinned only through the aborted run's task count | — | `a_walk_dropped_while_its_read_waits_for_the_permit_takes_no_permit_later` (the reviewer's) |
+| 4: planning reads overlapped: `plan_walk`'s `resume_after` and `compare_keys` (one uncached query per comparison for an index resumed by two or more lanes) ran outside K1, so N builders planning at once took N connections from the builder's `builds + 1` and could starve a build past sqlx's acquire timeout | a plan's reads take the key-read permit, on the builder's task, for as long as they last, and only when some lane has a recorded point (a first backfill plans with no read, takes nothing, and one index costs what it did). So key reads, planning included, stay one at a time and the pool's connections stay `builds` + 1 + the resolver | `planning_reads_of_walks_at_once_run_one_at_a_time` (two indexes resumed by two sinks each: 2 reads at once on `6285e679`, 1 now) |
+| 5: two variants of the stuck-walk test | adopted the one with each batch larger than half the budget: it kills a mutation nothing else in the engine tests kills (rule 4 per index only while the whole is under the limit). The one with `builds = 1` kills nothing the existing test doesn't, so it is not added | `a_stuck_walk_at_the_limit_holds_no_healthy_walk_whose_batches_pass_half` |
+| 6: wording | `pipeline.md`'s budget rules (backfill within half plus one batch per index walking; live's room under the limit shrinks with many walks of large batches, rule 5 still gives each index one live batch); "no task outlives the run" is "by more than one poll" (`abort` is asynchronous); `CLAUDE.md`'s "backfill cursor" and "the backfill's pool" (gone since #386 stage 3: key reads are single statements on the builder's pool, `document/keys.rs`) | — |
+
+Planning waits for the permit on the builder's task, so a builder may wait for another walk's read to
+end before its walk starts. That read always ends on its own (it runs on its task with two or more
+builders), so the wait is one read long at most per read ahead of it in the permit's line; with one
+builder nothing else holds the permit.
+
+**Mutations** (round 1; each compiles, none hangs):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| no read ahead | a walk starts its next page read while keys are in hand | `a_walk_holds_one_page_and_reads_no_further_until_it_is_taken` |
+| K1 for planning | planning reads outside the key-read permit | `planning_reads_of_walks_at_once_run_one_at_a_time` |
+| rule 4 | per index, but only while the whole is under the limit | `four_indexes_pass_the_limit_by_at_most_a_live_and_a_backfill_batch_each`, `a_stuck_walk_at_the_limit_holds_no_healthy_walk_whose_batches_pass_half` |
+| rule 4 | per index, but held back behind an older waiter (re-run) | the unit test, `a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk`, `a_stuck_walk_at_the_limit_holds_no_healthy_walk_whose_batches_pass_half`, and the `builds = 1` variant (not kept) |
+| no leak | a dropped walk leaves its read running (re-run) | the six leak tests, `a_walk_dropped_while_its_read_waits_for_the_permit_takes_no_permit_later` among them |
+
+The "not pinned" list above loses "no read ahead" and "the abort of a read still waiting for the
+permit"; it keeps the expected gain.
 
 #### 12. Rules, bounds, guarantees, mutation skeleton
 

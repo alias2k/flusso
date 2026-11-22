@@ -273,7 +273,7 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   written as a tombstone because the WAL key decoder and the read-back decoder disagree on
   the `GenericValue` variant). **A key is parsed by one function on both sides** (issue #295,
   `src/text_value.rs`'s `typed_value`): the WAL decoder on each cell, and every read-back of a key
-  (backfill cursor, the batched build's `doc_key`, reverse queries, the root-key lookup) selects it
+  (a backfill's key pages, `document/keys.rs`, the batched build's `doc_key`, reverse queries, the root-key lookup) selects it
   with `value::key_select` — `text_value::key_text`, a rendering **no session setting changes**
   (`'\x' || encode(col, 'hex')` for `bytea`, `float8send`/`float4send` bits for floats, else
   `format('%s', col)`: the output function, `::text` trims `char(n)`; dates follow the `DateStyle=ISO`
@@ -1189,9 +1189,13 @@ is the one concrete piece.
   `Walk::reading_apart`, aborted on drop), so a builder that stops stepping its walk (a publish blocked
   on a full lane, a batch waiting on the budget) still gives the permit back and keeps the page on the
   task; one builder reads inline, spawning nothing. A walk reads no page ahead (at most `KEY_PAGE` keys
-  held per walk). A read panicking on its task panics the run, as inline. Guards:
+  held per walk). Planning a resumed walk (`plan_walk`'s `resume_after`/`compare_keys`) takes the same
+  permit while some lane has a recorded point, so key reads stay one at a time and the builder's pool
+  `builds` + 1. A read panicking on its task panics the run, as inline. Guards:
   `snapshot::tests`' `one_index_stuck_mid_walk_does_not_stop_another_indexs_key_reads`,
-  `a_dropped_walk_ends_its_key_read`; `tests::builders`' `indexes_walk_at_once`,
+  `a_dropped_walk_ends_its_key_read`, `a_walk_holds_one_page_and_reads_no_further_until_it_is_taken`,
+  `a_walk_dropped_while_its_read_waits_for_the_permit_takes_no_permit_later`; `tests::builders`'
+  `indexes_walk_at_once`, `planning_reads_of_walks_at_once_run_one_at_a_time`,
   `a_stop_mid_walks_ends_every_key_read_and_serves_every_request_next_start`,
   `a_failed_walk_ends_the_run_and_every_other_key_read`, `an_aborted_run_leaves_no_key_read_running`
   (each counts the runtime's alive tasks), `one_index_spawns_no_task_for_its_key_reads`,
@@ -1436,7 +1440,8 @@ is the one concrete piece.
   bytes always granted one live batch (rule 5) and **an index holding no backfill bytes one backfill
   batch** (rule 4, per index since 6b-3: one walk on a parked lane keeps backfill's half for as long
   as it is stuck, and every other walk still goes on; guards `an_index_holding_no_backfill_bytes_gets_one_backfill_batch`,
-  `ingest::tests::walks`' `a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk`), so a batch
+  `ingest::tests::walks`' `a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk`,
+  `a_stuck_walk_at_the_limit_holds_no_healthy_walk_whose_batches_pass_half`), so a batch
   larger than the budget builds alone; held stays within the limit plus each in-flight build's
   **actual** batch and one live and one backfill batch per index (a grant is checked against its
   estimate, then settles to what it built). `[stream] capacity` / `--queue-capacity` are deprecated
@@ -2208,7 +2213,8 @@ build the same document, and with none any row answers, `TieBreak(None)`, no ter
 else, under a raw filter, `ROW(root.*)::text`, so the choice reads no column the document doesn't
 (`a_key_several_rows_share_builds_the_same_row_both_ways`,
 `choosing_a_shared_keys_row_reads_no_column_the_document_does_not_read`: a view column that raises). The
-builder's and the backfill's pools set `jit = off` after connect (`document::without_jit`, a refusal
+builder's pool, which also serves a backfill's key reads (single statements outside any transaction,
+`document/keys.rs`; no cursor and no pool of its own since #386 stage 3), sets `jit = off` after connect (`document::without_jit`, a refusal
 only warns: `a_server_that_refuses_the_jit_setting_still_connects`, Postgres 10; the lag pool doesn't;
 `the_builders_sessions_run_without_jit`, `partitions`'
 `a_batched_build_on_a_partitioned_root_is_not_jit_compiled`); the manual tells a transaction-mode
