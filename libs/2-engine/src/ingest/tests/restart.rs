@@ -40,6 +40,11 @@ struct AtRestart {
 #[derive(Debug, Default)]
 struct Restarts {
     failed: Mutex<Vec<(String, String, Duration, tokio::time::Instant)>>,
+    /// Each failure's kind, in order (slice 8-2).
+    kinds: Mutex<Vec<crate::Work>>,
+    /// How many walks started again after a failure.
+    retried: Mutex<usize>,
+    /// The builder's restarts (kind `live`).
     restarted: Mutex<Vec<AtRestart>>,
     look: Mutex<Option<(Arc<Recorder>, Arc<crate::Progress>)>>,
 }
@@ -62,6 +67,14 @@ impl Restarts {
         self.restarted.lock().unwrap().clone()
     }
 
+    fn kinds(&self) -> Vec<crate::Work> {
+        self.kinds.lock().unwrap().clone()
+    }
+
+    fn retried(&self) -> usize {
+        *self.retried.lock().unwrap()
+    }
+
     fn waits(&self) -> Vec<Duration> {
         self.failures()
             .iter()
@@ -71,7 +84,14 @@ impl Restarts {
 }
 
 impl Observer for Restarts {
-    fn on_index_failed(&self, index: &IndexName, error: &str, retry_in: Duration) {
+    fn on_index_failed(
+        &self,
+        index: &IndexName,
+        kind: crate::Work,
+        error: &str,
+        retry_in: Duration,
+    ) {
+        self.kinds.lock().unwrap().push(kind);
         self.failed.lock().unwrap().push((
             index.to_string(),
             error.to_owned(),
@@ -80,7 +100,11 @@ impl Observer for Restarts {
         ));
     }
 
-    fn on_index_restarted(&self, index: &IndexName) {
+    fn on_index_restarted(&self, index: &IndexName, kind: crate::Work) {
+        if kind == crate::Work::Backfill {
+            *self.retried.lock().unwrap() += 1;
+            return;
+        }
         let look = self.look.lock().unwrap();
         let Some((recorder, progress)) = look.as_ref() else {
             return;
@@ -145,6 +169,11 @@ async fn a_build_failure_on_one_index_restarts_that_index_alone() {
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert_eq!(failures[0].0, "orders");
     assert_eq!(failures[0].2, Duration::from_secs(1), "the first wait");
+    assert_eq!(
+        restarts.kinds(),
+        [crate::Work::Live],
+        "a live failure, reported as one (slice 8-2)"
+    );
     let restarted = restarts.restarts();
     assert_eq!(restarted.len(), 1);
     assert_eq!(restarted[0].index, "orders");
@@ -211,6 +240,16 @@ async fn a_restarted_index_task_gives_back_its_builds_and_serves_its_request_aga
     let failures = restarts.failures();
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert!(failures[0].1.contains("keys failed"), "{failures:?}");
+    assert_eq!(
+        restarts.kinds(),
+        [crate::Work::Backfill],
+        "a walk's failure, reported as one (slice 8-2)"
+    );
+    assert_eq!(restarts.retried(), 1, "its walk started again once");
+    assert!(
+        restarts.restarts().is_empty(),
+        "the builder never restarted"
+    );
     assert_eq!(deployment.recorder.state(), db.expected());
 }
 
@@ -1018,7 +1057,7 @@ async fn every_index_down_stops_the_reading_and_a_stop_ends_with_an_error() {
 struct FailureWaits(Mutex<Vec<Duration>>);
 
 impl Observer for FailureWaits {
-    fn on_index_failed(&self, _: &IndexName, _: &str, retry_in: Duration) {
+    fn on_index_failed(&self, _: &IndexName, _: crate::Work, _: &str, retry_in: Duration) {
         self.0.lock().unwrap().push(retry_in);
     }
 }

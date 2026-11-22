@@ -141,7 +141,7 @@ impl IngestEngine {
                  oldest of them"
             );
             self.observer
-                .on_index_failed(&index, &error.to_string(), wait);
+                .on_index_failed(&index, Work::Live, &error.to_string(), wait);
             // A stop cuts the wait short: the builder tries once more, under
             // the stop's deadline (O3).
             tokio::select! {
@@ -153,7 +153,7 @@ impl IngestEngine {
                 kind = "live",
                 "the index's builder restarted: building its backlog first"
             );
-            self.observer.on_index_restarted(&index);
+            self.observer.on_index_restarted(&index, Work::Live);
         };
         // The dispatcher is gone only once the run ended.
         let _ = done.send(result);
@@ -409,9 +409,18 @@ impl IngestEngine {
                 }
                 () = until(deadline), if deadline.is_some() => {
                     builds.leave_lines();
+                    let retrying = coalescing.as_ref().is_some_and(|gathered| gathered.retry);
                     *snapshot = self
                         .start_coalesced(coalescing, scopes, lanes, several)
                         .await?;
+                    if let (true, Some(index)) = (retrying, builds.index()) {
+                        tracing::info!(
+                            %index,
+                            kind = "backfill",
+                            "the index's backfill started again, each sink from where it got"
+                        );
+                        self.observer.on_index_restarted(index, Work::Backfill);
+                    }
                     mark = Instant::now();
                 }
                 signal = signals.next() => {
@@ -461,7 +470,7 @@ impl IngestEngine {
                  where it got, while the index's live changes keep flowing"
             );
             self.observer
-                .on_index_failed(index, &error.to_string(), wait);
+                .on_index_failed(index, Work::Backfill, &error.to_string(), wait);
         }
         let now = Instant::now();
         *coalescing = Some(Coalescing {

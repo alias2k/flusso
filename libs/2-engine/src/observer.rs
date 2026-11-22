@@ -503,18 +503,22 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (lane, outcome);
     }
 
-    /// One index's builder failed on its own work (a build, a document
-    /// under `on_error = "stop"`, its walk's key read) and restarts alone
-    /// after `retry_in`, while the reader and the other indexes go on (ADR
-    /// 0012 stage 8a, slice 8). Its documents wait meanwhile. Not an
-    /// engine's error: the ingest engine keeps running.
-    fn on_index_failed(&self, index: &IndexName, error: &str, retry_in: Duration) {
-        let _ = (index, error, retry_in);
+    /// One index's own work failed (ADR 0012 stage 8a, slice 8), and is
+    /// tried again after `retry_in` while the reader and the other indexes
+    /// go on. `kind` [`Work::Live`]: a live build or document; its builder
+    /// is down, its documents wait. [`Work::Backfill`]: its walk (a key
+    /// read, a backfill build or document); only the walk waits, its live
+    /// changes keep flowing. Not an engine's error: the ingest engine keeps
+    /// running.
+    fn on_index_failed(&self, index: &IndexName, kind: Work, error: &str, retry_in: Duration) {
+        let _ = (index, kind, error, retry_in);
     }
 
-    /// The index's builder restarted after its backoff.
-    fn on_index_restarted(&self, index: &IndexName) {
-        let _ = index;
+    /// The index's work of `kind` started again after its wait: its builder
+    /// restarted ([`Work::Live`]) or its walk's retry started
+    /// ([`Work::Backfill`]).
+    fn on_index_restarted(&self, index: &IndexName, kind: Work) {
+        let _ = (index, kind);
     }
 
     /// An engine stopped on an error. The daemon decides whether it restarts.
@@ -698,15 +702,15 @@ impl Observer for FanOut {
         }
     }
 
-    fn on_index_failed(&self, index: &IndexName, error: &str, retry_in: Duration) {
+    fn on_index_failed(&self, index: &IndexName, kind: Work, error: &str, retry_in: Duration) {
         for observer in &self.observers {
-            observer.on_index_failed(index, error, retry_in);
+            observer.on_index_failed(index, kind, error, retry_in);
         }
     }
 
-    fn on_index_restarted(&self, index: &IndexName) {
+    fn on_index_restarted(&self, index: &IndexName, kind: Work) {
         for observer in &self.observers {
-            observer.on_index_restarted(index);
+            observer.on_index_restarted(index, kind);
         }
     }
 
