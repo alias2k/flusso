@@ -151,6 +151,7 @@ impl IngestEngine {
             batch: PendingBatch::new(self.batch.max_changes),
             page_wait: Duration::ZERO,
             done: false,
+            reached: Reached::default(),
         };
         if indexes.is_empty() {
             self.finish_snapshot(&mut snapshot, lanes).await?;
@@ -196,6 +197,11 @@ impl IngestEngine {
         let indexes: Vec<IndexName> = snapshot.indexes.iter().cloned().collect();
         tracing::info!(indexes = indexes.len(), "snapshot complete");
         self.advances.fetch_add(1, Ordering::Relaxed);
+        for index in &indexes {
+            if let Some(walks) = self.walks.get(index) {
+                walks.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         self.observer.on_snapshot_completed(&indexes);
         Ok(())
     }
@@ -220,15 +226,53 @@ pub(super) struct Snapshot {
     pub(super) done: bool,
     /// Shows its walks in `/status` while it lives.
     _walking: Option<crate::index_states::Walking>,
+    /// The last walk mark published to each lane: everything up to it is on
+    /// the lane, so a builder that restarts resumes each lane's request
+    /// after it (slice 8, review of #456).
+    pub(super) reached: Reached,
 }
+
+/// The last walk mark a snapshot published to each lane, shared with its
+/// batches' slots, which record it as each is published.
+pub(super) type Reached = Arc<std::sync::Mutex<BTreeMap<LaneKey, stream::WalkMark>>>;
 
 impl Snapshot {
     /// Its requests, unacknowledged, for a builder that restarts to serve
     /// again (slice 8): dropping the snapshot stops its walk.
+    /// Each request resumes after the last mark the walk published to its
+    /// lane: a lane receives a walk's batches from its own point on, so
+    /// that mark is past its point, and every batch up to it is on the lane
+    /// and lands (the stream redelivers what isn't acknowledged).
     pub(super) fn into_requests(mut self) -> Vec<stream::Delivery<Request>> {
+        let reached = std::mem::take(
+            &mut *self
+                .reached
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         std::mem::take(&mut self.handles)
             .into_iter()
-            .map(|(request, handle)| stream::Delivery::new(request, handle))
+            .map(|(request, handle)| {
+                let Request::Backfill {
+                    index,
+                    sink,
+                    after,
+                    ticket,
+                } = request;
+                let after = reached
+                    .get(&LaneKey::new(index.clone(), sink.clone()))
+                    .cloned()
+                    .or(after);
+                stream::Delivery::new(
+                    Request::Backfill {
+                        index,
+                        sink,
+                        after,
+                        ticket,
+                    },
+                    handle,
+                )
+            })
             .collect()
     }
 

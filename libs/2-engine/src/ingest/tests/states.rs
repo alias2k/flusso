@@ -253,7 +253,9 @@ async fn a_walk_stopped_is_no_longer_shown() {
 
 /// Records every wait of the reader at its lead.
 #[derive(Debug, Default)]
-struct ReaderWaits(Mutex<Vec<(crate::ReaderBound, Option<String>, Duration)>>);
+pub(super) struct ReaderWaits(
+    pub(super) Mutex<Vec<(crate::ReaderBound, Option<String>, Duration)>>,
+);
 
 impl crate::Observer for ReaderWaits {
     fn on_reader_wait(

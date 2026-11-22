@@ -368,6 +368,7 @@ impl IngestEngine {
         let job = Job::Backfill {
             requested: snapshot.lanes_now(),
             marks,
+            reached: Arc::clone(&snapshot.reached),
         };
         builds
             .start(&self.documents, ids, job, &|built| self.halts(built))
@@ -495,9 +496,27 @@ impl IngestEngine {
                 self.publish_live(built, &taken, granted, charges, lanes)
                     .await?;
             }
-            (Job::Backfill { requested, marks }, Some(built)) => {
+            (
+                Job::Backfill {
+                    requested,
+                    marks,
+                    reached,
+                },
+                Some(built),
+            ) => {
                 self.publish_backfill(built, &requested, &marks, charges, lanes)
                     .await?;
+                // Every lane sent this batch has the walk through its mark.
+                let mut reached = reached
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for (sink, indexes) in &requested {
+                    for index in indexes.keys() {
+                        if let Some(mark) = marks.get(index) {
+                            reached.insert(LaneKey::new(index.clone(), sink.clone()), mark.clone());
+                        }
+                    }
+                }
             }
             (_, None) => {}
         }

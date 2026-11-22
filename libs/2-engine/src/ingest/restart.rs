@@ -11,18 +11,24 @@
 //! failure while stopping (a stop never restarts anything) and any failure of
 //! a lone builder (one index keeps the whole-run restart and its replay).
 //!
-//! **The wait.** Per builder, the `[backoff]` schedule: the first wait, then
-//! doubling to the longest, started over once the restarted builder published
-//! a live item of its index (a later failure is a new outage, not the same one
-//! repeating). A stop cuts the wait short.
+//! **The wait.** Per builder, the `[backoff]` schedule, one per kind of work
+//! that failed: the first wait, then doubling to the longest. A live failure
+//! (a live build, a live document) starts over once the index published a
+//! live item since its last restart; a backfill failure (its walk's key read,
+//! a backfill build or document) once a walk of the index completed since.
+//! Progress of the other kind is no sign the failure is past: a bad backfill
+//! row beside live traffic would otherwise be retried every first wait for
+//! ever (review of #456). A stop cuts the wait short.
 //!
 //! ```text
-//! fail ─▶ wait 1 s ─▶ restart ─▶ fail ─▶ wait 2 s ─▶ restart ─▶ publish … fail ─▶ wait 1 s
+//! live fail ─▶ 1 s ─▶ live fail ─▶ 2 s ─▶ … published live ─▶ live fail ─▶ 1 s
+//! walk fail ─▶ 1 s ─▶ walk fail ─▶ 2 s ─▶ 4 s (live published meanwhile: no reset)
 //! ```
 
 use tokio::time::Duration;
 
 use crate::error::EngineError;
+use crate::observer::Work;
 use crate::policy::Backoff;
 
 /// Whether a builder's `error` restarts that builder alone: it is one of
@@ -37,40 +43,68 @@ pub(super) fn restarts_alone(several: bool, stopping: bool, error: &EngineError)
         )
 }
 
-/// One builder's waits between restarts, for the life of an engine run.
+/// What an index has done so far, by kind: what restarts a kind's waits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Done {
+    /// Live items of the index numbered (published).
+    pub(super) live: u64,
+    /// Walks of the index completed.
+    pub(super) walks: u64,
+}
+
+/// One builder's waits between restarts, for the life of an engine run: one
+/// schedule per kind of work.
 #[derive(Debug)]
 pub(super) struct Retry {
-    schedule: Backoff,
+    live: Schedule,
+    walk: Schedule,
+}
+
+/// One kind's waits, and what that kind had done at the last restart.
+#[derive(Debug)]
+struct Schedule {
+    backoff: Backoff,
     next: Duration,
-    /// How many live items of the index had been numbered when it last
-    /// restarted: more at its next failure means it published since.
-    numbered: u64,
+    done: u64,
+}
+
+impl Schedule {
+    fn failed(&mut self, done: u64) -> Duration {
+        if done > self.done {
+            self.next = self.backoff.initial();
+        }
+        let wait = self.next;
+        self.next = self.backoff.after(wait);
+        wait
+    }
 }
 
 impl Retry {
-    pub(super) fn new(schedule: Backoff) -> Self {
+    pub(super) fn new(backoff: Backoff) -> Self {
+        let schedule = || Schedule {
+            backoff,
+            next: backoff.initial(),
+            done: 0,
+        };
         Self {
-            schedule,
-            next: schedule.initial(),
-            numbered: 0,
+            live: schedule(),
+            walk: schedule(),
         }
     }
 
-    /// The builder failed with `numbered` live items of its index numbered
-    /// so far: how long it waits before its restart.
-    pub(super) fn failed(&mut self, numbered: u64) -> Duration {
-        if numbered > self.numbered {
-            self.next = self.schedule.initial();
+    /// The builder failed on `work`, its index having `done` so much: how
+    /// long it waits before its restart.
+    pub(super) fn failed(&mut self, work: Work, done: Done) -> Duration {
+        match work {
+            Work::Live => self.live.failed(done.live),
+            Work::Backfill => self.walk.failed(done.walks),
         }
-        let wait = self.next;
-        self.next = self.schedule.after(wait);
-        wait
     }
 
-    /// The builder restarted with `numbered` live items of its index
-    /// numbered so far.
-    pub(super) fn restarted(&mut self, numbered: u64) {
-        self.numbered = numbered;
+    /// The builder restarted, its index having `done` so much.
+    pub(super) fn restarted(&mut self, done: Done) {
+        self.live.done = done.live;
+        self.walk.done = done.walks;
     }
 }
 
@@ -140,12 +174,40 @@ mod tests {
             Retry::new(Backoff::new(Duration::from_secs(1), Duration::from_secs(5)).unwrap());
         let mut waits = Vec::new();
         for _ in 0..4 {
-            waits.push(retry.failed(0).as_secs());
-            retry.restarted(0);
+            waits.push(retry.failed(Work::Live, done(0, 0)).as_secs());
+            retry.restarted(done(0, 0));
         }
-        waits.push(retry.failed(3).as_secs());
-        retry.restarted(3);
-        waits.push(retry.failed(3).as_secs());
+        waits.push(retry.failed(Work::Live, done(3, 0)).as_secs());
+        retry.restarted(done(3, 0));
+        waits.push(retry.failed(Work::Live, done(3, 0)).as_secs());
         assert_eq!(waits, [1, 2, 4, 5, 1, 2]);
+    }
+
+    fn done(live: u64, walks: u64) -> Done {
+        Done { live, walks }
+    }
+
+    /// R8 per kind (review of #456): a walk's failure starts over only once a
+    /// walk completed; live items published meanwhile don't, and a walk
+    /// completing doesn't start a live failure's waits over.
+    #[test]
+    fn each_kind_starts_over_only_on_its_own_progress() {
+        let mut retry =
+            Retry::new(Backoff::new(Duration::from_secs(1), Duration::from_secs(60)).unwrap());
+        let mut walk = Vec::new();
+        for live in 0..4 {
+            walk.push(retry.failed(Work::Backfill, done(live * 10, 0)).as_secs());
+            retry.restarted(done(live * 10, 0));
+        }
+        assert_eq!(walk, [1, 2, 4, 8], "live published after every restart");
+        assert_eq!(retry.failed(Work::Backfill, done(40, 1)).as_secs(), 1);
+        retry.restarted(done(40, 1));
+        assert_eq!(retry.failed(Work::Live, done(40, 1)).as_secs(), 1);
+        retry.restarted(done(40, 1));
+        assert_eq!(
+            retry.failed(Work::Live, done(40, 2)).as_secs(),
+            2,
+            "a walk completing doesn't start the live waits over"
+        );
     }
 }

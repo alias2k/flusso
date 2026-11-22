@@ -675,3 +675,672 @@ async fn a_lanes_positions_never_go_down_across_a_restart() {
     );
     assert_eq!(deployment.recorder.state(), db.expected());
 }
+
+// Adopted from the review of #456 (fix round 1).
+
+/// One index stuck (`orders`: every document refused, its lane of two
+/// parks: held) beside `users`, quiet, whose walk fails once at the start
+/// when `walk_fails`. Returns the changes read at 9 s.
+async fn stuck_beside_a_quiet_index(walk_fails: bool) -> u64 {
+    let changes: i64 = 300;
+    let log: Vec<Change> = (0..changes)
+        .map(|n| Change::upsert(2 * (n % 50) + 1))
+        .collect();
+    let arrivals: Vec<Duration> = (0..changes as u64)
+        .map(|n| Duration::from_millis(20 * n))
+        .collect();
+    let db = Database::new(1, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            keys_fail_once: Mutex::new(if walk_fails {
+                HashSet::from(["users".to_owned()])
+            } else {
+                HashSet::new()
+            }),
+            padding: 8 * KIB,
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(false);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let restarts = Arc::new(IndexRestarts::default());
+    let restarts_observer: Arc<dyn Observer> = Arc::clone(&restarts) as Arc<dyn Observer>;
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        64,
+    )
+    .with_budget(128 * KIB, usize::MAX)
+    .ingest(|ingest| {
+        ingest
+            .with_observer(restarts_observer)
+            .with_batch(batch(1))
+            .with_builds(2)
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+    });
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(9)).await;
+            let read = progress.changes_read();
+            recorder.refused_indexes.lock().unwrap().clear();
+            read
+        })
+    };
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    let read = watcher.await.unwrap();
+    assert_eq!(deployment.recorder.state(), db.expected());
+    read
+}
+
+/// A quiet index whose walk failed once and restarted keeps its lead hold
+/// (`down` sets it; only a live grant clears it, and a quiet index makes
+/// none): it is never free again, so a stuck neighbour freezes at its cap
+/// instead of reading on, exempt, as it does beside the same quiet index
+/// that never failed.
+#[tokio::test(start_paused = true)]
+async fn a_restarted_quiet_index_is_free_again() {
+    let control = stuck_beside_a_quiet_index(false).await;
+    let failing = stuck_beside_a_quiet_index(true).await;
+    assert_eq!(
+        failing, control,
+        "beside a quiet index the stuck one reads on ({control} read); after the quiet one \
+         restarted once, only {failing}"
+    );
+}
+
+/// The twin of `a_hold_across_an_engine_restart_is_one_wait`, as that test
+/// was before slice 8 (review of #456, item 3):
+/// `orders` 9's build fails once, which now restarts `orders` alone while
+/// `users` is held by the budget. One hold, so one refusal counted and one
+/// wait reported; the failed builder's dropped `Builds` must not end
+/// `users`' wait.
+#[tokio::test(start_paused = true)]
+async fn a_hold_across_an_index_restart_is_one_wait() {
+    let mut log: Vec<Change> = (0..10).map(|n| Change::upsert(2 * n)).collect();
+    log.push(Change::upsert(0));
+    log.extend([1, 3, 5, 7, 9].map(Change::upsert));
+    let db = Database::new(0, log);
+    let builder = Builder::over(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            fail_once: Mutex::new(HashSet::from([9])),
+            ..Behaviour::default()
+        },
+        2,
+    );
+    let recorder = Recorder::seeded(true);
+    recorder.stall();
+    let waits = Arc::new(BudgetWaits::default());
+    let observer = Arc::clone(&waits);
+    let restarts = Arc::new(IndexRestarts::default());
+    let restarts_observer: Arc<dyn Observer> = Arc::clone(&restarts) as Arc<dyn Observer>;
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_millis(100)),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(16))
+            .with_builds(4)
+            .with_observer(Arc::new(crate::FanOut::new(vec![
+                observer as Arc<dyn Observer>,
+                restarts_observer,
+            ])))
+    })
+    .with_budget(128 * KIB, usize::MAX);
+    let budget = deployment.budget.clone().unwrap();
+    let resumer = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(3_000)).await;
+            recorder.resume();
+        })
+    };
+    assert_eq!(deployment.run_to_end(0).await, 0, "no run failed");
+    resumer.await.unwrap();
+    assert_eq!(deployment.recorder.state(), db.expected());
+    assert_eq!(
+        restarts.0.load(Ordering::SeqCst),
+        1,
+        "orders restarted alone"
+    );
+    let live: Vec<(crate::Wake, Duration)> = waits
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(work, _, _)| *work == crate::Work::Live)
+        .map(|(_, wake, waited)| (*wake, *waited))
+        .collect();
+    assert_eq!(
+        budget.refused(crate::Work::Live),
+        1,
+        "one hold, counted once: {live:?}"
+    );
+    assert_eq!(live.len(), 1, "one wait: {live:?}");
+}
+
+/// While `orders` is down with change 1 given back, the sink's committed
+/// count stays before change 1 (read 2nd), `orders`' lane at both levels
+/// stays before position 1, and the slot too; at the end every change
+/// counts once.
+#[tokio::test(start_paused = true)]
+async fn nothing_counts_or_fences_past_a_given_back_change() {
+    let db = Database::new(0, (0..40).map(Change::upsert).collect());
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            fail_times: Mutex::new(BTreeMap::from([(1, 2)])),
+            delay: Some(Duration::from_millis(5)),
+            ..Behaviour::default()
+        },
+    );
+    let restarts = Arc::new(IndexRestarts::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&restarts) as Arc<dyn Observer>;
+    let mut deployment =
+        Deployment::new(Feed::new(&db), Arc::clone(&builder), Recorder::seeded(true)).ingest(
+            |ingest| {
+                ingest
+                    .with_batch(batch(1))
+                    .with_builds(2)
+                    .with_observer(observer)
+            },
+        );
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let progress = Arc::clone(&progress);
+        let builder = Arc::clone(&builder);
+        let restarts = Arc::clone(&restarts);
+        tokio::spawn(async move {
+            let mut samples = 0;
+            let mut bad = Vec::new();
+            for _ in 0..4_000 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                let built_1 = builder.behaviour.fail_times.lock().unwrap().get(&1) == Some(&0)
+                    && restarts.0.load(Ordering::SeqCst) >= 2;
+                if built_1 {
+                    break;
+                }
+                samples += 1;
+                let committed = progress.committed(&sink_name());
+                let orders = progress.lane(
+                    &stream::LaneKey::new(IndexName::try_new("orders").unwrap(), sink_name()),
+                    crate::Level::Searchable,
+                );
+                let landed = progress.landed();
+                let past = |answer: &source::cdc::Landed| {
+                    !matches!(answer, source::cdc::Landed::Before(p) if p.seq <= 1)
+                        && !matches!(answer, source::cdc::Landed::Idle)
+                };
+                if committed > 1 || orders.as_ref().is_some_and(past) || past(&landed) {
+                    bad.push((committed, orders, landed));
+                }
+            }
+            (samples, bad)
+        })
+    };
+    let failed = tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    assert_eq!(failed, 0);
+    let (samples, bad) = watcher.await.unwrap();
+    assert!(samples > 100, "sampled while orders was down: {samples}");
+    assert!(
+        bad.is_empty(),
+        "past the given-back change while down: {:?}",
+        &bad[..bad.len().min(5)]
+    );
+    assert_eq!(progress.committed(&sink_name()), 40, "every change once");
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// A thousand failures of `orders` (each with builds of its own in flight,
+/// under a budget that refuses): every permit, reservation and charge comes
+/// back each time (a leaked permit would hang the run, a leaked byte fails
+/// `run_to_end`'s release check), and the run ends with every document.
+#[tokio::test(start_paused = true)]
+async fn a_thousand_failures_leak_nothing() {
+    let log: Vec<Change> = (0..400).map(|n| Change::upsert(n % 40)).collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            fail_times: Mutex::new(BTreeMap::from([(1, 1000)])),
+            delay: Some(Duration::from_millis(1)),
+            padding: 4 * KIB,
+            ..Behaviour::default()
+        },
+    );
+    let restarts = Arc::new(IndexRestarts::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&restarts) as Arc<dyn Observer>;
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_millis(1)),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(4)
+            .with_observer(observer)
+            .with_backoff(
+                crate::Backoff::new(Duration::from_millis(1), Duration::from_millis(1)).unwrap(),
+            )
+    })
+    .with_budget(64 * KIB, usize::MAX);
+    let base = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    let failed = tokio::time::timeout(Duration::from_secs(3_600), deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    assert_eq!(failed, 0);
+    assert_eq!(restarts.0.load(Ordering::SeqCst), 1000);
+    assert_eq!(deployment.recorder.state(), db.expected());
+    let left = deployment.budget.as_ref().unwrap().held();
+    assert_eq!(left, crate::Held::default());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let alive = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    assert!(alive <= base + 1, "tasks left: {alive} past {base}");
+}
+
+/// Both indexes down for good: neither is free, so neither grows exempt and
+/// the reader stops at the caps; a stop has each try once more, both fail,
+/// and the run ends with an error (never hangs, never `Ok`).
+#[tokio::test(start_paused = true)]
+async fn every_index_down_stops_the_reading_and_a_stop_ends_with_an_error() {
+    let log: Vec<Change> = (0..200).map(|n| Change::upsert(n % 40)).collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            fail_times: Mutex::new(BTreeMap::from([(0, usize::MAX), (1, usize::MAX)])),
+            ..Behaviour::default()
+        },
+    );
+    let stop = Stop::new();
+    let restarts = Arc::new(IndexRestarts::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&restarts) as Arc<dyn Observer>;
+    let mut deployment = Deployment::new(
+        Feed::new(&db).open().with_delay(Duration::from_millis(10)),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(2)
+            .with_stop(stop.clone())
+            .with_observer(observer)
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+    });
+    let progress = deployment.ingest.progress();
+    let sink = deployment.start_sink().await;
+    let ingest = deployment.ingest;
+    let run = tokio::spawn(async move { ingest.run().await });
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let read = progress.changes_read();
+    let waiting = progress.waiting_by_index();
+    stop.request();
+    let ended = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the stop ends the run")
+        .unwrap();
+    sink.abort();
+    assert!(ended.is_err(), "both retries failed: {ended:?}");
+    assert!(
+        read < 200,
+        "the reading stopped with both down: {read} read, {waiting:?}"
+    );
+}
+
+#[derive(Debug, Default)]
+struct FailureWaits(Mutex<Vec<Duration>>);
+
+impl Observer for FailureWaits {
+    fn on_index_failed(&self, _: &IndexName, _: &str, retry_in: Duration) {
+        self.0.lock().unwrap().push(retry_in);
+    }
+}
+
+/// `orders`' backfill row 41 fails every time it is built, while `orders`
+/// keeps getting live changes. Each restart walks the table again and its
+/// live backlog publishes, which starts the backoff over: the waits never
+/// grow, so the whole walk is redone about once a second for ever.
+#[tokio::test(start_paused = true)]
+async fn a_poison_backfill_row_beside_live_traffic_backs_off() {
+    let changes = 600u64;
+    let log: Vec<Change> = (0..changes as i64)
+        .map(|n| Change::upsert(2 * (n % 10) + 1))
+        .collect();
+    let arrivals: Vec<Duration> = (0..changes)
+        .map(|n| Duration::from_millis(100 * n))
+        .collect();
+    let db = Database::new(60, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            fail_times: Mutex::new(BTreeMap::from([(41, usize::MAX)])),
+            ..Behaviour::default()
+        },
+    );
+    let stop = Stop::new();
+    let waits = Arc::new(FailureWaits::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&waits) as Arc<dyn Observer>;
+    let recorder = Recorder::seeded(false);
+    recorder
+        .seeded_indexes
+        .lock()
+        .unwrap()
+        .insert("users".to_owned());
+    let mut deployment = Deployment::new(
+        Feed::new(&db).open().with_arrivals(arrivals),
+        Arc::clone(&builder),
+        recorder,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(2)
+            .with_stop(stop.clone())
+            .with_observer(observer)
+    });
+    let sink = deployment.start_sink().await;
+    let ingest = deployment.ingest;
+    let run = tokio::spawn(async move { ingest.run().await });
+    tokio::time::sleep(Duration::from_secs(55)).await;
+    let seen = waits.0.lock().unwrap().clone();
+    let row_1_built = builder
+        .grants()
+        .iter()
+        .filter(|ids| ids.contains(&1) && !ids.contains(&3))
+        .count();
+    run.abort();
+    sink.abort();
+    let longest = seen.iter().max().copied().unwrap_or_default();
+    assert!(
+        longest >= Duration::from_secs(16),
+        "{} failures in 55 s, the longest wait {longest:?}, row 1 built {row_1_built} times: {seen:?}",
+        seen.len()
+    );
+}
+
+/// Range A: `pacing_reader` is true exactly while the reader waits at that
+/// index's bound. `users` 0's build hangs (holding one of the two permits),
+/// 2 and 4 wait behind it; `orders` builds slowly and reaches its cap (4):
+/// the reader waits on `orders` (4 + 2 = 6 is the total too). Then `users`
+/// 0's build fails and is given back: `users` waits on 3. One `orders` build
+/// later `orders` has 3 waiting, but 3 + 3 is still `total` (6): the reader
+/// waits on the total now, and `orders` still shows as pacing it.
+#[tokio::test(start_paused = true)]
+async fn pacing_follows_the_bound_the_reader_waits_at() {
+    let mut log: Vec<Change> = [0, 2, 4].into_iter().map(Change::upsert).collect();
+    log.extend((0..30).map(|n| Change::upsert(2 * n + 1)));
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([0])),
+            fail_once: Mutex::new(HashSet::from([0])),
+            delay: Some(Duration::from_millis(100)),
+            ..Behaviour::default()
+        },
+    );
+    let mut deployment =
+        Deployment::new(Feed::new(&db), Arc::clone(&builder), Recorder::seeded(true)).ingest(
+            |ingest| {
+                ingest
+                    .with_batch(batch(1))
+                    .with_builds(2)
+                    .with_max_waiting(MaxWaiting {
+                        per_index: 4,
+                        total: 6,
+                    })
+            },
+        );
+    let waits = Arc::new(super::states::ReaderWaits::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&waits) as Arc<dyn Observer>;
+    deployment = deployment.ingest(|ingest| ingest.with_observer(observer));
+    let states = deployment.ingest.index_states();
+    let progress = deployment.ingest.progress();
+    let orders = IndexName::try_new("orders").unwrap();
+    let watcher = {
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            let mut wrong = Vec::new();
+            let mut released = false;
+            for _ in 0..3_000 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                if !released && states.view(&orders).unwrap().pacing_reader {
+                    builder.release(0);
+                    released = true;
+                }
+                for name in ["orders", "users"] {
+                    let index = IndexName::try_new(name).unwrap();
+                    let waiting = progress.waiting_on(&index);
+                    if states.view(&index).unwrap().pacing_reader && waiting < 4 {
+                        wrong.push((name, waiting, progress.waiting()));
+                    }
+                }
+            }
+            builder.release(0);
+            (released, wrong)
+        })
+    };
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    let (released, wrong) = watcher.await.unwrap();
+    assert!(released, "the reader never waited on orders");
+    let waits = waits.0.lock().unwrap().clone();
+    assert!(
+        waits
+            .iter()
+            .any(|(bound, index, _)| *bound == crate::ReaderBound::PerIndex
+                && index.as_deref() == Some("orders"))
+            && waits
+                .iter()
+                .any(|(bound, index, _)| *bound == crate::ReaderBound::Total && index.is_none()),
+        "the wait is reported under each bound it was at: {waits:?}"
+    );
+    assert!(
+        wrong.is_empty(),
+        "shown pacing the reader below its cap: {:?} ({} samples)",
+        &wrong[..wrong.len().min(5)],
+        wrong.len()
+    );
+}
+
+/// Item 7 of the review of #456: `orders` 1's build fails at 0.5 s while
+/// its build of 3 is slow (held until 4 s). The builder waits for that build before it
+/// restarts, and is held and folding from the failure on, not only once the
+/// build returned: past its cap (4) it is exempt and the reader reads on,
+/// `users` landing every change meanwhile.
+#[tokio::test(start_paused = true)]
+async fn a_failed_index_is_held_while_its_slow_builds_finish() {
+    let mut log: Vec<Change> = [1, 3].into_iter().map(Change::upsert).collect();
+    log.extend((0..100).map(|n| Change::upsert(if n % 2 == 0 { n } else { n + 4 })));
+    let arrivals: Vec<Duration> = (0..log.len() as u64)
+        .map(|n| Duration::from_millis(if n < 2 { 0 } else { 100 + 10 * n }))
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([1, 3])),
+            fail_once: Mutex::new(HashSet::from([1])),
+            ..Behaviour::default()
+        },
+    );
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_arrivals(arrivals),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(4)
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+    });
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            builder.release(1);
+            tokio::time::sleep(Duration::from_millis(3_500)).await;
+            let read = progress.changes_read();
+            builder.release(3);
+            read
+        })
+    };
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    let read = watcher.await.unwrap();
+    assert_eq!(
+        read, 102,
+        "the reader read every change while orders waited on its slow build"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// Review of #456, item 2: a restarted walk resumes each lane's request
+/// after the last batch it published there, not from the request's own
+/// point. `orders`' backfill row 41 fails twice: the batches before it are
+/// published once, so row 1 is built once, and every row lands.
+#[tokio::test(start_paused = true)]
+async fn a_restarted_walk_resumes_where_its_lanes_are() {
+    let db = Database::new(60, Vec::new());
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            fail_times: Mutex::new(BTreeMap::from([(41, 2)])),
+            resumable: true,
+            ..Behaviour::default()
+        },
+    );
+    let mut deployment = Deployment::new(
+        Feed::new(&db),
+        Arc::clone(&builder),
+        Recorder::seeded(false),
+    )
+    .ingest(|ingest| ingest.with_batch(batch(4)).with_builds(2));
+    let restarts = Restarts::watching(&deployment);
+    let observer: Arc<dyn Observer> = Arc::clone(&restarts) as Arc<dyn Observer>;
+    deployment = deployment.ingest(|ingest| ingest.with_observer(observer));
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    assert_eq!(restarts.restarts().len(), 2, "{:?}", restarts.failures());
+    let built_1 = builder
+        .grants()
+        .iter()
+        .filter(|ids| ids.contains(&1))
+        .count();
+    assert_eq!(built_1, 1, "row 1 built once: {:?}", builder.grants());
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// R14 in the engine (review of #456, item 9): `orders`' lane fails a
+/// publish. A lane is the stream's, shared: the run ends, nothing restarts
+/// alone, and the replay builds everything.
+#[tokio::test(start_paused = true)]
+async fn a_lane_failure_ends_the_run_and_restarts_no_index_alone() {
+    let db = Database::new(0, (0..20).map(Change::upsert).collect());
+    let (mut deployment, _, restarts) = two_indexes(
+        &db,
+        Behaviour {
+            delay: Some(Duration::from_millis(5)),
+            ..Behaviour::default()
+        },
+        Recorder::seeded(true),
+        2,
+    );
+    deployment
+        .failing
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let failed = tokio::time::timeout(LIMIT, deployment.run_to_end(1))
+        .await
+        .expect("the run ends");
+    assert_eq!(failed, 1, "the lane's failure ended the run");
+    assert!(restarts.failures().is_empty(), "{:?}", restarts.failures());
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// R6 in the engine (review of #456, item 9): `orders` 3's build is held,
+/// then fails; behind it 1 (change 1), 5 (change 2) and 1 again (change 3)
+/// built and wait for their turn. All are given back: 1 waits at its older
+/// change, 1, so the restart takes 3, 1, 5, oldest first (at the newer
+/// change it would take 3, 5, 1).
+#[tokio::test(start_paused = true)]
+async fn a_given_back_document_keeps_its_older_change() {
+    let db = Database::new(0, [3, 1, 5, 1, 0].into_iter().map(Change::upsert).collect());
+    let (mut deployment, builder, restarts) = two_indexes(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([3])),
+            fail_once: Mutex::new(HashSet::from([3])),
+            ..Behaviour::default()
+        },
+        Recorder::seeded(true),
+        4,
+    );
+    let releaser = {
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            while builder.grants().iter().filter(|ids| **ids == [1]).count() < 2 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            builder.release(3);
+        })
+    };
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    releaser.await.unwrap();
+    assert_eq!(restarts.restarts().len(), 1);
+    let grants = builder.grants();
+    let second_1 = grants
+        .iter()
+        .enumerate()
+        .filter(|(_, ids)| **ids == [1])
+        .nth(1)
+        .map(|(at, _)| at)
+        .unwrap();
+    let after: Vec<i64> = grants
+        .iter()
+        .skip(second_1 + 1)
+        .flatten()
+        .copied()
+        .filter(|id| id % 2 == 1)
+        .collect();
+    assert_eq!(after, [3, 1, 5], "{grants:?}");
+    assert_eq!(deployment.recorder.state(), db.expected());
+}

@@ -96,6 +96,9 @@ pub(super) struct Building<'a> {
     /// a restart keeps their requests (slice 8).
     pub(super) snapshot: Option<Snapshot>,
     pub(super) coalescing: Option<Coalescing>,
+    /// Its last error came from its walk (a key read): which of its waits a
+    /// restart takes (slice 8).
+    pub(super) walk_failed: bool,
 }
 
 impl IngestEngine {
@@ -122,8 +125,17 @@ impl IngestEngine {
                 }
                 _ => break Err(error),
             };
+            // A walk's key read, or a backfill slot's publish, failed: its
+            // walk's waits; else the live ones.
+            let work = if std::mem::take(&mut building.walk_failed)
+                || building.builds.publishing() == Some(Work::Backfill)
+            {
+                Work::Backfill
+            } else {
+                Work::Live
+            };
             self.down(&mut building, &index).await;
-            let wait = retry.failed(self.progress.numbered(&index));
+            let wait = retry.failed(work, self.done(&index));
             tracing::error!(
                 %index,
                 %error,
@@ -140,7 +152,7 @@ impl IngestEngine {
                 () = tokio::time::sleep(wait) => {}
                 () = self.stop.requested() => {}
             }
-            retry.restarted(self.progress.numbered(&index));
+            retry.restarted(self.done(&index));
             tracing::info!(%index, "the index's builder restarted: building its backlog first");
             self.observer.on_index_restarted(&index);
         };
@@ -154,6 +166,15 @@ impl IngestEngine {
     /// while another index works, §3.10), with fresh builds for its restart
     /// and its requests gathered for a snapshot that starts with it.
     async fn down(&self, building: &mut Building<'_>, index: &IndexName) {
+        // Held and folding from the failure on, before its running builds
+        // are waited for: a slow one would otherwise leave the index at its
+        // cap, neither held nor exempt, stopping the reading for every index
+        // (review of #456, item 7).
+        let slot = building.runs.slot();
+        building.runs.lead().hold(slot, true);
+        building.runs.lead().fold(slot, true);
+        building.runs.clear();
+        self.index_states.budget(index, false);
         // Its requests are kept, unacknowledged, and gathered again at once
         // by the restart: handed back to the request lane, nothing would
         // bring them back before another request arrived. Dropping the
@@ -180,11 +201,6 @@ impl IngestEngine {
             });
         }
         self.progress.give_back(index);
-        let slot = building.runs.slot();
-        building.runs.lead().hold(slot, true);
-        building.runs.lead().fold(slot, true);
-        building.runs.clear();
-        self.index_states.budget(index, false);
         *building.builds = self.builds_of(building.gate, index.clone(), building.several);
         building.builds.set_folding(true);
     }
@@ -203,6 +219,7 @@ impl IngestEngine {
         let mut builds = LeavesLines(&mut *building.builds);
         let snapshot = &mut building.snapshot;
         let coalescing = &mut building.coalescing;
+        let walk_failed = &mut building.walk_failed;
         // The reader ended: every slice of this builder is handed over (its
         // channel closed after the last one).
         let mut reader_done = false;
@@ -331,7 +348,10 @@ impl IngestEngine {
                         active.page_wait += mark.elapsed();
                     }
                     match step {
-                        Err(error) => return Err(error.into()),
+                        Err(error) => {
+                            *walk_failed = true;
+                            return Err(error.into());
+                        }
                         Ok(Step::Keys) => active.take_keys(),
                         Ok(Step::Done) => active.done = true,
                     }
@@ -403,6 +423,12 @@ impl IngestEngine {
         } else if builds.folding() && self.progress.waiting_on(index) == 0 {
             builds.set_folding(false);
             runs.lead().fold(runs.slot(), false);
+            // Nothing waits and nothing is refused: nothing holds it. A
+            // restart's hold (slice 8) ends here when the index has nothing
+            // to build, since no live grant comes to end it (review of #456).
+            if builds.refused() != Some(Work::Live) {
+                runs.lead().hold(runs.slot(), false);
+            }
         }
     }
 

@@ -82,6 +82,8 @@ pub(super) enum Job {
     Backfill {
         requested: BTreeMap<SinkName, BTreeMap<IndexName, stream::Ticket>>,
         marks: BTreeMap<IndexName, stream::WalkMark>,
+        /// Its snapshot's record of the last mark published to each lane.
+        reached: super::snapshot::Reached,
     },
     /// A snapshot's end: `SnapshotComplete` to every lane that asked.
     Complete(Box<Snapshot>),
@@ -225,6 +227,9 @@ pub(super) struct Builds {
     granted: Option<Permit>,
     /// A build failed: nothing more is granted.
     halted: bool,
+    /// The kind of the slot published last: a publish's error is that
+    /// slot's (slice 8: which backoff a failure waits).
+    publishing: Option<Work>,
     spare: Vec<Vec<DocumentId>>,
     budget: Option<Arc<Budget>>,
     /// Bytes per document, per index, live and backfill: a running average
@@ -271,15 +276,22 @@ pub(super) struct Builds {
 
 impl Drop for Builds {
     /// The engine run ends (an error, an abort, a clean end with a hold
-    /// still open): a wait still open is reported up to now, so an outage
-    /// before the next run doesn't stretch it; the hold stays counted.
+    /// still open), or this builder restarts alone (slice 8): it is held no
+    /// more, and once no builder is, a wait still open is reported up to
+    /// now, so an outage before the next run doesn't stretch it; the hold
+    /// stays counted. Another builder's hold goes on, one wait (review of
+    /// #456).
     fn drop(&mut self) {
         for work in [Work::Live, Work::Backfill] {
             let since = {
                 let mut waits = lock(&self.waits);
                 let wait = waits.of(work);
-                wait.held.clear();
-                wait.since.take()
+                wait.held.remove(&self.index);
+                if wait.held.is_empty() {
+                    wait.since.take()
+                } else {
+                    None
+                }
             };
             if let Some(since) = since {
                 self.observer
@@ -320,6 +332,7 @@ impl Builds {
             ),
             granted: None,
             halted: false,
+            publishing: None,
             spare: Vec::new(),
             budget,
             per_document: PerDocument::default(),
@@ -910,7 +923,16 @@ impl Builds {
         }
         let slot = self.slots.pop_front()?;
         self.front += 1;
+        self.publishing = Some(match slot.job {
+            Job::Live { .. } => Work::Live,
+            Job::Backfill { .. } | Job::Complete(_) => Work::Backfill,
+        });
         Some((slot.job, slot.built, slot.charges))
+    }
+
+    /// The kind of the slot published last (see the field).
+    pub(super) fn publishing(&self) -> Option<Work> {
+        self.publishing
     }
 
     /// Wait for every running build and drop what it built: the run, or
