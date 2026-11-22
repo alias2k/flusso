@@ -2030,7 +2030,12 @@ stuck or exempt: reading stops at an index's cap, so one that paces the reader s
 `exemption`/`exemption_since`; `working`, about progress, not holds: false while items of it wait
 on a lane unacknowledged for `engine::STUCK_AFTER` (5 s), from the engine's record with two or more
 indexes and from the lanes' stall ages with one (one index keeps no record); `held_by`/`held_sinks`/
-`held_since`, information only; `backfill`), one entry per **enabled** index (`Status::with_ingest_indexes`:
+`held_since`, information only; `backfill`: `{"state": "walking", "sinks"}`, or `{"state": "retrying",
+"retry_at"}` while a failed walk waits (slice 8-2); `state` `running`/`down`, `down_since`, `last_error`
+`{kind, message, at}`, `restarts` `{live, backfill}` (slice 8-2: fed by `StatusObserver` from
+`on_index_failed`/`on_index_restarted`, which carry `engine::Work` as the kind; a whole run's failure,
+start or stop clears down and retrying (`Status::forget_index_runs`) and keeps the error and the counts;
+`working` reads false while down; one index is never down)), one entry per **enabled** index (`Status::with_ingest_indexes`:
 a disabled index has no entry, no `flusso.index.*` series and `404` on both index routes, while `indexes.<name>`
 and `GET /indexes` keep it, as on `main`), reads the ingest engine's `engine::IndexStates`, kept for the
 engine's life and attached to `Status` once the engine exists (`Status::attach_index_states`). The engine
@@ -2039,7 +2044,8 @@ writes it only at edges (the tick's exemption, `IndexStates::budget` in the buil
 included; the `Walking` guard on the snapshot), and an engine run's end, by any path, clears the
 exemption and the budget hold (`ClearsAtRunEnd` → `IndexStates::clear_run`). Metrics (observable gauges
 read from `Status`, `telemetry/metrics.rs`'s `register_index_gauges`): `flusso.index.{documents_waiting,
-backlog_age, exempt, frozen, working, held{by}, backfilling}`; `flusso.reader.waits{bound}` (plus `index` on `per_index`) is a
+backlog_age, exempt, frozen, working, held{by}, backfilling, backfill_retrying, down}` and the observable
+counter `flusso.index.restarts{index,kind}` (`flusso_index_restarts_total`; slice 8-2); `flusso.reader.waits{bound}` (plus `index` on `per_index`) is a
 histogram (buckets up to 600 s) recorded by `Observer::on_reader_wait` (`ReaderBound`: `per_index`,
 `total`, `changes`, `pending`, from `Lead::reached_by`) only for a wait that pended past its first poll.
 Alert `FlussoIndexBacklog`: `max by (index) (flusso_index_exempt) > 0 or max by (index)
