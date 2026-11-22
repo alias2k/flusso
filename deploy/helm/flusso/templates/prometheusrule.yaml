@@ -70,4 +70,21 @@ spec:
               indexes keep being written; this one holds the replication slot.
               /status names why under sinks.<sink>.lanes.<index>.reason.
             runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
+        - alert: FlussoIndexBacklog
+          expr: max by (index) (flusso_index_exempt) > 0 or max by (index) (flusso_index_working) == 0
+          for: {{ .Values.prometheusRule.indexBacklogFor }}
+          labels:
+            severity: {{ .Values.prometheusRule.severity }}
+          annotations:
+            summary: "flusso's {{ "{{" }} $labels.index {{ "}}" }} index has been exempt or not working for {{ .Values.prometheusRule.indexBacklogFor }}"
+            description: >-
+              An index has been exempt (held at its cap: its changes are kept
+              as documents to build while the other indexes read on, up to
+              max_pending_documents) or not working (held by the memory budget or
+              a full lane, or its items unacknowledged on a lane for 5 s) for the
+              alert's whole period. The replication slot stays pinned by it, so WAL grows.
+              /status names what holds it under ingest.indexes.<index> (held_by,
+              held_sinks, backlog_seconds); fix the sink, skip the document, or
+              reindex.
+            runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
 {{- end }}

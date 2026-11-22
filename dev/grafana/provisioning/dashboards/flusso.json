@@ -462,6 +462,96 @@
           "refId": "C"
         }
       ]
+    },
+    {
+      "id": 18,
+      "title": "Index backlog age (s; how long an index's oldest unbuilt change has stayed its oldest)",
+      "description": "Per index: how long its oldest change read and not built yet (waiting, or in a build not sent to a lane) has stayed its oldest. Near 0 while the index builds steadily; it grows while the index is exempt, frozen or held.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (index) (flusso_index_backlog_age_seconds)",
+          "legendFormat": "{{index}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "Indexes exempt, frozen, held or not working (1 = yes)",
+      "description": "Per index: exempt (held at its cap while the others read on), frozen (exempt, may drain but not grow), held by the memory budget or a full lane, not working (held, or items unacknowledged on a lane for 5 s). FlussoIndexBacklog fires once exempt or not working for 10 minutes.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (index) (flusso_index_exempt)",
+          "legendFormat": "{{index}} exempt",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (index) (flusso_index_frozen)",
+          "legendFormat": "{{index}} frozen",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (index, by) (flusso_index_held) > 0",
+          "legendFormat": "{{index}} held by {{by}}",
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "1 - max by (index) (flusso_index_working)",
+          "legendFormat": "{{index}} not working",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Reader waits at its lead, by bound (waits per second; seconds waiting per second)",
+      "description": "How often the reader stops at its lead and for how long, by the bound that stopped it: per_index (an index at its cap), total (the non-exempt indexes' documents), changes (changes read ahead), pending (the exempt indexes at max_pending_documents).",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 76 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (bound) (rate(flusso_reader_waits_seconds_count[5m]))",
+          "legendFormat": "{{bound}} waits/s",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (bound) (rate(flusso_reader_waits_seconds_sum[5m]))",
+          "legendFormat": "{{bound}} s/s",
+          "refId": "B"
+        }
+      ]
     }
   ]
 }

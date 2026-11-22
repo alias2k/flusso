@@ -142,6 +142,10 @@ prometheusRule:
   laneWalBehindBytes: 1073741824
   laneWalStallSeconds: 60
   for: 5m
+  # FlussoIndexBacklog fires once an index has been exempt or not working
+  # (held by the budget or a full lane, or its items unacknowledged 5 s)
+  # for this long.
+  indexBacklogFor: 10m
   severity: page
 
 serviceAccount:
