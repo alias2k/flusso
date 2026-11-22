@@ -102,7 +102,7 @@ A sender is the process that sent the signal (`siginfo`): the kernel for a termi
 
 The drain, in order:
 
-1. **Stop taking in work.** The phase turns `stopping`: [`/readyz`](http.md#get-readyz) answers `503`, a new [`/reindex`](http.md#post-reindexindexnamesinkname) is refused with `503`. No further change is read from the replication stream and no new backfill is served.
+1. **Stop taking in work.** The phase turns `stopping`: [`/readyz`](http.md#get-readyz) answers `503`, a new [reindex](http.md#post-indexesnamereindexsinkname) is refused with `503`. No further change is read from the replication stream and no new backfill is served.
 2. **Build what was read.** The changes already read (at most the [lead](config-toml.md#reading-ahead), plus the run being read when the stop came, plus every [stuck index's](config-toml.md#a-stuck-index) documents) are built in batches as usual and published to every sink, with what was being built. Every backfill in progress is abandoned at a row boundary, and its batches already queued for a sink are acknowledged without being written: its index stays unseeded, so the next start backfills it again (a backfill writes deterministic ids; what it wrote so far is overwritten). The abandoned backfill costs the stop nothing; the live changes already read still land, so under write load the stop takes as long as they do, and with a backlog that's the whole lead.
 3. **Every sink lands its lane**: the writes in flight return, the rest are written (several at once, as always), each acknowledged, until nothing is left; an idle sink then makes what it wrote searchable. A stalled or unreachable sink doesn't slow the others; it is what the deadline is for.
 4. **Confirm and close the stream.** The position every sink acknowledged is confirmed to the slot, flusso waits until Postgres was sent it, then ends replication. The next start resumes there and reads nothing already indexed again.
@@ -237,11 +237,11 @@ Both schemas are also published per release at `https://alias2k.github.io/flusso
 
 ## reindex
 
-`POST /reindex?index=<name>[&sink=<name>]` on a running server. Returns immediately with `202`; each targeted sink engine stages a fresh generation and requests its own snapshot while the current generation keeps serving. Nothing restarts. Watch `/status` for the index returning to `seeded` under that sink. See [Reindex without downtime](../operate/reindex.md).
+[`POST /indexes/<name>/reindex[?sink=<name>]`](http.md#post-indexesnamereindexsinkname) on a running server. Returns immediately with `202` and prints `reindex of users on every sink queued` (or `on primary`); each targeted sink engine stages a fresh generation and requests its own snapshot while the current generation keeps serving. Nothing restarts. Watch `/status` for the index returning to `seeded` under that sink. See [Reindex without downtime](../operate/reindex.md).
 
 ```sh
 flusso reindex users --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
 flusso reindex users --sink primary --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
 ```
 
-Same connection flags as `indexes`; the index name is positional. `--sink` limits the rebuild to one sink; omitted, every sink rebuilds, sharing one pass over the table.
+Same connection flags as `indexes`; the index name is positional, and one that isn't a valid index name is refused before anything is sent. `--sink` limits the rebuild to one sink; omitted, every sink rebuilds, sharing one pass over the table. A refusal fails the command with `server returned <status>: <body>`.

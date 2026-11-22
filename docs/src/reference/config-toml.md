@@ -196,7 +196,7 @@ With two or more indexes, one stuck index doesn't stop the others, as long as an
 - **The slot stays pinned.** Nothing past the stuck index's oldest unbuilt change is confirmed to Postgres, so WAL grows for as long as it's stuck. [`flusso.replication.slot_lag`](metrics.md) shows how much, and `pinned_by` ([`/status`](http.md#get-status), `flusso.slot.pinned_by`) names the index. Past `max_slot_wal_keep_size`, Postgres invalidates the slot.
 - **With one index**, nothing changes: there is no other index to read on for.
 - **A `/wait` covering the stuck index**, by naming it or by naming none, waits for it.
-- **No per-index view yet.** `/status` and the metrics show no exemption; only the log does.
+- **Shown per index.** `/status`'s [`ingest.indexes.<index>`](http.md#per-index-ingest-state) and the `flusso_index_*` [metrics](metrics.md) show the exemption, what holds the index and whether it works; `FlussoIndexBacklog` alerts on it ([runbook](../operate/stalled-lane.md#when-flussoindexbacklog-fires)).
 
 **The log.** One line per index names its state, and one line names the cap:
 
@@ -278,8 +278,8 @@ The table is a property of the machine that runs flusso, so it is **never writte
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `public_address` | `host:port` | `127.0.0.1:9464` | The unauthenticated surface: `/healthz`, `/readyz`, `/status`, `/metrics`. |
-| `private_address` | `host:port` | `127.0.0.1:9465` | The Basic-auth control surface: `/indexes`, `/reindex`. |
+| `public_address` | `host:port` | `127.0.0.1:9464` | The unauthenticated surface: `/healthz`, `/readyz`, `/status`, `/metrics`, `/wait`, `/indexes/<name>/status`. |
+| `private_address` | `host:port` | `127.0.0.1:9465` | The Basic-auth control surface: `/indexes`, `/indexes/<name>/reindex`. |
 
 Precedence is flag, then `FLUSSO_PUBLIC_ADDRESS` / `FLUSSO_PRIVATE_ADDRESS`, then this table, then the default. The credentials for the private surface are **not** config keys; they come from `--admin-user` / `--admin-password` or their env vars only. See [HTTP endpoints](http.md).
 

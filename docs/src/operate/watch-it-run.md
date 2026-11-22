@@ -14,7 +14,7 @@ flusso is running and you want to know whether it's keeping up, what it's done, 
    curl -s localhost:9464/status | jq
    ```
 
-   `phase` should be `live` and every entry in `indexes` should be `seeded`. `changes_in_flight` is the backlog between capture and the sink's slowest index; `slot_lag_bytes` is how far the confirmed position trails Postgres. The field list is in [HTTP endpoints](../reference/http.md#get-status).
+   `phase` should be `live` and every entry in `indexes` should be `seeded`. `ingest.indexes` says, per index, what waits to be built and what holds it: an `exemption` other than `none`, or `working: false`, marks an index in trouble ([per-index state](../reference/http.md#per-index-ingest-state); one index alone: `curl -s localhost:9464/indexes/users/status`). `changes_in_flight` is the backlog between capture and the sink's slowest index; `slot_lag_bytes` is how far the confirmed position trails Postgres. The field list is in [HTTP endpoints](../reference/http.md#get-status).
 
 2. **Wire the probes.** `/healthz` is liveness; `/readyz` returns `200` from the start of backfill onward and `503` once the pipeline stops. Point Kubernetes probes at both; the Helm chart already does.
 
@@ -29,9 +29,9 @@ flusso is running and you want to know whether it's keeping up, what it's done, 
 
    The series and their meanings are in [Metrics](../reference/metrics.md).
 
-4. **Add the rules.** Copy `dev/prometheus/rules/flusso.rules.yml` from the repository. It derives the net drain rate and a time-to-clear estimate from slot lag alone, and alerts on a long visibility wait (`FlussoVisibilityWait`).
+4. **Add the rules.** Copy `dev/prometheus/rules/flusso.rules.yml` from the repository. It derives the net drain rate and a time-to-clear estimate from slot lag alone, and alerts on a stalled or parked lane (`FlussoLaneStalled`, `FlussoLaneParked`), an index exempt or stuck (`FlussoIndexBacklog`), and a long visibility wait (`FlussoVisibilityWait`). The first three share a runbook: [A lane is stalled](stalled-lane.md).
 
-5. **Import the dashboard.** `dev/grafana/provisioning/dashboards/flusso.json` shows change throughput, in-flight backlog, slot lag with its trend, flush duration p95, documents built, errors, the drain ETA, and the visibility wait. In the dev stack it's provisioned at `localhost:3000`.
+5. **Import the dashboard.** `dev/grafana/provisioning/dashboards/flusso.json` shows change throughput, in-flight backlog, slot lag with its trend, flush duration p95, documents built, errors, the drain ETA, and the visibility wait. Its per-index row plots each index's backlog age, which indexes are exempt, frozen, held or not working, and how often and how long the reader waits at its lead, by bound ([`flusso.reader.waits`](../reference/metrics.md)). In the dev stack it's provisioned at `localhost:3000`.
 
 6. **Alert on the three that matter.**
 

@@ -13,6 +13,14 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 | `flusso.lane.parked` | gauge | | `index`, `sink`, `why` | 1 while flusso doesn't write the lane: `why` is the lane's [`health`](http.md#lane-health), `refused` (a document refused under `on_error = "stop"`), `blocked` (the index refuses writes for now) or `restaging` (its target was gone and the index is being staged again). No series while the lane is written. Read at scrape time. `FlussoLaneParked` alerts on it; it covers a refused backfill page too, which has no position and so no stall age. See [A lane is stalled](../operate/stalled-lane.md). |
 | `flusso.lane.probes` | counter | | `index`, `sink`, `outcome` | A parked lane's oldest batch written again alone, by how it came back: `landed` (the lane opens), `refused`, `blocked`, `missing` (the index is staged again) or `failed` (the write failed as a whole). |
 | `flusso.lane.outstanding` | gauge | | `index`, `sink` | Items routed to that `(index, sink)` lane and not written yet. Read at scrape time. The lane that stays high is the one holding back the replication slot and every fence on its index. |
+| `flusso.index.documents_waiting` | gauge | | `index` | Documents of the index read and not yet taken by a build: `/status`'s [`documents_waiting`](http.md#per-index-ingest-state). Like every `flusso.index.*` gauge, read at scrape time, one series per enabled index (one index too), none for a disabled index. |
+| `flusso.index.backlog_age` | gauge | s | `index` | How long ago the index's oldest change not built yet was read: [`backlog_seconds`](http.md#what-backlog_seconds-shows). Grows only while the index is stuck or exempt. Not a lag behind the source: that is `flusso.lane.wal_behind` and `flusso.replication.slot_lag`. `FlussoIndexBacklog` alerts on it ([runbook](../operate/stalled-lane.md#when-flussoindexbacklog-fires)). |
+| `flusso.index.exempt` | gauge | | `index` | 1 while the index is [exempt](config-toml.md#a-stuck-index), growing or frozen; else 0. `FlussoIndexBacklog` alerts on it. |
+| `flusso.index.frozen` | gauge | | `index` | 1 while the index is exempt and frozen: it may drain but not grow. |
+| `flusso.index.working` | gauge | | `index` | 1 while the index is [`working`](http.md#per-index-ingest-state); 0 once items of it have waited at a sink 5 s with none acknowledged. |
+| `flusso.index.held` | gauge | | `index`, `by` | 1 on the series of what holds the index's builds, `by="budget"` (the memory budget refuses its live batch) or `by="lane"` (a publish waits on a full lane), 0 on the other; both 0 while nothing holds it. A hold alone isn't a fault: a held index whose sink keeps acknowledging is working. |
+| `flusso.index.backfilling` | gauge | | `index` | 1 while the index's backfill runs. |
+| `flusso.reader.waits` | histogram | s | `bound`, `index` | Each time the reader stops at its [lead](config-toml.md#reading-ahead), how long, recorded when the wait ends, by the `bound` that stopped it: `per_index` (an index at `max_waiting_per_index`, or a frozen one at the count it froze at; `index` names it), `total` (the non-exempt indexes' documents at `max_waiting`), `changes` (`max_waiting` changes read ahead of a builder's oldest queued one), `pending` (the exempt indexes at `max_pending_documents`). Only `per_index` carries `index`. A check that finds room at once isn't a wait. `_count` is how often reading stopped, `_sum` how long. The memory budget is no bound of the reader's: it holds builds, which then show here as one of these. Buckets from 100 µs to 600 s. |
 | `flusso.documents.built` | counter | | `index` | Documents assembled by the ingest engine, once for every sink. The unlabeled total is the sum. |
 | `flusso.documents.quarantined` | counter | | `sink`, `index` | Documents that sink rejected and its engine skipped under `on_error = "skip"`. Non-zero means data is being dropped. Alert on it. |
 | `flusso.script.failures` | counter | | `index`, `field`, `policy` | Documents that failed to build: a [script failed](scripts.md#failures), or an [`array: true`](field-types.md#array) column held an object. `field` is the path with array positions folded (`variants[].gross`); `policy` is `skip` (the document kept its indexed version) or `stop` (the ingest engine stopped; each retry counts). Non-zero means documents are going stale. Alert on it. See [Script fields](scripts.md#failures). |
@@ -48,6 +56,14 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.lane.stall_age` | `flusso_lane_stall_age_seconds{index,sink}` |
 | `flusso.lane.wal_behind` | `flusso_lane_wal_behind_bytes{index,sink}` |
 | `flusso.slot.pinned_by` | `flusso_slot_pinned_by{index,sink}`, or `{index}` alone for an index's backlog (matched by `sink=""`) |
+| `flusso.index.documents_waiting` | `flusso_index_documents_waiting{index}` |
+| `flusso.index.backlog_age` | `flusso_index_backlog_age_seconds{index}` |
+| `flusso.index.exempt` | `flusso_index_exempt{index}` |
+| `flusso.index.frozen` | `flusso_index_frozen{index}` |
+| `flusso.index.working` | `flusso_index_working{index}` |
+| `flusso.index.held` | `flusso_index_held{index,by}` |
+| `flusso.index.backfilling` | `flusso_index_backfilling{index}` |
+| `flusso.reader.waits` | `flusso_reader_waits_seconds_bucket{bound}`, `{bound,index}` for `per_index`, `_sum`, `_count` |
 | `flusso.documents.built` | `flusso_documents_built_total{index}` |
 | `flusso.memory.built` | `flusso_memory_built_bytes{work}` |
 | `flusso.memory.refused` | `flusso_memory_refused_total{work}` |

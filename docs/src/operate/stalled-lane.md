@@ -8,6 +8,7 @@ A **lane** is one index flowing into one sink. Open this page when any of these 
 
 - `FlussoLaneParked` fired: flusso stopped writing a lane on purpose.
 - `FlussoLaneStalled` fired: a lane has landed nothing for 10 minutes.
+- `FlussoIndexBacklog` fired: an index has been exempt or stuck for 10 minutes. See [When FlussoIndexBacklog fires](#when-flussoindexbacklog-fires).
 - The log says `the lane is parked`, `the index's target is gone`, or `a lane has landed nothing for …s`.
 - The log says `index held at max_waiting_per_index: exempt, …`, `exempt index frozen: …` or `reading stopped for every index: …`: an index is stuck and its changes are piling up. See [When one index is stuck beside others](#when-one-index-is-stuck-beside-others).
 - [`/status`](../reference/http.md#get-status) shows a lane whose `health` isn't `open`, or whose `stall_seconds` keeps climbing.
@@ -133,7 +134,7 @@ What that means:
 
 - **Still working:** the other indexes are read, built and written, and a `/wait` naming only them answers.
 - **Growing:** the stuck index's documents waiting to be built (each once, however often it changes), and the WAL the slot keeps. `flusso_replication_slot_lag_bytes` climbs while `pinned_by` names the stuck index.
-- **Only in the log:** `/status` and the metrics have no per-index view of it yet. Each line repeats at most once a minute, and the last one names the current state ([the log lines](../reference/config-toml.md#a-stuck-index)).
+- **Shown per index:** `/status`'s `ingest.indexes.<index>` reads `"exemption": "exempt"`, `flusso_index_exempt{index}` is 1, and `FlussoIndexBacklog` fires after 10 minutes ([below](#when-flussoindexbacklog-fires)). The log lines repeat at most once a minute, and the last one names the current state ([the log lines](../reference/config-toml.md#a-stuck-index)).
 - **`exempt index frozen: …`** means the index stopped growing: its lane recovered, or no other index is working any more. It builds its backlog down, and reading stops for every index while it has that many documents waiting.
 - **With one index** there is nothing to read on for: reading stops at its waiting bound.
 
@@ -166,9 +167,43 @@ Find which side is slow:
 | `flusso_memory_built_bytes` flat at the limit, `flusso_memory_refused_total` climbing | The [memory budget](../reference/config-toml.md#concurrency) is full, so nothing more is built | Find the sink that isn't acknowledging (a parked lane, a lane whose `outstanding` stays high) and fix it as above; with every sink healthy, raise `max_built_mib` |
 | `flusso_memory_built_bytes` below the limit while `pinned_by` keeps naming the index alone; `flusso_memory_refused_total{work="live"}` rose by one when it began, and the wait shows in `flusso_memory_wait_seconds{work="live"}` once it ends | The index holds its [share of the budget](../reference/config-toml.md#concurrency) (`index_budget_share`), so its documents wait while the other indexes build | Find that index's lane that isn't acknowledging and fix it as above; with every sink healthy, raise `max_built_mib` or `index_budget_share` |
 
+## When FlussoIndexBacklog fires
+
+`FlussoIndexBacklog` names one index (its `index` label) that has been **exempt** or **stuck** for 10 minutes:
+
+```promql
+max by (index) (flusso_index_exempt) > 0 or max by (index) (flusso_index_backlog_age_seconds) > 60
+```
+
+- **Exempt:** held at `max_waiting_per_index` while the other indexes read on. Its changes are kept as documents to build, up to `max_pending_documents`, and the slot stays pinned by it ([above](#when-one-index-is-stuck-beside-others)).
+- **Stuck:** its oldest change not built yet was read over 60 s ago, so nothing of it is being built ([`backlog_seconds`](../reference/http.md#what-backlog_seconds-shows)).
+
+It ships in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`, with `for: 10m` and severity `page`. The chart sets the 60 s and the 10 minutes ([Helm values](../reference/helm-values.md)).
+
+**Read why.** Ask flusso about that index ([fields](../reference/http.md#per-index-ingest-state)):
+
+```sh
+curl -s localhost:9464/indexes/users/status | jq
+```
+
+| What it shows | What it means | What to do |
+| --- | --- | --- |
+| `held_by: "lane"`, `held_sinks: ["primary"]` | A lane of that sink is full: the sink is slow, refusing or down. `FlussoLaneStalled` or `FlussoLaneParked` usually fires beside it. | Read the lane, `sinks.primary.lanes.users` in `/status`, and fix it from [step 2](#2-read-its-health). |
+| `working: false` | A sink has acknowledged nothing of the index for 5 s. | The same: find its lane whose `stall_seconds` climbs or whose `health` isn't `open`. |
+| `held_by: "budget"`, `working: true` | The memory budget refuses its live batch, but its sinks keep acknowledging: slow, not stuck. | Find the slow side in [When an index's backlog holds the slot](#when-an-indexs-backlog-holds-the-slot). |
+| `held_by: null`, `working: true`, `backlog_seconds` past 60 | Nothing holds it and its sinks acknowledge, yet its oldest change has waited a minute: its builds are that slow. | The `build` stage and the document queries, in [the same table](#when-an-indexs-backlog-holds-the-slot). |
+| `exemption: "frozen"` | Its hold ended, or no other index works: it drains but doesn't grow. | Watch `documents_waiting` fall. |
+| `pacing_reader: true` | Reading for every index waits on this one right now. | Nothing on its own: this index sets the pace. |
+
+Once the cause is fixed, the index builds its waiting documents down, `exemption` returns to `none`, `backlog_seconds` falls to 0, and the alert clears.
+
+- **A planned catch-up pages too.** With several indexes, after a sink outage or a burst, an index slower than the others is exempt while they read on, for as long as it trails. A catch-up longer than 10 minutes fires the alert: silence it for the catch-up, or raise `indexBacklogFor`.
+- **Quiet** for a healthy index at its sink's limit, for an index merely behind its source (its backlog stays seconds old), while flusso starts, between engine runs (a restart's backoff, a source down) and while it stops.
+- **Not a lag alert.** How far an index trails the source is its lanes' WAL behind (`wal_behind_bytes` in `/status`, `flusso_lane_wal_behind_bytes{sink,index}`) and the slot lag (`flusso_replication_slot_lag_bytes`).
+
 ## Options and variations
 
-- **The two alerts.** `FlussoLaneParked` fires once `flusso_lane_parked > 0` has held for 5 minutes. `FlussoLaneStalled` fires on a lane landing nothing for 10 minutes (`reason: age`), or on more than 1 GiB of WAL kept behind a lane that has landed nothing for a minute (`reason: wal`). Both ship in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`; tune them in the [Helm values](../reference/helm-values.md). Only `FlussoLaneParked` sees a refused **backfill** page: backfill rows carry no position, so their lane never ages.
+- **The lane alerts.** `FlussoLaneParked` fires once `flusso_lane_parked > 0` has held for 5 minutes. `FlussoLaneStalled` fires on a lane landing nothing for 10 minutes (`reason: age`), or on more than 1 GiB of WAL kept behind a lane that has landed nothing for a minute (`reason: wal`). Both ship in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`; tune them in the [Helm values](../reference/helm-values.md). Only `FlussoLaneParked` sees a refused **backfill** page: backfill rows carry no position, so their lane never ages. The per-index alert is [`FlussoIndexBacklog`](#when-flussoindexbacklog-fires).
 - **Probe sooner, or less often.** [`[backoff]`](../reference/config-toml.md#backoff) sets the first and the longest wait between probes, for every lane and every engine restart. A short `max_ms` unparks a lane sooner once its cause is fixed; each probe of a lane still refused costs one bulk request.
 - **`/readyz` stays ready.** A parked lane doesn't make flusso unready: the other indexes are written and served, and a restart wouldn't help. Alert on the lane, not on readiness.
 - **A slow lane isn't stalled.** A lane that lands, just slowly, fires neither alert; `flusso:backlog_drain_eta_seconds` shows how long it will take. flusso logs a warning once a lane passes 10 minutes without landing, and every 10 minutes after.
