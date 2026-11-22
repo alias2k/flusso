@@ -92,7 +92,16 @@ impl IngestEngine {
                     }
                 }
                 None => {
-                    if !self.publish_ready(builds, lanes, Some(&mut *runs)).await? {
+                    let published = self.publish_ready(builds, lanes, Some(&mut *runs)).await?;
+                    // The walk in progress failed: the failure keeps its
+                    // requests, and no more of it is granted.
+                    if let Some(failure) = builds.walk_failure_mut()
+                        && let Some(active) = snapshot
+                            .take_if(|active| Arc::ptr_eq(&active.reached, &failure.reached))
+                    {
+                        failure.requests.extend(active.into_requests());
+                    }
+                    if !published {
                         return Ok(());
                     }
                 }
@@ -411,6 +420,30 @@ impl IngestEngine {
         }
     }
 
+    /// The error a failed backfill build stands for: its build's, or its
+    /// first document failed under `on_error = "stop"` (reported as any).
+    fn walk_error(&self, built: Built) -> EngineError {
+        match built.documents {
+            Err(error) => error,
+            Ok(documents) => documents
+                .into_iter()
+                .find_map(|document| match document {
+                    Document::Failed { id, failure }
+                        if self.failure_policies.resolve(id.index.as_ref())
+                            == FailurePolicy::Stop =>
+                    {
+                        self.document_failed(&id, failure).err()
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    EngineError::Source(source::SourceError::Query(
+                        "a backfill batch failed".to_owned(),
+                    ))
+                }),
+        }
+    }
+
     /// Whether a build's result ends the run once it is published: the build
     /// failed, or a document failed under `on_error = "stop"`. Nothing more
     /// is granted from the moment it lands.
@@ -443,6 +476,18 @@ impl IngestEngine {
         let mut published = false;
         while let Some((job, built, charges)) = builds.pop_ready() {
             published = true;
+            // Beside other builders a failed backfill batch is its walk's
+            // failure (slice 8, fix round 2): nothing of it is published,
+            // its walk's later slots are discarded, and the live ones go on.
+            let (job, built) = match (job, built) {
+                (Job::Backfill { reached, .. }, Some(built))
+                    if builds.several() && self.halts(&built) =>
+                {
+                    builds.fail_walk(self.walk_error(built), &reached);
+                    continue;
+                }
+                other => other,
+            };
             let publishing = self.publish_slot(job, built, charges, lanes);
             tokio::pin!(publishing);
             if let Poll::Ready(result) = futures::poll!(publishing.as_mut()) {
@@ -506,6 +551,15 @@ impl IngestEngine {
             ) => {
                 self.publish_backfill(built, &requested, &marks, charges, lanes)
                     .await?;
+                // Its lanes' resume points moved (a batch the source marked:
+                // one that can't mark walks starts each retry from the first
+                // key, which is no progress): what starts the walk failure's
+                // waits over.
+                for index in marks.keys() {
+                    if let Some(batches) = self.walk_batches.get(index) {
+                        batches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
                 // Every lane sent this batch has the walk through its mark.
                 let mut reached = reached
                     .lock()
@@ -518,7 +572,7 @@ impl IngestEngine {
                     }
                 }
             }
-            (_, None) => {}
+            (_, None) | (Job::Discarded, _) => {}
         }
         Ok(())
     }

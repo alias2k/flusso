@@ -158,9 +158,10 @@ pub struct IngestEngine {
     failure_policies: FailurePolicies,
     /// How long one index's builder waits before it restarts alone (slice 8).
     backoff: Backoff,
-    /// How many walks of each index completed, across runs: what starts a
-    /// walk failure's waits over (slice 8).
-    walks: BTreeMap<IndexName, AtomicU64>,
+    /// How many backfill batches of each index carrying a walk mark were
+    /// published, across runs (each moved some lane's resume point): what
+    /// starts a walk failure's waits over (slice 8, fix round 2).
+    walk_batches: BTreeMap<IndexName, AtomicU64>,
     stop: Stop,
     /// How many times this engine moved the source forward (see
     /// [`advances`](Self::advances)), across restarts of its run.
@@ -220,7 +221,7 @@ impl IngestEngine {
             key_reads: Arc::new(tokio::sync::Semaphore::new(1)),
             failure_policies: FailurePolicies::default(),
             backoff: Backoff::default(),
-            walks: progress
+            walk_batches: progress
                 .indexes()
                 .map(|index| (index.clone(), AtomicU64::new(0)))
                 .collect(),
@@ -453,10 +454,10 @@ impl IngestEngine {
     fn done(&self, index: &IndexName) -> restart::Done {
         restart::Done {
             live: self.progress.numbered(index),
-            walks: self
-                .walks
+            walk_batches: self
+                .walk_batches
                 .get(index)
-                .map_or(0, |walks| walks.load(Ordering::Relaxed)),
+                .map_or(0, |batches| batches.load(Ordering::Relaxed)),
         }
     }
 
@@ -542,7 +543,7 @@ impl IngestEngine {
                     gate,
                     snapshot: None,
                     coalescing: None,
-                    walk_failed: false,
+                    retry: restart::Retry::new(self.backoff),
                 },
                 done,
             ));

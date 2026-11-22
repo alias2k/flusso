@@ -649,6 +649,33 @@ mod tests {
         assert_eq!(again.oldest, p(1));
     }
 
+    /// R6 (review of #456, round 3): an id the reader marked again while it built
+    /// waits at the newer change; given back, it must wait at the older one,
+    /// and every lane's backlog answer stays at it.
+    #[test]
+    fn an_id_waiting_again_takes_its_older_change_back() {
+        let mut pending = Pending::default();
+        let primary = SinkName::try_new("primary").unwrap();
+        pending.mark(key(1), p(1), 1);
+        let taken = pending.take(&index(), usize::MAX, None, &none).unwrap();
+        pending.mark(key(1), p(6), 6);
+        let before = pending.backlog_for(&primary);
+        assert_eq!(before, Some(p(1)));
+        pending.give_back();
+        let _ = taken;
+        assert_eq!(
+            pending.oldest_waiting(),
+            Some(p(1)),
+            "1 at its older change"
+        );
+        assert_eq!(pending.least_unbuilt(), Some(1));
+        assert_eq!(
+            pending.backlog_for(&primary),
+            before,
+            "no lane's answer moves"
+        );
+    }
+
     /// A give-back leaves the backlog's answer where it was: the oldest of
     /// a build not yet sending holds every lane at its oldest id's change,
     /// and that id now waits there.
