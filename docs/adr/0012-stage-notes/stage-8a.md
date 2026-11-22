@@ -3272,7 +3272,8 @@ today's whole-run crash loop for that one index, without the other indexes payin
 - **Observer** (engine): `on_index_failed(index, error, retry_in)` and `on_index_restarted(index)`. Not an
   `EngineId`: an index restart is not an engine's error (`on_engine_error` stays the run's), and the
   daemon's `Status` treats `on_engine_error(Ingest)` as "the ingest engine is restarting".
-- **Logs**: `error!` at each failure (index, error, wait), `info!` at each restart (index, attempt).
+- **Logs**: `error!` at each failure (index, error, kind, wait), `info!` at each restart (index, kind;
+  no attempt count: `restarts` in `/status` counts them; corrected in the final review of #456).
 - **`/status`, metrics, the alert: proposed as slice 8-2** (below).
 - **Does a down index page someone today?** `FlussoIndexBacklog` fires for a down index with documents
   waiting: nothing of it builds, so its backlog age grows a second a second past 60 s (and it is exempt
@@ -3546,7 +3547,7 @@ unchanged: `several` is false).
 | Rule | Test (written first) | Mutation |
 | --- | --- | --- |
 | W1 a walk failure keeps the index's live documents flowing | `a_failing_walk_leaves_the_index_live_documents_flowing` (the reviewer's: the slowest live change of the first 30 s lands within 5 s) | the walk failure returns an error from the loop |
-| W2 the failed walk's later backfill slots are discarded, the live ones publish | `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks` | the later backfill slots kept |
+| W2 the failed walk's later backfill slots are discarded, the live ones publish | `a_walk_still_reading_keys_discards_its_later_batches_when_one_fails` (since the final review of #456), `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks` | the later backfill slots kept |
 | W3 a request arriving during the wait waits with the walk | `a_request_during_a_walks_wait_joins_its_retry` | the held set started by "every sink asked" |
 | W4 the walk's schedule starts over once the walk published a batch | `distinct_one_off_walk_failures_each_wait_the_first_wait` (the reviewer's) | reset only on a completed walk |
 | W5 a stop during the wait ends the run cleanly, the walk re-requested next start | `a_stop_while_a_walk_waits_to_retry_ends_cleanly` | none (fix round 3: the stop drops every gathered set with one `coalescing.take()`, retry or not, and a set kept past it would be dropped with the builder at its end the same way; no mutation of that one line changes what the stop leaves, so the test pins the outcome: exit 0 within 5 s, the request back on the lane) |
@@ -3602,7 +3603,7 @@ became counts of failures: a walk's failure restarts nothing now.
 | --- | --- | --- |
 | W1 | a key read's failure ends the builder (returns its error) | `a_key_read_failing_mid_walk_resumes_each_lane` (no restart expected) |
 | W1 | a backfill batch's failure ends the builder | `a_poison_backfill_row_beside_live_traffic_backs_off`, `a_restarted_walk_resumes_where_its_lanes_are`, `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks`, `a_live_failure_while_a_walk_waits_keeps_its_retry`, `distinct_one_off_walk_failures_each_wait_the_first_wait`, `two_sinks_resume_each_lane_after_its_own_mark`, … |
-| W2 | the walk's later backfill slots kept | `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks`, every random schedule (closed, open, three indexes, two sinks) |
+| W2 | the walk's later backfill slots kept | every random schedule (closed, open, three indexes, two sinks); since the final review of #456 also `a_walk_still_reading_keys_discards_its_later_batches_when_one_fails` (the directed test: `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks` lets it survive, see fix round 3's A5) |
 | W3 | the held set started when every sink asked | `a_request_during_a_walks_wait_joins_its_retry` |
 | W4 | the walk's waits never start over | `each_kind_starts_over_only_on_its_own_progress`, `distinct_one_off_walk_failures_each_wait_the_first_wait` |
 | W6 | `down` moves the held set's deadline to now | `a_live_failure_while_a_walk_waits_keeps_its_retry` |
@@ -3622,7 +3623,7 @@ and how often each kind restarted. Slice 7's fields stay; three are added and on
 | --- | --- | --- |
 | `state` | `"running"` / `"down"` | `down` from a failure of its live work until its builder restarted (8-1's `on_index_failed`/`on_index_restarted` of kind `live`); `running` otherwise. Always `running` with one index: a failure there ends the run, which restarts every builder |
 | `down_since` | RFC 3339, UTC; absent while running | when its live work failed (reported as it fails, before the builder waits for its running builds: fix round 3) |
-| `last_error` | `null` or `{"kind": "live" \| "backfill", "message": "…", "at": RFC 3339}` | its last failure of either kind, kept after it recovered (for the process's life); `message` cut at 4096 bytes on a char boundary, ` … (cut)` appended (fix round 3) |
+| `last_error` | `{"live": null \| {"message": "…", "at": RFC 3339}, "backfill": null \| {…}}` | its last failure of each kind, kept after it recovered (for the process's life): one kind never hides the other (final review of #456: the live failure that took it down stays beside a walk's failure reported after it); `message` cut at 4096 bytes on a char boundary, ` … (cut)` appended (fix round 3) |
 | `restarts` | `{"live": n, "backfill": n}` | how often its builder restarted after a live failure, and its walk started again after a walk failure, since the process started |
 | `backfill` | `null`, `{"state": "walking", "sinks": […]}`, `{"state": "retrying", "retry_at": RFC 3339}` or `{"state": "waiting"}` | slice 7's walk in progress, now with `state`; `retrying` while a failed walk waits for its retry, `retry_at` when it is due (in the past while the builder is busy or a walk runs: it starts at the builder's next look once none runs); `waiting` while a walk a live failure cut short waits for the builder's restart (fix round 3; `retrying` wins when both hold); `sinks` only while walking: the retry's requests are the walk's, served when it starts |
 
@@ -3694,7 +3695,7 @@ engine, never down, no restart or error recorded); `ingest::tests::restart`'s
 `each_index_is_exported_with_its_ingest_state` (S8) and `http::tests`'
 `a_down_index_and_a_retrying_walk_are_served_on_the_index_route` (S9). The walk's retry start is
 reported where the held set starts (the builder's deadline arm), with an `info` line. `restarts` counts
-starts: a failure that ends the run (while stopping, or the run's own) is in `last_error` but restarts
+starts: a failure that ends the run (while stopping, or the run's own) is in `last_error` (under its kind) but restarts
 nothing. The `working` gauge's description takes `main`'s wording (#454) and adds "and it isn't down".
 
 **Mutations** (8-2):
@@ -3720,7 +3721,7 @@ description, which takes `main`'s wording plus "and it isn't down"; `backlog_age
 | A2: a backfill slot failing before a live slot in one pass reached `down`, which merged its requests into a set due at once: no `on_index_failed(backfill)`, no log line, the walk's schedule not moved, the walk retried at the builder's restart | `down` hands a pending walk failure to `retry_walk`: reported, the walk's own wait, a held set (the builder's other requests join it) | `a_walk_failing_in_the_pass_a_live_batch_fails_is_reported_and_waits_its_own_wait` (both walk failures reported; the second waits 2 s, past the builder's 1 s restart) |
 | A3: a retry wait was never `Stage::Idle` (any gathered set counted as work) | a held retry set is no work: idle unless something else runs | `a_walks_retry_wait_is_idle_time` (≥ 15 s of a 20 s wait reported idle) |
 | A4: the main schedules' "restarted an index alone" was met by walk retries too | `IndexRestarts` counts the builder's restarts and the walk's retries apart; `Restarted::assert_both` asserts each happened, and a whole run's failure | the two random-schedule tests |
-| A5: the W2 mutation was killed only by the random two-sink schedules; the fix-round-2 report said ten mutations where the table has nine rows; W5 had no mutation | the directed test's release waits for a batch of the walk past the failing one (ids from 49, not 43: 43–47 are the failing batch itself), so it kills W2; nine rows is right (the report's "ten" was wrong); W5's row says why it has none | `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks` |
+| A5: the W2 mutation was killed only by the random two-sink schedules; the fix-round-2 report said ten mutations where the table has nine rows; W5 had no mutation | the directed test's release waits for a batch of the walk past the failing one (ids from 49, not 43: 43–47 are the failing batch itself). **That did not kill W2** (final review of #456): with 80 rows the walk has read every key when row 41's batch fails, so its queued end is turned into requests at once, before the later batches publish, and no row is lost. The directed test is now `a_walk_still_reading_keys_discards_its_later_batches_when_one_fails` (400 rows: under W2 rows 41, 43, 45, 47 are missing). Nine rows is right (the report's "ten" was wrong); W5's row says why it has none | `a_walk_still_reading_keys_discards_its_later_batches_when_one_fails` |
 | B1: `down_since` lagged the failure by the running builds' time (the event came after `down` waited for them) | the live failure is reported first, then `down` runs (held and folding are set at its start, before it waits); events stay ordered: failed, then restarted | `a_live_failure_is_reported_before_its_slow_builds_return` (reported at 0.5 s, not at 4 s) |
 | B2: `retry_at` can be in the past | its doc says "due to start": the walk starts at the builder's next look once no walk runs, later while the builder is busy or down | — |
 | B3: a walk cut by a live failure showed `backfill: null` while the index was down, its requests kept | a third state, `waiting`: set when a live failure arrives while a walk is in progress (`IndexStates`' walk, read as the failure is reported, before `down` drops it), cleared by the builder's restart and by a run's end; `retrying` wins while a failed walk waits too | `status::tests`' `a_walk_cut_by_a_live_failure_shows_waiting_until_the_restart` |
@@ -3737,10 +3738,27 @@ description, which takes `main`'s wording plus "and it isn't down"; `backlog_age
 | A1: the deadline arm without `snapshot.is_none()` | `a_retry_never_drops_a_walk_in_progress`, `a_poisoned_walks_retries_let_a_newer_walk_past_the_poison_complete` |
 | A2: `down` merges a walk failure's requests into a set due at once, unreported | `a_walk_failing_in_the_pass_a_live_batch_fails_is_reported_and_waits_its_own_wait` |
 | A3: any gathered set counts as work | `a_walks_retry_wait_is_idle_time` |
-| W2 (A5): a failed walk's later slots kept | `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks` (the directed test alone) |
+| W2 (A5): a failed walk's later slots kept | the random schedules only, here: `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks` let it survive (corrected in the final review; see below) |
 | B1: the live failure reported after `down` | `a_live_failure_is_reported_before_its_slow_builds_return` |
 | B3: `waiting` never set | `a_walk_cut_by_a_live_failure_shows_waiting_until_the_restart` |
 | B4: the message not cut | `a_long_index_error_is_cut_at_a_char_boundary` |
+
+#### Slice 8, final review of #456 (at `2aaa2346`, the manual at `6f134d06`)
+
+| Finding | Fix | Tests (fail before the fix, or under the mutation) |
+| --- | --- | --- |
+| 1: the directed W2 test did not kill W2 (`Job::Backfill { .. } => false` in `Builds::fail_walk`): with 80 rows the walk had read every key when its batch failed | the reviewer's variant adopted as the directed test: 400 rows, live ids from 1001, the walk still reading keys; under W2 rows 41, 43, 45, 47 are missing. The old test stays for the path where the walk's end is already queued at the failure (turned into requests at once; the walk fails once and alone, the live batches behind it publish) | `a_walk_still_reading_keys_discards_its_later_batches_when_one_fails` |
+| 2: a down index could show the walk's error as `last_error` (the A2 path reports the live failure, then the walk's), hiding the live error that took it down | `last_error` keeps one failure per kind: `{"live": null \| {message, at}, "backfill": null \| {message, at}}`, as `restarts` does; `FailureKind` is gone (`IndexErrors` holds both) | `status::tests`' `a_down_index_keeps_the_live_error_that_took_it_down` (the reviewer's), the CLI's `a_down_index_and_a_retrying_walk_are_served_on_the_index_route` |
+| 3: `retry_in` understated the wait: the sleep started after `down` waited for the running builds (failure at 0.5 s, "retry in 1 s", restart at about 5 s) | the builder sleeps until the failure plus the wait, so it restarts `retry_in` after the failure, or as soon as `down` returns when that is later. A walk failure `down` reports (the A2 path) has no such lag: its retry's deadline is set from the moment it is reported | `a_restart_comes_its_wait_after_the_failure` (released at 1 s: restart at 1.5 s, not 2 s; released at 4 s: restart at 4 s) |
+| 4: §3.10 said the restart line carries an attempt | corrected: index and kind, no attempt | — |
+
+**Mutations** (each compiles, none hangs):
+
+| Mutation | Killed by |
+| --- | --- |
+| W2: `Job::Backfill { .. } => false` (the directed test alone) | `a_walk_still_reading_keys_discards_its_later_batches_when_one_fails`; `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks` alone lets it survive |
+| 2: a walk's failure overwrites the live one | `a_down_index_keeps_the_live_error_that_took_it_down`, `a_walk_failure_shows_the_backfill_retrying_until_it_walks_again` |
+| 3: the wait slept after `down` | `a_restart_comes_its_wait_after_the_failure` |
 
 ## 4. Guarantees
 

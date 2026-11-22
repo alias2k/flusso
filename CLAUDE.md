@@ -821,7 +821,8 @@ is the one concrete piece.
   for its running builds (the reader hands it nothing, and at its cap it is exempt while another index
   is free, 6b-2's mechanism), clears its budget hold, takes fresh `Builds` (whose drop removes only its
   own index from the shared budget wait, ending it only when no builder is held), and waits its
-  `Retry` (`[backoff]` via `IngestEngine::with_backoff`, 1 s doubling to `max_ms`, one schedule per
+  `Retry`, counted from the failure (it restarts the wait after it, or once `down` returns if later)
+  (`[backoff]` via `IngestEngine::with_backoff`, 1 s doubling to `max_ms`, one schedule per
   kind, each started over once its kind moved since its last failure: a live item of the index
   numbered, or a backfill batch carrying a walk mark published (`IngestEngine::walk_batches`; a source
   that can't mark walks never moves it, its retries starting from the first key); a stop cuts a live
@@ -2034,7 +2035,8 @@ indexes and from the lanes' stall ages with one (one index keeps no record); `he
 `held_since`, information only; `backfill`: `{"state": "walking", "sinks"}`, `{"state": "retrying",
 "retry_at"}` while a failed walk waits (due at, can be past), or `{"state": "waiting"}` while a walk its
 live failure cut waits for the builder's restart (slice 8-2); `state` `running`/`down`, `down_since`, `last_error`
-`{kind, message, at}` (the message cut at `INDEX_ERROR_BYTES`, 4096, on a char boundary), `restarts` `{live, backfill}` (slice 8-2: fed by `StatusObserver` from
+`{live, backfill}`, each null or `{message, at}` (one kind never hides the other; the message cut at
+`INDEX_ERROR_BYTES`, 4096, on a char boundary), `restarts` `{live, backfill}` (slice 8-2: fed by `StatusObserver` from
 `on_index_failed`/`on_index_restarted`, which carry `engine::Work` as the kind; a whole run's failure,
 start or stop clears down and retrying (`Status::forget_index_runs`) and keeps the error and the counts;
 `working` reads false while down; one index is never down)), one entry per **enabled** index (`Status::with_ingest_indexes`:
