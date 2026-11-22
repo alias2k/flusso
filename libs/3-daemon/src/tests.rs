@@ -1412,7 +1412,8 @@ impl DocumentBuilder for PanickingDocuments {
 /// its own task (it awaited first) or in the ingest task's own first poll of
 /// it (it panicked before awaiting anything; caught since slice 8 of ADR
 /// 0012 stage 8a), it is a failed build: with one index an engine error, so
-/// the ingest engine fails and the daemon restarts it.
+/// the ingest engine fails and the daemon restarts it, and the deployment
+/// runs on until the stop, which ends it `Ok`.
 #[tokio::test]
 async fn a_panicking_build_restarts_the_ingest_engine_and_never_hangs() {
     for at_once in [false, true] {
@@ -1428,11 +1429,15 @@ async fn a_panicking_build_restarts_the_ingest_engine_and_never_hangs() {
             .unwrap();
         let status = running.status();
         let run = tokio::spawn(running.run(tokio::time::sleep(Duration::from_millis(500))));
-        tokio::time::timeout(Duration::from_secs(20), run)
+        let ended = tokio::time::timeout(Duration::from_secs(20), run)
             .await
             .unwrap_or_else(|_| panic!("at_once {at_once}: the deployment hung"))
-            .unwrap()
-            .ok();
+            .unwrap();
+        assert!(
+            ended.is_ok(),
+            "at_once {at_once}: the deployment didn't end on the panic; the stop ended it \
+             cleanly: {ended:?}"
+        );
         assert!(
             status.snapshot().errors >= 1,
             "at_once {at_once}: the failed build is an engine error"
