@@ -3682,6 +3682,33 @@ such rules can read.
 | S8 the metrics: `flusso_index_down`, `flusso_index_restarts_total{kind}`, `flusso_index_backfill_retrying`, `backfilling` only while walking | the CLI's `each_index_is_exported_with_its_ingest_state` | — |
 | S9 the HTTP route serves the new fields | `http::tests`' index route case | — |
 
+**As built** (8-2): as designed. The test names: `status::tests`'
+`a_live_failure_shows_the_index_down_until_it_restarts` (S1, S2, S5),
+`a_walk_failure_shows_the_backfill_retrying_until_it_walks_again` (S3),
+`a_run_restart_clears_down_and_retrying_and_keeps_the_history` (S4: a run's failure, start and stop);
+the daemon's `a_panicking_build_restarts_the_ingest_engine_and_never_hangs` (S6: one index, a real
+engine, never down, no restart or error recorded); `ingest::tests::restart`'s
+`a_build_failure_on_one_index_restarts_that_index_alone` and
+`a_restarted_index_task_gives_back_its_builds_and_serves_its_request_again` (S7: `live`, then
+`backfill` with one walk retry and no builder restart); the CLI's
+`each_index_is_exported_with_its_ingest_state` (S8) and `http::tests`'
+`a_down_index_and_a_retrying_walk_are_served_on_the_index_route` (S9). The walk's retry start is
+reported where the held set starts (the builder's deadline arm), with an `info` line. `restarts` counts
+starts: a failure that ends the run (while stopping, or the run's own) is in `last_error` but restarts
+nothing. The `working` gauge's description takes `main`'s wording (#454) and adds "and it isn't down".
+
+**Mutations** (8-2):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| S1 | `down_since` never set | `a_live_failure_shows_the_index_down_until_it_restarts` |
+| S2 | a live restart not counted | the same, `a_run_restart_clears_down_and_retrying_and_keeps_the_history` |
+| S3 | `retry_at` never cleared | `a_walk_failure_shows_the_backfill_retrying_until_it_walks_again` |
+| S4 | a run's end clears nothing | `a_run_restart_clears_down_and_retrying_and_keeps_the_history` |
+| S5 | `working` ignores down | `a_live_failure_shows_the_index_down_until_it_restarts` |
+| S7 | the engine reports a live failure as `backfill` | `a_build_failure_on_one_index_restarts_that_index_alone` |
+| S8 | `backfilling` while retrying; `down` not exported | `each_index_is_exported_with_its_ingest_state` (each) |
+
 ## 4. Guarantees
 
 | Invariant (CLAUDE.md) | After 8a | Existing guards | New test |
