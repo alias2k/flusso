@@ -806,14 +806,20 @@ is the one concrete piece.
   the oldest of them, so the slot and every fence of the index stay pinned while the other indexes'
   pass; the `newest` invariant needs no reset, since `newest` moved only past builds already taken),
   keeps its requests (the snapshot's, the coalescing set's and a finished walk's still queued to
-  complete, carried as a coalescing set due at once: the channel adapter makes a dropped delivery due
-  but wakes no pending `recv`, so a request handed back could sit until another one arrived), sets its
-  lead queue `held` and `folding` (the reader hands it nothing, and at its cap it is exempt while
-  another index is free, 6b-2's mechanism), clears its budget hold, takes fresh `Builds`, and waits its
-  `Retry` (`[backoff]` via `IngestEngine::with_backoff`, 1 s doubling to `max_ms`, started over once a
-  live item of the index was numbered since the last restart; a stop cuts it short: one more try under
-  the stop, O3). The restarted builder folds and asks for its backlog once as it starts (nothing else
-  would: the reader hands a folding builder nothing). A backlog candidate never carries a position
+  complete, carried as a coalescing set due at once, each lane's `after` moved to the last walk mark
+  published to it: `Snapshot::reached`, recorded as each backfill slot is published, so the walk
+  resumes where its lanes are; the channel adapter wakes a waiting `recv` on a release too, so the
+  engine doesn't depend on carrying them), sets its lead queue `held` and `folding` **before** it waits
+  for its running builds (the reader hands it nothing, and at its cap it is exempt while another index
+  is free, 6b-2's mechanism), clears its budget hold, takes fresh `Builds` (whose drop removes only its
+  own index from the shared budget wait, ending it only when no builder is held), and waits its
+  `Retry` (`[backoff]` via `IngestEngine::with_backoff`, 1 s doubling to `max_ms`, one schedule per
+  kind: a live failure's starts over once a live item of the index was numbered since the last
+  restart, a walk failure's (its key read, a backfill slot: `walk_failed`, `Builds::publishing`) once a
+  walk of the index completed (`IngestEngine::walks`); a stop cuts it short: one more try under the
+  stop, O3). The restarted builder folds and asks for its backlog once as it starts (nothing else
+  would: the reader hands a folding builder nothing); leaving the fold with nothing waiting and nothing
+  refused ends its hold (a quiet index makes no live grant to end it). A backlog candidate never carries a position
   older than the builder's last live grant (`Runs::backlog`, the floor), so a lane's positions never go
   down within a run. Reported as `Observer::on_index_failed` / `on_index_restarted` and an `error!` /
   `info!` line; `/status` and metrics are slice 8-2. Guards: `ingest::tests::restart` (each kind of
@@ -822,7 +828,11 @@ is the one concrete piece.
   `Through`, exempt past its cap while down, the waits doubling and starting over, a stop cutting the
   wait, a failure while stopping ending the run, an inline build panic, one index ending the run, an
   open stream's backlog and walk served after the restart, a lane's positions never going down across
-  a restart), `restart::tests` (the predicate, the
+  a restart, a quiet restarted index free again, a failure beside a slow build held at once, a walk
+  resuming where its lanes are, a poison backfill row backing off beside live traffic, one budget wait
+  across another index's restart, two builds of one document given back at the older change, a lane
+  failure ending the run; the review of #456's guards `nothing_counts_or_fences_past_a_given_back_change`,
+  `a_thousand_failures_leak_nothing`, `every_index_down_stops_the_reading_and_a_stop_ends_with_an_error`), `restart::tests` (the predicate, the
   waits), `pending::tests`' `a_give_back_*`, `tests::builders`'
   `a_failed_walk_restarts_its_index_alone_and_the_other_walk_reads_on`,
   `a_build_error_restarts_its_builder_alone_beside_a_held_builder`,
@@ -1288,7 +1298,10 @@ is the one concrete piece.
   ticket; a nacked or dropped-unacked delivery is marked due by its own ticket and redelivered alone,
   due ones in lane order, never the deliveries still in flight beside it, so a released delivery can
   follow later acked ones: the sink engine's admission keeps document order (issue #395; guards
-  `releasing_one_delivery_redelivers_only_that_one`, `released_deliveries_come_back_in_lane_order`). (A single redelivery slot
+  `releasing_one_delivery_redelivers_only_that_one`, `released_deliveries_come_back_in_lane_order`).
+  A release wakes a `recv` already waiting (the channel's `Notify`, registered before the ledger is
+  read), which hands the released delivery back first (review of #456; guards
+  `a_dropped_request_wakes_a_recv_already_waiting`, `a_nack_or_a_drop_wakes_a_recv_already_waiting_in_lane_order`). (A single redelivery slot
   made the coalescing loop receive the same request forever — the OOM behind the first attempts.)
   Guards: `an_unseeded_sink_requests_a_snapshot_then_marks_seeded`, `a_seeded_sink_requests_nothing`,
   `backfill_false_makes_a_stateless_sink_live_only`,
