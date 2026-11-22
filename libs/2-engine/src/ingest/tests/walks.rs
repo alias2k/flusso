@@ -85,6 +85,72 @@ async fn a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk() {
     );
 }
 
+/// The same with each batch larger than half the budget (rule 2 never
+/// admits one): `orders` holds one batch, the whole at the limit, and
+/// `users` still gets its one batch past the limit each time its last was
+/// let go. Rule 4 passes the limit too, as rule 5 does for live.
+#[tokio::test(start_paused = true)]
+async fn a_stuck_walk_at_the_limit_holds_no_healthy_walk_whose_batches_pass_half() {
+    let rows: i64 = 400;
+    let db = Database::new(rows, Vec::new());
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(false);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let stop = Stop::new();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        1 << 20,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(2)
+            .with_stop(stop.clone())
+    })
+    .with_budget_shared_at(32 * KIB, 0.5);
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        let stop = stop.clone();
+        let db = Arc::clone(&db);
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            while users_landed(&recorder, rows) < (rows / 2) as usize
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let landed = users_landed(&recorder, rows);
+            recorder.refused_indexes.lock().unwrap().clear();
+            while recorder.state() != db.expected() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            stop.request();
+            landed
+        })
+    };
+    tokio::time::timeout(LIMIT * 4, deployment.run_to_end(0))
+        .await
+        .expect("the run ends at the stop");
+    let landed = watcher.await.unwrap();
+    assert_eq!(
+        landed,
+        (rows / 2) as usize,
+        "users' walk lands beside orders stuck mid-walk"
+    );
+}
+
 /// Fairness (§3.9 §7): two indexes walking at once, one build at a time.
 /// Each builder keeps one backfill waiter, FIFO (G2), so while both walk
 /// they take the grants in turn; neither waits for the other's whole walk.

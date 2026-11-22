@@ -31,9 +31,13 @@
 //! on a task of its own ([`Walk::reading_apart`]), finishes without its walk
 //! being stepped, gives the permit back, and keeps its page until the walk
 //! takes it. The task is aborted when the walk is dropped (a stop, a failed
-//! or aborted run), so none outlives it. One builder reads inline, as before.
+//! or aborted run), so none outlives it by more than one poll (`abort` is
+//! asynchronous: the task is dropped at its next poll, a read awaiting the
+//! database at its next await). One builder reads inline, as before.
 //! A walk reads no page ahead: per walk at most one page (`KEY_PAGE` keys) is
-//! held, in hand or in a finished read.
+//! held, in hand or in a finished read. Planning a resumed walk (reading
+//! the lanes' recorded points back and ordering them) takes the permit too,
+//! on the builder's task, for as long as its reads last.
 //!
 //! ```text
 //! orders' walk: read ──permit──▶ page (kept on its task)   builder blocked
@@ -109,6 +113,14 @@ impl IngestEngine {
             .collect();
         let mut plans = HashMap::with_capacity(points.len());
         for (index, points) in points {
+            // Reading the recorded points back and ordering them are key
+            // reads on the builder's pool: under K1 like the walk's own, so
+            // walks at once plan one read at a time (review of #453).
+            let _reading = if points.iter().any(|(_, after)| after.is_some()) {
+                self.key_reads.acquire().await.ok()
+            } else {
+                None
+            };
             let plan = plan_walk(self.documents.as_ref(), &index, points).await;
             plans.insert(index, plan);
         }
@@ -871,5 +883,140 @@ mod tests {
             before,
             "no task spawned"
         );
+    }
+
+    /// Counts every page read started.
+    #[derive(Debug, Default)]
+    struct Paging {
+        inner: Counted,
+        pages: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl DocumentBuilder for Paging {
+        async fn resolve(
+            &self,
+            _: &TableName,
+            _: &RowKey,
+            _: Option<&RowImage>,
+            _: Option<&RowImage>,
+        ) -> source::Result<Vec<DocumentId>> {
+            Ok(Vec::new())
+        }
+
+        async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+            Ok(Document::Delete { id: id.clone() })
+        }
+
+        fn backfill_indexes(&self) -> Vec<IndexName> {
+            Vec::new()
+        }
+
+        async fn last_key(&self, index: &IndexName) -> source::Result<Option<RowKey>> {
+            self.inner.last_key(index).await
+        }
+
+        async fn keys(
+            &self,
+            index: &IndexName,
+            after: Option<&RowKey>,
+            through: &RowKey,
+            limit: usize,
+        ) -> source::Result<Vec<RowKey>> {
+            self.pages.fetch_add(1, Ordering::SeqCst);
+            self.inner.keys(index, after, through, limit).await
+        }
+    }
+
+    /// No read ahead (6b-3, review of #453): a walk, inline or reading apart,
+    /// its keys in hand not taken, starts no further read however long it
+    /// waits and however often it is stepped: it holds one page at most.
+    #[tokio::test(start_paused = true)]
+    async fn a_walk_holds_one_page_and_reads_no_further_until_it_is_taken() {
+        for apart in [false, true] {
+            let documents = Arc::new(Paging::default());
+            let walk = Walk::new(
+                Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+                [IndexName::try_new("users").unwrap()],
+                Arc::new(Semaphore::new(1)),
+            );
+            let mut walk = if apart { walk.reading_apart() } else { walk };
+            assert!(matches!(walk.step().await.unwrap(), Step::Keys));
+            assert_eq!(documents.pages.load(Ordering::SeqCst), 1);
+            for _ in 0..5 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                assert!(matches!(walk.step().await.unwrap(), Step::Keys));
+            }
+            assert_eq!(
+                documents.pages.load(Ordering::SeqCst),
+                1,
+                "apart {apart}: no read ahead"
+            );
+            assert_eq!(walk.keys.len(), KEY_PAGE, "apart {apart}: one page held");
+            walk.keys.clear();
+            assert!(matches!(walk.step().await.unwrap(), Step::Keys));
+            assert_eq!(documents.pages.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    /// The abort of a read still waiting for the permit (6b-3, review of
+    /// #453).
+    /// `orders`' read holds the key-read permit and never answers; `users'`
+    /// read waits for the permit on its task. Dropping `users`' walk ends
+    /// that wait: once `orders`' walk is dropped too, the permit comes back
+    /// and no read is left alive (a waiter left running would take the
+    /// permit and hang in its read).
+    #[tokio::test(start_paused = true)]
+    async fn a_walk_dropped_while_its_read_waits_for_the_permit_takes_no_permit_later() {
+        let documents = Arc::new(Hanging::default());
+        let key_reads = Arc::new(Semaphore::new(1));
+        let walk = |name: &str| {
+            Walk::new(
+                Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+                [IndexName::try_new(name).unwrap()],
+                Arc::clone(&key_reads),
+            )
+            .reading_apart()
+        };
+        let mut holding = walk("orders");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), holding.step())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            documents.live.load(Ordering::SeqCst),
+            1,
+            "setup: orders reads"
+        );
+        let mut waiting = walk("users");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), waiting.step())
+                .await
+                .is_err()
+        );
+        assert_eq!(key_reads.available_permits(), 0);
+        assert_eq!(
+            documents.live.load(Ordering::SeqCst),
+            1,
+            "setup: users waits for the permit"
+        );
+        drop(waiting);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        drop(holding);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while documents.live.load(Ordering::SeqCst) != 0 || key_reads.available_permits() != 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("no read alive and the permit back");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            documents.live.load(Ordering::SeqCst),
+            0,
+            "the dropped waiter never read"
+        );
+        assert_eq!(key_reads.available_permits(), 1);
     }
 }

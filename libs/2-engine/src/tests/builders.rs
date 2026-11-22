@@ -834,6 +834,134 @@ async fn an_aborted_run_leaves_no_key_read_running() {
     assert_eq!(walks.alive.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
+/// Every read a walk makes of the source, planning included, each taking
+/// 10 ms: how many run at once, at most. Every index is empty past its
+/// recorded point (no bound), so a walk is its planning and its bound.
+#[derive(Debug, Default)]
+struct PlanningReads {
+    now: std::sync::atomic::AtomicUsize,
+    most: std::sync::atomic::AtomicUsize,
+}
+
+impl PlanningReads {
+    async fn read<T>(&self, value: T) -> source::Result<T> {
+        use std::sync::atomic::Ordering;
+        let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        self.now.fetch_sub(1, Ordering::SeqCst);
+        Ok(value)
+    }
+}
+
+#[async_trait]
+impl DocumentBuilder for PlanningReads {
+    async fn resolve(
+        &self,
+        _: &TableName,
+        _: &RowKey,
+        _: Option<&source::RowImage>,
+        _: Option<&source::RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        Ok(Vec::new())
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        Ok(Document::Upsert {
+            id: id.clone(),
+            body: GenericValue::Null,
+        })
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![orders(), users()]
+    }
+
+    async fn resume_after(&self, _: &IndexName, mark: &str) -> source::Result<Option<RowKey>> {
+        self.read(Some(row(mark.parse().unwrap_or(0)))).await
+    }
+
+    async fn compare_keys(
+        &self,
+        _: &IndexName,
+        a: &RowKey,
+        b: &RowKey,
+    ) -> source::Result<Option<std::cmp::Ordering>> {
+        let id = |key: &RowKey| match key.0.first() {
+            Some((_, GenericValue::BigInt(id))) => *id,
+            _ => 0,
+        };
+        self.read(Some(id(a).cmp(&id(b)))).await
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        self.read(None).await
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        _: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        self.read(Vec::new()).await
+    }
+}
+
+/// K1 covers planning too (review of #453): a walk resuming from recorded
+/// points reads them back (`resume_after`) and orders them
+/// (`compare_keys`) before its bound, queries on the builder's pool like
+/// any key read. Two indexes, each asked by two sinks from a recorded
+/// point, walk at once: no two of those reads, or of their bound reads, run
+/// at once, so key reads stay one at a time and the pool's one spare
+/// connection is theirs.
+#[tokio::test(start_paused = true)]
+async fn planning_reads_of_walks_at_once_run_one_at_a_time() {
+    let sinks = [sink_name("a"), sink_name("b")];
+    let indexes = vec![orders(), users()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), sinks.clone()));
+    let progress = Arc::new(crate::Progress::of(indexes.clone(), sinks.clone()));
+    let requests = stream.requests().unwrap().producer;
+    for index in &indexes {
+        for (n, sink) in sinks.iter().enumerate() {
+            requests
+                .publish(stream::Request::Backfill {
+                    index: index.clone(),
+                    sink: sink.clone(),
+                    after: Some(stream::WalkMark::new((n + 1).to_string())),
+                    ticket: stream::Ticket::default(),
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let documents = Arc::new(PlanningReads::default());
+    let started = Arc::new(Snapshots::default());
+    let ingest = IngestEngine::new(
+        Arc::new(MockSource::new(Vec::new())) as Arc<dyn ChangeCapture>,
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        sinks.to_vec(),
+        Arc::clone(&progress),
+    )
+    .with_observer(Arc::clone(&started) as Arc<dyn crate::Observer>);
+    tokio::time::timeout(Duration::from_secs(10), ingest.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        started.0.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "both walks ran"
+    );
+    assert_eq!(
+        documents.most.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "planning and bound reads one at a time"
+    );
+}
+
 /// A walk of `orders` takes two seconds to find its bound; `users` has
 /// none. Records the indexes marked seeded.
 #[derive(Debug, Default)]
