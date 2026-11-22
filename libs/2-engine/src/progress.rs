@@ -1015,16 +1015,18 @@ impl Progress {
         })
     }
 
-    /// Every index that can have pending documents: one with a lane here.
-    /// The position of `index`'s oldest change not built yet: a document
-    /// waiting, or in a build no lane has been sent yet. `None` while none.
-    /// What an index's backlog age is measured by (slice 7). One lock.
-    pub fn oldest_unbuilt(&self, index: &IndexName) -> Option<Position> {
+    /// The read number of `index`'s oldest change not built yet: a document
+    /// waiting, or in a build no lane has been sent yet; `None` while none.
+    /// Compared with [`changes_read`](Self::changes_read) over time, it says
+    /// how long ago that change was read: an index's backlog age (slice 7).
+    /// One lock.
+    pub fn oldest_unbuilt(&self, index: &IndexName) -> Option<u64> {
         self.pending
             .get(index)
             .and_then(|pending| lock(pending).oldest_unbuilt())
     }
 
+    /// Every index that can have pending documents: one with a lane here.
     pub fn indexes(&self) -> impl Iterator<Item = &IndexName> {
         self.pending.keys()
     }

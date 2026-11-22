@@ -262,6 +262,10 @@ fn the_readers_waits_are_a_histogram_by_bound() {
         ),
         1.0
     );
+    for le in ["60", "120", "300", "600"] {
+        let bucket = format!(r#"flusso_reader_waits_seconds_bucket{{bound="pending",le="{le}"}}"#);
+        assert!(text.contains(&bucket), "{bucket} missing:\n{text}");
+    }
     assert!(
         !text.contains(r#"bound="total""#),
         "no series for a bound never hit:\n{text}"

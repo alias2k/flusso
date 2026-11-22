@@ -15,8 +15,8 @@ use stream::LaneKey;
 
 use super::*;
 use crate::ingest::together::together;
-use crate::observer::NoopObserver;
 use crate::observer::ReaderBound;
+use crate::observer::{NoopObserver, Observer};
 
 const LIMIT: Duration = Duration::from_secs(5);
 
@@ -562,8 +562,31 @@ async fn a_take_before_the_wake_up_is_registered_is_seen_by_the_check_after_it()
     a_take_at(Check::BeforeRegistering).await;
 }
 
+/// Records each wait of the reader at its lead.
+#[derive(Debug, Default)]
+struct Waits(Mutex<Vec<ReaderBound>>);
+
+impl Observer for Waits {
+    fn on_reader_wait(&self, bound: ReaderBound, _: Duration) {
+        self.0.lock().unwrap().push(bound);
+    }
+}
+
+/// Review of #454, item 8: a wait the lead's first poll already ends (a take
+/// before the wake-up is registered) stopped nothing and is not reported; one
+/// that pended is.
+#[tokio::test(start_paused = true)]
+async fn only_a_wait_that_pended_is_reported() {
+    assert_eq!(a_take_at(Check::BeforeRegistering).await, Vec::new());
+    assert_eq!(
+        a_take_at(Check::BeforeWaiting).await,
+        vec![ReaderBound::PerIndex]
+    );
+}
+
 /// One take, at `point`, then the stream's end: the reader must read on.
-async fn a_take_at(point: Check) {
+/// Returns the waits the reader reported.
+async fn a_take_at(point: Check) -> Vec<ReaderBound> {
     let progress = progress();
     let (sender, mut runs) = mpsc::unbounded_channel();
     let lead = Lead::new(
@@ -587,11 +610,12 @@ async fn a_take_at(point: Check) {
             }
         }) as Box<dyn Fn(Check) + Send + Sync>
     };
+    let waits = Arc::new(Waits::default());
     let mut task = ReaderTask::spawn(
         Reader {
             resolver: Arc::new(Resolver::default()),
             progress: Arc::clone(&progress),
-            observer: Arc::new(NoopObserver),
+            observer: Arc::clone(&waits) as Arc<dyn Observer>,
             stop: Stop::new(),
             batch: BatchPolicy {
                 max_changes: 1,
@@ -610,6 +634,8 @@ async fn a_take_at(point: Check) {
         .unwrap();
     assert!(ended.stream_ended, "it read on to the stream's end");
     assert_eq!(received(&mut runs).len(), 1);
+    let waits = waits.0.lock().unwrap().clone();
+    waits
 }
 
 /// R9 and `changes_captured`: a run an error cuts is not handed over, but

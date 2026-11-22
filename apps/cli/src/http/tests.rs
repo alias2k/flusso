@@ -501,9 +501,16 @@ async fn a_reindex_is_queued_on_the_index_path() {
     let (base, mut receivers, _stop) = serve_private(status).await;
     let (code, body) = post_reindex(&base, "/indexes/users/reindex?sink=primary").await;
     assert_eq!(code, 202, "{body}");
-    assert_eq!(body.trim(), "reindex of users on primary queued");
-    let (code, _) = post_reindex(&base, "/indexes/orders/reindex").await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"index": "users", "sink": "primary", "queued": true})
+    );
+    let (code, body) = post_reindex(&base, "/indexes/orders/reindex").await;
     assert_eq!(code, 202);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"index": "orders", "sink": null, "queued": true})
+    );
     let primary = receivers
         .get_mut(&SinkName::try_new("primary").unwrap())
         .unwrap();

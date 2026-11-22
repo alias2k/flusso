@@ -28,7 +28,7 @@ use tokio::time::{Duration, Instant};
 /// counts as stuck: above a healthy sink's flush (hundreds of ms) and one
 /// sink engine restart (1 s, then 2 s), below three failed attempts in a row
 /// (1 + 2 + 4 s). See the stage note, §5.
-pub(crate) const STUCK_AFTER: Duration = Duration::from_secs(5);
+pub const STUCK_AFTER: Duration = Duration::from_secs(5);
 
 /// Each index's record, for the life of the ingest engine (an item outlives
 /// the engine run that published it).

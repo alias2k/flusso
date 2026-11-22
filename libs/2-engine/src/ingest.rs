@@ -50,6 +50,7 @@ mod gate;
 mod live;
 mod outstanding;
 pub(crate) use outstanding::Outstanding;
+pub use outstanding::STUCK_AFTER;
 mod reader;
 mod snapshot;
 #[cfg(test)]
@@ -104,6 +105,16 @@ type LiveStream = BoxStream<'static, source::Result<LiveChange>>;
 /// before reading stops for every index (`[concurrency]
 /// max_pending_documents`).
 pub const DEFAULT_MAX_PENDING_DOCUMENTS: usize = 1_000_000;
+
+/// Clears what an engine run alone decides (the exemption, the budget hold)
+/// when the run ends by any path.
+struct ClearsAtRunEnd<'a>(&'a IndexStates);
+
+impl Drop for ClearsAtRunEnd<'_> {
+    fn drop(&mut self) {
+        self.0.clear_run();
+    }
+}
 
 /// What the exemption keeps for the life of the ingest engine (6b-2).
 #[derive(Debug)]
@@ -324,6 +335,10 @@ impl IngestEngine {
     /// and before any snapshot (the #120 ordering).
     #[tracing::instrument(name = "ingest.run", skip_all, fields(max_changes = self.batch.max_changes))]
     pub async fn run(&self) -> Result<()> {
+        // Whatever ends the run (its end, a stop, an error, a drop), nothing
+        // is exempt or held by the budget until the next run decides again
+        // (slice 7, review of #454).
+        let _clears = ClearsAtRunEnd(&self.index_states);
         let result = self.run_inner().await;
         match &result {
             Ok(ended) => {

@@ -1,6 +1,6 @@
 //! What the ingest engine knows of each index that an operator reads (ADR
 //! 0012 stage 8a, slice 7): whether it is exempt, whether something holds
-//! its builder, whether its walk runs, and whether it counts as working.
+//! its builder, whether its walk runs, and whether it is stuck.
 //! One [`IndexStates`] lives as long as the ingest engine, across its runs,
 //! and the daemon's `Status` reads it as a handle, as it reads `Progress`.
 //!
@@ -13,12 +13,21 @@
 //! | held by a lane | a publish that pends on a full lane, until it goes through |
 //! | walking | a snapshot's start; its drop (completed, stopped or failed) clears it |
 //!
+//! **An engine run that ends**, by any path, clears the exemption and the
+//! budget hold of every index ([`clear_run`](IndexStates::clear_run), a
+//! guard in `IngestEngine::run`): nothing is read between runs, so nothing
+//! is exempt, and a source down for an hour shows no exemption from before
+//! it. Lane holds and walks clear with their own guards.
+//!
 //! The writers are public so a status can be shown in a test; only the
 //! engine calls them in a deployment.
 //!
-//! **Working** is read, not stored: not held, and none of the index's items
-//! waits on a lane unacknowledged for 5 s (6b-2's rule). With one index the
-//! engine keeps no record of its items, so working is "not held".
+//! **Stuck** is read, not stored, and is about progress, not holds: items of
+//! the index wait on a lane and none was acknowledged for 5 s (6b-2's rule,
+//! the record the exemption decides by). A held index whose sink keeps
+//! acknowledging is not stuck. With one index the engine keeps no record of
+//! its items (one index pays nothing for it), so the view has no answer
+//! (`None`) and the daemon reads the lanes' stall ages instead.
 //!
 //! ```
 //! use engine::{ExemptionState, IndexStates};
@@ -28,7 +37,7 @@
 //! let states = IndexStates::new([users.clone()]);
 //! let view = states.view(&users).unwrap();
 //! assert_eq!(view.exemption, ExemptionState::None);
-//! assert!(view.working);
+//! assert_eq!(view.stuck, None, "one index: no record");
 //! assert!(view.held.is_none() && view.backfill.is_none());
 //! ```
 
@@ -43,6 +52,7 @@ use crate::ingest::Outstanding;
 
 /// An index's place in 6b-2's exemption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExemptionState {
     /// Not exempt: it paces the reading at its cap.
     None,
@@ -67,6 +77,7 @@ impl ExemptionState {
 
 /// What holds an index's builder.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HeldBy {
     /// Its live batch is refused by the memory budget.
     Budget,
@@ -86,7 +97,9 @@ impl HeldBy {
 
 /// One index's state, as read now.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct IndexView {
+    /// Its place in the exemption, as of the last tick.
     pub exemption: ExemptionState,
     /// When it entered its exemption state (to the tick); `None` while not
     /// exempt.
@@ -95,9 +108,9 @@ pub struct IndexView {
     pub held: Option<HeldBy>,
     /// When the hold began.
     pub held_since: Option<Instant>,
-    /// Not held, and none of its items waits on a lane unacknowledged for
-    /// 5 s.
-    pub working: bool,
+    /// Whether items of it wait on a lane and none was acknowledged for 5 s
+    /// (6b-2's rule); `None` where the engine keeps no record (one index).
+    pub stuck: Option<bool>,
     /// The sinks its walk in progress serves; `None` while none runs.
     pub backfill: Option<BTreeSet<SinkName>>,
 }
@@ -174,11 +187,11 @@ impl IndexStates {
         let stuck = self
             .outstanding
             .as_ref()
-            .is_some_and(|outstanding| outstanding.stuck(index));
+            .map(|outstanding| outstanding.stuck(index));
         Some(IndexView {
             exemption: state.exemption.0,
             exemption_since: state.exemption.1,
-            working: held.is_none() && !stuck,
+            stuck,
             held_since: held.as_ref().and(state.held_since),
             held,
             backfill: state.walking.clone(),
@@ -188,6 +201,16 @@ impl IndexStates {
     /// The indexes it tracks.
     pub fn indexes(&self) -> impl Iterator<Item = &IndexName> {
         self.indexes.keys()
+    }
+
+    /// An engine run ended (any path): no index is exempt or held by the
+    /// budget until the next run decides again. Lane holds and walks clear
+    /// with their own guards.
+    pub fn clear_run(&self) {
+        for (index, one) in &self.indexes {
+            self.budget(index, false);
+            lock(&one.state).exemption = (ExemptionState::None, None);
+        }
     }
 
     /// `index` is in `state` (the tick): its since moves only on a change.
@@ -343,7 +366,6 @@ mod tests {
         states.budget(&users(), true);
         let began = states.view(&users()).unwrap().held_since.unwrap();
         assert_eq!(states.view(&users()).unwrap().held, Some(HeldBy::Budget));
-        assert!(!states.view(&users()).unwrap().working);
         tokio::time::advance(Duration::from_secs(1)).await;
         let full = states.lane_full(&users(), &sink("audit"));
         states.budget(&users(), false);
@@ -355,9 +377,50 @@ mod tests {
         assert_eq!(view.held_since, Some(began), "one hold");
         drop(full);
         let view = states.view(&users()).unwrap();
+        assert_eq!((view.held, view.held_since), (None, None));
+    }
+
+    /// Review of #454, item 6: a hold that ended and a new one later: the
+    /// second starts when it does, not at the first's start.
+    #[tokio::test(start_paused = true)]
+    async fn a_second_hold_starts_when_it_does() {
+        let states = IndexStates::new([users()]);
+        states.budget(&users(), true);
+        states.budget(&users(), false);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let full = states.lane_full(&users(), &sink("audit"));
         assert_eq!(
-            (view.held, view.held_since, view.working),
-            (None, None, true)
+            states.view(&users()).unwrap().held_since,
+            Some(Instant::now()),
+            "the lane's hold starts now"
+        );
+        drop(full);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        states.budget(&users(), true);
+        assert_eq!(
+            states.view(&users()).unwrap().held_since,
+            Some(Instant::now()),
+            "and the budget's next one too"
+        );
+    }
+
+    /// Review of #454, item 3: a run's end clears the exemption and the
+    /// budget hold.
+    #[tokio::test(start_paused = true)]
+    async fn a_runs_end_clears_the_exemption_and_the_budget_hold() {
+        let states = IndexStates::new([users()]);
+        states.set_exemption(&users(), ExemptionState::Exempt);
+        states.budget(&users(), true);
+        states.clear_run();
+        let view = states.view(&users()).unwrap();
+        assert_eq!(
+            (
+                view.exemption,
+                view.exemption_since,
+                view.held,
+                view.held_since
+            ),
+            (ExemptionState::None, None, None, None)
         );
     }
 
@@ -374,15 +437,24 @@ mod tests {
         assert_eq!(states.view(&users()).unwrap().backfill, None);
     }
 
-    /// 6b-2's rule: an index whose item waited 5 s unacknowledged doesn't
-    /// work, held or not.
+    /// 6b-2's rule: an index whose item waited 5 s unacknowledged is stuck,
+    /// held or not; without the record there is no answer.
     #[tokio::test(start_paused = true)]
-    async fn an_index_whose_items_wait_unacknowledged_does_not_work() {
+    async fn an_index_whose_items_wait_unacknowledged_is_stuck() {
         let outstanding = Arc::new(Outstanding::new([users()]));
         let states = IndexStates::new([users()]).with_outstanding(Arc::clone(&outstanding));
         let _item = outstanding.publish(&users()).unwrap();
-        assert!(states.view(&users()).unwrap().working);
+        states.budget(&users(), true);
+        assert_eq!(
+            states.view(&users()).unwrap().stuck,
+            Some(false),
+            "held, not stuck"
+        );
         tokio::time::advance(Duration::from_secs(5)).await;
-        assert!(!states.view(&users()).unwrap().working);
+        assert_eq!(states.view(&users()).unwrap().stuck, Some(true));
+        assert_eq!(
+            IndexStates::new([users()]).view(&users()).unwrap().stuck,
+            None
+        );
     }
 }

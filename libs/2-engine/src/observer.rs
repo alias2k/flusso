@@ -328,6 +328,7 @@ impl std::fmt::Display for EngineId {
 /// The bound of the reader's lead it stopped at (ADR 0012 stage 8a, slice
 /// 7): what `flusso.reader.waits{bound}` counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReaderBound {
     /// One index (not exempt, or exempt and frozen) at its cap,
     /// `max_waiting_per_index` (or the count it froze at).

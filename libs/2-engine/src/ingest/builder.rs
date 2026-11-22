@@ -251,6 +251,9 @@ impl IngestEngine {
                         gathered.deliveries.push(more);
                     }
                     if everyone_asked(&gathered.deliveries, lanes) {
+                        // Planning awaits (its reads take the key-read
+                        // permit): out of every line first (G9′).
+                        builds.leave_lines();
                         snapshot = self
                             .start_coalesced(&mut coalescing, scopes, lanes, several)
                             .await?;
@@ -258,6 +261,7 @@ impl IngestEngine {
                     mark = Instant::now();
                 }
                 () = until(deadline), if deadline.is_some() => {
+                    builds.leave_lines();
                     snapshot = self
                         .start_coalesced(&mut coalescing, scopes, lanes, several)
                         .await?;

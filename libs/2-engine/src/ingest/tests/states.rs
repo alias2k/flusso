@@ -81,7 +81,7 @@ async fn a_lane_hold_and_the_exemption_are_shown_and_cleared() {
             let users = states.view(&IndexName::try_new("users").unwrap()).unwrap();
             recorder.refused_indexes.lock().unwrap().clear();
             let cleared = until_view(&states, "orders", "the hold's end", |view| {
-                view.held.is_none() && view.working && view.exemption == ExemptionState::None
+                view.held.is_none() && view.exemption == ExemptionState::None
             })
             .await;
             while recorder.state() != db.expected() {
@@ -100,12 +100,12 @@ async fn a_lane_hold_and_the_exemption_are_shown_and_cleared() {
         Some(HeldBy::Lanes(BTreeSet::from([sink_name()]))),
         "held by its full lane into the sink"
     );
-    assert!(held.held_since.is_some() && !held.working);
+    assert!(held.held_since.is_some());
     assert!(exempt.exemption_since.is_some());
     assert_eq!(users.exemption, ExemptionState::None, "users is not exempt");
     assert!(
-        users.held.is_none() && users.working,
-        "users works: {users:?}"
+        users.held.is_none() && users.stuck != Some(true),
+        "users is neither held nor stuck: {users:?}"
     );
     assert_eq!(cleared.exemption_since, None);
     assert_eq!(cleared.held_since, None);
@@ -175,7 +175,7 @@ async fn a_budget_hold_is_shown_and_cleared() {
         .await
         .expect("the run ends at the stop");
     let (held, cleared) = watcher.await.unwrap();
-    assert!(held.held_since.is_some() && !held.working);
+    assert!(held.held_since.is_some());
     assert_eq!(cleared.held_since, None);
 }
 
@@ -307,4 +307,294 @@ async fn each_wait_of_the_reader_is_reported_with_its_bound() {
             .any(|(_, waited)| *waited >= Duration::from_millis(50)),
         "a wait lasts until a build takes: {waits:?}"
     );
+}
+
+/// An engine run that fails while `orders` is exempt: once the run has
+/// ended (the supervisor now waits its backoff, up to a minute, or the
+/// source stays down), nothing is read, nothing waits on a cap, yet the
+/// index is still shown exempt (and `flusso_index_exempt` stays 1, so
+/// `FlussoIndexBacklog` keeps counting).
+#[tokio::test(start_paused = true)]
+async fn a_failed_run_leaves_no_exemption_shown() {
+    let changes: i64 = 400;
+    let log: Vec<Change> = (0..changes).map(Change::upsert).collect();
+    let arrivals: Vec<Duration> = (0..changes as u64)
+        .map(|n| Duration::from_millis(10 * n))
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(&db, Behaviour::default());
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        2,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(2)
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+    });
+    let states = deployment.ingest.index_states();
+    let sink = deployment.start_sink().await;
+    let failer = {
+        let states = Arc::clone(&states);
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            until_view(&states, "orders", "the exemption", |view| {
+                view.exemption != ExemptionState::None
+            })
+            .await;
+            // The source fails from the next change on: the run ends.
+            builder
+                .behaviour
+                .resolve_fails
+                .lock()
+                .unwrap()
+                .extend(0..changes);
+        })
+    };
+    let ended = tokio::time::timeout(Duration::from_secs(600), deployment.ingest.run())
+        .await
+        .expect("the run ends");
+    failer.await.unwrap();
+    assert!(ended.is_err(), "the run failed");
+    // The supervisor's backoff: nothing runs.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let orders = states.view(&IndexName::try_new("orders").unwrap()).unwrap();
+    sink.abort();
+    assert_eq!(
+        orders.exemption,
+        ExemptionState::None,
+        "no run, yet still shown: {orders:?}"
+    );
+}
+
+/// Review of #454, item 1: a sustained live load a healthy sink lands
+/// steadily (every write within 50 ms) in a small memory budget, so the
+/// builder is held by the budget most of the time. Held is information; the
+/// published "working" is about progress (6b-2's rule: nothing waited 5 s
+/// for an acknowledgement with none acknowledged), so the saturated index is
+/// never stuck. `users` (even ids) carries the load, `orders` is quiet, so the
+/// engine keeps its record (two indexes).
+#[tokio::test(start_paused = true)]
+async fn a_healthy_sink_bound_burst_is_never_stuck() {
+    let changes: i64 = 6000;
+    let log: Vec<Change> = (0..changes)
+        .map(|n| Change::upsert(2 * (n % 250)))
+        .collect();
+    let arrivals: Vec<Duration> = (0..changes as u64)
+        .map(|n| Duration::from_millis(2 * n))
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(true);
+    *recorder.write_delay.lock().unwrap() = Some(Duration::from_millis(50));
+    let stop = Stop::new();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        1 << 20,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(16))
+            .with_builds(2)
+            .with_stop(stop.clone())
+    })
+    .with_shared_budget(256 * KIB, usize::MAX, None);
+    let states = deployment.ingest.index_states();
+    let sampler = {
+        let recorder = Arc::clone(&recorder);
+        let db = Arc::clone(&db);
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            let users = IndexName::try_new("users").unwrap();
+            let mut samples = Vec::new();
+            let mut landed = 0usize;
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let view = states.view(&users).unwrap();
+                let now = recorder.landings.lock().unwrap().len();
+                samples.push((view.stuck, view.held.clone(), now - landed));
+                landed = now;
+            }
+            while recorder.state() != db.expected() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            stop.request();
+            samples
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(600), deployment.run_to_end(0))
+        .await
+        .expect("the run ends at the stop");
+    let samples = sampler.await.unwrap();
+    assert!(
+        samples.iter().all(|(_, _, landed)| *landed > 0),
+        "the sink lands documents every second: {samples:?}"
+    );
+    assert!(
+        samples.iter().any(|(_, held, _)| held.is_some()),
+        "setup: the budget holds the builder at some samples: {samples:?}"
+    );
+    assert!(
+        samples.iter().all(|(stuck, _, _)| *stuck == Some(false)),
+        "a saturated index whose sink lands steadily is never stuck: {samples:?}"
+    );
+}
+
+/// Review of #454, item 3, the budget's half: `orders` held by the budget
+/// when the run fails; once it has ended nothing holds anything, so nothing
+/// is shown held through the supervisor's backoff.
+#[tokio::test(start_paused = true)]
+async fn a_failed_run_leaves_no_budget_hold_shown() {
+    let changes: i64 = 400;
+    let log: Vec<Change> = (0..changes).map(Change::upsert).collect();
+    let arrivals: Vec<Duration> = (0..changes as u64)
+        .map(|n| Duration::from_millis(10 * n))
+        .collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        1 << 20,
+    )
+    .ingest(|ingest| ingest.with_batch(batch(1)).with_builds(2))
+    .with_budget_shared_at(256 * KIB, 0.25);
+    let states = deployment.ingest.index_states();
+    let sink = deployment.start_sink().await;
+    let failer = {
+        let states = Arc::clone(&states);
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            until_view(&states, "orders", "a budget hold", |view| {
+                view.held == Some(HeldBy::Budget)
+            })
+            .await;
+            builder
+                .behaviour
+                .resolve_fails
+                .lock()
+                .unwrap()
+                .extend(0..changes);
+        })
+    };
+    let ended = tokio::time::timeout(Duration::from_secs(600), deployment.ingest.run())
+        .await
+        .expect("the run ends");
+    failer.await.unwrap();
+    assert!(ended.is_err(), "the run failed");
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let orders = states.view(&IndexName::try_new("orders").unwrap()).unwrap();
+    sink.abort();
+    assert_eq!(
+        (orders.held.clone(), orders.held_since),
+        (None, None),
+        "no run, nothing held: {orders:?}"
+    );
+}
+
+/// A run that ends cleanly at a stop clears what only a run decides: an
+/// index shown exempt (one index: no tick writes it back) is shown not
+/// exempt once the run has ended.
+#[tokio::test(start_paused = true)]
+async fn a_stopped_run_leaves_no_exemption_shown() {
+    let db = Database::new(0, Vec::new());
+    let builder = Builder::new(&db, Behaviour::default());
+    let recorder = Recorder::seeded(true);
+    let stop = Stop::new();
+    let mut deployment = Deployment::new(
+        Feed::new(&db).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+    )
+    .ingest(|ingest| ingest.with_stop(stop.clone()));
+    let states = deployment.ingest.index_states();
+    let users = IndexName::try_new("users").unwrap();
+    let stopper = {
+        let states = Arc::clone(&states);
+        let users = users.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            states.set_exemption(&users, ExemptionState::Exempt);
+            stop.request();
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(60), deployment.run_to_end(0))
+        .await
+        .expect("the run ends at the stop");
+    stopper.await.unwrap();
+    assert_eq!(states.view(&users).unwrap().exemption, ExemptionState::None);
+}
+
+/// Review of #454, item 7: a snapshot's end blocked on a full lane shows the
+/// lane's hold too, with one index. One backfill batch fills the stalled
+/// sink's lane of one item; the `SnapshotComplete` after it waits.
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_end_blocked_on_a_full_lane_shows_the_lane_hold() {
+    let db = Database::new(2, Vec::new());
+    let builder = Builder::new(&db, Behaviour::default());
+    let recorder = Recorder::seeded(false);
+    recorder.stall();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        1,
+    )
+    .ingest(|ingest| ingest.with_batch(batch(4)));
+    let states = deployment.ingest.index_states();
+    let watcher = {
+        let states = Arc::clone(&states);
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            let held = until_view(&states, "users", "the snapshot end's lane hold", |view| {
+                view.held.is_some()
+            })
+            .await;
+            recorder.resume();
+            held
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(120), deployment.run_to_end(0))
+        .await
+        .expect("the run ends with the stream");
+    let held = watcher.await.unwrap();
+    assert_eq!(
+        held.held,
+        Some(HeldBy::Lanes(BTreeSet::from([sink_name()])))
+    );
+    assert_eq!(recorder.state(), db.expected());
 }

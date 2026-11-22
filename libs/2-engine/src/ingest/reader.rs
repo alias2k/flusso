@@ -603,18 +603,24 @@ impl Reader {
             return !self.stop.is_requested();
         };
         let began = Instant::now();
-        let room = self.wait_for_room().await;
-        self.observer.on_reader_wait(bound, began.elapsed());
+        let (room, waited) = self.wait_for_room().await;
+        // A wait that returned at its first poll stopped nothing.
+        if waited {
+            self.observer.on_reader_wait(bound, began.elapsed());
+        }
         room
     }
 
     /// [`room`](Self::room)'s wait, once the lead was found reached.
-    async fn wait_for_room(&self) -> bool {
+    /// Returns whether there is room (not the stop) and whether it waited
+    /// past its first poll.
+    async fn wait_for_room(&self) -> (bool, bool) {
         #[cfg(test)]
         if let Some(checked) = &self.checked {
             checked(Check::BeforeRegistering);
         }
-        std::future::poll_fn(|cx| {
+        let mut waited = false;
+        let room = std::future::poll_fn(|cx| {
             self.lead.taken.register(cx.waker());
             self.lead.waiting.store(true, Ordering::Relaxed);
             fence(Ordering::SeqCst);
@@ -626,9 +632,11 @@ impl Reader {
             if let Some(checked) = &self.checked {
                 checked(Check::BeforeWaiting);
             }
+            waited = true;
             Poll::Pending
         })
-        .await
+        .await;
+        (room, waited)
     }
 
     /// Read every change the stream has ready right now into the run, until

@@ -65,3 +65,17 @@ fn a_reindex_posts_to_the_index_path() {
     assert_eq!(reindex_path("users").unwrap(), "/indexes/users/reindex");
     assert!(reindex_path("no such/index").is_err());
 }
+
+/// What `flusso reindex` prints for the server's `202` body.
+#[test]
+fn a_queued_reindex_is_printed_from_its_json() {
+    assert_eq!(
+        queued_message(r#"{"index":"users","sink":"primary","queued":true}"#),
+        "reindex of users on primary queued"
+    );
+    assert_eq!(
+        queued_message(r#"{"index":"users","sink":null,"queued":true}"#),
+        "reindex of users on every sink queued"
+    );
+    assert_eq!(queued_message("plain text\n"), "plain text");
+}

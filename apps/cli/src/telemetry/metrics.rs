@@ -64,13 +64,19 @@ const FLUSH_SIZE_BUCKETS_BYTES: &[f64] = &[
     67_108_864.0,
 ];
 
+/// `flusso.reader.waits`: the stage buckets, then minutes, since a reader
+/// stopped behind a stuck index waits that long.
+const READER_WAIT_BUCKETS_SECONDS: &[f64] = &[
+    0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+    5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+];
+
 /// The explicit buckets of each histogram flusso records, by instrument name.
 fn buckets(instrument: &str) -> Option<&'static [f64]> {
     match instrument {
         "flusso.flush.duration" => Some(FLUSH_BUCKETS_SECONDS),
-        "flusso.stage.duration" | "flusso.memory.wait" | "flusso.reader.waits" => {
-            Some(STAGE_BUCKETS_SECONDS)
-        }
+        "flusso.stage.duration" | "flusso.memory.wait" => Some(STAGE_BUCKETS_SECONDS),
+        "flusso.reader.waits" => Some(READER_WAIT_BUCKETS_SECONDS),
         "flusso.flush.documents" => Some(FLUSH_DOCUMENT_BUCKETS),
         "flusso.flush.size" => Some(FLUSH_SIZE_BUCKETS_BYTES),
         _ => None,
@@ -639,20 +645,48 @@ mod tests {
         );
     }
 
-    /// Slice 7: each index's gauges, one series per index (one with nothing
-    /// happening too): `orders` exempt and frozen, held by its lane, not
-    /// working, walking; `users` at rest.
+    /// Slice 7: each index's gauges, one series per index: `orders` exempt
+    /// and frozen, held by its lane (information: still working), walking;
+    /// `users` neither, but its lane has landed nothing for 5 s, so it is not
+    /// working.
     #[tokio::test(start_paused = true)]
     async fn each_index_is_exported_with_its_ingest_state() {
         let orders = IndexName::try_new("orders").unwrap();
         let users = IndexName::try_new("users").unwrap();
         let primary = SinkName::try_new("primary").unwrap();
         let states = Arc::new(daemon::IndexStates::new([orders.clone(), users.clone()]));
-        let status = Arc::new(Status::new(
-            [orders.clone(), users.clone()],
-            [primary.clone()],
-            std::time::Instant::now(),
-        ));
+        // `users`' lane has landed nothing for 5 s: not working (one index's
+        // rule, the states keep no record here).
+        let users_lane = LaneKey::new(users.clone(), primary.clone());
+        let lanes = [
+            users_lane.clone(),
+            LaneKey::new(orders.clone(), primary.clone()),
+        ];
+        let progress = Arc::new(Progress::new(lanes.clone()));
+        let stalls = Arc::new(Stalls::new(lanes));
+        progress.published(
+            &users_lane,
+            stream::ItemKey::new(1),
+            Position::new(1),
+            Position::new(1),
+        );
+        let start = tokio::time::Instant::now();
+        stalls.sample(start, &progress, &NoPositions, None);
+        stalls.sample(
+            start + Duration::from_secs(5),
+            &progress,
+            &NoPositions,
+            None,
+        );
+        let status = Arc::new(
+            Status::new(
+                [orders.clone(), users.clone()],
+                [primary.clone()],
+                std::time::Instant::now(),
+            )
+            .with_progress(progress)
+            .with_stalls(stalls),
+        );
         status.attach_index_states(Arc::clone(&states));
         states.set_exemption(&orders, daemon::ExemptionState::Frozen);
         let _full = states.lane_full(&orders, &primary);
@@ -675,14 +709,14 @@ mod tests {
             r#"flusso_index_backlog_age_seconds{index="orders"} 0"#,
             r#"flusso_index_exempt{index="orders"} 1"#,
             r#"flusso_index_frozen{index="orders"} 1"#,
-            r#"flusso_index_working{index="orders"} 0"#,
+            r#"flusso_index_working{index="orders"} 1"#,
             r#"flusso_index_held{by="budget",index="orders"} 0"#,
             r#"flusso_index_held{by="lane",index="orders"} 1"#,
             r#"flusso_index_backfilling{index="orders"} 1"#,
             r#"flusso_index_documents_waiting{index="users"} 0"#,
             r#"flusso_index_exempt{index="users"} 0"#,
             r#"flusso_index_frozen{index="users"} 0"#,
-            r#"flusso_index_working{index="users"} 1"#,
+            r#"flusso_index_working{index="users"} 0"#,
             r#"flusso_index_held{by="lane",index="users"} 0"#,
             r#"flusso_index_backfilling{index="users"} 0"#,
         ] {

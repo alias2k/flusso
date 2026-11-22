@@ -146,3 +146,29 @@ fn every_repo_path_named_in_the_agent_docs_exists() {
         dangling.join("\n  ")
     );
 }
+
+/// Routes the binary no longer serves: an agent following one gets a 404.
+/// `POST /reindex?index=` became `POST /indexes/<name>/reindex` in 0.19
+/// (ADR 0012 stage 8a, slice 7).
+const GONE_ROUTES: &[&str] = &["POST /reindex", "/reindex?index="];
+
+#[test]
+fn no_agent_doc_names_a_route_that_is_gone() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    markdown_files(&root.join("plugin"), &mut files);
+    markdown_files(&root.join(".claude/commands"), &mut files);
+    markdown_files(&root.join(".claude/skills"), &mut files);
+    let stale: Vec<String> = files
+        .iter()
+        .flat_map(|file| {
+            let body = std::fs::read_to_string(file).unwrap();
+            GONE_ROUTES
+                .iter()
+                .filter(|route| body.contains(*route))
+                .map(|route| format!("{}: {route}", file.display()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(stale.is_empty(), "routes that are gone: {stale:#?}");
+}

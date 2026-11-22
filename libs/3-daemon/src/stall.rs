@@ -111,17 +111,18 @@ pub struct Stalls {
 #[derive(Debug, Default)]
 struct State {
     lanes: BTreeMap<LaneKey, Tracked>,
-    /// Each index's oldest unbuilt change, and since when it is the oldest.
-    backlogs: BTreeMap<IndexName, Backlog>,
+    /// Each index's backlog age as of the last sample.
+    backlogs: BTreeMap<IndexName, Duration>,
+    /// How many changes had been read at each sample, oldest first: what
+    /// tells when a read number was read. Only what an unbuilt change may
+    /// need is kept, at most [`BACKLOG_SPAN`] samples.
+    reads: std::collections::VecDeque<(u64, Instant)>,
     pinned_by: Option<Pin>,
 }
 
-#[derive(Debug)]
-struct Backlog {
-    oldest: Option<u64>,
-    since: Instant,
-    age: Duration,
-}
+/// The most samples a backlog age is measured over: an hour at one a
+/// second. An older oldest unbuilt change reads as an hour.
+pub const BACKLOG_SPAN: usize = 3600;
 
 #[derive(Debug)]
 struct Tracked {
@@ -139,20 +140,12 @@ impl Stalls {
         let lanes: Vec<LaneKey> = lanes.into_iter().collect();
         let backlogs = lanes
             .iter()
-            .map(|lane| {
-                (
-                    lane.index.clone(),
-                    Backlog {
-                        oldest: None,
-                        since: now,
-                        age: Duration::ZERO,
-                    },
-                )
-            })
+            .map(|lane| (lane.index.clone(), Duration::ZERO))
             .collect();
         Self {
             state: Mutex::new(State {
                 backlogs,
+                reads: std::collections::VecDeque::new(),
                 lanes: lanes
                     .into_iter()
                     .map(|lane| {
@@ -223,18 +216,30 @@ impl Stalls {
                 });
             }
         }
-        // Each index's backlog age (slice 7): how long its oldest unbuilt
-        // change has stayed its oldest, measured as a lane's stall is.
-        for (index, backlog) in &mut state.backlogs {
-            let oldest = progress.oldest_unbuilt(index).map(|position| position.seq);
-            if oldest != backlog.oldest {
-                backlog.oldest = oldest;
-                backlog.since = now;
-            }
-            backlog.age = match oldest {
-                Some(_) => now.saturating_duration_since(backlog.since),
-                None => Duration::ZERO,
-            };
+        // Each index's backlog age (slice 7, review of #454): how long ago
+        // its oldest unbuilt change was read, to the sample (a change read
+        // since the last one counts as read now).
+        let read = progress.changes_read();
+        let state = &mut *state;
+        state.reads.push_back((read, now));
+        if state.reads.len() > BACKLOG_SPAN {
+            state.reads.pop_front();
+        }
+        let mut needed = u64::MAX;
+        for (index, age) in &mut state.backlogs {
+            let oldest = progress.oldest_unbuilt(index);
+            *age = oldest.map_or(Duration::ZERO, |oldest| {
+                needed = needed.min(oldest);
+                let at = state.reads.partition_point(|(read, _)| *read < oldest);
+                state.reads.get(at).map_or(Duration::ZERO, |(_, when)| {
+                    now.saturating_duration_since(*when)
+                })
+            });
+        }
+        // Keep the first sample that had read the oldest unbuilt change, and
+        // everything after it.
+        while state.reads.get(1).is_some_and(|(read, _)| *read < needed) {
+            state.reads.pop_front();
         }
         // What `landed` itself is decided by: one computation, so a tie (two
         // lanes at one source position) names what holds the slot back, never
@@ -263,15 +268,12 @@ impl Stalls {
             .collect()
     }
 
-    /// How long `index`'s oldest unbuilt change has stayed its oldest, as of
-    /// the last sample: 0 while nothing waits to be built, or for an index
-    /// with no lane.
+    /// How long ago `index`'s oldest change not built yet was read, as of
+    /// the last sample (1 s resolution, at most [`BACKLOG_SPAN`] samples): 0
+    /// while nothing waits to be built, or for an index with no lane.
     pub fn backlog(&self, index: &IndexName) -> Duration {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state
-            .backlogs
-            .get(index)
-            .map_or(Duration::ZERO, |backlog| backlog.age)
+        state.backlogs.get(index).copied().unwrap_or(Duration::ZERO)
     }
 
     /// What holds the slot back the most, a lane or an index's pending
@@ -410,10 +412,10 @@ mod tests {
         );
     }
 
-    /// Slice 7's backlog age: an index's oldest unbuilt change that stays
-    /// its oldest ages a second a second; once it is taken and its build sent
-    /// to the lanes, nothing is unbuilt and the age is 0. A change that
-    /// builds right after it was read never ages past a sample.
+    /// Slice 7's backlog age: how long ago the index's oldest unbuilt change
+    /// was read: it ages a second a second while it stays; taken into a
+    /// build it is still unbuilt; once its build is sent to the lanes nothing
+    /// is unbuilt and the age is 0.
     #[test]
     fn an_index_backlog_ages_while_its_oldest_change_stays_unbuilt() {
         let users = lane("users");
@@ -430,8 +432,10 @@ mod tests {
         stalls.sample(start, &progress, &Lsns, None);
         assert_eq!(stalls.backlog(&users.index), Duration::ZERO, "none");
         progress.mark([(id(1), Position::new(1))]);
+        progress.read_changes(1);
         stalls.sample(at(start, 1), &progress, &Lsns, None);
         progress.mark([(id(2), Position::new(2))]);
+        progress.read_changes(1);
         stalls.sample(at(start, 31), &progress, &Lsns, None);
         assert_eq!(
             stalls.backlog(&users.index),
@@ -448,6 +452,115 @@ mod tests {
         progress.build_sending(&users.index, taken.token);
         stalls.sample(at(start, 41), &progress, &Lsns, None);
         assert_eq!(stalls.backlog(&users.index), Duration::ZERO, "built");
+    }
+
+    /// Review of #454, item 2: an index falling behind. Ten changes a second
+    /// are read, five built a second, oldest first: after five minutes the
+    /// oldest unbuilt change was read two and a half minutes ago and 1,500
+    /// documents wait; the backlog says so (it read about a second before:
+    /// the oldest moved every sample).
+    #[test]
+    fn a_slow_index_falling_behind_shows_its_backlog() {
+        let users = lane("users");
+        let progress = Progress::new([users.clone()]);
+        let stalls = Stalls::new([users.clone()]);
+        let start = Instant::now();
+        let id = |key: i64| source::document::DocumentId {
+            index: users.index.clone(),
+            key: source::RowKey(vec![(
+                kernel::ColumnName::try_new("id").unwrap(),
+                kernel::GenericValue::BigInt(key),
+            )]),
+        };
+        let mut next = 0i64;
+        for second in 1..=300u64 {
+            for _ in 0..10 {
+                next += 1;
+                progress.mark([(id(next), Position::new(next as u64))]);
+                progress.read_changes(1);
+            }
+            let taken = progress.take(&users.index, 5, &|_| false).unwrap();
+            progress.build_sending(&users.index, taken.token);
+            stalls.sample(at(start, second), &progress, &Lsns, None);
+        }
+        let waiting = progress.waiting_on(&users.index);
+        assert_eq!(waiting, 1500);
+        assert!(
+            stalls.backlog(&users.index) >= Duration::from_secs(60),
+            "{waiting} documents wait, the oldest read 150 s ago, the backlog reads {:?}",
+            stalls.backlog(&users.index)
+        );
+    }
+
+    /// Reads `read` changes and builds `built` (oldest first, sent to the
+    /// lanes) in each second of `seconds`, sampling at its end; returns the
+    /// backlog age at each sample.
+    fn backlog_over(seconds: &[(u64, usize)]) -> Vec<u64> {
+        let users = lane("users");
+        let progress = Progress::new([users.clone()]);
+        let stalls = Stalls::new([users.clone()]);
+        let start = Instant::now();
+        let mut next = 0i64;
+        let mut ages = Vec::new();
+        for (second, (read, built)) in seconds.iter().enumerate() {
+            for _ in 0..*read {
+                next += 1;
+                progress.mark([(
+                    source::document::DocumentId {
+                        index: users.index.clone(),
+                        key: source::RowKey(vec![(
+                            kernel::ColumnName::try_new("id").unwrap(),
+                            kernel::GenericValue::BigInt(next),
+                        )]),
+                    },
+                    Position::new(next as u64),
+                )]);
+                progress.read_changes(1);
+            }
+            if *built > 0
+                && let Some(taken) = progress.take(&users.index, *built, &|_| false)
+            {
+                progress.build_sending(&users.index, taken.token);
+            }
+            stalls.sample(at(start, second as u64 + 1), &progress, &Lsns, None);
+            ages.push(stalls.backlog(&users.index).as_secs());
+        }
+        ages
+    }
+
+    /// Steady healthy load: everything read in a second is built in it; the
+    /// backlog stays 0.
+    #[test]
+    fn a_steady_index_has_no_backlog() {
+        assert!(backlog_over(&[(10, 10); 30]).iter().all(|age| *age == 0));
+    }
+
+    /// A stuck index (or an exempt one growing): changes read, none built:
+    /// the backlog grows a second a second from the first one read, whether
+    /// the reading goes on or stopped at the lead.
+    #[test]
+    fn a_stuck_or_exempt_index_backlog_grows_a_second_a_second() {
+        let growing = backlog_over(&[(10, 0); 20]);
+        assert_eq!(growing, (0..20).collect::<Vec<u64>>());
+        let mut stopped = vec![(10, 0)];
+        stopped.extend([(0, 0); 19]);
+        assert_eq!(backlog_over(&stopped), (0..20).collect::<Vec<u64>>());
+    }
+
+    /// An exempt index draining slowly: 100 changes read over ten seconds,
+    /// then built at 20 a second: the backlog falls as it catches up (by a
+    /// second a second, since it drains twice as fast as it was read), and
+    /// is 0 once everything is built.
+    #[test]
+    fn a_draining_index_backlog_falls_as_it_catches_up() {
+        let mut seconds = vec![(10, 0); 10];
+        seconds.extend([(0, 20); 6]);
+        let ages = backlog_over(&seconds);
+        let draining = &ages[10..];
+        // 9 s at the last second of reading; each second of draining takes
+        // two seconds' reads; the fifth builds the last.
+        assert_eq!(ages[9], 9);
+        assert_eq!(draining, [8, 7, 6, 5, 0, 0], "{ages:?}");
     }
 
     #[test]

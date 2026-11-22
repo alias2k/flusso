@@ -488,14 +488,13 @@ fn known_index(status: &Status, name: &str) -> Result<IndexName, Box<Response>> 
                 .into_response(),
         ));
     };
-    let known: Vec<String> = status.snapshot().indexes.into_keys().collect();
-    if !known.iter().any(|known| known == index.as_ref()) {
+    if !status.tracks(&index) {
         return Err(Box::new(
             (
                 StatusCode::NOT_FOUND,
                 Json(json!({
                     "error": format!("unknown index {}", index.as_ref()),
-                    "indexes": known,
+                    "indexes": status.index_names(),
                 })),
             )
                 .into_response(),
@@ -525,8 +524,9 @@ async fn index_status(State(state): State<PublicState>, Path(name): Path<String>
 /// sink or, without `sink`, on every sink. Validates the names, then hands
 /// the operation to the daemon; the targeted sink engines stage a fresh
 /// generation and request their snapshot, no restart involved. `202`
-/// queued; `400` an invalid index or sink name; `404` an unknown index or
-/// sink; `503` while stopping or with the engine not running.
+/// `{"index", "sink" (null: every sink), "queued": true}`; `400` an invalid
+/// index or sink name; `404` an unknown index or sink; `503` while stopping
+/// or with the engine not running.
 async fn reindex(
     State(state): State<PrivateState>,
     Path(name): Path<String>,
@@ -552,10 +552,11 @@ async fn reindex(
     match state.control.reindex(index.clone(), sink.as_ref()) {
         Ok(()) => (
             StatusCode::ACCEPTED,
-            match &sink {
-                Some(sink) => format!("reindex of {} on {sink} queued\n", index.as_ref()),
-                None => format!("reindex of {} on every sink queued\n", index.as_ref()),
-            },
+            Json(json!({
+                "index": index.as_ref(),
+                "sink": sink.as_ref().map(|sink| sink.as_ref()),
+                "queued": true,
+            })),
         )
             .into_response(),
         Err(ControlError::UnknownSink(name)) => (

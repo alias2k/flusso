@@ -176,12 +176,16 @@ impl IngestEngine {
         let markers = snapshot.requested.iter().flat_map(|(sink, indexes)| {
             indexes.iter().filter_map(|(index, ticket)| {
                 lanes
-                    .get(&LaneKey::new(index.clone(), sink.clone()))
-                    .map(|producer| {
-                        producer.publish(LaneItem::SnapshotComplete {
-                            index: index.clone(),
-                            ticket: *ticket,
-                        })
+                    .get_key_value(&LaneKey::new(index.clone(), sink.clone()))
+                    .map(|(lane, producer)| {
+                        self.publish_to(
+                            lane,
+                            producer.as_ref(),
+                            LaneItem::SnapshotComplete {
+                                index: index.clone(),
+                                ticket: *ticket,
+                            },
+                        )
                     })
             })
         });

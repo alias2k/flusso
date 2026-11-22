@@ -137,8 +137,22 @@ pub(crate) async fn reindex(args: ReindexArgs) -> anyhow::Result<()> {
         bail!("server returned {status}: {}", body.trim());
     }
     let mut out = std::io::stdout().lock();
-    writeln!(out, "{}", body.trim())?;
+    writeln!(out, "{}", queued_message(&body))?;
     Ok(())
+}
+
+/// What `flusso reindex` prints for the server's `202` body
+/// (`{"index", "sink", "queued"}`); a body it can't read is printed as is.
+fn queued_message(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.trim().to_owned();
+    };
+    let field = |name: &str| value.get(name).and_then(serde_json::Value::as_str);
+    match (field("index"), field("sink")) {
+        (Some(index), Some(sink)) => format!("reindex of {index} on {sink} queued"),
+        (Some(index), None) => format!("reindex of {index} on every sink queued"),
+        _ => body.trim().to_owned(),
+    }
 }
 
 /// `POST /indexes/<index>/reindex`'s path; an index name has only
