@@ -39,7 +39,7 @@ The live status document as JSON: the deployment, then one block per sink.
 | `searchable_position` | string or null | The source position every sink can search. The slowest sink's. |
 | `memory.limit_bytes` | int | `[concurrency] max_built_mib` in bytes. |
 | `memory.built_bytes` | int | Built documents not yet acknowledged by every sink, builds in flight included. See [config.toml](config-toml.md#concurrency). |
-| `memory.backfill_bytes` | int | The backfill's share of `built_bytes`: at most half the limit, past the one batch a backfill holding nothing is always granted. |
+| `memory.backfill_bytes` | int | Backfills' share of `built_bytes`, every index's together: at most half the limit, past one batch per index backfilling ([memory budget](config-toml.md#concurrency)). |
 | `errors` | int | Engine errors, ingest and sink. |
 | `last_error` | string or null | |
 | `script_failures.<index>.count` | int | Documents of that index that failed to build: a [script failed](scripts.md#failures), or an [`array: true`](field-types.md#array) column held an object. Under either `on_error` policy (a `stop` index counts each retry). The key is absent until one fails. |

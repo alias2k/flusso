@@ -499,7 +499,7 @@ async fn an_uncontested_grant_does_not_move_the_count() {
 async fn a_refusal_does_not_move_the_count() {
     let budget = Arc::new(Budget::new(64 * KIB));
     let backfill_held = budget
-        .reserve(Work::Backfill, &[(index("other"), 32 * KIB)])
+        .reserve(Work::Backfill, &[(index("b"), 32 * KIB)])
         .unwrap();
     let gate = Gate::new(1, Arc::clone(&budget));
     let held = take(&gate, Work::Live).unwrap();
@@ -526,7 +526,8 @@ async fn a_refusal_does_not_move_the_count() {
     });
     settle().await;
     drop(held);
-    // l1-l3 contested, b1 refused at its turn (backfill holds half), l4-l6
+    // l1-l3 contested, b1 refused at its turn (its index holds backfill's
+    // half: rule 4 is per index), l4-l6
     // uncontested.
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(

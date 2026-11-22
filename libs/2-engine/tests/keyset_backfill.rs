@@ -116,7 +116,12 @@ struct WritesAfterEachPage {
     /// A row of `items` and a statement run once, right after the first
     /// batch holding that row's document is built.
     after_build: Mutex<Option<(i64, String)>>,
+    walks: Walks,
 }
+
+/// Per index walked by writes: the full pages added before its bound was
+/// read, and the full pages it read.
+type Walks = Arc<Mutex<BTreeMap<String, (usize, usize)>>>;
 
 /// What [`WritesAfterEachPage`] writes after each full page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,7 +176,16 @@ impl DocumentBuilder for WritesAfterEachPage {
     }
 
     async fn last_key(&self, index: &IndexName) -> source::Result<Option<RowKey>> {
-        self.inner.last_key(index).await
+        let bound = self.inner.last_key(index).await;
+        if matches!(index.as_ref(), "items" | "live_items") {
+            self.walks
+                .lock()
+                .unwrap()
+                .entry(index.to_string())
+                .or_default()
+                .0 = self.pages.load(Ordering::SeqCst);
+        }
+        bound
     }
 
     async fn keys(
@@ -185,6 +199,12 @@ impl DocumentBuilder for WritesAfterEachPage {
         let walked_by_writes = matches!(index.as_ref(), "items" | "live_items");
         if let (true, true, Some(last)) = (walked_by_writes, page.len() == limit, page.last()) {
             let n = self.pages.fetch_add(1, Ordering::SeqCst);
+            self.walks
+                .lock()
+                .unwrap()
+                .entry(index.to_string())
+                .or_default()
+                .1 += 1;
             match self.mode {
                 Mode::Around => writes(&self.pool, n, id_of(last)).await,
                 Mode::Ahead => ahead(&self.pool, n, limit).await,
@@ -517,6 +537,8 @@ struct Plan {
     after_build: Option<(i64, String)>,
     /// Writes the sink engine keeps in flight.
     writes: usize,
+    /// What each walk read, against what was there when its bound was read.
+    walks: Walks,
 }
 
 impl Default for Plan {
@@ -526,6 +548,7 @@ impl Default for Plan {
             mode: Mode::Around,
             after_build: None,
             writes: 1,
+            walks: Walks::default(),
         }
     }
 }
@@ -550,6 +573,7 @@ async fn run_with(
         stop: stop_after.map(|at| (at, stop.clone())),
         mode: plan.mode,
         after_build: Mutex::new(plan.after_build),
+        walks: Arc::clone(&plan.walks),
     });
     let capture: Arc<dyn ChangeCapture> =
         Arc::new(WalChangeCapture::new(replication(port), url.to_owned()));
@@ -705,8 +729,10 @@ async fn rows_added_ahead_of_the_walk_end_it_where_it_began_and_are_built_once()
     let (_container, port, url, pool) = database(false).await;
     let sink = Arc::new(LastWrite::default());
     let pages = Arc::new(AtomicUsize::new(0));
+    let walks = Walks::default();
     let plan = Plan {
         mode: Mode::Ahead,
+        walks: Arc::clone(&walks),
         ..Plan::default()
     };
     let engines = run_with(port, &url, &pool, &sink, &pages, plan)
@@ -715,23 +741,29 @@ async fn rows_added_ahead_of_the_walk_end_it_where_it_began_and_are_built_once()
     settles(&url, &pool, &sink).await;
     engines.abort();
 
-    // `items` is walked first: its 5,000 rows are 4 full pages and a short
-    // one. `live_items` starts after it and finds the 4 pages added meanwhile
-    // too: 9,096 rows, 8 full pages and a short one.
-    let page = engine::KEY_PAGE;
-    let items = usize::try_from(ITEMS).unwrap() / page;
-    let live_items = (usize::try_from(ITEMS).unwrap() + items * page) / page;
-    assert_eq!(
-        pages.load(Ordering::SeqCst),
-        items + live_items,
-        "each walk reads the rows it found at its start, not the pages added during it"
-    );
+    // Both indexes walk `items`, at once (6b-3), whatever order their reads
+    // take: its 5,000 rows are 4 full pages and a short one, and each walk
+    // reads exactly the full pages there when its bound was read (the 4,
+    // plus one page added after each full page read before then), none
+    // added during it. Following them, a walk would never end.
+    let items = usize::try_from(ITEMS).unwrap() / engine::KEY_PAGE;
+    let walks = walks.lock().unwrap().clone();
+    assert_eq!(walks.len(), 2, "both walks read their bound: {walks:?}");
+    for (index, (at_bound, read)) in &walks {
+        assert_eq!(
+            *read,
+            items + at_bound,
+            "{index} reads the rows it found at its start, not the pages added during it"
+        );
+    }
     let twice: Vec<_> = sink
         .upserts
         .lock()
         .unwrap()
         .iter()
-        .filter(|((index, _), count)| index == "items" && **count > 1)
+        .filter(|((index, _), count)| {
+            matches!(index.as_str(), "items" | "live_items") && **count > 1
+        })
         .map(|(id, count)| format!("{id:?} ×{count}"))
         .take(10)
         .collect();

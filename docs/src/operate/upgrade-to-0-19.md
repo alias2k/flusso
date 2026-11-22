@@ -14,6 +14,7 @@
 - **flusso reads ahead of its builds**, up to `[concurrency] max_waiting_per_index` and `max_waiting`, and a stop builds everything it read before it exits: [Reading runs ahead of the builds](#reading-runs-ahead-of-the-builds).
 - **Batches are per index**, so a slow index no longer delays a fast one's writes; one build takes at most `[batch] max_changes` documents; a change can be searchable in one index before another, and the stdout sink's `seq` is ordered per index only: [Batches are per index](#batches-are-per-index).
 - **A stuck index stops only itself**: with two or more indexes, the others keep being read and written while its changes wait as documents to build, up to `[concurrency] max_pending_documents`; the slot, and so the WAL, still waits for it: [A stuck index stops only itself](#a-stuck-index-stops-only-itself).
+- **Backfills of several indexes run at once**, within the same `builds` and Postgres connections; one stuck backfill no longer holds the others, and memory may pass `max_built_mib` by one backfill batch per index: [Backfills run at once](#backfills-run-at-once).
 
 **Code that embeds the crates**
 
@@ -177,7 +178,7 @@ The share has a flag and a variable, like the table's other keys:
 
 1. **Nothing, usually.** Bursts of one index stop holding up the others.
 2. **Raise `index_budget_share` towards `1`** if one index does nearly all the work and should keep using the whole budget, as in 0.18. `1` is the old behaviour.
-3. **Check the memory headroom.** An index holding no live documents always gets one live batch, even with the budget full, so one index stuck at its share leaves the others building ([how long](#a-stuck-index-stops-only-itself)). Plan for one live batch per index, plus one backfill batch, above `max_built_mib` ([sizing](../reference/config-toml.md#concurrency)); 0.18 needed one live batch in all.
+3. **Check the memory headroom.** An index holding no live documents always gets one live batch, even with the budget full, so one index stuck at its share leaves the others building ([how long](#a-stuck-index-stops-only-itself)). Plan for one live and one backfill batch per index above `max_built_mib` ([sizing](../reference/config-toml.md#concurrency)); 0.18 needed one of each in all.
 
 **What to know.**
 
@@ -223,7 +224,6 @@ The share has a flag and a variable, like the table's other keys:
 
 - **After an ingest engine restart**, reading resumes from the change the furthest-behind index still needs, so an index that was ahead of another receives some changes again. Writes are idempotent: the index ends in the same state, but OpenSearch's `_version` of those documents moves.
 - **`/wait` is unchanged.** A wait naming an index passes once that index has the commit; one without `index` waits for every index, as before ([`/wait`](../reference/http.md#get-waitpositionposition)).
-- **Unchanged too:** backfills of several indexes still run one at a time.
 
 **Who is affected.**
 
@@ -270,6 +270,27 @@ The share has a flag and a variable, like the table's other keys:
 - **A stop builds the backlog too**, within `--shutdown-timeout-secs`. When it can't, flusso exits `1` naming each index left with documents read and not built (`orders: 1200 documents read and not built`), and the next start reads them again ([Stopping](../reference/cli.md#stopping)).
 - **Refused at start.** `check`, `build` and `run` refuse `0`, and a flag or variable that isn't a whole number, naming where the value came from. A value below `max_waiting_per_index` is accepted. Like the rest of `[concurrency]`, it is never written into `flusso.lock`. The designer's config form sets it.
 
+## Backfills run at once
+
+**What changed.** In 0.18 one index's backfill waited for another's whole walk: a small index waited behind a large one. In 0.19 each index's backfill (a first seed, a reindex, a fresh backfill after its target was deleted) starts as soon as its sinks ask, beside the others'.
+
+| | 0.18 | 0.19 |
+| --- | --- | --- |
+| Several indexes to backfill | one after another | at once; each is marked seeded when its own backfill lands |
+| Builds and Postgres connections | `builds` builds, `builds` + 2 connections | unchanged: the backfills share them, and root keys are read one page at a time over every index |
+| One index's backfill stuck on a sink that stops acknowledging | every other index's backfill waits | the others go on, one batch in flight at a time while the stuck one holds backfill's half of the budget |
+| Backfill memory | half of `max_built_mib`, past one batch | half of `max_built_mib`, past one batch per index backfilling |
+| A stop | the backfill in progress is dropped and served again on the next start | every backfill in progress is |
+| One index | — | unchanged |
+
+**Who is affected.** Deployments that backfill two or more indexes at a time: a first start, a [reindex](reindex.md) of several, a [lost slot](dropped-slot.md), an upgrade that moves several content hashes.
+
+**What to do.**
+
+1. **Nothing, usually.**
+2. **Check the memory headroom** on a tight host: plan for one backfill batch per index above `max_built_mib`, and up to 1,024 root keys per index backfilling (about 110 KB for a one-column integer key) ([sizing](../reference/config-toml.md#concurrency)).
+3. **Don't rely on the order** indexes finish in: wait on each index's own state in [`/status`](../reference/http.md#get-status).
+
 ## For code embedding the crates
 
 - **Removed:** `EngineError::DocumentsRejected` (a refusal no longer ends the run).
@@ -286,7 +307,7 @@ The share has a flag and a variable, like the table's other keys:
 - **Removed: `Observer::on_changes_settled`.** A sink's committed count is no longer an event: read `Progress::committed(sink)`, or `daemon::Status::committed(sink)`. `CommitStats.changes` and `stream::Batch.changes`, which only fed it, are removed: `CommitStats::new` takes `(envelopes, flush, work)`, and a `Batch` literal drops the field (a serialized item that still carries it reads fine).
 - **`Progress` counts committed changes by step.** New `engine::Step`, and `Progress::change_read`, `changes_read`, `close_step`, `committed`, `published_step` and `skipped_step`. `Progress::published_build` takes the build's `Step`; `skipped_build` takes an `Option<Token>` and a `Step`. `Progress::steps_kept(lane)` reports how many steps a lane keeps beside its unwritten items (the first is at most the second plus two), and `RunningDaemon::progress()` hands out the deployment's `Progress`. A step is per index: `Progress::close_steps(frontiers)` closes one grant's steps under one number, each carrying its index's frontier, which `Progress::frontier(index)` reads and a take reports as `Taken::frontier`; `close_step` is right only while nothing is waiting. A lane's position moves to an item's `last` only while nothing of its index marked at or before `last` waits or sits in another build not yet released, so `published`, `published_step`, `published_build`, `skipped`, `skipped_step` and `skipped_build` hold it back meanwhile; with nothing marked, as in 0.18, they move it as before. `Progress::mark` marks as the next change read, `mark_reads` takes each change's read number, `read_unmarked` counts a run read but never marked, and `routed(position)` tells `Progress` the reader routed every change through it.
 - **`daemon::Status::with_progress`** is new: a `Status` built without it reports `0` committed for every sink, so all its captured changes read as in flight.
-- **`engine::Budget` serves many reservers and is shared per index.** Removed: `fits`, `want_release` and `released`. New: `admit(work, parts)` answers an `engine::Admission` (`admitted`, `refused`, `generation`, `grants()`); `reserve(work, parts)` admits and reserves in one step, one `Reservation` per index, or `Err` with the refusal's generation; `released_since(generation)` waits for a release after it. `with_index_share(indexes, share)` caps one index's live bytes at `share` of the limit when `indexes` is 2 or more; `held_by`, `index_share`, `generation` and `Reservation::index` read the state. `try_reserve` stays, counted toward no index.
+- **`engine::Budget` serves many reservers and is shared per index.** Removed: `fits`, `want_release` and `released`. New: `admit(work, parts)` answers an `engine::Admission` (`admitted`, `refused`, `generation`, `grants()`); `reserve(work, parts)` admits and reserves in one step, one `Reservation` per index, or `Err` with the refusal's generation; `released_since(generation)` waits for a release after it. `with_index_share(indexes, share)` caps one index's live bytes at `share` of the limit when `indexes` is 2 or more; `held_by`, `index_share`, `generation` and `Reservation::index` read the state. `try_reserve` stays, counted toward no index. A backfill reservation is granted to an index holding no backfill bytes whatever the limit says, so each index gets one (0.18: one while every backfill held nothing).
 - **`[concurrency] index_budget_share`** is `ConcurrencyConfig.index_budget_share: Option<config::ShareValue>` (`share`, `origin`), and `ConcurrencyConfig` no longer derives `Eq`. `daemon::index_budget_share(&Config)` resolves and checks it (`daemon::DEFAULT_INDEX_BUDGET_SHARE` is `0.5`), and `Daemon::start` fails on a share outside (0, 1]. `config::parse_index_budget_share` parses a flag's or a variable's value. New `Progress::waiting_by_index`.
 - **`[concurrency] max_waiting_per_index` and `max_waiting`** are `ConcurrencyConfig.max_waiting_per_index` and `max_waiting: Option<config::CountValue>` (`count`, `origin`): a struct literal of `ConcurrencyConfig` must set them. `daemon::max_waiting(&Config)` resolves and checks them into an `engine::MaxWaiting { per_index, total }` (re-exported by `daemon`; `MaxWaiting::derived(batch, builds)` gives the defaults), and `Daemon::start` fails on the refusals above. `IngestEngine::with_max_waiting` sets the lead, `max_waiting()` reads it. `config::parse_max_waiting` parses a flag's or a variable's value. New on `Progress`: `take_through`, `waiting_through`, `read_changes`, `most_waiting`, and for one index's builds `take_through_at_most` (a take capped at a number of documents), `waiting_of` (each index's count stopped at a limit, `most`), `waiting_on`, `newest_waiting` and `waits_through` (whether a document marked at or before a position still waits). New `engine::Holds`, what `waiting_through` and `waiting_of` take: a visitor offered the documents running builds hold, one at a time, until it answers `true`.
 - **`[concurrency] max_pending_documents`** is `ConcurrencyConfig.max_pending_documents: Option<config::CountValue>`: a struct literal of `ConcurrencyConfig` must set it. `daemon::max_pending_documents(&Config)` resolves and checks it (`engine::DEFAULT_MAX_PENDING_DOCUMENTS` is 1,000,000), and `Daemon::start` fails on `0`. `IngestEngine::with_max_pending_documents` sets it (at least 1); `config::parse_max_waiting` parses its flag or variable. New `EngineError::DocumentsLeft`: every builder returned with documents read and not built, named per index. New `daemon::Status::waiting_by_index`.

@@ -436,12 +436,14 @@ marked, so with two or more indexes one index's batch holds the documents of up 
 
 **Bounds, derived:**
 
-- **Total:** the limit, plus one live batch per index (rule 5), plus one backfill batch (rule 4), plus what
-  each build in flight settles past its estimate. Guards: `four_indexes_pass_the_limit_by_at_most_a_live_batch_each_and_a_backfill_batch`
-  (the reviewer's sequence: 224 KiB), `random_reservations_stay_within_the_stated_bounds` (seeded
+- **Total:** the limit, plus one live batch per index (rule 5), plus one backfill batch per index (rule 4,
+  per index since 6b-3; one batch before), plus what each build in flight settles past its estimate.
+  Guards: `four_indexes_pass_the_limit_by_at_most_a_live_and_a_backfill_batch_each`
+  (the reviewer's sequence: 224 KiB before 6b-3, 288 KiB with rule 4 per index), `random_reservations_stay_within_the_stated_bounds` (seeded
   reservations and releases over four indexes; a guard, it doesn't tell rule sets apart), and the parked-lane
   engine test below, which checks the bound at every write for ten simulated minutes.
-- **Backfill:** half, plus one batch when backfill held nothing, plus the same settle slack.
+- **Backfill:** half, plus one batch per index that held no backfill bytes (6b-3; before: one batch when
+  backfill held nothing), plus the same settle slack.
 - **One index's live bytes:** its share, or one batch when that batch alone is larger, plus the same.
   Guard: the three-index schedule, which watches each index's live bytes at every write against share + one
   batch and fails with the share off.
@@ -1402,7 +1404,8 @@ a backfill-only builder its freed permit), `every_fourth_contested_grant_goes_to
   walk. One permit stays (the pool is `builds + 1`).
 - **Fairness between backfilling indexes**: one persistent backfill waiter per builder, FIFO (G2), so
   they take backfill grants in turn; G4 gives every fourth contested grant to the oldest eligible
-  backfill waiter, whichever index; backfill's half (rule 2) is shared, rule 4 holds for them together.
+  backfill waiter, whichever index; backfill's half (rule 2) is shared, and rule 4 is per index
+  (corrected in 6b-3: "for them together" let a stuck walk keep the half and stop every other walk).
 
 #### 8. End, stop and failure (F3)
 
@@ -1856,7 +1859,7 @@ after 2; "hang" marks a paused-time engine test the nextest limit ended):
 | I5 | the catch-up only while the index is idle | `a_change_read_ahead_is_not_counted_committed_before_its_build_lands` |
 | I5 | no lift of a quiet index's cap at a step | `after_a_restart_a_quiet_indexs_lanes_catch_up_with_no_step_of_their_own` |
 | §9 | one budget wait per builder, not per hold | `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`, `a_hold_across_an_engine_restart_is_one_wait`, `a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment` |
-| I11 | no walk token | `indexes_walk_one_at_a_time` |
+| I11 | no walk token | `indexes_walk_one_at_a_time` (turned around in 6b-3 as `indexes_walk_at_once`) |
 | I12 | a settling builder returns with a batch waiting for a permit | `random_schedules_keep_every_document_in_order`, `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` |
 | I10/I12 | the end with one builder idle | `a_request_queued_for_one_index_after_live_ends_is_served` (written after the first run: nothing failed) |
 
@@ -2352,6 +2355,211 @@ user-visible list above, the first one's and rounds 1 and 2's):
   state, on an idle stream and across an ingest engine restart too. Nothing is logged while the ingest
   engine waits to restart after a failure; its first second back logs the state.
 
+#### 6b-3 as designed against the code (checked before building)
+
+Checked against `c3b6233b` (6b-2 after its three fix rounds). What the paper (§3.5 K1, §7, §11, §12's
+6b-3 rows) says and what the code needs:
+
+- **The walk token goes.** Each index has its own builder (6b-1c), whose `Snapshot` walks only its own
+  index, so walks at once means: drop the token (`Building.walks`, `start_walkable`'s wait, the
+  `walk_wait` arm). A builder starts its gathered requests' snapshot as soon as they are ready (every
+  sink with a lane asked, or `max_delay` passed), as `main` did and as one builder always found the
+  token free. Coalescing, tickets, cuts, "acked only after its `SnapshotComplete` is published", "rows
+  only to the requesting lanes" and the per-index order of snapshot and live builds are the builder's
+  and its `Builds`' already, per index, and don't move. One walk per index at a time, as before.
+- **K1 stays one permit, now held only by a read in progress.** Where the paper said "a key read runs
+  on a task of its own": with two or more builders a key read (the bound, a page) is polled once where
+  the walk is stepped and, if that doesn't finish it, spawned on its own task, as a build is (6a's
+  `Builds::start`). The permit is taken inside the read, from before the query until it returns, so a
+  walk whose builder stops stepping it (its builder awaiting a publish on a full lane, its batch waiting
+  on the budget) still finishes its read and gives the permit back; the page waits in the task's output
+  until the walk is stepped again. The handle aborts the task when the walk is dropped. **One builder
+  reads inline, as today**: no spawn, no handle, so one index costs what it did (the hazard needs a
+  second walk). The pool stays `builds + 1` plus the resolver; reads at once ≤ 1 over every walk.
+- **Keys read ahead: no prefetch.** A walk starts its next read only once its keys in hand are taken
+  (as today), so per walk at most one page, `KEY_PAGE` = 1,024 keys, is held: in hand, or in a finished
+  read not yet taken; plus its batch's ids (`max_changes`). With N walks: N × 1,024 keys, about 110 B
+  each for a one-column integer key (the `RowKey`, its `Vec` and the column name), so about 115 KB a
+  walk, 1.1 MB for ten; a wider key costs more. The paper didn't state it.
+- **Correction: rule 4 is per index.** §7 said "rule 4 holds for them together" (backfill holding
+  nothing gets one batch). With walks at once that lets one stuck walk stop every other: its items stay
+  unacknowledged, their charges stay, and its backfill fills the shared half (rule 2) and keeps it, so
+  backfill never holds nothing again and every other index's backfill batch is refused for as long as it
+  is stuck. Lanes don't stop it first: the channel's backstop is 1,048,576 items, so the budget is what
+  bounds a stuck lane. The token hid it (the stuck walk held the token anyway). So, as round 3 of the
+  budget did for live (rule 5): **an index holding no backfill bytes gets one backfill batch, whatever
+  rules 1 and 2 say, and is never held back by an older backfill waiter**. A healthy index acknowledges
+  its batches, holds none again and again, and walks on, one batch in flight at a time beside a stuck
+  one; with nothing stuck rule 2 governs as before. With one index it is the old rule exactly (its
+  backfill bytes are all the backfill). **Bounds change**: backfill ≤ half plus one batch per index
+  walking (was one batch); total ≤ the limit plus one live and one backfill batch per index, plus the
+  settle slack (was one backfill batch).
+- **The stop, a failure, a drop.** A stop drops every builder's snapshot, unacknowledged (its requests
+  redelivered on the next start), as today, now for every walk at once; a failure ends the run and drops
+  every builder in place; an aborted run drops them too. Each drop aborts the walk's read task, so none
+  outlives the run **by more than one poll**: `abort()` is asynchronous, so an aborted task is dropped
+  at its next poll; a read awaiting the database (on another worker, say) stops at its next await, its
+  query left to the connection's drop. The tests wait for it (alive tasks and reads back to where they
+  were, within 5 s).
+- **The exemption with walks at once.** An index only backfilling on a dead sink is not free after 5 s
+  (built in 6b-2: backfill items carry the outstanding guard). A walk adds nothing to
+  `max_pending_documents` or the lead: its documents are the snapshot's batch, never marked waiting in
+  `Progress`. The budget's rules hold with N walks by the correction above (rule 2 for the half, rule 4
+  per index).
+- **Fairness.** Each builder keeps one persistent backfill waiter (6b-1c), FIFO (G2), so walking
+  indexes take backfill grants in turn; G4 gives every fourth contested grant to the oldest backfill
+  waiter, whichever index.
+
+**Expected gain** (not measured here): the first backfill of several indexes overlaps. A small index no
+longer waits behind a large one's whole walk, and one index's key read runs beside another's builds and
+publishes. Builds at once stay ≤ `builds` and key reads ≤ 1, so the gain is wall time where one walk
+alone left permits idle (a key read, a slow lane, a small table), not more than `builds` at once. One
+index: nothing changes, and it costs what it did (no spawn, the same rule 4).
+
+**Tests, written first** (a rule each; each fails on `c3b6233b` or under its mutation):
+
+| Rule | Test |
+| --- | --- |
+| walks at once | `indexes_walk_at_once` (6b-1c's `indexes_walk_one_at_a_time` turned around: two walks with no page both start) |
+| K1 read on its own task | `one_index_stuck_mid_walk_does_not_stop_another_indexs_key_reads` (two walks, one stepped once and then never: the other reads every key) ; `a_walk_blocked_on_a_full_lane_holds_no_other_walks_key_reads` (engine, added while building) |
+| no leak: drop | `a_dropped_walk_ends_its_key_read` (unit), `an_aborted_run_leaves_no_key_read_running` |
+| no leak: stop | `a_stop_mid_walks_ends_every_key_read_and_serves_every_request_next_start` |
+| no leak: failure | `a_failed_walk_ends_the_run_and_every_other_key_read` |
+| rule 4 per index | `an_index_holding_no_backfill_bytes_gets_one_backfill_batch` (budget unit), `a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk` (engine: a dead sink for `orders`, both backfilling, `users`' walk lands) |
+| fairness | `two_backfilling_indexes_take_backfill_grants_in_turn` |
+| one index | `one_index_reads_its_keys_inline` (no task spawned for its reads) |
+
+#### 6b-3 as built
+
+Built as "6b-3 as designed against the code" states, in two commits that each build and pass: rule 4
+per index (`Budget::decide`, `State::backfill_by`), then walks at once with the key read's task
+(`ingest/snapshot.rs`'s `Read`/`KeyRead`/`Walk::reading_apart`, `start_snapshot`'s `apart`, the
+builder without the token). What building added:
+
+- **Every key read is spawned when the walk reads apart**, not polled once first as a build is: a read
+  almost always waits on the database, and a first poll inline would take the permit on the builder's
+  task, which is what the task is there to avoid. Cost: one spawn per bound or page read (per
+  `KEY_PAGE` = 1,024 keys) with two or more builders.
+- **A read that panics on its task panics the run** (`resume_unwind` of the task's panic), as a read run
+  inline did; a cancelled one (only its own walk's drop aborts it, so never awaited) would be a query
+  error.
+- **The engine-level K1 test needs a full lane.** With lanes at the channel's backstop (1,048,576
+  items) a builder stops stepping its walk mid-read only while a publish blocks, which the budget makes
+  rare (a lane fills before the budget only past about 2 GiB of `max_built_mib`); the walk is otherwise
+  stepped whenever its batch has room, and its batch can't fill while its read is pending. So the
+  hazard is real but narrow in production; the test (`a_walk_blocked_on_a_full_lane_holds_no_other_walks_key_reads`)
+  builds it with a two-item lane. The budget-bound stuck walk was the case with the wider reach, and
+  it needed rule 4 per index, not the task.
+- **One existing e2e expectation encoded the token**: `keyset_backfill`'s
+  `rows_added_ahead_of_the_walk_end_it_where_it_began_and_are_built_once` counted 12 full pages, `live_items`
+  walking after `items` and finding the pages added meanwhile. Both walk at once now and normally both
+  bounds are read before either page (8); the test asserts the range 8–12 (each walk ends at the bound
+  it found at its start) and still that no document is built twice.
+- **Tests written first and how they failed on `c3b6233b`**: `one_index_stuck_mid_walk_does_not_stop_another_indexs_key_reads`
+  (`users`' walk timed out), `indexes_walk_at_once` (one snapshot started), `two_backfilling_indexes_take_backfill_grants_in_turn`
+  (orders' 8 grants, then users' 8), `a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk` (0 of
+  200 `users` rows), `an_index_holding_no_backfill_bytes_gets_one_backfill_batch`,
+  `a_stop_mid_walks_ends_every_key_read_and_serves_every_request_next_start` and
+  `an_aborted_run_leaves_no_key_read_running` (one walk started). The leak and inline tests
+  (`a_dropped_walk_ends_its_key_read`, `a_failed_walk_ends_the_run_and_every_other_key_read`,
+  `one_index_reads_its_keys_inline`, `one_index_spawns_no_task_for_its_key_reads`,
+  `a_key_read_panicking_on_its_own_task_panics_the_run`) pass on `c3b6233b`, which spawned nothing: they
+  guard the task, and fail under its mutations. The leak tests count the runtime's alive tasks
+  (`num_alive_tasks`) and each read's future, back to where they were, within 5 s.
+- **Changed by rule 4 per index**: `four_indexes_pass_the_limit_by_at_most_a_live_and_a_backfill_batch_each`
+  (renamed; 288 KiB, each index's first backfill batch admitted), `random_reservations_stay_within_the_stated_bounds`
+  (bounds `limit + 4B + 4B`, backfill `half + 4B`), `gate::tests`' `a_refusal_does_not_move_the_count`
+  (its refused backfill waiter's own index now holds the half, so it is still refused).
+
+**Mutations** (each compiles; run over the engine's snapshot, builders, walks, budget, gate, stop, gone,
+snapshot, exemption and random-schedule tests; "hang" never):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| walks at once | 6b-1c's walk token kept (its builder and the token restored) | `indexes_walk_at_once`, `two_backfilling_indexes_take_backfill_grants_in_turn`, `a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk`, `a_stop_mid_walks_ends_every_key_read_and_serves_every_request_next_start`, `an_aborted_run_leaves_no_key_read_running`, `one_index_spawns_no_task_for_its_key_reads` |
+| K1 task | several builders read inline | `a_walk_blocked_on_a_full_lane_holds_no_other_walks_key_reads` (the first run of the set had no engine test for it: the mutation survived, and the test was written then) |
+| no leak | a dropped walk leaves its read running (no abort) | `a_dropped_walk_ends_its_key_read`, `a_failed_walk_ends_the_run_and_every_other_key_read`, `a_stop_mid_walks_ends_every_key_read_and_serves_every_request_next_start`, `an_aborted_run_leaves_no_key_read_running`, `indexes_walk_at_once` |
+| one index | one builder reads on a task too | `one_index_spawns_no_task_for_its_key_reads` |
+| panic | a read panicking on its task becomes an error | `a_key_read_panicking_on_its_own_task_panics_the_run` |
+| rule 4 | over every index together (backfill holding nothing) | `an_index_holding_no_backfill_bytes_gets_one_backfill_batch`, `four_indexes_pass_the_limit_by_at_most_a_live_and_a_backfill_batch_each`, `a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk` |
+| rule 4 | per index, but held back behind an older waiter | `an_index_holding_no_backfill_bytes_gets_one_backfill_batch`, `a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk` |
+
+**Not pinned**: no read ahead (a walk starting its next read before its keys in hand are taken would
+only hold one more page per walk; no test counts the keys held); the abort of a read still waiting for
+the permit, apart from the aborted-run test (which counts every task, the waiting one included); the
+expected gain (nothing measured, as asked).
+
+**Writers checked** (6b-3's):
+
+| State | Writer | Readers |
+| --- | --- | --- |
+| the K1 permit | the read, on its task, from before its query to its return | every walk's reads (FIFO) |
+| a walk's read in flight (`Walk.fetch`) | its walk, stepped by its builder; the task writes only its own output | its walk |
+| an index's backfill bytes (`Held.backfill`) | the budget, under its lock (a backfill grant adds, a charge's drop subtracts) | `Budget::decide` (rule 4 per index) |
+
+**Costs against 6b-2** (nothing measured):
+
+| Where | One index | Two or more |
+| --- | --- | --- |
+| per key read | nothing | one spawn and a `JoinHandle` per bound or page (1,024 keys) |
+| per walk | the token's `try_acquire` gone | the same |
+| per backfill reservation | one map lookup for rule 4 (`backfill_by`) where a counter was read | one lookup per index of the batch (one) |
+| memory | as before | ≤ 1,024 keys per walk (in hand or on its task), about 110 B each for a one-column integer key |
+
+**User-visible** (for the documentation agent; the 0.19 upgrade page and the backfill, memory and
+reference pages):
+
+- **Backfills of several indexes run at once.** Each index's backfill (the first one, a reindex, a
+  re-seed after its sink lost the index) starts as soon as its sinks asked, beside any other index's;
+  before, one index's backfill waited for the other's whole walk. Builds at once stay within
+  `[concurrency] builds` and key reads stay one at a time over every index, so the database sees no more
+  connections than before. With one index nothing changes.
+- **One index stuck stops no other index's backfill.** An index whose sink stops acknowledging keeps
+  its backfill's batches in memory (up to half of `max_built_mib`, shared by every backfill) for as long
+  as it is stuck; every other index walking still gets a batch each time its previous one was
+  acknowledged, so its backfill goes on (one batch in flight at a time while the half is full). Before,
+  the stuck index's walk held every other walk anyway.
+- **Memory: backfill may pass half of `max_built_mib` by one batch per index walking** (it was one batch
+  in all), so the whole stays within `max_built_mib` plus one live batch and one backfill batch per
+  index. A walk holds at most 1,024 root keys at a time (about 110 B each for a one-column integer key).
+- **The stop**: every backfill in progress is dropped, not acknowledged, and served again on the next
+  start, as before for the one walk; nothing it read is left running.
+- **Order**: which index's backfill finishes first is no longer the order they were asked in; a sink
+  marks each index seeded when its own backfill completes, as before.
+
+**Expected gain**, restated: initial backfills of several indexes overlap (key reads of one beside builds
+and publishes of another, a small index not waiting for a large one's whole walk); builds at once stay
+≤ `builds` and key reads ≤ 1. One index: unchanged, at its old cost.
+
+#### 6b-3, fix round 1 (the review of `6285e679`)
+
+| Finding | Fix | Tests (fail before the fix, or under the mutation) |
+| --- | --- | --- |
+| 1: the loosened keyset e2e (8–12 pages) let `live_items` read up to 4 pages past its own bound unseen, and checked built-once on `items` only | the test records, per walk, the full pages added before its bound was read and the full pages it read, and asserts each walk read exactly the 4 pages there at the start plus those; built-once on both indexes | `keyset_backfill`'s `rows_added_ahead_of_the_walk_end_it_where_it_began_and_are_built_once` (the reviewer's check, on the test's own plan rather than a `static`, so tests sharing a process can't mix) |
+| 2: "no read ahead" rested on nothing | — | `a_walk_holds_one_page_and_reads_no_further_until_it_is_taken` (inline and apart; the reviewer's) |
+| 3: the abort of a read waiting for the permit was pinned only through the aborted run's task count | — | `a_walk_dropped_while_its_read_waits_for_the_permit_takes_no_permit_later` (the reviewer's) |
+| 4: planning reads overlapped: `plan_walk`'s `resume_after` and `compare_keys` (one uncached query per comparison for an index resumed by two or more lanes) ran outside K1, so N builders planning at once took N connections from the builder's `builds + 1` and could starve a build past sqlx's acquire timeout | a plan's reads take the key-read permit, on the builder's task, for as long as they last, and only when some lane has a recorded point (a first backfill plans with no read, takes nothing, and one index costs what it did). So key reads, planning included, stay one at a time and the pool's connections stay `builds` + 1 + the resolver | `planning_reads_of_walks_at_once_run_one_at_a_time` (two indexes resumed by two sinks each: 2 reads at once on `6285e679`, 1 now) |
+| 5: two variants of the stuck-walk test | adopted the one with each batch larger than half the budget: it kills a mutation nothing else in the engine tests kills (rule 4 per index only while the whole is under the limit). The one with `builds = 1` kills nothing the existing test doesn't, so it is not added | `a_stuck_walk_at_the_limit_holds_no_healthy_walk_whose_batches_pass_half` |
+| 6: wording | `pipeline.md`'s budget rules (backfill within half plus one batch per index walking; live's room under the limit shrinks with many walks of large batches, rule 5 still gives each index one live batch); "no task outlives the run" is "by more than one poll" (`abort` is asynchronous); `CLAUDE.md`'s "backfill cursor" and "the backfill's pool" (gone since #386 stage 3: key reads are single statements on the builder's pool, `document/keys.rs`) | — |
+
+Planning waits for the permit on the builder's task, so a builder may wait for another walk's read to
+end before its walk starts. That read always ends on its own (it runs on its task with two or more
+builders), so the wait is one read long at most per read ahead of it in the permit's line; with one
+builder nothing else holds the permit.
+
+**Mutations** (round 1; each compiles, none hangs):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| no read ahead | a walk starts its next page read while keys are in hand | `a_walk_holds_one_page_and_reads_no_further_until_it_is_taken` |
+| K1 for planning | planning reads outside the key-read permit | `planning_reads_of_walks_at_once_run_one_at_a_time` |
+| rule 4 | per index, but only while the whole is under the limit | `four_indexes_pass_the_limit_by_at_most_a_live_and_a_backfill_batch_each`, `a_stuck_walk_at_the_limit_holds_no_healthy_walk_whose_batches_pass_half` |
+| rule 4 | per index, but held back behind an older waiter (re-run) | the unit test, `a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk`, `a_stuck_walk_at_the_limit_holds_no_healthy_walk_whose_batches_pass_half`, and the `builds = 1` variant (not kept) |
+| no leak | a dropped walk leaves its read running (re-run) | the six leak tests, `a_walk_dropped_while_its_read_waits_for_the_permit_takes_no_permit_later` among them |
+
+The "not pinned" list above loses "no read ahead" and "the abort of a read still waiting for the
+permit"; it keeps the expected gain.
+
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
 | Rule | |
@@ -2366,7 +2574,7 @@ user-visible list above, the first one's and rounds 1 and 2's):
 | I8 | **Exempt** (6b-2). Written by the reader: latched when it finds the index held with `max_waiting_per_index` or more waiting, cleared when fewer wait; counted only toward `max_pending_documents`. |
 | I9 | **Gate.** G9′: persistent waiters, arms of the builder's loop, one per kind, joined only while a permit could be used, left before any await outside the loop and on a blocked publish; a shrink clears a refusal, a growth keeps it; slice 5's wake-all (G7) until the 24-index measurement says otherwise; G1–G8 otherwise unchanged; G7′ dropped. |
 | I10 | **Dispatcher.** Routes requests without waiting (every request ready, each poll; none to a builder gone); confirms once per poll after a registration (raised by `Progress`'s registration signal, beside the fence's listener) and on the tick; reads each builder's result cell; sends the stop once per builder; signals the end (every builder reported idle: its reader ended with its stream, nothing to serve; the request lane empty) and forwards nothing after; returns the first error. A builder acts on the end only while idle itself. |
-| I11 | **Backfill.** Coalescing per builder on a deadline; the walk token (6b-1c), coalescing kept while waiting for it; walks at once with K1's key-read task (6b-3). |
+| I11 | **Backfill.** Coalescing per builder on a deadline; walks at once (6b-3: the walk token of 6b-1c is gone), each key read holding the one K1 permit inside it and, with two or more builders, running on a task of its own, aborted with its walk; rule 4 of the budget per index. |
 | I12 | **End and stop.** Builders return only after the end signal; the stream's end builds everything; a stop builds and lands everything read under the deadline or fails with exit 1 naming what is left; no run ends `Ok` with a document waiting. |
 | I13 | **Failure.** A builder's error ends the run; the others dropped in place; a panic unwinds the task. |
 
@@ -2382,7 +2590,9 @@ user-visible list above, the first one's and rounds 1 and 2's):
   folding builder.
 - A build: ≤ `max_changes` ids of one index (O2). Builds at once ≤ `builds` (G1); live builds of one
   index ≤ `builds` (6a).
-- Key reads at once ≤ 1 (K1); key-read tasks ≤ one per walk (6b-3).
+- Key reads at once ≤ 1 (K1); key-read tasks ≤ one per walk (6b-3), none with one builder; keys held per
+  walk ≤ `KEY_PAGE` (no read ahead), plus its batch's `max_changes` ids.
+- Backfill bytes ≤ half the budget plus one batch per index walking (rule 4 per index, 6b-3).
 - Gate waiters ≤ 2 per builder; wakes per gate change: one (G7″).
 - Future polls per task poll ≤ 64 (I1).
 - What a stop builds: ≤ `max_waiting` + one run, plus the exempt backlogs (≤ `max_pending_documents`),
@@ -2464,8 +2674,9 @@ user-visible list above, the first one's and rounds 1 and 2's):
 | I10 | the dispatcher waits on a builder's inbox | `coalescing_for_one_index_delays_no_live_change_of_it` |
 | I10 | confirmation before the registering builder ran | `the_dispatcher_confirms_after_the_builder_that_registered` |
 | I10 | builders return before the end signal | `a_request_queued_for_one_index_after_live_ends_is_served` |
-| I11 | the key read stepped by its walk (6b-3) | `one_index_stuck_mid_walk_does_not_stop_another_indexs_key_reads` (6b-3) |
-| I11 | a builder waiting for the token stops coalescing | no test |
+| I11 | the key read stepped by its walk (6b-3) | `one_index_stuck_mid_walk_does_not_stop_another_indexs_key_reads`, `a_walk_blocked_on_a_full_lane_holds_no_other_walks_key_reads` (6b-3) |
+| I11 | the walk token kept (6b-3) | `indexes_walk_at_once` and five more (6b-3) |
+| I11 | a builder waiting for the token stops coalescing | gone with the token (6b-3) |
 | I12 | an exempt backlog left at the stream's end (6b-2) | `an_index_held_past_its_waiting_bound_is_exempt_and_the_reading_goes_on`; `the_stream_end_builds_an_exempt_backlog` and `a_stop_builds_and_lands_an_exempt_backlog_under_the_deadline` pin the outcome |
 | I12 | a run ending `Ok` with documents waiting | no test of its own; the random schedules check every document landed |
 | I12 | a builder returns before the reader's end | `a_stop_mid_run_builds_what_the_reader_marked_last` (several indexes) |

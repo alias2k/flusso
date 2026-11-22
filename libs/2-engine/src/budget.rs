@@ -23,7 +23,7 @@
 //! | 1 | everything held, live and backfill, ≤ the limit |
 //! | 2 | backfill, over every index, ≤ half the limit, so live always has room |
 //! | 3 | with two or more indexes ([`Budget::with_index_share`]), one index's **live** bytes ≤ its share of the limit |
-//! | 4 | backfill holding nothing gets one batch, whatever 1 and 2 say |
+//! | 4 | an index holding no backfill bytes gets one backfill batch, whatever 1 and 2 say (with one index: backfill holding nothing) |
 //! | 5 | an index holding no live bytes gets one live batch, whatever 1 and 3 say (so live holding nothing takes every index waiting) |
 //!
 //! Rules 1, 2 and 4 (with 5 for live holding nothing) are the budget before it
@@ -54,12 +54,17 @@
 //! index's batch holds the documents of up to about three live runs (with
 //! one index, nothing waits: one run's, as before the share).
 //!
+//! Rule 4 is per index for the same reason as rule 5 (stage 8a, 6b-3: walks
+//! at once): a walk whose lane is parked keeps its backfill charged and can
+//! fill backfill's half for hours; every other index's walk still gets a
+//! batch whenever it holds no backfill bytes.
+//!
 //! **Bounds**, from the rules: rules 4 and 5 pass the limit, one backfill
 //! batch and one live batch per index, and a settled batch may come out
 //! larger than its estimate, so the whole stays within the limit plus one
-//! live batch per index plus one backfill batch plus what each build in
+//! live batch and one backfill batch per index plus what each build in
 //! flight settles past its estimate. Backfill stays within half plus one
-//! batch and the same. One index's live bytes stay within its share, or one
+//! batch per index walking and the same. One index's live bytes stay within its share, or one
 //! batch when that batch alone is larger, and the same.
 //!
 //! **Many reservers.** Every count lives under one lock, so a check and its
@@ -183,6 +188,10 @@ impl State {
         self.by_index
             .get(index)
             .map_or(0, |held| held.total - held.backfill)
+    }
+
+    fn backfill_by(&self, index: &IndexName) -> usize {
+        self.by_index.get(index).map_or(0, |held| held.backfill)
     }
 
     /// Add `bytes`; whether the generation moved (only while watched).
@@ -450,9 +459,12 @@ impl Budget {
             }
             Work::Backfill => {
                 let estimate: usize = parts.iter().map(|(_, bytes)| *bytes).sum();
-                // Rule 4, then rules 2 and 1: backfill as on `main`, whichever
-                // indexes it walks.
-                let fits = state.backfill == 0
+                // Rule 4, per index (stage 8a, 6b-3): an index holding no
+                // backfill bytes gets one batch, never held back, so one
+                // stuck walk keeping backfill's half stops no other walk.
+                // Then rules 2 and 1, as on `main`. With one index it is
+                // `main`'s rule 4: its backfill is all the backfill.
+                let fits = parts.iter().all(|(index, _)| state.backfill_by(index) == 0)
                     || (!behind
                         && state.backfill.saturating_add(estimate) <= self.limit / 2
                         && state.total.saturating_add(estimate) <= self.limit);
@@ -1095,6 +1107,40 @@ mod tests {
         assert_eq!(admission.admitted, vec![index("items")]);
     }
 
+    /// Rule 4 per index (stage 8a, 6b-3): `orders`, walking behind a stuck
+    /// sink, holds backfill's whole half. `users`, holding no backfill
+    /// bytes, still gets one backfill batch, ahead of an older waiter too;
+    /// its second waits until the first is let go. `orders` gets none.
+    #[test]
+    fn an_index_holding_no_backfill_bytes_gets_one_backfill_batch() {
+        let budget = Arc::new(Budget::new(64 * KIB).with_index_share(2, 0.5));
+        let _stuck = budget
+            .reserve(Work::Backfill, &[(index("orders"), 32 * KIB)])
+            .unwrap();
+        assert!(
+            budget
+                .reserve(Work::Backfill, &[(index("orders"), KIB)])
+                .is_err(),
+            "orders holds backfill's half"
+        );
+        let first = budget
+            .reserve_behind(Work::Backfill, &[(index("users"), 8 * KIB)], true)
+            .expect("users holds no backfill bytes: one batch, even behind");
+        assert!(
+            budget
+                .reserve(Work::Backfill, &[(index("users"), 8 * KIB)])
+                .is_err(),
+            "one batch past the half, not two"
+        );
+        drop(first);
+        assert!(
+            budget
+                .reserve(Work::Backfill, &[(index("users"), 8 * KIB)])
+                .is_ok(),
+            "let go, it gets the next"
+        );
+    }
+
     /// An index whose backfill holds half the budget keeps, for its live
     /// changes, all the room `main` gave live beside a backfill (everything
     /// within the limit), up to its share: a reindex of one index on a live
@@ -1120,9 +1166,9 @@ mod tests {
 
     /// The reviewer's sequence over four indexes: past the limit only by
     /// one live batch per index holding none (rule 5) and one backfill batch
-    /// (rule 4).
+    /// per index holding none (rule 4, per index since 6b-3).
     #[test]
-    fn four_indexes_pass_the_limit_by_at_most_a_live_batch_each_and_a_backfill_batch() {
+    fn four_indexes_pass_the_limit_by_at_most_a_live_and_a_backfill_batch_each() {
         let budget = Arc::new(Budget::new(128 * KIB).with_index_share(4, 0.5));
         let mut held = Vec::new();
         for (work, name, kib) in [
@@ -1139,25 +1185,25 @@ mod tests {
             }
         }
         assert!(
-            budget.held().total <= 128 * KIB + 4 * 64 * KIB + 64 * KIB,
+            budget.held().total <= 128 * KIB + 4 * 64 * KIB + 4 * 64 * KIB,
             "{:?}",
             budget.held()
         );
         assert_eq!(
             budget.held(),
             Held {
-                total: 224 * KIB,
-                backfill: 64 * KIB
+                total: 288 * KIB,
+                backfill: 128 * KIB
             },
-            "each index's first live batch, and no backfill past half"
+            "each index's first live batch and first backfill batch"
         );
     }
 
     /// Random reservations and releases over four indexes, both kinds, each
     /// call at most `B`: after every step the whole is within the limit plus
-    /// one live batch per index and one backfill batch, backfill within half
-    /// plus one batch, and each index's live bytes within its share, or one
-    /// batch when it held none.
+    /// one live and one backfill batch per index, backfill within half plus
+    /// one batch per index, and each index's live bytes within its share, or
+    /// one batch when it held none.
     #[test]
     fn random_reservations_stay_within_the_stated_bounds() {
         const B: usize = 24 * KIB;
@@ -1209,8 +1255,8 @@ mod tests {
                     held.extend(parts);
                 }
                 let now = budget.held();
-                assert!(now.total <= limit + 4 * B + B, "seed {seed}: {now:?}");
-                assert!(now.backfill <= limit / 2 + B, "seed {seed}: {now:?}");
+                assert!(now.total <= limit + 4 * B + 4 * B, "seed {seed}: {now:?}");
+                assert!(now.backfill <= limit / 2 + 4 * B, "seed {seed}: {now:?}");
                 for name in &names {
                     let live = budget.state().live_by(name);
                     assert!(
