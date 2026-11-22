@@ -681,7 +681,7 @@ impl IngestEngine {
                 .into_iter()
                 .map(|(lane, producer, routed, item)| async move {
                     let key = item.key();
-                    producer.publish(item).await?;
+                    self.publish_to(lane, producer.as_ref(), item).await?;
                     if let (Some((oldest, last, token, step)), Some(key)) = (routed, key) {
                         self.progress
                             .published_build(lane, key, oldest, last, token, step);
@@ -697,6 +697,28 @@ impl IngestEngine {
         .await?;
         self.observer
             .on_stage(StageTiming::new(Stage::Publish, started.elapsed()).work(work));
+        Ok(())
+    }
+
+    /// Publish `item` to `lane`. A full lane holds the index until it takes
+    /// the item: what `/status` names (slice 7). Every publish of the
+    /// engine's goes through here, a snapshot's end included, so a hold has
+    /// one rule.
+    pub(super) async fn publish_to(
+        &self,
+        lane: &LaneKey,
+        producer: &dyn stream::Producer<LaneItem>,
+        item: LaneItem,
+    ) -> Result<()> {
+        let publishing = producer.publish(item);
+        tokio::pin!(publishing);
+        match futures::poll!(publishing.as_mut()) {
+            Poll::Ready(published) => published?,
+            Poll::Pending => {
+                let _full = self.index_states.lane_full(&lane.index, &lane.sink);
+                publishing.await?;
+            }
+        }
         Ok(())
     }
 

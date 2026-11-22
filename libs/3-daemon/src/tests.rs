@@ -1443,3 +1443,135 @@ async fn a_panicking_build_ends_or_restarts_the_ingest_engine_but_never_hangs() 
         }
     }
 }
+
+/// `ScriptedDocuments` whose bound read waits until released: a walk that
+/// stays in progress.
+#[derive(Debug, Default)]
+struct HeldWalk {
+    inner: ScriptedDocuments,
+    released: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl DocumentBuilder for HeldWalk {
+    async fn resolve(
+        &self,
+        table: &TableName,
+        key: &RowKey,
+        before: Option<&RowImage>,
+        after: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        self.inner.resolve(table, key, before, after).await
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        self.inner.build(id).await
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        self.inner.backfill_indexes()
+    }
+
+    async fn last_key(&self, index: &IndexName) -> source::Result<Option<RowKey>> {
+        self.released.notified().await;
+        self.inner.last_key(index).await
+    }
+
+    async fn keys(
+        &self,
+        index: &IndexName,
+        after: Option<&RowKey>,
+        through: &RowKey,
+        limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        self.inner.keys(index, after, through, limit).await
+    }
+
+    async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
+        self.inner.index_mappings().await
+    }
+}
+
+/// Slice 7: the daemon hands the ingest engine's per-index states to its
+/// `Status`. A walk held at its bound read shows in `ingest.indexes.users`
+/// with the sink it serves; released, it completes and shows no more.
+#[tokio::test]
+async fn the_status_reads_each_index_from_the_ingest_engine() {
+    let documents = Arc::new(HeldWalk::default());
+    let sink = Arc::new(RecordingSink::default());
+    let backends = backends_with(
+        Arc::new(ScriptedSource::new(Vec::new())),
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let running = Daemon::new(backendless_config(), backends)
+        .start()
+        .await
+        .unwrap();
+    let status = running.status();
+    let run = tokio::spawn(running.run(std::future::pending::<()>()));
+    let walking = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(backfill) = status
+                .index_ingest(&users())
+                .and_then(|entry| entry.backfill)
+            {
+                return backfill;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the walk shows in the status");
+    assert_eq!(walking.sinks, vec!["primary".to_owned()]);
+    documents.released.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.index_ingest(&users()).unwrap().backfill, None);
+}
+
+/// Review round 2 of #454, item 2: a disabled index is no index of the
+/// deployment's ingest: no `ingest.indexes` entry, no `GET
+/// /indexes/<name>/status` (which answers 404 for what `index_ingest` returns
+/// `None`), no reindex. The older `indexes.<name>` section keeps listing it,
+/// as it did before slice 7.
+#[tokio::test]
+async fn a_disabled_index_has_no_ingest_entry() {
+    let sink = Arc::new(RecordingSink::seeded());
+    let backends = backends(
+        ScriptedSource::new(Vec::new()),
+        vec![(primary(), sink, SinkOptions::default())],
+    );
+    let mut config = backendless_config();
+    let archive = IndexName::try_new("archive").unwrap();
+    let mut disabled = config.indexes.get(&users()).unwrap().clone();
+    disabled.enabled = false;
+    config.indexes.insert(archive.clone(), disabled);
+    let running = Daemon::new(config, backends).start().await.unwrap();
+    let status = running.status();
+    let entries: Vec<String> = status
+        .snapshot()
+        .ingest
+        .indexes
+        .keys()
+        .map(|name| name.to_string())
+        .collect();
+    assert!(
+        status.index_ingest(&archive).is_none() && !status.tracks(&archive),
+        "a disabled index is tracked: entries {entries:?}, names {:?}",
+        status.index_names()
+    );
+    assert_eq!(entries, ["users"]);
+    assert_eq!(status.index_names(), ["users"]);
+    assert!(
+        status.snapshot().indexes.contains_key("archive"),
+        "the older indexes.<name> section is unchanged"
+    );
+}

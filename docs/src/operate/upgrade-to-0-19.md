@@ -15,10 +15,12 @@
 - **Batches are per index**, so a slow index no longer delays a fast one's writes; one build takes at most `[batch] max_changes` documents; a change can be searchable in one index before another, and the stdout sink's `seq` is ordered per index only: [Batches are per index](#batches-are-per-index).
 - **A stuck index stops only itself**: with two or more indexes, the others keep being read and written while its changes wait as documents to build, up to `[concurrency] max_pending_documents`; the slot, and so the WAL, still waits for it: [A stuck index stops only itself](#a-stuck-index-stops-only-itself).
 - **Backfills of several indexes run at once**, within the same `builds` and Postgres connections; one stuck backfill no longer holds the others, and memory may pass `max_built_mib` by one backfill batch per index: [Backfills run at once](#backfills-run-at-once).
+- **`POST /reindex` is gone** (breaking): reindex with `POST /indexes/<name>/reindex[?sink=<name>]`, which answers JSON; `flusso reindex` already does: [Reindex moved to the index path](#reindex-moved-to-the-index-path).
+- **Each index's state is shown**: `/status`'s `ingest.indexes`, `GET /indexes/<name>/status`, the `flusso_index_*` metrics, `flusso_reader_waits_seconds`, and a new alert, `FlussoIndexBacklog`: [Each index's state is shown](#each-indexs-state-is-shown).
 
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`**: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`, the per-index ingest state in `Status` and `Observer::on_reader_wait`**: [For code embedding the crates](#for-code-embedding-the-crates).
 
 ## One index's failure parks its own lane
 
@@ -265,7 +267,7 @@ The share has a flag and a variable, like the table's other keys:
 
 **What to know.**
 
-- **The log is the only sign yet.** A warning names the index when it becomes exempt, another when it may drain but not grow, an info line when it is no longer exempt; a warning says when reading stops at the cap. At most one line a minute per index, and the last one names the current state ([the log lines](../reference/config-toml.md#a-stuck-index)). `/status` and the metrics have no per-index view of it.
+- **The log and `/status` show it.** A warning names the index when it becomes exempt, another when it may drain but not grow, an info line when it is no longer exempt; a warning says when reading stops at the cap. At most one line a minute per index, and the last one names the current state ([the log lines](../reference/config-toml.md#a-stuck-index)). `/status`, the metrics and an alert show it per index: [Each index's state is shown](#each-indexs-state-is-shown).
 - **A slow acknowledgement pauses it for a while.** A healthy sink taking more than 5 seconds over one write (a large backfill or reindex bulk), or a sink engine restart whose failing write runs to its timeout, makes its index count as not working for that long: an exempt neighbour stops growing, and reading may stop, until that write is acknowledged ([details](../reference/config-toml.md#a-stuck-index)). Never worse than 0.18.
 - **A stop builds the backlog too**, within `--shutdown-timeout-secs`. When it can't, flusso exits `1` naming each index left with documents read and not built (`orders: 1200 documents read and not built`), and the next start reads them again ([Stopping](../reference/cli.md#stopping)).
 - **Refused at start.** `check`, `build` and `run` refuse `0`, and a flag or variable that isn't a whole number, naming where the value came from. A value below `max_waiting_per_index` is accepted. Like the rest of `[concurrency]`, it is never written into `flusso.lock`. The designer's config form sets it.
@@ -291,6 +293,39 @@ The share has a flag and a variable, like the table's other keys:
 2. **Check the memory headroom** on a tight host: plan for one backfill batch per index above `max_built_mib`, and up to 1,024 root keys per index backfilling (about 110 KB for a one-column integer key) ([sizing](../reference/config-toml.md#concurrency)).
 3. **Don't rely on the order** indexes finish in: wait on each index's own state in [`/status`](../reference/http.md#get-status).
 
+## Reindex moved to the index path
+
+**What changed.** The private surface's reindex route is now `POST /indexes/<name>/reindex[?sink=<name>]`. `POST /reindex?index=…` is removed and answers `404`. Every answer is JSON ([the route](../reference/http.md#post-indexesnamereindexsinkname)):
+
+| | 0.18 | 0.19 |
+| --- | --- | --- |
+| The request | `POST /reindex?index=users&sink=primary` | `POST /indexes/users/reindex?sink=primary` |
+| `202` | text: `reindex of users on primary queued` | `{"index": "users", "sink": "primary", "queued": true}`, `sink` null for every sink |
+| Refusals (`400`, `404`, `503`) | text | `{"error": "…"}`; an unknown index adds `"indexes"`, the enabled ones |
+| A disabled index | accepted | `404` |
+
+**Who is affected.** Scripts and tools that call `POST /reindex` themselves. `flusso reindex` is updated and prints what it printed before; use it at the same version as the server.
+
+**What to do.** Move each call to the new path: the index goes into the path, `sink` stays a query parameter. Read the `202`'s JSON instead of its text, if the script reads it.
+
+## Each index's state is shown
+
+**What changed.** What 0.19 does per index (the [exemption](#a-stuck-index-stops-only-itself), holds, backfills) shows outside the log too:
+
+- **`/status`** gains `ingest.indexes.<index>` for each enabled index: documents waiting, `backlog_seconds`, `exemption`, `working`, `held_by` and `held_sinks`, `backfill`, `pacing_reader` ([per-index state](../reference/http.md#per-index-ingest-state)).
+- **`GET /indexes/<name>/status`**, on the public surface, serves one index's entry ([the route](../reference/http.md#get-indexesnamestatus)).
+- **Metrics**, one series per enabled index: `flusso_index_documents_waiting`, `flusso_index_backlog_age_seconds`, `flusso_index_exempt`, `flusso_index_frozen`, `flusso_index_working`, `flusso_index_held{by}`, `flusso_index_backfilling`; and `flusso_reader_waits_seconds`, how often and how long reading stops, by the bound that stopped it ([Metrics](../reference/metrics.md)).
+- **`FlussoIndexBacklog`**, new in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`: an index exempt, or stuck past 60 s, for 10 minutes. New chart values `prometheusRule.indexBacklogSeconds` and `indexBacklogFor` ([runbook](stalled-lane.md#when-flussoindexbacklog-fires)).
+- **The dev dashboard** has a per-index row.
+
+**Who is affected.** Nobody has to change anything. With the chart's `prometheusRule` on, the new alert pages.
+
+**What to know.**
+
+- **`backlog_seconds` is not a lag.** It grows only while an index is stuck or exempt; an index merely behind its source stays seconds old. Read lag from `flusso_lane_wal_behind_bytes` and the slot lag ([what it shows](../reference/http.md#what-backlog_seconds-shows)).
+- **A long catch-up can page.** With several indexes, an index slower than the others is exempt while it trails, so a catch-up longer than `indexBacklogFor` fires `FlussoIndexBacklog`. Silence it, or raise the period.
+- **Disabled indexes** have no `ingest.indexes` entry and no series; `indexes` in `/status` and `GET /indexes` still list them.
+
 ## For code embedding the crates
 
 - **Removed:** `EngineError::DocumentsRejected` (a refusal no longer ends the run).
@@ -312,6 +347,7 @@ The share has a flag and a variable, like the table's other keys:
 - **`[concurrency] max_waiting_per_index` and `max_waiting`** are `ConcurrencyConfig.max_waiting_per_index` and `max_waiting: Option<config::CountValue>` (`count`, `origin`): a struct literal of `ConcurrencyConfig` must set them. `daemon::max_waiting(&Config)` resolves and checks them into an `engine::MaxWaiting { per_index, total }` (re-exported by `daemon`; `MaxWaiting::derived(batch, builds)` gives the defaults), and `Daemon::start` fails on the refusals above. `IngestEngine::with_max_waiting` sets the lead, `max_waiting()` reads it. `config::parse_max_waiting` parses a flag's or a variable's value. New on `Progress`: `take_through`, `waiting_through`, `read_changes`, `most_waiting`, and for one index's builds `take_through_at_most` (a take capped at a number of documents), `waiting_of` (each index's count stopped at a limit, `most`), `waiting_on`, `newest_waiting` and `waits_through` (whether a document marked at or before a position still waits). New `engine::Holds`, what `waiting_through` and `waiting_of` take: a visitor offered the documents running builds hold, one at a time, until it answers `true`.
 - **`[concurrency] max_pending_documents`** is `ConcurrencyConfig.max_pending_documents: Option<config::CountValue>`: a struct literal of `ConcurrencyConfig` must set it. `daemon::max_pending_documents(&Config)` resolves and checks it (`engine::DEFAULT_MAX_PENDING_DOCUMENTS` is 1,000,000), and `Daemon::start` fails on `0`. `IngestEngine::with_max_pending_documents` sets it (at least 1); `config::parse_max_waiting` parses its flag or variable. New `EngineError::DocumentsLeft`: every builder returned with documents read and not built, named per index. New `daemon::Status::waiting_by_index`.
 - **Lane items are keyed per index.** New `stream::ItemKey`, and `stream::Batch` gains `key: Option<ItemKey>` (`None` on snapshot rows; a serialized item without it still reads). `Progress::published(lane, key, oldest, last)` takes the item's key, and `Progress::applied` and `Progress::searchable` take an `ItemKey` instead of a `Position`; the new `published_step` and `published_build` take it too. `Progress::next_key(index)` numbers an index's next item, the same on every lane of the index.
+- **Per-index ingest state.** New `engine::IndexStates`, shared by the ingest engine (`IngestEngine::index_states`), with `IndexView`, `ExemptionState`, `HeldBy` and the guards `LaneFull`, `PacingReader` and `Walking`; `engine::STUCK_AFTER` (5 s). `Observer::on_reader_wait(bound, index, waited)` is new, with a no-op default, and `engine::ReaderBound`. `Progress::oldest_unbuilt`, `daemon::Stalls::backlog` and `forget_backlog`, and `daemon::BACKLOG_SPAN` (an hour of samples) are new. `daemon::Status` gains `with_ingest_indexes` (the enabled indexes), `attach_index_states`, `index_ingest`, `ingest_indexes`, `tracks` and `index_names`; `StatusSnapshot` gains the public field `ingest` (`IngestSnapshot`, `IndexIngestSnapshot`, `Exemption`, `IndexHold`, `BackfillSnapshot`), so a struct literal must set it. `DaemonControl::detached` builds a control with no deployment behind it, for a transport's tests.
 - **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.
 
 ## Related

@@ -108,3 +108,38 @@ groups:
             indexes keep being written; this one holds the replication slot.
             /status names why under sinks.<sink>.lanes.<index>.reason.
           runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
+
+      # An index exempt, or stuck (its oldest unbuilt change read over a
+      # minute ago), for 10 minutes (ADR 0012 stage 8a, slice 7). Not "held":
+      # a healthy sink at its limit holds its index's builder most of the time.
+      # Not lag behind the source either: reading stops at an index's cap, so
+      # an index that isn't exempt never has an unbuilt change older than its
+      # read-ahead (seconds); its lag behind the source is the lanes' WAL
+      # behind and the slot lag. Quiet while no engine run reads (staging, a
+      # long start, a restart's backoff): the backlog reads 0 then. It does
+      # fire during a planned catch-up longer than `for` when one index is
+      # slower than the others: that index is exempt, the slot pinned by it,
+      # and memory heads to max_pending_documents.
+      - alert: FlussoIndexBacklog
+        expr: max by (index) (flusso_index_exempt) > 0 or max by (index) (flusso_index_backlog_age_seconds) > 60
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "flusso's {{ $labels.index }} index has been exempt or stuck for 10m"
+          description: >-
+            The index has been exempt (held at max_waiting_per_index while the
+            other indexes read on: its changes are kept as documents to build, up
+            to max_pending_documents, and the slot stays pinned by it), or stuck
+            (its oldest change not built yet was read over 60 s ago: nothing of it
+            is being built), the whole period. It also fires during a planned
+            catch-up longer than 10m when one index is slower than the others
+            (it is exempt meanwhile): silence it, or raise the period. /status names
+            why under ingest.indexes.<index>: held_by and held_sinks (a full lane: the
+            sink is slow, refusing or down, see FlussoLaneStalled and
+            FlussoLaneParked; or the memory budget), working (false: a sink has
+            acknowledged nothing for 5 s), backlog_seconds, pacing_reader. How far
+            an index is behind the source is not this alert: read its lanes' WAL
+            behind (flusso_lane_wal_behind_bytes) and the slot lag
+            (flusso_replication_slot_lag_bytes).
+          runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html

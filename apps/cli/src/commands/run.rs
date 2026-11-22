@@ -105,13 +105,14 @@ pub(crate) struct RunArgs {
     queue_capacity: Option<usize>,
 
     /// Bind address for the public, read-only HTTP surface (`/healthz`,
-    /// `/readyz`, `/status`, `/metrics`). Overrides `[server].public_address`
+    /// `/readyz`, `/status`, `/metrics`, `/wait`, `/indexes/<name>/status`).
+    /// Overrides `[server].public_address`
     /// from config; defaults to `127.0.0.1:9464`.
     #[arg(long, env = "FLUSSO_PUBLIC_ADDRESS")]
     public_address: Option<SocketAddr>,
 
     /// Bind address for the private, Basic-auth control surface (`/indexes`,
-    /// `/reindex`). Overrides `[server].private_address` from config; defaults
+    /// `/indexes/<name>/reindex`). Overrides `[server].private_address` from config; defaults
     /// to `127.0.0.1:9465`.
     #[arg(long, env = "FLUSSO_PRIVATE_ADDRESS")]
     private_address: Option<SocketAddr>,
@@ -366,6 +367,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let _lane_outstanding_gauge = metrics::register_lane_outstanding_gauge(Arc::clone(&status));
     let _lane_parked_gauge = metrics::register_lane_parked_gauge(Arc::clone(&status));
     let _stall_gauges = metrics::register_stall_gauges(Arc::clone(&status));
+    let _index_gauges = metrics::register_index_gauges(Arc::clone(&status));
     let _memory_instruments = metrics::register_memory_instruments(running.budget());
 
     let waits = http::Waits::default();

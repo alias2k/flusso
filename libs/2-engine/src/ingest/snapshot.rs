@@ -130,8 +130,21 @@ impl IngestEngine {
             Arc::clone(&self.key_reads),
         )
         .planned(plans);
+        // What `/status` shows of each index's walk (slice 7), until the
+        // snapshot is dropped: completed, stopped or failed.
+        let walking = (!indexes.is_empty()).then(|| {
+            self.index_states.walking(indexes.iter().map(|index| {
+                let sinks = requested
+                    .iter()
+                    .filter(|(_, asked)| asked.contains_key(index))
+                    .map(|(sink, _)| sink.clone())
+                    .collect();
+                (index.clone(), sinks)
+            }))
+        });
         let mut snapshot = Snapshot {
             walk: if apart { walk.reading_apart() } else { walk },
+            _walking: walking,
             requested,
             indexes: indexes.iter().cloned().collect(),
             handles,
@@ -163,12 +176,16 @@ impl IngestEngine {
         let markers = snapshot.requested.iter().flat_map(|(sink, indexes)| {
             indexes.iter().filter_map(|(index, ticket)| {
                 lanes
-                    .get(&LaneKey::new(index.clone(), sink.clone()))
-                    .map(|producer| {
-                        producer.publish(LaneItem::SnapshotComplete {
-                            index: index.clone(),
-                            ticket: *ticket,
-                        })
+                    .get_key_value(&LaneKey::new(index.clone(), sink.clone()))
+                    .map(|(lane, producer)| {
+                        self.publish_to(
+                            lane,
+                            producer.as_ref(),
+                            LaneItem::SnapshotComplete {
+                                index: index.clone(),
+                                ticket: *ticket,
+                            },
+                        )
                     })
             })
         });
@@ -199,6 +216,8 @@ pub(super) struct Snapshot {
     /// The walk has read every index's keys; what is left is to build the
     /// batch in hand and complete.
     pub(super) done: bool,
+    /// Shows its walks in `/status` while it lives.
+    _walking: Option<crate::index_states::Walking>,
 }
 
 impl Snapshot {

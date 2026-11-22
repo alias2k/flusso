@@ -4,7 +4,7 @@ Change the control surface's default credentials, keep it off the network, and r
 
 ## When to use this
 
-Before the first deployment anywhere other than a laptop. The private surface (`/indexes`, `/reindex`) ships with well-known default credentials so it works out of the box (they're listed in [HTTP endpoints](../reference/http.md)), and flusso logs a warning on every start while the password is unchanged.
+Before the first deployment anywhere other than a laptop. The private surface (`/indexes`, `/indexes/<name>/reindex`) ships with well-known default credentials so it works out of the box (they're listed in [HTTP endpoints](../reference/http.md)), and flusso logs a warning on every start while the password is unchanged.
 
 ## Steps
 

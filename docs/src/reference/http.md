@@ -4,8 +4,10 @@
 
 | Surface | Default bind | Auth | Endpoints |
 | --- | --- | --- | --- |
-| public | `127.0.0.1:9464` | none | `GET /healthz`, `GET /readyz`, `GET /status`, `GET /metrics`, `GET /wait` |
-| private | `127.0.0.1:9465` | HTTP Basic | `GET /indexes`, `POST /reindex` |
+| public | `127.0.0.1:9464` | none | `GET /healthz`, `GET /readyz`, `GET /status`, `GET /metrics`, `GET /wait`, `GET /indexes/<name>/status` |
+| private | `127.0.0.1:9465` | HTTP Basic | `GET /indexes`, `POST /indexes/<name>/reindex` |
+
+Each surface answers `404` for the other's routes.
 
 Bind addresses: `--public-address` / `--private-address`, then `FLUSSO_PUBLIC_ADDRESS` / `FLUSSO_PRIVATE_ADDRESS`, then `[server]` in `flusso.toml`, then the default. Credentials: `--admin-user` / `--admin-password` or `FLUSSO_ADMIN_USER` / `FLUSSO_ADMIN_PASSWORD`, defaulting to `admin` / `flusso`. They are never config keys. A warning is logged on every start while the password is the default. Both listeners are bound before the pipeline starts, so a bad address fails fast; a serve-loop error is logged and never stops the pipeline.
 
@@ -28,7 +30,8 @@ The live status document as JSON: the deployment, then one block per sink.
 | `pid` | int | The flusso process's id, to stop it by. |
 | `phase` | `starting` \| `backfilling` \| `live` \| `stopping` \| `stopped` | Where the deployment is: `starting` until the ingest engine follows the source and every sink has staged (and again while a failed ingest engine restarts), `backfilling` while any sink still seeds, `stopping` from a [stop](cli.md#stopping) until its drain ends, `stopped` once the source stream ended. |
 | `uptime_seconds` | int | Since the daemon started. A reindex does not restart anything. |
-| `indexes` | map of name to `pending` \| `backfilling` \| `seeded` | Per-index state across sinks: the least advanced sink's state. |
+| `indexes` | map of name to `pending` \| `backfilling` \| `seeded` | Per-index state across sinks: the least advanced sink's state. Disabled indexes are listed too. |
+| `ingest.indexes.<index>` | object | What the ingest side knows of each enabled index: is it behind or stuck, and why. See [Per-index ingest state](#per-index-ingest-state). |
 | `changes_captured` | int | Changes the ingest engine pulled from the source. |
 | `changes_in_flight` | int | Captured minus the slowest sink's `changes_committed`. `0` means every sink has written everything read. |
 | `documents_built` | int | Documents assembled by the ingest engine (once, however many sinks). |
@@ -71,6 +74,13 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
 {
   "pid": 48213,
   "phase": "live",
+  "ingest": {
+    "indexes": {
+      "orders": { "documents_waiting": 0, "backlog_seconds": 0.0, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false },
+      "products": { "documents_waiting": 0, "backlog_seconds": 0.0, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false },
+      "users": { "documents_waiting": 0, "backlog_seconds": 0.0, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false }
+    }
+  },
   "uptime_seconds": 412,
   "indexes": { "orders": "seeded", "products": "seeded", "users": "seeded" },
   "changes_captured": 1520,
@@ -105,6 +115,49 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
   }
 }
 ```
+
+### Per-index ingest state
+
+`ingest.indexes.<index>` answers "which index is behind or stuck, and why", from the ingest side: documents read and not built yet, the [exemption](config-toml.md#a-stuck-index), and what holds the index's builds. What each sink has landed of it stays under `sinks.<sink>.lanes.<index>`. One entry per **enabled** index, with one index too. [`GET /indexes/<name>/status`](#get-indexesnamestatus) serves one entry alone.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `documents_waiting` | int | Documents of the index read and not yet taken by a build. |
+| `backlog_seconds` | number | How long ago the index's oldest change not built yet was read (waiting, or in a build not yet handed to a sink). `0` when there is none. Grows only while the index is stuck or exempt: [below](#what-backlog_seconds-shows). |
+| `exemption` | `none` \| `exempt` \| `frozen` | `exempt`: held at `max_waiting_per_index` while another index works, so reading goes on for the others; its documents count only toward `max_pending_documents`. `frozen`: exempt, but its hold ended or no other index works, so it may drain but not grow. Always `none` with one index, and between engine runs. See [A stuck index](config-toml.md#a-stuck-index). |
+| `exemption_since` | string, absent | When it entered that state (RFC 3339, UTC), to within a second. Absent while `none`. |
+| `working` | bool | `false` while items of the index wait at a sink and none has been acknowledged for 5 s. About progress, not holds: an index held by the memory budget whose sink keeps acknowledging is working. [Below](#working-with-one-index-and-with-several). |
+| `held_by` | `budget` \| `lane` \| null | What holds the index's builds right now. `budget`: its live batch is refused by the [memory budget](config-toml.md#concurrency). `lane`: a publish (a batch, or a backfill's end) waits on a full lane. For information: a hold alone isn't a fault. Cleared when an engine run ends. |
+| `held_sinks` | list of string, absent | With `lane`, the sinks whose lanes are full. Absent otherwise. |
+| `held_since` | string, absent | When this hold began (RFC 3339, UTC); a new hold starts its own. Absent while nothing holds it. |
+| `backfill` | object or null | `{"sinks": [...]}` while the index's backfill runs, naming the sinks it serves. Null otherwise. |
+| `pacing_reader` | bool | The reader is stopped at this index's bound right now (`max_waiting_per_index`, or the count a frozen index froze at): this index sets the pace of reading for every index. |
+
+An index that is exempt and waits on a full lane of `primary`:
+
+```json
+"users": {
+  "documents_waiting": 48211, "backlog_seconds": 734.0,
+  "exemption": "exempt", "exemption_since": "2026-11-19T12:03:14Z",
+  "working": false,
+  "held_by": "lane", "held_sinks": ["primary"], "held_since": "2026-11-19T12:03:09Z",
+  "backfill": null, "pacing_reader": false
+}
+```
+
+#### What `backlog_seconds` shows
+
+- **It grows only while the index is stuck or exempt**, a second a second, and falls as the index catches up.
+- **It is not a lag behind the source.** Reading stops at each index's cap, so an index that paces the reader stays within its read-ahead (seconds), at its sink's limit or however far behind the source it falls. How far an index is behind is its lanes' `wal_behind_bytes` (`flusso_lane_wal_behind_bytes{sink,index}`) and `slot_lag_bytes`.
+- **`0` while no engine run reads**: starting, a restart's backoff, a source down. A restarted run starts from `0`.
+- **`0` for a build blocked at its publish** with nothing else waiting, while its lane is full: its documents were taken. That lane's stall age shows it, and `FlussoLaneStalled` covers it.
+- **Sampled every second, at most an hour.** A change read longer ago reads as 3600.
+
+#### `working` with one index, and with several
+
+- **With two or more indexes**, backfill items count: a backfill nothing acknowledges for 5 s makes the index not working.
+- **With one index**, only live changes count (it is read off the lanes' stall ages), so a backfill nothing acknowledges still reads as working. `FlussoLaneParked` covers a refused backfill page.
+- **Not the exemption's test.** To decide whether another index is working, the exemption also counts a held index as not working ([A stuck index](config-toml.md#a-stuck-index)); this field doesn't.
 
 ### Lane health
 
@@ -179,19 +232,38 @@ A `503` for an index being seeded or rebuilt also names the lanes holding it up:
 
 The runbook is [Read your own writes](../operate/read-your-writes.md); the Rust client is [Reading your own writes](../query/read-your-writes.md).
 
+## GET /indexes/\<name\>/status
+
+One index's [ingest state](#per-index-ingest-state): the same object as `/status`'s `ingest.indexes.<name>`. Public surface; the private one answers `404`.
+
+```sh
+curl -s localhost:9464/indexes/users/status
+```
+
+| Response | When |
+| --- | --- |
+| `200` | The entry. |
+| `400` | `{"error": "invalid index name \"…\""}`: not an index name. |
+| `404` | `{"error": "unknown index <name>", "indexes": ["orders", …]}`: not an enabled index. `indexes` lists the enabled ones. |
+
 ## GET /indexes
 
 Every sink's `indexes` map from `/status`: `{"primary": {"users": "seeded", …}, "audit": {…}}`. Basic auth required.
 
-## POST /reindex?index=\<name\>[&sink=\<name\>]
+## POST /indexes/\<name\>/reindex[?sink=\<name\>]
 
-Stage a from-scratch rebuild of one index into a fresh generation on one sink, or on every sink when `sink` is omitted. Basic auth required.
+Stage a from-scratch rebuild of one index into a fresh generation on one sink, or on every sink when `sink` is omitted. Basic auth required; the public surface answers `404`. New in 0.19; the route it replaces is on the [upgrade page](../operate/upgrade-to-0-19.md#reindex-moved-to-the-index-path).
+
+```sh
+curl -u admin:… -X POST 'http://10.0.0.5:9465/indexes/users/reindex?sink=primary'
+```
 
 | Response | When |
 | --- | --- |
-| `202 Accepted` | Queued. Each targeted sink engine stages the new generation between two batches and requests its own snapshot; nothing restarts, reads stay on the old generation until the swap, and untargeted sinks are untouched. A sink with `backfill = false` logs and ignores it. Watch `/status` for the index leaving and returning to `seeded` under that sink. |
-| `400` | Missing `index` parameter, or `index`/`sink` is not a valid name. |
-| `404` | Not a configured index, or not a configured sink. |
-| `503` | That sink's operation queue is full, its engine has stopped for good, or flusso is [stopping](cli.md#stopping). |
+| `202 Accepted` | Queued: `{"index": "users", "sink": "primary", "queued": true}`, with `"sink": null` for every sink. Each targeted sink engine stages the new generation between two batches and requests its own snapshot; nothing restarts, reads stay on the old generation until the swap, and untargeted sinks are untouched. A sink with `backfill = false` logs and ignores it. Watch `/status` for the index leaving and returning to `seeded` under that sink. |
+| `400` | `{"error": "invalid index name \"…\""}` or `{"error": "invalid sink name \"…\""}`. |
+| `401` | Credentials missing or wrong. |
+| `404` | `{"error": "unknown index <name>", "indexes": [...]}`: not an enabled index. `{"error": "unknown sink <name>"}`: not a configured sink. |
+| `503` | `{"error": "…"}`: flusso is [stopping](cli.md#stopping), that sink's operation queue is full (retry shortly), or its engine has stopped for good. |
 
 The runbook is [Reindex without downtime](../operate/reindex.md); the CLI wrapper is [`flusso reindex`](cli.md#reindex).

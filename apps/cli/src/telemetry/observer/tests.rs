@@ -230,3 +230,54 @@ fn a_parked_lanes_probes_are_counted_by_outcome() {
         1.0
     );
 }
+
+/// Slice 7: each wait of the reader at its lead is one observation of
+/// `flusso.reader.waits`, by the bound that stopped it, and for a per-index
+/// bound by the index at it (the other bounds carry no `index` label).
+#[test]
+fn the_readers_waits_are_a_histogram_by_bound() {
+    let (observer, registry, _provider) = recorder();
+    let orders = IndexName::try_new("orders").unwrap();
+    observer.on_reader_wait(
+        daemon::ReaderBound::PerIndex,
+        Some(&orders),
+        Duration::from_millis(30),
+    );
+    observer.on_reader_wait(
+        daemon::ReaderBound::PerIndex,
+        Some(&orders),
+        Duration::from_millis(70),
+    );
+    observer.on_reader_wait(daemon::ReaderBound::Pending, None, Duration::from_secs(2));
+    let text = scrape(&registry);
+    assert_eq!(
+        value(
+            &text,
+            r#"flusso_reader_waits_seconds_count{bound="per_index",index="orders"}"#
+        ),
+        2.0
+    );
+    assert!(
+        (value(
+            &text,
+            r#"flusso_reader_waits_seconds_sum{bound="per_index",index="orders"}"#
+        ) - 0.1)
+            .abs()
+            < 1e-9
+    );
+    assert_eq!(
+        value(
+            &text,
+            r#"flusso_reader_waits_seconds_count{bound="pending"}"#
+        ),
+        1.0
+    );
+    for le in ["60", "120", "300", "600"] {
+        let bucket = format!(r#"flusso_reader_waits_seconds_bucket{{bound="pending",le="{le}"}}"#);
+        assert!(text.contains(&bucket), "{bucket} missing:\n{text}");
+    }
+    assert!(
+        !text.contains(r#"bound="total""#),
+        "no series for a bound never hit:\n{text}"
+    );
+}

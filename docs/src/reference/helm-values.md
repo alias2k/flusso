@@ -42,13 +42,15 @@ Every value the chart at `deploy/helm/flusso/` accepts, with its default. `value
 | `serviceAccount.create`, `name`, `annotations` | `true`, `""`, `{}` | |
 | `livenessProbe` | `GET /healthz` on `http`, 5 s delay, 10 s period | |
 | `readinessProbe` | `GET /readyz` on `http`, 5 s delay, 10 s period, `failureThreshold: 30` | The threshold rides out a long backfill. |
-| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with `FlussoLaneStalled`, `FlussoLaneParked` and `FlussoVisibilityWait`. Requires the operator's CRDs. |
+| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with `FlussoLaneStalled`, `FlussoLaneParked`, `FlussoIndexBacklog` and `FlussoVisibilityWait`. Requires the operator's CRDs. |
 | `prometheusRule.namespace` | `""` | Defaults to the release namespace. |
 | `prometheusRule.labels` | `{}` | Extra labels, to match your Prometheus `ruleSelector`. |
 | `prometheusRule.laneStallSeconds` | `600` | `FlussoLaneStalled` fires past this stall age… |
 | `prometheusRule.laneWalBehindBytes` | `1073741824` | …or past this much WAL kept behind one lane (1 GiB, WAL not read yet included)… |
 | `prometheusRule.laneWalStallSeconds` | `60` | …while that lane has landed nothing for this long, so a catch-up whose lanes keep landing doesn't page. |
-| `prometheusRule.for` | `5m` | How long the condition holds before the alert fires; for `FlussoLaneParked`, how long a lane stays parked (`flusso_lane_parked > 0`). |
+| `prometheusRule.for` | `5m` | How long the condition holds before `FlussoLaneStalled` fires; for `FlussoLaneParked`, how long a lane stays parked (`flusso_lane_parked > 0`). |
+| `prometheusRule.indexBacklogSeconds` | `60` | `FlussoIndexBacklog` fires on an index whose oldest change not built yet was read longer ago than this (`flusso_index_backlog_age_seconds`), or on an exempt one… |
+| `prometheusRule.indexBacklogFor` | `10m` | …once that has held this long. A planned catch-up longer than this, with one index slower than the others, fires it too. See [When FlussoIndexBacklog fires](../operate/stalled-lane.md#when-flussoindexbacklog-fires). |
 | `prometheusRule.severity` | `page` | The alerts' `severity` label. |
 | `resources` | `requests.memory: 512Mi` | No limit by default. A limit needs room for `[concurrency] max_built_mib` (512 MiB by default) plus about 150 MiB (768Mi for the default), the batches past it, what the budget doesn't count (request bodies, the source's read-ahead) and about 100 MiB, plus 10–20% allocator overhead; the formula is in [config.toml](config-toml.md#concurrency). |
 | `podAnnotations`, `podLabels` | `{}` | |

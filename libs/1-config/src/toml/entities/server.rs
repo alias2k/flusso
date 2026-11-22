@@ -13,12 +13,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Server {
-    /// Public, read-only surface (`/healthz`, `/readyz`, `/status`, `/metrics`),
-    /// e.g. `0.0.0.0:9464`.
+    /// Public, read-only surface (`/healthz`, `/readyz`, `/status`, `/metrics`,
+    /// `/wait`, `/indexes/<name>/status`), e.g. `0.0.0.0:9464`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_address: Option<SocketAddr>,
-    /// Private, Basic-auth control surface (`/indexes`, `/reindex`), e.g.
-    /// `0.0.0.0:9465`.
+    /// Private, Basic-auth control surface (`/indexes`,
+    /// `/indexes/<name>/reindex`), e.g. `0.0.0.0:9465`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_address: Option<SocketAddr>,
 }

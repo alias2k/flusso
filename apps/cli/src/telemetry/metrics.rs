@@ -64,11 +64,19 @@ const FLUSH_SIZE_BUCKETS_BYTES: &[f64] = &[
     67_108_864.0,
 ];
 
+/// `flusso.reader.waits`: the stage buckets, then minutes, since a reader
+/// stopped behind a stuck index waits that long.
+const READER_WAIT_BUCKETS_SECONDS: &[f64] = &[
+    0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+    5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+];
+
 /// The explicit buckets of each histogram flusso records, by instrument name.
 fn buckets(instrument: &str) -> Option<&'static [f64]> {
     match instrument {
         "flusso.flush.duration" => Some(FLUSH_BUCKETS_SECONDS),
         "flusso.stage.duration" | "flusso.memory.wait" => Some(STAGE_BUCKETS_SECONDS),
+        "flusso.reader.waits" => Some(READER_WAIT_BUCKETS_SECONDS),
         "flusso.flush.documents" => Some(FLUSH_DOCUMENT_BUCKETS),
         "flusso.flush.size" => Some(FLUSH_SIZE_BUCKETS_BYTES),
         _ => None,
@@ -229,6 +237,106 @@ fn lane_parked_gauge(
             }
         })
         .build()
+}
+
+/// Each index's ingest state (ADR 0012 stage 8a, slice 7), read from the
+/// daemon's [`Status`] at collection, one series per enabled index (one
+/// index too): `flusso.index.documents_waiting`, `flusso.index.backlog_age`
+/// (s), and 0/1 for `flusso.index.exempt` (exempt or frozen),
+/// `flusso.index.frozen`, `flusso.index.working`, `flusso.index.held` (by
+/// `budget` and by `lane`) and `flusso.index.backfilling` (its walk runs).
+pub(crate) fn register_index_gauges(status: Arc<Status>) -> IndexGauges {
+    index_gauges(&global::meter("flusso"), status)
+}
+
+/// The gauges [`register_index_gauges`] keeps registered.
+pub(crate) type IndexGauges = (ObservableGauge<f64>, Vec<ObservableGauge<u64>>);
+
+fn index_gauges(meter: &opentelemetry::metrics::Meter, status: Arc<Status>) -> IndexGauges {
+    use daemon::{Exemption, IndexHold, IndexIngestSnapshot};
+    let label = |index: &daemon::IndexName| KeyValue::new("index", index.as_ref().to_owned());
+    let ages = Arc::clone(&status);
+    let backlog_age = meter
+        .f64_observable_gauge("flusso.index.backlog_age")
+        .with_unit("s")
+        .with_description(
+            "Seconds since an index's oldest unbuilt change (waiting, or in a build not yet sent \
+             to a lane) was read; 0 while nothing waits to be built. It grows only while the \
+             index is stuck or exempt",
+        )
+        .with_callback(move |observer| {
+            for (index, entry) in ages.ingest_indexes() {
+                observer.observe(entry.backlog_seconds, &[label(&index)]);
+            }
+        })
+        .build();
+    let flag =
+        |name: &'static str, description: &'static str, read: fn(&IndexIngestSnapshot) -> bool| {
+            let status = Arc::clone(&status);
+            meter
+                .u64_observable_gauge(name)
+                .with_description(description)
+                .with_callback(move |observer| {
+                    for (index, entry) in status.ingest_indexes() {
+                        observer.observe(u64::from(read(&entry)), &[label(&index)]);
+                    }
+                })
+                .build()
+        };
+    let waiting = Arc::clone(&status);
+    let held = Arc::clone(&status);
+    let gauges = vec![
+        meter
+            .u64_observable_gauge("flusso.index.documents_waiting")
+            .with_description("Documents of an index read and not yet taken by a build")
+            .with_callback(move |observer| {
+                for (index, entry) in waiting.ingest_indexes() {
+                    observer.observe(entry.documents_waiting, &[label(&index)]);
+                }
+            })
+            .build(),
+        flag(
+            "flusso.index.exempt",
+            "1 while an index is exempt (held at its cap while another index works, growing \
+             or frozen): its documents count only toward max_pending_documents",
+            |entry| entry.exemption != Exemption::None,
+        ),
+        flag(
+            "flusso.index.frozen",
+            "1 while an exempt index is frozen: its hold ended or no other index works, so it \
+             may drain but not grow",
+            |entry| entry.exemption == Exemption::Frozen,
+        ),
+        flag(
+            "flusso.index.working",
+            "1 while an index works: nothing of it has waited at a sink 5 s with none \
+             acknowledged",
+            |entry| entry.working,
+        ),
+        flag(
+            "flusso.index.backfilling",
+            "1 while an index's backfill walk runs",
+            |entry| entry.backfill.is_some(),
+        ),
+        meter
+            .u64_observable_gauge("flusso.index.held")
+            .with_description(
+                "1 on the series of what holds an index's builder: by budget (its live batch \
+                 refused by the memory budget) or by lane (a publish blocked on a full lane)",
+            )
+            .with_callback(move |observer| {
+                for (index, entry) in held.ingest_indexes() {
+                    for (by, hold) in [("budget", IndexHold::Budget), ("lane", IndexHold::Lane)] {
+                        observer.observe(
+                            u64::from(entry.held_by == Some(hold)),
+                            &[label(&index), KeyValue::new("by", by)],
+                        );
+                    }
+                }
+            })
+            .build(),
+    ];
+    (backlog_age, gauges)
 }
 
 /// Register `flusso.lane.outstanding` as an observable gauge read from the
@@ -535,6 +643,94 @@ mod tests {
         assert!(
             !text.contains(r#"index="carts""#),
             "an open lane, parked and opened again, has no series:\n{text}"
+        );
+    }
+
+    /// Slice 7: each index's gauges, one series per index: `orders` exempt
+    /// and frozen, held by its lane (information: still working), walking;
+    /// `users` neither, but its lane has landed nothing for 5 s, so it is not
+    /// working.
+    #[tokio::test(start_paused = true)]
+    async fn each_index_is_exported_with_its_ingest_state() {
+        let orders = IndexName::try_new("orders").unwrap();
+        let users = IndexName::try_new("users").unwrap();
+        let primary = SinkName::try_new("primary").unwrap();
+        let states = Arc::new(daemon::IndexStates::new([orders.clone(), users.clone()]));
+        // `users`' lane has landed nothing for 5 s: not working (one index's
+        // rule, the states keep no record here).
+        let users_lane = LaneKey::new(users.clone(), primary.clone());
+        let lanes = [
+            users_lane.clone(),
+            LaneKey::new(orders.clone(), primary.clone()),
+        ];
+        let progress = Arc::new(Progress::new(lanes.clone()));
+        let stalls = Arc::new(Stalls::new(lanes));
+        progress.published(
+            &users_lane,
+            stream::ItemKey::new(1),
+            Position::new(1),
+            Position::new(1),
+        );
+        let start = tokio::time::Instant::now();
+        stalls.sample(start, &progress, &NoPositions, None);
+        stalls.sample(
+            start + Duration::from_secs(5),
+            &progress,
+            &NoPositions,
+            None,
+        );
+        let status = Arc::new(
+            Status::new(
+                [
+                    orders.clone(),
+                    users.clone(),
+                    IndexName::try_new("archive").unwrap(),
+                ],
+                [primary.clone()],
+                std::time::Instant::now(),
+            )
+            .with_ingest_indexes([orders.clone(), users.clone()])
+            .with_progress(progress)
+            .with_stalls(stalls),
+        );
+        status.attach_index_states(Arc::clone(&states));
+        states.set_exemption(&orders, daemon::ExemptionState::Frozen);
+        let _full = states.lane_full(&orders, &primary);
+        let _walking =
+            states.walking([(orders.clone(), std::collections::BTreeSet::from([primary]))]);
+
+        let registry = Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .scope_info_enabled(false)
+            .build()
+            .unwrap();
+        let provider = provider_builder().with_reader(exporter).build();
+        let _gauges = index_gauges(&provider.meter("flusso"), status);
+        let text = TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for line in [
+            r#"flusso_index_documents_waiting{index="orders"} 0"#,
+            r#"flusso_index_backlog_age_seconds{index="orders"} 0"#,
+            r#"flusso_index_exempt{index="orders"} 1"#,
+            r#"flusso_index_frozen{index="orders"} 1"#,
+            r#"flusso_index_working{index="orders"} 1"#,
+            r#"flusso_index_held{by="budget",index="orders"} 0"#,
+            r#"flusso_index_held{by="lane",index="orders"} 1"#,
+            r#"flusso_index_backfilling{index="orders"} 1"#,
+            r#"flusso_index_documents_waiting{index="users"} 0"#,
+            r#"flusso_index_exempt{index="users"} 0"#,
+            r#"flusso_index_frozen{index="users"} 0"#,
+            r#"flusso_index_working{index="users"} 0"#,
+            r#"flusso_index_held{by="lane",index="users"} 0"#,
+            r#"flusso_index_backfilling{index="users"} 0"#,
+        ] {
+            assert!(text.contains(line), "{line} missing from:\n{text}");
+        }
+        assert!(
+            !text.contains(r#"index="archive""#),
+            "a disabled index has no series:\n{text}"
         );
     }
 

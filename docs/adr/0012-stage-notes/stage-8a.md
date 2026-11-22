@@ -2560,6 +2560,389 @@ builder nothing else holds the permit.
 The "not pinned" list above loses "no read ahead" and "the abort of a read still waiting for the
 permit"; it keeps the expected gain.
 
+#### Slice 7 as designed against the code (checked before building)
+
+Checked against `059f3602` (6b-3 after its fix round). The plan above names the section
+(`ingest.indexes.<name>`, decision (b)4), `flusso.index.backlog_age`, `flusso.reader.waits{bound}`,
+the two routes and `FlussoIndexBacklog`; ADR 0012 §6's per-index list ("phase, pending, builds, bytes
+held, and per sink the stall age, WAL behind and items in flight") predates decision 4 and 6b: the
+per-sink half is already `sinks.<sink>.lanes.<index>` (stall age, WAL behind, outstanding, health).
+So the section holds what the ingest side alone knows, the answer to "which index is behind or stuck,
+and why". Where the plan is silent, chosen here:
+
+**Where it comes from.** The engine keeps one `engine::IndexStates` for its life (as it keeps
+`Outstanding` and the exemption's log lines), handed to the daemon's `Status` as a read handle
+(`Status::with_index_states`), as `Progress`, `Budget` and `Stalls` are. Written only at edges: the
+dispatcher's 1 s tick (the exemption state, from `Lead::deciding`, the rule the log lines already
+read), a hold's start and end (where `Lead::hold` is called, and for one builder too), a walk's start
+and end (the `Snapshot` carries a guard that clears its index on drop, so a stop or a failure clears
+it). Nothing on the path a change takes; the daemon stays transport-free (data and a handle).
+
+**`ingest.indexes.<name>`**, one entry per enabled index with lanes:
+
+| Field | Type | What | From |
+| --- | --- | --- | --- |
+| `documents_waiting` | integer | documents read and not yet taken by a build | `Progress::waiting_on` (live) |
+| `backlog_seconds` | number | how long the index's oldest unbuilt change has stayed its oldest (waiting, or in a build not yet sent): 0 when none. Sampled each second, as a lane's stall age is; a busy index building steadily stays near 0 | `Stalls`, over `Progress::oldest_unbuilt` |
+| `exemption` | `"none"` / `"exempt"` / `"frozen"` | 6b-2's three states: not exempt; exempt and growing (reading goes on for the others); exempt and frozen (may drain, not grow). Always `"none"` with one index | the tick |
+| `exemption_since` | RFC 3339 / absent | when it entered that state (to the tick); absent while `"none"` | the tick |
+| `working` | bool | 6b-2's rule: not held, and none of its items has waited on a lane 5 s unacknowledged (`STUCK_AFTER`). With one index (no record): not held | `IndexStates` + `Outstanding` (live) |
+| `held_by` | `null` / `"budget"` / `"lane"` | what holds its builder: its live batch refused by the memory budget, or a publish blocked on a full lane | the hold's edges |
+| `held_sinks` | array | with `"lane"`, the sinks whose lanes are full; absent otherwise | the publish |
+| `held_since` | RFC 3339 / absent | when the hold began | the hold's edges |
+| `backfill` | `null` / `{"sinks": [...]}` | the index's walk in progress, and the sinks it serves | the walk's start and drop |
+
+The budget's reason (share or limit) is not split out: the builder sees one refusal per batch, and
+`memory` above already says whether the whole budget is full. The per-sink lane fields stay where
+they are; the section names no sink but in `held_sinks` and `backfill`.
+
+**`GET /indexes/<name>/status`** (public): that entry alone, `200`. `400` for a name that is not a
+valid index name, `404` (`{"error": …, "indexes": [...]}`) for an unknown or disabled index.
+**`POST /indexes/<name>/reindex[?sink=<name>]`** (private, Basic auth): `202` queued; `400` invalid
+index or sink name; `404` unknown index or sink; `503` stopping or the engine not running
+(`ControlError`'s other cases). `POST /reindex` is removed. axum 0.8 path syntax (`/indexes/{name}/…`).
+
+**Metrics** (observable gauges read from `Status` at collection, `index` label, one series per index
+with one index too):
+
+| Instrument | Prometheus | Unit | What |
+| --- | --- | --- | --- |
+| `flusso.index.documents_waiting` | `flusso_index_documents_waiting` | documents | `documents_waiting` (the pending documents: there is one count; the exempt ones are the exempt indexes' share of it) |
+| `flusso.index.backlog_age` | `flusso_index_backlog_age_seconds` | s | `backlog_seconds` |
+| `flusso.index.exempt` | `flusso_index_exempt` | 0/1 | 1 while `"exempt"` or `"frozen"` |
+| `flusso.index.frozen` | `flusso_index_frozen` | 0/1 | 1 while `"frozen"` |
+| `flusso.index.working` | `flusso_index_working` | 0/1 | `working` |
+| `flusso.index.held` | `flusso_index_held` | 0/1, label `by` (`budget`, `lane`) | 1 on the series of what holds it; both 0 while not held |
+| `flusso.index.backfilling` | `flusso_index_backfilling` | 0/1 | 1 while its walk runs |
+
+**`flusso.reader.waits{bound}`** (`flusso_reader_waits_seconds_{bucket,sum,count}`): a histogram of each
+wait of the reader at its lead, by the bound that stopped it, recorded when the wait ends (`count` is
+how often, `sum` how long): `per_index` (a non-exempt or frozen index at its cap), `total` (the
+non-exempt indexes' documents), `changes` (changes read ahead), `pending` (the exempt indexes at
+`max_pending_documents`). The budget is no bound of the reader's: it holds builders, which the lead then
+sees as one of these. Reported through a new `Observer::on_reader_wait(ReaderBound, Duration)`; the
+lead's check returns the bound it found (`Lead::reached_by`), so a check costs what it did.
+
+**`FlussoIndexBacklog`**: `max by (index) (flusso_index_exempt) > 0 or max by (index)
+(flusso_index_working) == 0`, `for: 10m` (a value in the chart). It fires for an index exempt (its
+backlog growing or frozen while the others go on) or not working (held, or its items unacknowledged
+for 5 s) for ten minutes; `backlog_age` is in the annotation. The dev dashboard gets a per-index row:
+backlog age, the exempt / not working / held states, and the reader's waits by bound.
+
+**Tests, written first**: one per field (daemon `status::tests` over a hand-built `IndexStates`, and an
+engine test that each edge writes it), one per endpoint and refusal (`http::tests`), one per metric
+(`telemetry::metrics::tests`' pattern), the reader's bound per kind (`reader::tests`), the alert with
+promtool's unit tests. No `flusso-cli` e2e calls `/reindex` today (checked): the route moves with its
+unit tests and the admin client.
+
+#### Slice 7 as built
+
+Built as "Slice 7 as designed against the code" states, in commits that each build: the engine's
+`IndexStates` and the reader's bound, the daemon's section and backlog age, the routes, the metrics,
+the alert and dashboard. What building added:
+
+- **`Status` takes the engine's handle after it is built** (`Status::attach_index_states`, a
+  `OnceLock`): the daemon builds `Status` before the ingest engine (its observer needs it), and the
+  engine makes its `IndexStates` (it holds the engine's record of unacknowledged items). Until
+  attached, an entry shows nothing held and working.
+- **`IndexStates`' writers are public** (`set_exemption`, `budget`, `lane_full`, `walking`): only the
+  engine calls them in a deployment; the daemon's and the CLI's tests put an index in each state with
+  them.
+- **`DaemonControl::detached`**: a control with no deployment behind it, for the transport's route tests.
+- **Error bodies are JSON** on both index routes (`{"error": …}`; a `404` for an unknown index adds
+  `"indexes"`); the old `POST /reindex` answered text.
+- **The alert's summary reads the chart's `indexBacklogFor`**, so a changed period isn't misstated.
+- **Exported names** (checked by the tests, as the OpenTelemetry Prometheus exporter writes them):
+  `flusso_index_documents_waiting`, `flusso_index_backlog_age_seconds`, `flusso_index_exempt`,
+  `flusso_index_frozen`, `flusso_index_working`, `flusso_index_held{by}`, `flusso_index_backfilling`,
+  `flusso_reader_waits_seconds_{bucket,sum,count}{bound}` (buckets as `flusso.stage.duration`'s).
+
+**Tests** (the pattern of each place they sit): `index_states::tests` (four: the exemption's since,
+a hold from its first reason to its last, a walk's guard, the 5 s rule); `ingest::tests::states` (five,
+through the engine: a lane hold and the exemption shown and cleared, a budget hold, a walk while it
+runs and after a stop, each reader wait reported with its bound); `reader::tests`' `the_lead_names_*`
+(each bound); `stall::tests`' `an_index_backlog_ages_while_its_oldest_change_stays_unbuilt`;
+`status::tests` (five: an entry per index at rest and its JSON, documents waiting and backlog age, an
+exempt index held by a lane, a budget hold and a walk, an unknown index); the daemon's
+`the_status_reads_each_index_from_the_ingest_engine`; `http::tests` (five: the entry served and equal to
+`/status`'s, `404`/`400` for an index, each surface's routes only, a reindex queued on the index path and
+the old route gone, every refusal: `400` index or sink, `404` index or sink, `401`, `503` stopping);
+`admin::tests`' `a_reindex_posts_to_the_index_path`; `telemetry::metrics::tests`'
+`each_index_is_exported_with_its_ingest_state`; `observer::tests`'
+`the_readers_waits_are_a_histogram_by_bound`; the promtool unit test of `FlussoIndexBacklog` (exempt
+and not working fire at 10 minutes, at rest never). No `flusso-cli` e2e called `/reindex`.
+
+**Mutations** (each compiles; none hangs):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| exemption | the tick writes no exemption | `a_lane_hold_and_the_exemption_are_shown_and_cleared` |
+| held by the budget | the builder records no budget hold | `a_budget_hold_is_shown_and_cleared` |
+| held by a lane | a pending publish records no lane hold | `a_lane_hold_and_the_exemption_are_shown_and_cleared` |
+| walking | the snapshot shows no walk | `a_walk_is_shown_while_it_runs`, `a_walk_stopped_is_no_longer_shown` |
+| reader bound | the lead names `per_index` for the total bound | `the_lead_names_the_bound_it_is_at_with_one_builder` |
+| backlog age | never sampled | `an_index_backlog_ages_while_its_oldest_change_stays_unbuilt`, `documents_waiting_and_the_backlog_age_are_read_per_index` |
+| wiring | the daemon attaches no states | `the_status_reads_each_index_from_the_ingest_engine` |
+
+**Not pinned**: the reader's `changes` and `pending` bounds through the engine (the lead unit tests
+pin each, the engine test only `per_index`); the dashboard panels (no test renders Grafana); the alert
+over a real scrape (promtool's unit test runs the rule over series, not over flusso's exporter).
+
+**Costs** (nothing measured): per builder loop pass, one atomic load (`IndexStates::budget`), a lock
+only when the refusal starts or ends; per publish to a lane, the first poll moved before the `.await`
+(no extra poll), a lock only while a lane is full; per tick (two or more builders), one lock per index
+to set its exemption; per sample (1 s), one pending lock per index for its backlog; per reader wait, one
+clock read and an observer call; per scrape, `ingest_indexes` once per gauge (seven), each a progress
+lock, a stalls lock and a states lock per index. One index: the budget and lane writes and the walk
+guard as above; no tick work.
+
+**User-visible** (superseded by fix round 1's list below; kept as built):
+
+- **`/status` gains `ingest.indexes.<name>`**, one entry per enabled index (the existing `indexes.<name>`
+  is unchanged):
+  - `documents_waiting` (integer): documents read and not yet taken by a build;
+  - `backlog_seconds` (number): how long the index's oldest change not built yet (waiting, or in a build
+    not yet sent to a sink) has stayed its oldest, sampled each second; 0 when none. Near 0 for an index
+    that builds steadily;
+  - `exemption` (`"none"`, `"exempt"`, `"frozen"`): `exempt` = held at `max_waiting_per_index` while
+    another index works, so the reading goes on for the others; `frozen` = exempt, its hold ended or no
+    other index works, so it may drain but not grow; always `"none"` with one index;
+  - `exemption_since` (RFC 3339, UTC; absent while `"none"`);
+  - `working` (bool): not held, and none of its items has waited on a sink 5 s unacknowledged;
+  - `held_by` (`null`, `"budget"`, `"lane"`): its live batch refused by the memory budget, or a publish
+    blocked on a full lane;
+  - `held_sinks` (array of sink names; only with `"lane"`);
+  - `held_since` (RFC 3339, UTC; absent while not held);
+  - `backfill` (`null` or `{"sinks": [...]}`): its backfill walk in progress and the sinks it serves.
+- **`GET /indexes/<name>/status`** (public surface, unauthenticated): that entry alone, `200`; `400`
+  `{"error": …}` for a name that is no index name; `404` `{"error": …, "indexes": [...]}` for an unknown
+  or disabled index. The private surface answers `404` for it.
+- **`POST /indexes/<name>/reindex[?sink=<name>]`** (private surface, Basic auth) replaces
+  `POST /reindex?index=…&sink=…`, which is **removed** (breaking): `202` and `reindex of <index> on <sink>
+  queued` (or `on every sink`); `400` `{"error": …}` for an invalid index or sink name; `404` for an unknown
+  index (with `"indexes"`) or sink; `401` without credentials; `503` while stopping or with the engine
+  not running. The public surface answers `404` for it. `flusso reindex <index> [--sink <name>]` posts
+  there and refuses a name that is no index name before sending; `GET /indexes` is unchanged.
+- **Metrics**, every one labelled `index` (one series per enabled index, one index too), read at
+  collection:
+  - `flusso.index.documents_waiting` → `flusso_index_documents_waiting`: documents waiting;
+  - `flusso.index.backlog_age` (s) → `flusso_index_backlog_age_seconds`: `backlog_seconds`;
+  - `flusso.index.exempt` → `flusso_index_exempt`: 1 while exempt or frozen, else 0;
+  - `flusso.index.frozen` → `flusso_index_frozen`: 1 while frozen;
+  - `flusso.index.working` → `flusso_index_working`: 1 while working;
+  - `flusso.index.held{by}` → `flusso_index_held{by="budget"|"lane"}`: 1 on the series of what holds
+    it, 0 on the other; both 0 while not held;
+  - `flusso.index.backfilling` → `flusso_index_backfilling`: 1 while its walk runs.
+- **`flusso.reader.waits{bound}`** (s, histogram) → `flusso_reader_waits_seconds_bucket`, `_sum`,
+  `_count`: each wait of the reader at its lead, recorded when it ends, by the bound that stopped it:
+  `per_index` (an index at `max_waiting_per_index`, or a frozen index at the count it froze at),
+  `total` (the non-exempt indexes' documents at `max_waiting`), `changes` (`max_waiting` changes read
+  ahead), `pending` (the exempt indexes at `max_pending_documents`). `_count` is how often, `_sum` how
+  long. The memory budget is no bound of the reader's: it holds builds, which then show here as one of
+  these.
+- **Alert `FlussoIndexBacklog`**: `max by (index) (flusso_index_exempt) > 0 or max by (index)
+  (flusso_index_working) == 0`, `for: 10m` (the chart's `prometheusRule.indexBacklogFor`), severity
+  `page`, labels `index`; summary "flusso's <index> index has been exempt or not working for 10m";
+  runbook: the stalled-lane page (`operate/stalled-lane.html`). In the dev Prometheus rules and the Helm
+  chart's `PrometheusRule`.
+- **The dev Grafana dashboard** gets a per-index row: backlog age, exempt / frozen / held / not working,
+  the reader's waits by bound.
+- **The `[server]` key descriptions** (`public_address`, `private_address`) name the new routes (editor
+  schema regenerated); no key changes.
+
+#### Slice 7, fix round 1 (the review of `261e0f39`)
+
+| Finding | Fix | Tests (fail before the fix, or under the mutation) |
+| --- | --- | --- |
+| 1: `working` read false while a healthy sink was saturated (held by the budget most of the time), so `FlussoIndexBacklog` would page during a long healthy burst | `held_by`/`held_sinks`/`held_since` stay, as information. `working` is about progress: false while items of the index wait on a lane and none was acknowledged for 5 s (6b-2's rule). With two or more indexes the engine's record answers (`IndexView.stuck`); with one, which keeps no record (one index pays nothing for it), the daemon reads its lanes' stall ages (`Stalls`, live items only: a backfill-only stall with one index isn't seen there, `FlussoLaneParked` covers a refused backfill page). The exemption's rule inside the reader is unchanged. The alert no longer reads "held": `max by (index) (flusso_index_exempt) > 0 or max by (index) (flusso_index_backlog_age_seconds) > 60`, `for: 10m` | `a_healthy_sink_bound_burst_is_never_stuck` (the reviewer's, over two indexes so the record exists; it samples `stuck`, since one index's answer lives in the daemon), `an_index_whose_lane_lands_nothing_for_five_seconds_does_not_work`, the held cases of `status::tests` (held: working), the promtool cases |
+| 2: `backlog_seconds` read about 0 for an index falling behind (the age reset whenever the oldest was built) | a lag: how long ago the index's oldest unbuilt change was read. `Stalls` keeps, at each 1 s sample, how many changes had been read (`(changes_read, instant)`, only what an unbuilt change may need, at most `BACKLOG_SPAN` = 3,600 samples, so an hour: an older change reads as an hour); `Progress::oldest_unbuilt` gives the change's read number, and its age is from the first sample that had read it (resolution 1 s, a change read since the last sample counting as read now). 0 when nothing is unbuilt, and while no engine run is live (staging, a long start, a restart's backoff, a source down: nothing is read, nothing grows) | `a_slow_index_falling_behind_shows_its_backlog` (removed in fix round 2: it fed `Progress` by hand with no reader bound, a state the engine never reaches), `a_steady_index_has_no_backlog`, `a_stuck_or_exempt_index_backlog_grows_a_second_a_second`, `a_draining_index_backlog_falls_as_it_catches_up`, `documents_waiting_and_the_backlog_age_are_read_per_index` (0 between runs) |
+| 3: state went stale after a failed run (an exemption from before a source outage stayed shown, and counted by the alert) | a guard in `IngestEngine::run` clears the exemption and the budget hold of every index when the run ends by any path (`IndexStates::clear_run`); lane holds and walks clear by their own guards | `a_failed_run_leaves_no_exemption_shown` (the reviewer's), `a_failed_run_leaves_no_budget_hold_shown`, `a_stopped_run_leaves_no_exemption_shown`, `a_runs_end_clears_the_exemption_and_the_budget_hold` |
+| 4: `plugin/skills/flusso-opensearch/SKILL.md` named `POST /reindex` | fixed; the repo grep finds the old route only in `docs/src` (the documentation agent's) and in tests asserting it is gone | `agent_docs_paths`' `no_agent_doc_names_a_route_that_is_gone` (fails on the literal in `plugin/**`, `.claude/**`) |
+| 5: `indexes()` lost its doc to `oldest_unbuilt` | both restored | — |
+| 6: a second hold reusing the first's start was not pinned | — | `a_second_hold_starts_when_it_does` |
+| 7: a blocked `SnapshotComplete` showed no lane hold | every publish of the engine's goes through `IngestEngine::publish_to` (one rule for a lane hold), `finish_snapshot`'s included. The reader's `Lead::hold` keeps its own edges (it is the exemption's rule, not what `/status` shows) | `a_snapshot_end_blocked_on_a_full_lane_shows_the_lane_hold` (one index) |
+| 8: reader-wait buckets stopped at 30 s; a wait ended at its first poll was recorded | buckets add 60, 120, 300, 600 s; only a wait that pended is reported | `only_a_wait_that_pended_is_reported`, the bucket lines in `the_readers_waits_are_a_histogram_by_bound` |
+| 9: planning awaited in an arm body inside the gate's lines | the builder leaves every line before it starts a snapshot (G9′) | — (a scheduling rule; no test can tell a parked waiter from none here) |
+| 10: API hygiene | `LaneFull`/`Walking` re-exported; `ReaderBound`, `ExemptionState`, `HeldBy`, `IndexView` `#[non_exhaustive]`; `IndexView.exemption`, `Exemption` and `IndexHold` documented | — |
+| 11: a whole snapshot per route check; text `202` | `Status::tracks`/`index_names`; `202` is `{"index", "sink", "queued": true}`; `flusso reindex` prints it as before | `a_reindex_is_queued_on_the_index_path`, `a_queued_reindex_is_printed_from_its_json` |
+| 12: the private surface answers `404` for `GET /indexes/<name>/status` | a choice: the route reads nothing private, and one surface serving it keeps "public reads, private acts" | — |
+
+**The threshold, 60 s.** Reading ahead is bounded (`max_waiting_per_index`, `max_waiting`), so an index
+keeping up, even at its sink's limit, has its oldest unbuilt change a few batches old: seconds. A minute
+leaves room for slow builds (large documents, a slow database); `for: 10m` makes only a state that lasts
+page. It is not a lag behind the source (fix round 2): an index that paces the reader never gets past its
+read-ahead here, however far behind it falls. And it does page during a planned catch-up longer than
+`for` when one index is slower than the others, since that index is exempt meanwhile (fix round 2). Exempt alone also fires (`> 0`, `for: 10m`): an exempt index
+is held at its cap while the others read on, which is what an operator must hear about even before its
+backlog is a minute old. Quiet in staging and a long start (no run reads: backlog 0, nothing exempt), during
+a restart's backoff and a source outage (the run-end guard, and backlog 0), and while stopping (a stop is
+bounded by `--shutdown-timeout-secs`, 30 s, well under `for`).
+
+**What the backlog shows** (corrected in fix round 2; pinned in `stall::tests` unless named):
+
+| Case | `backlog_seconds` |
+| --- | --- |
+| steady healthy load | 0 (to the sample) |
+| a stuck index, the reader stopped at its lead | grows a second a second from its first unbuilt read |
+| an exempt index growing | the same: its oldest is never built |
+| an exempt index draining slowly | falls as it catches up (by a second a second when it drains twice as fast as it read), then 0 |
+| an index pacing the reader (at its sink's limit, or falling behind its source) | within its read-ahead: seconds, since reading stops at its cap (`an_index_falling_behind_its_source_keeps_a_backlog_within_its_read_ahead`, through the engine). Its lag behind the source is its lanes' WAL behind and the slot lag |
+| a build blocked at its publish, nothing else waiting | 0 while its lane is full (its documents were taken); `FlussoLaneStalled` covers it |
+| older than an hour | an hour (`BACKLOG_SPAN` samples) |
+| between engine runs, and right after a run goes live or fails | 0 (`a_restarted_run_shows_no_backlog_from_before_it`) |
+
+**Mutations** (round 1; each compiles, none hangs):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| working | working is "not held" again | `a_budget_hold_and_a_walk_are_shown`, `an_exempt_index_held_by_a_full_lane_is_shown_with_since` |
+| working, one index | the lanes' stall ages ignored | `an_index_whose_lane_lands_nothing_for_five_seconds_does_not_work` |
+| backlog | measured from the newest sample, not the one that read the change | the four `stall::tests` backlog cases, `documents_waiting_and_the_backlog_age_are_read_per_index` |
+| backlog | read between runs too | `documents_waiting_and_the_backlog_age_are_read_per_index` |
+| run end | no guard | `a_failed_run_leaves_no_exemption_shown`, `a_failed_run_leaves_no_budget_hold_shown`, `a_stopped_run_leaves_no_exemption_shown` |
+| one hold rule | the snapshot's end publishes directly | `a_snapshot_end_blocked_on_a_full_lane_shows_the_lane_hold` |
+| reader waits | a wait ended at its first poll is recorded | `only_a_wait_that_pended_is_reported` |
+| holds | `held_since` never cleared | `a_second_hold_starts_when_it_does` |
+
+**User-visible after fix round 1**: superseded by the list at the end of fix round 2.
+
+#### Slice 7, fix round 2 (the review of `d45b8464`)
+
+| Finding | Fix | Tests (fail before the fix, or under the mutation) |
+| --- | --- | --- |
+| 1: `backlog_seconds` cannot show an index falling behind its source unless it is exempt (reading stops at the index's cap, so its oldest unbuilt change is never older than its read-ahead) | the definition stays; every text now says it grows only while the index is stuck or exempt, stays within the read-ahead for an index pacing the reader, and that lag behind the source is the lanes' WAL behind (`sinks.<sink>.lanes.<index>`, `flusso_lane_wal_behind_bytes`) plus `flusso_replication_slot_lag_bytes`: this note's case table, the alert (summary "exempt or stuck"), `values.yaml`, the chart README, the dashboard, `CLAUDE.md`, `pipeline.md`, the field's doc. `flusso.reader.waits` carries `index` on the `per_index` bound (`Lead::reached_by` names the queue). `/status` adds `pacing_reader`, set by a `PacingReader` guard for the length of a `per_index` wait (cheap: two locks per wait that names an index) | `an_index_falling_behind_its_source_keeps_a_backlog_within_its_read_ahead` (the reviewer's, through the engine: over 60 behind, backlog ≤ 3), `the_index_that_stops_the_reader_is_named_and_shown_while_it_does` (two indexes: exactly one pacing at a time, waits named, none at the end), `each_wait_of_the_reader_is_reported_with_its_bound` (one index: `index` named), the CLI's `the_readers_waits_are_a_histogram_by_bound` (`{bound="per_index",index="orders"}`, no `index` on the others). The stuck and exempt cases still grow (`a_stuck_or_exempt_index_backlog_grows_a_second_a_second`). `a_slow_index_falling_behind_shows_its_backlog` is gone |
+| 2: a disabled index was tracked | the ingest side is built from enabled indexes only (`Status::with_ingest_indexes`, set by the daemon): no `ingest.indexes` entry, no `flusso_index_*` series, `404` on both index routes. `indexes.<name>` and `GET /indexes` keep it, as on `main` | `a_disabled_index_has_no_ingest_entry` (daemon), `a_disabled_index_has_no_index_routes` (status `404`, reindex `404`, the two sections), `each_index_is_exported_with_its_ingest_state` (no `index="archive"`) |
+| 3: the chart README described the old alert; the rule hard-coded "a minute" | README rewritten (exempt or stuck, `indexBacklogSeconds`, `indexBacklogFor`, the catch-up, where lag is read); the chart renders `indexBacklogSeconds` and `indexBacklogFor` in the description and summary | `test_alert_rule_copies.py` (the chart at its defaults renders the dev copy, description included), `check-alerts.sh` (promtool cases, `helm lint`, the rendered rules) |
+| 4: the alert pages during a long healthy catch-up with several indexes | kept paging, and said so: the description ("also fires during a planned catch-up longer than `for` when one index is slower than the others: silence it, or raise the period"), `values.yaml` (its "room for a catch-up" was wrong), the chart README, this note | — (wording) |
+| 5: an old backlog showed for up to a second after a restart | `Stalls::forget_backlog` on `mark_ingest_live` and `mark_ingest_failed` | `a_restarted_run_shows_no_backlog_from_before_it` (the reviewer's), `documents_waiting_and_the_backlog_age_are_read_per_index` |
+| 6: the hour cap's mutation survived | — | `a_backlog_older_than_the_samples_kept_reads_their_span` |
+| 7: two unstated limits | stated on `working` (field doc, this note, the list): the engine's record counts backfill items, the one-index rule live items only. On `backlog_seconds`: a build blocked at its publish with nothing else waiting reads 0 while its lane is full (`FlussoLaneStalled`) | — |
+| 8: the agent-docs guard missed `/reindex?sink=`, a `POST` split across lines, a bare `` `/reindex` `` | `gone_reindex_routes` flags a `/reindex` path token unless it sits under `/indexes/<segment>` | `the_gone_route_is_told_from_the_served_one` (gone: `POST /reindex`, `` `/reindex` ``, `/reindex?sink=`, `/reindex?index=`, `POST\n/reindex`, `…/reindex`, `/indexes/reindex`; served: `POST /indexes/<name>/reindex`, `?sink=audit`, a literal name, prose "generations/reindex") |
+
+Not built, as the review asked: an alert for an ingest engine crash loop, and one for source lag that keeps
+growing (the reviewer is filing an issue).
+
+**Mutations** (round 2; each compiles, none hangs):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| hour cap | no `pop_front` past `BACKLOG_SPAN` | `a_backlog_older_than_the_samples_kept_reads_their_span` |
+| restart | `forget_backlog` does nothing | `a_restarted_run_shows_no_backlog_from_before_it` |
+| pacing | the `PacingReader` guard never taken | `the_index_that_stops_the_reader_is_named_and_shown_while_it_does` |
+| index label | `on_reader_wait` handed no index | `each_wait_of_the_reader_is_reported_with_its_bound`, `the_index_that_stops_the_reader_is_named_and_shown_while_it_does` |
+| disabled | `with_ingest_indexes` ignored | `a_disabled_index_has_no_ingest_entry` |
+
+**User-visible, slice 7 as it now stands** (for the documentation agent; replaces every earlier list):
+
+- **`/status` gains `ingest.indexes.<name>`**, one entry per **enabled** index (the existing
+  `indexes.<name>` is unchanged). Every field, always present unless noted:
+  - `documents_waiting` (integer): documents of the index read and not yet taken by a build.
+  - `backlog_seconds` (number): how long ago the index's oldest change not built yet (waiting, or in a
+    build not yet sent to a sink) was read; 0 when none, and while no engine run reads (starting, a
+    restart's backoff, a source down; a restarted run starts from 0, nothing from before it is shown).
+    Sampled each second (resolution 1 s); at most an hour (3,600 s), an older one reading as an hour.
+    **It grows only while the index is stuck or exempt**, and falls as it catches up. Reading stops at
+    an index's cap, so an index that paces the reader stays within its read-ahead (seconds), both at
+    its sink's limit and however far it falls behind the source. A build blocked at its publish with
+    nothing else waiting reads 0 while its lane is full (`FlussoLaneStalled` covers that).
+  - `exemption` (`"none"`, `"exempt"`, `"frozen"`): `"exempt"`, held at `max_waiting_per_index` while
+    another index works, so the reading goes on for the others (its documents count only toward
+    `max_pending_documents`); `"frozen"`, exempt but its hold ended or no other index works, so it may
+    drain but not grow; always `"none"` with one index, and between engine runs.
+  - `exemption_since` (RFC 3339, UTC): when it entered that state; absent while `"none"`.
+  - `working` (bool): false while items of the index wait at a sink and none was acknowledged for 5 s.
+    With one index: while a sink's lane of it has landed nothing for 5 s, live changes only, so a
+    backfill nothing acknowledges still reads as working there (`FlussoLaneParked` covers a refused
+    backfill page); with two or more, backfill items count too. About progress, not holds: an index
+    held by the memory budget whose sink keeps acknowledging works.
+  - `held_by` (`null`, `"budget"`, `"lane"`): what holds its builder now, for information: its live batch
+    refused by the memory budget, or a publish (a batch, or a backfill's end) blocked on a full lane.
+    Cleared when an engine run ends.
+  - `held_sinks` (array of sink names): with `"lane"`, the sinks whose lanes are full; absent otherwise.
+  - `held_since` (RFC 3339, UTC): when the hold began (a new hold starts its own); absent while not held.
+  - `backfill` (`null` or `{"sinks": [...]}`): its backfill walk in progress and the sinks it serves.
+  - `pacing_reader` (bool): the reader is stopped at this index's bound now (`max_waiting_per_index`,
+    or the count a frozen index froze at): this index is the one pacing the reading.
+- **How far an index is behind its source** is not `backlog_seconds`: read its lanes' WAL behind,
+  `/status`'s `sinks.<sink>.lanes.<index>` (`wal_behind_bytes`) and the metric
+  `flusso_lane_wal_behind_bytes{sink,index}`, and the slot's lag, `flusso_replication_slot_lag_bytes`.
+- **Disabled indexes** (`enabled = false`) are not tracked: no `ingest.indexes.<name>` entry, no
+  `flusso_index_*` series, and `404` on both `GET /indexes/<name>/status` and
+  `POST /indexes/<name>/reindex` (their `indexes` list names the enabled ones). `/status`'s
+  `indexes.<name>` and `GET /indexes` still list them, as before.
+- **`GET /indexes/<name>/status`** (public surface, unauthenticated): that entry alone.
+  - `200`: the entry, the same JSON as `/status`'s `ingest.indexes.<name>`.
+  - `400` `{"error": "invalid index name \"…\""}`: not an index name.
+  - `404` `{"error": "unknown index <name>", "indexes": ["…", …]}`: unknown or disabled; `indexes` names
+    the enabled ones.
+  - The private surface answers `404` for this route (a choice: it reads nothing private).
+- **`POST /indexes/<name>/reindex[?sink=<name>]`** (private surface, HTTP Basic auth) replaces `POST
+  /reindex?index=<name>[&sink=<name>]`, which is **removed** (breaking).
+  - `202` `{"index": "<name>", "sink": "<sink>" | null, "queued": true}` (`null`: every sink).
+  - `400` `{"error": "invalid index name \"…\""}` or `{"error": "invalid sink name \"…\""}`.
+  - `404` `{"error": "unknown index <name>", "indexes": [...]}` (unknown or disabled) or
+    `{"error": "unknown sink <name>"}`.
+  - `401` without valid credentials.
+  - `503` `{"error": "…"}` while stopping (`the deployment is stopping and takes no new operations`), or
+    when the sink engine is not taking operations (closed, or busy: retry shortly).
+  - The public surface answers `404` for it. `flusso reindex <index> [--sink <name>]` posts here, refuses
+    a name that is no index name before sending, and prints `reindex of <index> on <sink> queued` (or
+    `on every sink queued`). `GET /indexes` is unchanged.
+- **Metrics**, every one labelled `index`, one series per enabled index (with one index too), read at
+  collection (gauges):
+  - `flusso.index.documents_waiting` → `flusso_index_documents_waiting`: `documents_waiting`.
+  - `flusso.index.backlog_age` (unit s) → `flusso_index_backlog_age_seconds`: `backlog_seconds` (same
+    meaning: grows only while exempt or stuck).
+  - `flusso.index.exempt` → `flusso_index_exempt`: 1 while `"exempt"` or `"frozen"`, else 0.
+  - `flusso.index.frozen` → `flusso_index_frozen`: 1 while `"frozen"`.
+  - `flusso.index.working` → `flusso_index_working`: 1 while `working`.
+  - `flusso.index.held{by}` → `flusso_index_held{by="budget"|"lane",index}`: 1 on the series of what holds
+    it, 0 on the other; both 0 while not held.
+  - `flusso.index.backfilling` → `flusso_index_backfilling`: 1 while its walk runs.
+- **`flusso.reader.waits{bound[,index]}`** (histogram, unit s) → `flusso_reader_waits_seconds_bucket`,
+  `_sum`, `_count`: each wait of the reader at its lead, recorded when it ends, by the bound that stopped
+  it; a check that found room at once is not a wait. `bound`: `per_index` (an index at
+  `max_waiting_per_index`, or a frozen one at the count it froze at) **with an `index` label naming that
+  index**; `total` (the non-exempt indexes' documents at `max_waiting`), `changes` (`max_waiting` changes
+  read ahead) and `pending` (the exempt indexes at `max_pending_documents`) with **no `index` label**.
+  Buckets (s): 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5,
+  5, 10, 30, 60, 120, 300, 600. `_count` is how often it stopped, `_sum` how long. The memory budget is
+  no bound of the reader's: it holds builds, which then show here as one of these.
+- **Alert `FlussoIndexBacklog`** (dev Prometheus rules and the Helm chart's `PrometheusRule`):
+  - expr: `max by (index) (flusso_index_exempt) > 0 or max by (index) (flusso_index_backlog_age_seconds) > 60`
+    (the chart renders `prometheusRule.indexBacklogSeconds`, default 60);
+  - `for: 10m` (`prometheusRule.indexBacklogFor`); labels `severity: page` (`prometheusRule.severity`),
+    `index`;
+  - summary: `flusso's <index> index has been exempt or stuck for 10m` (the chart renders
+    `indexBacklogFor`);
+  - description: "The index has been exempt (held at max_waiting_per_index while the other indexes read
+    on: its changes are kept as documents to build, up to max_pending_documents, and the slot stays
+    pinned by it), or stuck (its oldest change not built yet was read over 60 s ago: nothing of it is
+    being built), the whole period. It also fires during a planned catch-up longer than 10m when one
+    index is slower than the others (it is exempt meanwhile): silence it, or raise the period. /status
+    names why under ingest.indexes.<index>: held_by and held_sinks (a full lane: the sink is slow,
+    refusing or down, see FlussoLaneStalled and FlussoLaneParked; or the memory budget), working (false:
+    a sink has acknowledged nothing for 5 s), backlog_seconds, pacing_reader. How far an index is behind
+    the source is not this alert: read its lanes' WAL behind (flusso_lane_wal_behind_bytes) and the slot
+    lag (flusso_replication_slot_lag_bytes)." (The chart renders 60 s and 10m from its values.)
+  - runbook: `operate/stalled-lane.html` (a section for this alert belongs there).
+  - Quiet for a healthy index at its sink's limit and for an index merely behind its source (its
+    backlog stays seconds old), while starting, between engine runs and while stopping. It pages during
+    a planned catch-up longer than `for` when one index is slower than the others, by design.
+- **Helm chart**: `prometheusRule.indexBacklogSeconds` (60) and `prometheusRule.indexBacklogFor` (10m);
+  the chart README's alert list describes the alert as above.
+- **Dev Grafana dashboard**, a per-index row: "Index backlog age" (`max by (index)
+  (flusso_index_backlog_age_seconds)`; its description says it grows only while exempt or stuck and
+  points at the WAL held per lane panel for lag), "Indexes exempt, frozen, held or not working"
+  (`flusso_index_exempt`, `flusso_index_frozen`, `flusso_index_held` by `by`, `1 - flusso_index_working`),
+  "Reader waits at its lead, by bound" (`rate(flusso_reader_waits_seconds_count[5m])` and `_sum`, by
+  `bound`).
+- **`[server]`**: the `public_address`/`private_address` descriptions name the new routes; no key changes.
+- **Pages still naming the old route** (`docs/src`, for the documentation agent): `reference/http.md:8`
+  and `:186` (the heading and its anchors), `reference/cli.md:105` and `:240`, `operate/reindex.md:35`,
+  `operate/private-surface.md:7`, `reference/config-toml.md:282`, and the 0.19 upgrade page (the route's
+  removal is breaking).
+
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
 | Rule | |

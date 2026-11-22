@@ -360,6 +360,17 @@ impl Pending {
             .min()
     }
 
+    /// The least read number of an id not built yet: one waiting, or in a
+    /// build no lane has been sent yet (slice 7's backlog age).
+    pub(crate) fn oldest_unbuilt(&self) -> Option<u64> {
+        self.builds
+            .iter()
+            .filter(|build| !build.sending)
+            .map(|build| build.least_read)
+            .chain(self.least_waiting_read())
+            .min()
+    }
+
     /// The oldest change any of its ids holds back on any lane.
     #[cfg(test)]
     pub(crate) fn minimum(&self) -> Option<Position> {

@@ -1946,9 +1946,51 @@ attached via `with_observer`; metric names/labels/buckets live here because they
 choice), serves **two** HTTP surfaces (`http/mod.rs`): a **public** one (`/healthz` `/readyz`
 `/status` `/metrics` `/wait`, unauthenticated; `/wait` long-polls the daemon's `Fence`, default
 5 s, capped at 60 s: `200` reached, `408` timed out, `400`/`404` refused, `503` before the source
-is live or once flusso is stopping; `/status` adds the process `pid`) and a **private** one (`/indexes`, later `/reindex`; HTTP
-Basic auth in `http/auth.rs`, default `admin`/`flusso` with a loud startup warning), both reading
-the daemon's `Status`, and owns the process signals. It binds **both** listeners up front (a bad
+is live or once flusso is stopping; `/status` adds the process `pid`; `GET /indexes/{name}/status`
+is one index's `ingest.indexes.<name>` entry, `404` naming the known indexes for an unknown or
+disabled one, `400` for no index name) and a **private** one (`GET /indexes`, `POST
+/indexes/{name}/reindex[?sink=]`: `202` `{"index", "sink", "queued": true}`, `400` an invalid index
+or sink name, `404` an unknown one, `503` stopping or not running; `POST /reindex` is gone since slice 7; HTTP Basic auth in
+`http/auth.rs`, default `admin`/`flusso` with a loud startup warning; each listener answers `404` for
+the other's `/indexes/…` routes), both reading the daemon's `Status`, and owns the process signals.
+**Per-index ingest state (ADR 0012 stage 8a, slice 7)**: `/status`'s `ingest.indexes.<name>`
+(`daemon::IndexIngestSnapshot`: `documents_waiting`; `backlog_seconds`, how long ago the index's oldest
+unbuilt change was read, from `Stalls`' ring of `(changes read, instant)` per 1 s sample over
+`Progress::oldest_unbuilt`'s read number, at most `BACKLOG_SPAN` (3,600) samples, 0 while no engine run
+is live and forgotten when one goes live or fails (`Stalls::forget_backlog`); it grows only for an index
+stuck or exempt: reading stops at an index's cap, so one that paces the reader stays within its read-ahead
+(seconds) however far it falls behind the source, which is its lanes' `wal_behind` and the slot lag;
+`pacing_reader`, the reader stopped at this index's `per_index` bound now (the `PacingReader` guard);
+`exemption`/`exemption_since`; `working`, about progress, not holds: false while items of it wait
+on a lane unacknowledged for `engine::STUCK_AFTER` (5 s), from the engine's record with two or more
+indexes and from the lanes' stall ages with one (one index keeps no record); `held_by`/`held_sinks`/
+`held_since`, information only; `backfill`), one entry per **enabled** index (`Status::with_ingest_indexes`:
+a disabled index has no entry, no `flusso.index.*` series and `404` on both index routes, while `indexes.<name>`
+and `GET /indexes` keep it, as on `main`), reads the ingest engine's `engine::IndexStates`, kept for the
+engine's life and attached to `Status` once the engine exists (`Status::attach_index_states`). The engine
+writes it only at edges (the tick's exemption, `IndexStates::budget` in the builder's loop on a change,
+`lane_full` while any publish pends, `IngestEngine::publish_to` being the one path, a snapshot's end
+included; the `Walking` guard on the snapshot), and an engine run's end, by any path, clears the
+exemption and the budget hold (`ClearsAtRunEnd` → `IndexStates::clear_run`). Metrics (observable gauges
+read from `Status`, `telemetry/metrics.rs`'s `register_index_gauges`): `flusso.index.{documents_waiting,
+backlog_age, exempt, frozen, working, held{by}, backfilling}`; `flusso.reader.waits{bound}` (plus `index` on `per_index`) is a
+histogram (buckets up to 600 s) recorded by `Observer::on_reader_wait` (`ReaderBound`: `per_index`,
+`total`, `changes`, `pending`, from `Lead::reached_by`) only for a wait that pended past its first poll.
+Alert `FlussoIndexBacklog`: `max by (index) (flusso_index_exempt) > 0 or max by (index)
+(flusso_index_backlog_age_seconds) > 60`, `for: 10m` (the chart's `indexBacklogSeconds`/`indexBacklogFor`):
+"exempt or stuck", never "held" (a healthy sink at its limit holds its builder) and not lag behind the
+source (bounded reading keeps a non-exempt backlog seconds old); it also fires during a planned catch-up
+longer than `for` when one index is slower than the others (it is exempt meanwhile). Guards: `index_states::tests`, `ingest::tests::states` (incl.
+`a_healthy_sink_bound_burst_is_never_stuck`, the failed-run and stopped-run clears, the snapshot end's lane
+hold), `reader::tests`' `the_lead_names_*` and `only_a_wait_that_pended_is_reported`, `stall::tests`'
+backlog cases (steady, stuck or exempt, draining, the hour cap), `ingest::tests::states`'
+`an_index_falling_behind_its_source_keeps_a_backlog_within_its_read_ahead` and
+`the_index_that_stops_the_reader_is_named_and_shown_while_it_does`, the daemon's
+`a_disabled_index_has_no_ingest_entry`, `status::tests`' ingest cases, the
+daemon's `the_status_reads_each_index_from_the_ingest_engine`, `http::tests`' index-route cases,
+`telemetry::metrics::tests`' `each_index_is_exported_with_its_ingest_state`, `observer::tests`'
+`the_readers_waits_are_a_histogram_by_bound`, the promtool rule test, `agent_docs_paths`'
+`no_agent_doc_names_a_route_that_is_gone`. It binds **both** listeners up front (a bad
 `--public-address`/`--private-address` fails fast; a taken one names the flusso there, from its
 `/status` pid), then `Daemon::with_observer(otel).start()`
 → register the `in_flight` observable gauge (read from `Status` at collection) → serve both →
@@ -2813,8 +2855,9 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | --- | --- |
 | The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the builder's loop; `ingest/reader.rs` the reader: read, resolve, mark, the lead; `ingest/together.rs` the reader, the dispatcher and the builders polled as one task; `ingest/dispatcher.rs` requests forwarded, confirmation, the tick, the end and the stop; `ingest/builder.rs` the builder's loop and request coalescing; `ingest/live.rs` the queued runs formed into batches, `ingest/builds.rs` admission and the grant-ordered slots, `ingest/gate.rs` the build permits (live first, every fourth contested grant to backfill), `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`; `budget.rs` the memory budget: `Budget`, `Reservation`/`Charge`, the heap walk), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in item-key order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `sink_engine/walked.rs` (the landed prefix of a backfill walk, recorded for resume), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
+| Per-index ingest state an operator reads (slice 7: exemption, holds, walk, working) | engine `libs/2-engine/src/index_states.rs` (`IndexStates`); daemon `status.rs` (`ingest.indexes.<name>`, `index_ingest`), `stall.rs` (`backlog`); CLI `http/mod.rs` (`/indexes/{name}/status`), `telemetry/metrics.rs` (`register_index_gauges`), `telemetry/observer.rs` (`flusso.reader.waits`); alert `FlussoIndexBacklog` in `dev/prometheus/rules/` and `deploy/helm/flusso/templates/prometheusrule.yaml` |
 | Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
-| Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `stall.rs` (stall age, WAL behind, `pinned_by`), `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
+| Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`, `detached` for a transport's tests), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs` (incl. `ingest.indexes.<name>`, slice 7), `lag.rs`, `stall.rs` (stall age, WAL behind, `pinned_by`, an index's backlog age), `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
 | Read-after-visible (issue #343): holding a change until its transaction is visible, the stall warning, the synchronous-standby refusal | `libs/2-adapters/source-postgres/src/cdc/stream.rs` (the hold in `pending`, the snapshot read on its own task), `cdc/visibility.rs` (`Snapshot`, `widen`, `poll_delay`, `refuse_standby`, `standby_listing`, `PgVisibility`), `cdc/capture.rs` (`check_server`, `with_read_ahead`, `readable_wait`); `libs/3-daemon/src/status.rs` (`with_source`); CLI `telemetry/metrics.rs` (`register_visibility_wait_gauge`); e2e `libs/2-engine/tests/visibility.rs`; scenario `dev/bench/src/standby.rs` (`sync-standby`) |
 | Read-your-writes (fences), end to end | source: `libs/1-ports/source/src/cdc/capture.rs` (`SourcePosition`, `reached`, `on_advance`), `libs/2-adapters/source-postgres/src/cdc/ack.rs` (`Positions`: stamps + horizon, no map) and `stream.rs` (who moves the horizon); sink: `libs/1-ports/sink/src/sink.rs` (`Visibility`), `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`settle_visibility`); engine: `libs/2-engine/src/progress.rs` (`Progress`: what each lane landed), `sink_engine/writes.rs` (`write_returned` reports to it), `sink_engine/fences.rs` (the searchable queue); daemon: `libs/3-daemon/src/fence.rs`; CLI: `apps/cli/src/http/mod.rs` (`wait`); client: `sdk/query/src/fence.rs`, `position.rs`; e2e: `libs/3-daemon/tests/fence.rs` |
 | Adapter registry (the one place that names adapters): `type` → config struct, `validate`, descriptions, flag overrides | `apps/cli/src/adapters.rs` |
@@ -2833,7 +2876,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
 | CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
-| On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /reindex?index&sink`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
+| On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /indexes/{name}/reindex?sink=`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
 | Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position; `rules/`: read-time fields — `condition.rs` the two-sided tests, `date.rs`, `handles.rs` the rule handles, `list.rs` `Rules`/`Plan`, `field.rs` `RuleField`, `computation.rs`) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `read_time.rs` (what `context`/`rules`/`computed` generate, and which stored fields get a rule handle), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |

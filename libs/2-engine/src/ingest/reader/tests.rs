@@ -15,7 +15,8 @@ use stream::LaneKey;
 
 use super::*;
 use crate::ingest::together::together;
-use crate::observer::NoopObserver;
+use crate::observer::ReaderBound;
+use crate::observer::{NoopObserver, Observer};
 
 const LIMIT: Duration = Duration::from_secs(5);
 
@@ -228,6 +229,7 @@ fn reader(
         },
         lead: Arc::clone(&lead),
         runs: vec![(IndexName::try_new("users").unwrap(), sender)],
+        states: None,
         handing,
         checked: None,
     };
@@ -561,8 +563,31 @@ async fn a_take_before_the_wake_up_is_registered_is_seen_by_the_check_after_it()
     a_take_at(Check::BeforeRegistering).await;
 }
 
+/// Records each wait of the reader at its lead.
+#[derive(Debug, Default)]
+struct Waits(Mutex<Vec<ReaderBound>>);
+
+impl Observer for Waits {
+    fn on_reader_wait(&self, bound: ReaderBound, _: Option<&IndexName>, _: Duration) {
+        self.0.lock().unwrap().push(bound);
+    }
+}
+
+/// Review of #454, item 8: a wait the lead's first poll already ends (a take
+/// before the wake-up is registered) stopped nothing and is not reported; one
+/// that pended is.
+#[tokio::test(start_paused = true)]
+async fn only_a_wait_that_pended_is_reported() {
+    assert_eq!(a_take_at(Check::BeforeRegistering).await, Vec::new());
+    assert_eq!(
+        a_take_at(Check::BeforeWaiting).await,
+        vec![ReaderBound::PerIndex]
+    );
+}
+
 /// One take, at `point`, then the stream's end: the reader must read on.
-async fn a_take_at(point: Check) {
+/// Returns the waits the reader reported.
+async fn a_take_at(point: Check) -> Vec<ReaderBound> {
     let progress = progress();
     let (sender, mut runs) = mpsc::unbounded_channel();
     let lead = Lead::new(
@@ -586,11 +611,12 @@ async fn a_take_at(point: Check) {
             }
         }) as Box<dyn Fn(Check) + Send + Sync>
     };
+    let waits = Arc::new(Waits::default());
     let mut task = ReaderTask::spawn(
         Reader {
             resolver: Arc::new(Resolver::default()),
             progress: Arc::clone(&progress),
-            observer: Arc::new(NoopObserver),
+            observer: Arc::clone(&waits) as Arc<dyn Observer>,
             stop: Stop::new(),
             batch: BatchPolicy {
                 max_changes: 1,
@@ -598,6 +624,7 @@ async fn a_take_at(point: Check) {
             },
             lead,
             runs: vec![(IndexName::try_new("users").unwrap(), sender)],
+            states: None,
             handing: None,
             checked: Some(checked),
         },
@@ -609,6 +636,8 @@ async fn a_take_at(point: Check) {
         .unwrap();
     assert!(ended.stream_ended, "it read on to the stream's end");
     assert_eq!(received(&mut runs).len(), 1);
+    let waits = waits.0.lock().unwrap().clone();
+    waits
 }
 
 /// R9 and `changes_captured`: a run an error cuts is not handed over, but
@@ -732,6 +761,7 @@ async fn an_untouched_index_is_handed_nothing() {
             },
             lead: Lead::over(plenty(), 0, 2),
             runs: vec![(users(), to_users), (orders(), to_orders)],
+            states: None,
             handing: None,
             checked: None,
         },
@@ -770,6 +800,7 @@ fn exempting(pending: usize) -> Arc<Lead> {
             users(),
         ])),
         Arc::new(ExemptionLog::new([orders(), users()])),
+        Arc::new(crate::IndexStates::new([orders(), users()])),
     )
 }
 
@@ -861,6 +892,7 @@ fn exempt_documents_count_toward_no_other_bound() {
             users(),
         ])),
         Arc::new(ExemptionLog::new([orders(), users()])),
+        Arc::new(crate::IndexStates::new([orders(), users()])),
     );
     lead.hold(0, true);
     mark_docs(&progress, orders(), 0, 20);
@@ -1149,5 +1181,67 @@ async fn an_exempt_index_whose_hold_ends_logs_that_it_is_frozen() {
         last.as_deref()
             .is_some_and(|line| line.contains("exempt index frozen")),
         "frozen, the last line names it: {last:?}"
+    );
+}
+
+/// Slice 7: the lead names the bound it is at, for
+/// `flusso.reader.waits{bound}`. One builder: one index at its cap is
+/// `per_index`; the indexes together at `max_waiting`, `total`; changes read
+/// ahead of the oldest one queued, `changes`.
+#[test]
+fn the_lead_names_the_bound_it_is_at_with_one_builder() {
+    let max = MaxWaiting {
+        per_index: 3,
+        total: 4,
+    };
+    let progress = progress();
+    let lead = Lead::new(max, 0);
+    assert_eq!(lead.reached_by(&progress).map(|(bound, _)| bound), None);
+    mark_docs(&progress, users(), 0, 3);
+    assert_eq!(
+        lead.reached_by(&progress).map(|(bound, _)| bound),
+        Some(ReaderBound::PerIndex)
+    );
+    progress.take(&users(), 1, &|_| false).unwrap();
+    mark_docs(&progress, orders(), 100, 2);
+    assert_eq!(progress.waiting(), 4);
+    assert_eq!(
+        lead.reached_by(&progress).map(|(bound, _)| bound),
+        Some(ReaderBound::Total)
+    );
+
+    let progress = self::progress();
+    let lead = Lead::new(max, 0);
+    progress.read_changes(4);
+    lead.routed(0, 1, 4);
+    assert_eq!(
+        lead.reached_by(&progress).map(|(bound, _)| bound),
+        Some(ReaderBound::Changes)
+    );
+}
+
+/// With the exemption: an index at its cap and not exempt is `per_index`;
+/// exempt ones together at `max_pending_documents`, `pending`.
+#[test]
+fn the_lead_names_the_pending_cap_and_a_cap_per_index() {
+    let progress = progress();
+    let lead = exempting(4);
+    mark_docs(&progress, orders(), 0, 2);
+    assert_eq!(
+        lead.reached_by(&progress).map(|(bound, _)| bound),
+        Some(ReaderBound::PerIndex),
+        "not held: not exempt"
+    );
+    lead.hold(0, true);
+    assert_eq!(
+        lead.reached_by(&progress).map(|(bound, _)| bound),
+        None,
+        "held: exempt"
+    );
+    mark_docs(&progress, orders(), 100, 2);
+    assert_eq!(
+        lead.reached_by(&progress).map(|(bound, _)| bound),
+        Some(ReaderBound::Pending),
+        "four exempt documents: the pending cap"
     );
 }

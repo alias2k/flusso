@@ -119,6 +119,12 @@ impl IngestEngine {
             if several {
                 self.fold(&mut runs, &mut builds);
             }
+            if let Some(index) = builds.index() {
+                // What `/status` shows holds the index (slice 7): one load
+                // unless the refusal started or ended.
+                self.index_states
+                    .budget(index, builds.refused() == Some(Work::Live));
+            }
             if reader_done
                 && !self.stop.is_requested()
                 && snapshot.is_none()
@@ -245,6 +251,9 @@ impl IngestEngine {
                         gathered.deliveries.push(more);
                     }
                     if everyone_asked(&gathered.deliveries, lanes) {
+                        // Planning awaits (its reads take the key-read
+                        // permit): out of every line first (G9′).
+                        builds.leave_lines();
                         snapshot = self
                             .start_coalesced(&mut coalescing, scopes, lanes, several)
                             .await?;
@@ -252,6 +261,7 @@ impl IngestEngine {
                     mark = Instant::now();
                 }
                 () = until(deadline), if deadline.is_some() => {
+                    builds.leave_lines();
                     snapshot = self
                         .start_coalesced(&mut coalescing, scopes, lanes, several)
                         .await?;

@@ -20,7 +20,7 @@ Data in the index has drifted from the source (a bug, a manual edit, rows import
    flusso reindex users --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
    ```
 
-   The server answers `reindex of users on every sink queued` with `202`. Each sink engine stages generation `n+1` behind the same hash alias between two batches and requests a snapshot; the ingest engine serves it alongside live changes. Reads keep hitting generation `n` through the alias the whole time, nothing restarts, and the other sinks are untouched. Add `--sink primary` to rebuild on one sink only.
+   The server answers `202` and the command prints `reindex of users on every sink queued`. Each sink engine stages generation `n+1` behind the same hash alias between two batches and requests a snapshot; the ingest engine serves it alongside live changes. Reads keep hitting generation `n` through the alias the whole time, nothing restarts, and the other sinks are untouched. Add `--sink primary` to rebuild on one sink only.
 
 3. **Watch it land.** In `/status`, `users` goes `backfilling`, then `seeded` under the sink. At that moment the alias flips to `n+1` and `n` is dropped.
 
@@ -28,11 +28,13 @@ Data in the index has drifted from the source (a bug, a manual edit, rows import
    watch -n 5 'curl -s localhost:9464/status | jq .sinks.primary.indexes'
    ```
 
+   While the backfill runs, `curl -s localhost:9464/indexes/users/status` shows it under `backfill`, with the sinks it serves ([per-index state](../reference/http.md#per-index-ingest-state)).
+
 4. **Confirm the read side.** `flusso-query` addresses the hash alias, so nothing changes for consumers. Ad-hoc readers on the convenience alias see the new generation too.
 
 ## Options and variations
 
-- **With `curl`.** `curl -u admin:… -X POST 'http://10.0.0.5:9465/reindex?index=users&sink=primary'` (drop `&sink=` for every sink). Responses are in [HTTP endpoints](../reference/http.md#post-reindexindexnamesinkname).
+- **With `curl`.** `curl -u admin:… -X POST 'http://10.0.0.5:9465/indexes/users/reindex?sink=primary'` (drop `?sink=` for every sink). Responses are in [HTTP endpoints](../reference/http.md#post-indexesnamereindexsinkname).
 - **Rebuild one index by deleting it.** Delete its generation index (`users_<hash>_<n>`) in OpenSearch. On the next start the seed marker is found to name a missing index, so the marker is retracted and the backfill refills it in place. While the server runs, the same happens on the next write to that index: OpenSearch answers `index_not_found_exception` instead of recreating the index, and that index alone is staged again into the rebuild (its lane `restaging` in `/status`) while the sink's other indexes keep being written; nothing restarts. Reads 404 until then and see a partial index while it refills. Deleting an index still mid-backfill restarts that backfill from the first row. Every case is in [A generation deleted or replaced](../reference/sink-opensearch.md#a-generation-deleted-or-replaced).
 - **Asking twice.** A reindex of an index that is still rebuilding is accepted and does nothing: the rebuild in flight is already from scratch.
 - **Rebuild everything.** Drop the replication slot. Every seeded index is rebuilt into a fresh generation on the next start. See [Recover from a dropped slot](dropped-slot.md).

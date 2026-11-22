@@ -16,9 +16,10 @@ pub use fence::{
     LanePositions, SinkPositions, Unserved,
 };
 pub use observer::StatusObserver;
-pub use stall::{LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};
+pub use stall::{BACKLOG_SPAN, LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};
 pub use status::{
-    IndexState, LaneHealthState, LaneHealthView, LaneSnapshot, LastScriptFailure, Phase, PinnedBy,
+    BackfillSnapshot, Exemption, IndexHold, IndexIngestSnapshot, IndexState, IngestSnapshot,
+    LaneHealthState, LaneHealthView, LaneSnapshot, LastScriptFailure, Phase, PinnedBy,
     ScriptFailures, SinkPhase, SinkSnapshot, Status, StatusSnapshot,
 };
 pub use supervise::{ControlError, DaemonControl};
@@ -26,8 +27,9 @@ pub use supervise::{ControlError, DaemonControl};
 use supervise::ControlReceivers;
 
 pub use engine::{
-    BuildStats, CommitStats, EngineId, LaneHealth, Observer, ParkReason, ProbeOutcome, Stage,
-    StageTiming, StartupStep, Wake, Work,
+    BuildStats, CommitStats, EngineId, ExemptionState, IndexStates, LaneHealth, Observer,
+    ParkReason, ProbeOutcome, ReaderBound, SinkControl, Stage, StageTiming, StartupStep, Stop,
+    Wake, Work,
 };
 pub use kernel::{IndexName, SinkName};
 
@@ -436,6 +438,13 @@ impl Daemon {
                 sink_names.iter().cloned(),
                 Instant::now(),
             )
+            .with_ingest_indexes(
+                config
+                    .indexes
+                    .iter()
+                    .filter(|(_, index)| index.enabled)
+                    .map(|(name, _)| name.clone()),
+            )
             .with_fence(fence.clone())
             .with_progress(Arc::clone(&progress))
             .with_source(Arc::clone(&capture))
@@ -479,6 +488,7 @@ impl Daemon {
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())
         .with_stop(stop.clone());
+        status.attach_index_states(ingest.index_states());
 
         let sink_engines: Vec<SinkEngine> = sinks
             .into_iter()

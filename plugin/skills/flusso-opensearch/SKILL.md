@@ -18,7 +18,7 @@ OpenSearch is the *substrate*. This covers the slice flusso shapes; for the quer
 
 ## Generations & reindex
 
-Because the physical name is hash-suffixed, multiple **generations** of an index can coexist; the alias points at the live one. A schema change naturally rolls a new generation (new hash → new index → re-seed → alias repoint). An on-demand **reindex** (`POST /reindex` on the private HTTP surface, or the `flusso reindex` client) rebuilds a fresh generation and repoints the alias when it's seeded, dropping every other generation. A reindex of an index that's still unseeded is a no-op: a from-scratch rebuild is already in flight. (Write-side zero-downtime cutover specifics are tracked in issue #6.)
+Because the physical name is hash-suffixed, multiple **generations** of an index can coexist; the alias points at the live one. A schema change naturally rolls a new generation (new hash → new index → re-seed → alias repoint). An on-demand **reindex** (`POST /indexes/<name>/reindex` on the private HTTP surface, or the `flusso reindex` client) rebuilds a fresh generation and repoints the alias when it's seeded, dropping every other generation. A reindex of an index that's still unseeded is a no-op: a from-scratch rebuild is already in flight. (Write-side zero-downtime cutover specifics are tracked in issue #6.)
 
 ## Analyzers & subfields — the part that affects *your* queries
 

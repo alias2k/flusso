@@ -123,22 +123,44 @@ pub(crate) async fn indexes(args: IndexesArgs) -> anyhow::Result<()> {
 
 /// `flusso reindex <index>` — trigger a from-scratch rebuild of one index.
 pub(crate) async fn reindex(args: ReindexArgs) -> anyhow::Result<()> {
+    let path = reindex_path(&args.index)?;
     let resp = args
         .connect
-        .request(reqwest::Method::POST, "/reindex")?
-        .query(&[("index", args.index.as_str())])
+        .request(reqwest::Method::POST, &path)?
         .query(&args.sink.as_deref().map(|sink| [("sink", sink)]))
         .send()
         .await
-        .context("requesting /reindex")?;
+        .with_context(|| format!("requesting {path}"))?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         bail!("server returned {status}: {}", body.trim());
     }
     let mut out = std::io::stdout().lock();
-    writeln!(out, "{}", body.trim())?;
+    writeln!(out, "{}", queued_message(&body))?;
     Ok(())
+}
+
+/// What `flusso reindex` prints for the server's `202` body
+/// (`{"index", "sink", "queued"}`); a body it can't read is printed as is.
+fn queued_message(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.trim().to_owned();
+    };
+    let field = |name: &str| value.get(name).and_then(serde_json::Value::as_str);
+    match (field("index"), field("sink")) {
+        (Some(index), Some(sink)) => format!("reindex of {index} on {sink} queued"),
+        (Some(index), None) => format!("reindex of {index} on every sink queued"),
+        _ => body.trim().to_owned(),
+    }
+}
+
+/// `POST /indexes/<index>/reindex`'s path; an index name has only
+/// characters a path takes as they are, and anything else is refused here.
+fn reindex_path(index: &str) -> anyhow::Result<String> {
+    let index = kernel::IndexName::try_new(index.to_owned())
+        .map_err(|_| anyhow::anyhow!("{index:?} is not an index name"))?;
+    Ok(format!("/indexes/{}/reindex", index.as_ref()))
 }
 
 #[cfg(test)]

@@ -55,7 +55,8 @@ use tokio::time::{Duration, Instant};
 use super::LiveStream;
 use super::outstanding::Outstanding;
 use crate::error::{EngineError, Result};
-use crate::observer::Observer;
+use crate::index_states::{ExemptionState, IndexStates};
+use crate::observer::{Observer, ReaderBound};
 use crate::policy::{BatchPolicy, MaxWaiting};
 use crate::progress::Progress;
 use crate::stop::Stop;
@@ -154,6 +155,9 @@ struct Exemption {
     outstanding: Arc<Outstanding>,
     /// The engine's lines, checked on the tick (review round 3 of #452).
     log: Arc<ExemptionLog>,
+    /// What `/status` shows of each index's exemption (slice 7), written on
+    /// the tick with the lines.
+    states: Arc<IndexStates>,
 }
 
 impl Lead {
@@ -180,6 +184,7 @@ impl Lead {
         max_pending_documents: usize,
         outstanding: Arc<Outstanding>,
         log: Arc<ExemptionLog>,
+        states: Arc<IndexStates>,
     ) -> Arc<Self> {
         let builders = indexes.len();
         Arc::new(Self::of(
@@ -191,6 +196,7 @@ impl Lead {
                 max_pending: max_pending_documents,
                 outstanding,
                 log,
+                states,
             }),
         ))
     }
@@ -302,27 +308,39 @@ impl Lead {
 
     /// Whether the reader is as far ahead as it may be.
     pub(super) fn reached(&self, progress: &Progress) -> bool {
+        self.reached_by(progress).is_some()
+    }
+
+    /// The bound the reader is at, if any, and for a per-index bound the
+    /// queue of the index at it: the first found, per index before the
+    /// totals, documents before changes.
+    pub(super) fn reached_by(&self, progress: &Progress) -> Option<(ReaderBound, Option<usize>)> {
         match &self.exemption {
             None => {
-                if progress.most_waiting() >= self.max.per_index
-                    || progress.waiting() >= self.max.total
-                {
-                    return true;
+                if progress.most_waiting() >= self.max.per_index {
+                    // One builder builds one index: its queue's.
+                    return Some((ReaderBound::PerIndex, (self.queues.len() == 1).then_some(0)));
+                }
+                if progress.waiting() >= self.max.total {
+                    return Some((ReaderBound::Total, None));
                 }
             }
             Some(exemption) => {
-                if self.documents_reached(progress, exemption) {
-                    return true;
+                if let Some(bound) = self.documents_reached(progress, exemption) {
+                    return Some(bound);
                 }
             }
         }
         let read = progress.changes_read();
-        self.queues.iter().any(|queue| {
-            // A folding queue holds nothing: entering the fold cleared it,
-            // and the reader routes it nothing while it folds.
-            let oldest = queue.oldest.load(Ordering::Relaxed);
-            oldest != u64::MAX && read.saturating_sub(oldest - 1) >= self.max.total as u64
-        })
+        self.queues
+            .iter()
+            .any(|queue| {
+                // A folding queue holds nothing: entering the fold cleared
+                // it, and the reader routes it nothing while it folds.
+                let oldest = queue.oldest.load(Ordering::Relaxed);
+                oldest != u64::MAX && read.saturating_sub(oldest - 1) >= self.max.total as u64
+            })
+            .then_some((ReaderBound::Changes, None))
     }
 }
 
@@ -331,29 +349,37 @@ impl Lead {
     /// at `max_waiting_per_index`, the non-exempt indexes together at
     /// `max_waiting`, a frozen exempt index at the count it stopped growing
     /// at, the exempt ones together at `max_pending_documents`.
-    fn documents_reached(&self, progress: &Progress, exemption: &Exemption) -> bool {
+    fn documents_reached(
+        &self,
+        progress: &Progress,
+        exemption: &Exemption,
+    ) -> Option<(ReaderBound, Option<usize>)> {
         let someone_free = self.someone_free(exemption);
         let mut others = 0;
         let mut exempt = 0;
-        for (queue, index) in self.queues.iter().zip(&exemption.indexes) {
+        for (slot, (queue, index)) in self.queues.iter().zip(&exemption.indexes).enumerate() {
             let waiting = progress.waiting_on(index);
             match Self::decide(queue, waiting, self.max.per_index, someone_free) {
                 Exempt::Growing => exempt += waiting,
                 Exempt::Frozen(ceiling) => {
                     if waiting >= ceiling.max(self.max.per_index) {
-                        return true;
+                        return Some((ReaderBound::PerIndex, Some(slot)));
                     }
                     exempt += waiting;
                 }
                 Exempt::No => {
                     if waiting >= self.max.per_index {
-                        return true;
+                        return Some((ReaderBound::PerIndex, Some(slot)));
                     }
                     others += waiting;
                 }
             }
         }
-        others >= self.max.total || exempt >= exemption.max_pending
+        if others >= self.max.total {
+            Some((ReaderBound::Total, None))
+        } else {
+            (exempt >= exemption.max_pending).then_some((ReaderBound::Pending, None))
+        }
     }
 
     /// Whether some index is free: not held, and nothing of it waiting
@@ -441,6 +467,14 @@ impl Lead {
                 exempt += waiting;
             }
             exemption.log.index(index, shown, waiting);
+            exemption.states.set_exemption(
+                index,
+                match shown {
+                    Shown::Quiet => ExemptionState::None,
+                    Shown::Raised => ExemptionState::Exempt,
+                    Shown::Frozen => ExemptionState::Frozen,
+                },
+            );
         }
         exemption.log.cap(
             exempt >= exemption.max_pending,
@@ -481,6 +515,8 @@ pub(super) struct Reader {
     /// Each builder's hand-over, in the lead's queue order, with the index it
     /// builds. With one builder it is handed every change.
     pub(super) runs: Vec<(IndexName, mpsc::UnboundedSender<Run>)>,
+    /// What `/status` shows of each index: which one the reader waits on.
+    pub(super) states: Option<Arc<IndexStates>>,
     /// A test's look at each run just before it is handed over.
     #[cfg(test)]
     pub(super) handing: Option<Box<dyn Fn(&Run) + Send + Sync>>,
@@ -571,14 +607,36 @@ impl Reader {
     /// ([`together`](mod@super::together)).
     async fn room(&self) -> bool {
         // Room now: nothing to register.
-        if !self.lead.reached(&self.progress) {
+        let Some((bound, queue)) = self.lead.reached_by(&self.progress) else {
             return !self.stop.is_requested();
+        };
+        let index = queue
+            .and_then(|queue| self.runs.get(queue))
+            .map(|(index, _)| index);
+        let began = Instant::now();
+        // `/status`'s `pacing_reader` for the index at its cap, while the
+        // reader waits on it (slice 7).
+        let _pacing = index
+            .zip(self.states.as_ref())
+            .map(|(index, states)| states.pacing_reader(index));
+        let (room, waited) = self.wait_for_room().await;
+        // A wait that returned at its first poll stopped nothing.
+        if waited {
+            self.observer.on_reader_wait(bound, index, began.elapsed());
         }
+        room
+    }
+
+    /// [`room`](Self::room)'s wait, once the lead was found reached.
+    /// Returns whether there is room (not the stop) and whether it waited
+    /// past its first poll.
+    async fn wait_for_room(&self) -> (bool, bool) {
         #[cfg(test)]
         if let Some(checked) = &self.checked {
             checked(Check::BeforeRegistering);
         }
-        std::future::poll_fn(|cx| {
+        let mut waited = false;
+        let room = std::future::poll_fn(|cx| {
             self.lead.taken.register(cx.waker());
             self.lead.waiting.store(true, Ordering::Relaxed);
             fence(Ordering::SeqCst);
@@ -590,9 +648,11 @@ impl Reader {
             if let Some(checked) = &self.checked {
                 checked(Check::BeforeWaiting);
             }
+            waited = true;
             Poll::Pending
         })
-        .await
+        .await;
+        (room, waited)
     }
 
     /// Read every change the stream has ready right now into the run, until

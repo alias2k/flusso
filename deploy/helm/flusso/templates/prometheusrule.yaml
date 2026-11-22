@@ -70,4 +70,27 @@ spec:
               indexes keep being written; this one holds the replication slot.
               /status names why under sinks.<sink>.lanes.<index>.reason.
             runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
+        - alert: FlussoIndexBacklog
+          expr: max by (index) (flusso_index_exempt) > 0 or max by (index) (flusso_index_backlog_age_seconds) > {{ .Values.prometheusRule.indexBacklogSeconds }}
+          for: {{ .Values.prometheusRule.indexBacklogFor }}
+          labels:
+            severity: {{ .Values.prometheusRule.severity }}
+          annotations:
+            summary: "flusso's {{ "{{" }} $labels.index {{ "}}" }} index has been exempt or stuck for {{ .Values.prometheusRule.indexBacklogFor }}"
+            description: >-
+              The index has been exempt (held at max_waiting_per_index while the
+              other indexes read on: its changes are kept as documents to build, up
+              to max_pending_documents, and the slot stays pinned by it), or stuck
+              (its oldest change not built yet was read over {{ .Values.prometheusRule.indexBacklogSeconds }} s ago: nothing of it
+              is being built), the whole period. It also fires during a planned
+              catch-up longer than {{ .Values.prometheusRule.indexBacklogFor }} when one index is slower than the others
+              (it is exempt meanwhile): silence it, or raise the period. /status names
+              why under ingest.indexes.<index>: held_by and held_sinks (a full lane: the
+              sink is slow, refusing or down, see FlussoLaneStalled and
+              FlussoLaneParked; or the memory budget), working (false: a sink has
+              acknowledged nothing for 5 s), backlog_seconds, pacing_reader. How far
+              an index is behind the source is not this alert: read its lanes' WAL
+              behind (flusso_lane_wal_behind_bytes) and the slot lag
+              (flusso_replication_slot_lag_bytes).
+            runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
 {{- end }}
