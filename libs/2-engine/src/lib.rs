@@ -3,6 +3,7 @@
 
 mod budget;
 mod error;
+mod index_states;
 mod ingest;
 mod observer;
 mod policy;
@@ -17,6 +18,7 @@ pub use budget::{
     Admission, Budget, Charge, FLOOR, Held, Refusal, Reservation, document_bytes, value_bytes,
 };
 pub use error::*;
+pub use index_states::{ExemptionState, HeldBy, IndexStates, IndexView};
 pub use ingest::{DEFAULT_MAX_PENDING_DOCUMENTS, IngestEngine, KEY_PAGE, document_id};
 pub use observer::*;
 pub use policy::{Backoff, BackoffError, BatchPolicy, FailurePolicies, FailurePolicy, MaxWaiting};

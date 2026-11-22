@@ -55,7 +55,8 @@ use tokio::time::{Duration, Instant};
 use super::LiveStream;
 use super::outstanding::Outstanding;
 use crate::error::{EngineError, Result};
-use crate::observer::Observer;
+use crate::index_states::{ExemptionState, IndexStates};
+use crate::observer::{Observer, ReaderBound};
 use crate::policy::{BatchPolicy, MaxWaiting};
 use crate::progress::Progress;
 use crate::stop::Stop;
@@ -154,6 +155,9 @@ struct Exemption {
     outstanding: Arc<Outstanding>,
     /// The engine's lines, checked on the tick (review round 3 of #452).
     log: Arc<ExemptionLog>,
+    /// What `/status` shows of each index's exemption (slice 7), written on
+    /// the tick with the lines.
+    states: Arc<IndexStates>,
 }
 
 impl Lead {
@@ -180,6 +184,7 @@ impl Lead {
         max_pending_documents: usize,
         outstanding: Arc<Outstanding>,
         log: Arc<ExemptionLog>,
+        states: Arc<IndexStates>,
     ) -> Arc<Self> {
         let builders = indexes.len();
         Arc::new(Self::of(
@@ -191,6 +196,7 @@ impl Lead {
                 max_pending: max_pending_documents,
                 outstanding,
                 log,
+                states,
             }),
         ))
     }
@@ -302,27 +308,37 @@ impl Lead {
 
     /// Whether the reader is as far ahead as it may be.
     pub(super) fn reached(&self, progress: &Progress) -> bool {
+        self.reached_by(progress).is_some()
+    }
+
+    /// The bound the reader is at, if any: the first found, per index
+    /// before the totals, documents before changes.
+    pub(super) fn reached_by(&self, progress: &Progress) -> Option<ReaderBound> {
         match &self.exemption {
             None => {
-                if progress.most_waiting() >= self.max.per_index
-                    || progress.waiting() >= self.max.total
-                {
-                    return true;
+                if progress.most_waiting() >= self.max.per_index {
+                    return Some(ReaderBound::PerIndex);
+                }
+                if progress.waiting() >= self.max.total {
+                    return Some(ReaderBound::Total);
                 }
             }
             Some(exemption) => {
-                if self.documents_reached(progress, exemption) {
-                    return true;
+                if let Some(bound) = self.documents_reached(progress, exemption) {
+                    return Some(bound);
                 }
             }
         }
         let read = progress.changes_read();
-        self.queues.iter().any(|queue| {
-            // A folding queue holds nothing: entering the fold cleared it,
-            // and the reader routes it nothing while it folds.
-            let oldest = queue.oldest.load(Ordering::Relaxed);
-            oldest != u64::MAX && read.saturating_sub(oldest - 1) >= self.max.total as u64
-        })
+        self.queues
+            .iter()
+            .any(|queue| {
+                // A folding queue holds nothing: entering the fold cleared
+                // it, and the reader routes it nothing while it folds.
+                let oldest = queue.oldest.load(Ordering::Relaxed);
+                oldest != u64::MAX && read.saturating_sub(oldest - 1) >= self.max.total as u64
+            })
+            .then_some(ReaderBound::Changes)
     }
 }
 
@@ -331,7 +347,7 @@ impl Lead {
     /// at `max_waiting_per_index`, the non-exempt indexes together at
     /// `max_waiting`, a frozen exempt index at the count it stopped growing
     /// at, the exempt ones together at `max_pending_documents`.
-    fn documents_reached(&self, progress: &Progress, exemption: &Exemption) -> bool {
+    fn documents_reached(&self, progress: &Progress, exemption: &Exemption) -> Option<ReaderBound> {
         let someone_free = self.someone_free(exemption);
         let mut others = 0;
         let mut exempt = 0;
@@ -341,19 +357,23 @@ impl Lead {
                 Exempt::Growing => exempt += waiting,
                 Exempt::Frozen(ceiling) => {
                     if waiting >= ceiling.max(self.max.per_index) {
-                        return true;
+                        return Some(ReaderBound::PerIndex);
                     }
                     exempt += waiting;
                 }
                 Exempt::No => {
                     if waiting >= self.max.per_index {
-                        return true;
+                        return Some(ReaderBound::PerIndex);
                     }
                     others += waiting;
                 }
             }
         }
-        others >= self.max.total || exempt >= exemption.max_pending
+        if others >= self.max.total {
+            Some(ReaderBound::Total)
+        } else {
+            (exempt >= exemption.max_pending).then_some(ReaderBound::Pending)
+        }
     }
 
     /// Whether some index is free: not held, and nothing of it waiting
@@ -441,6 +461,14 @@ impl Lead {
                 exempt += waiting;
             }
             exemption.log.index(index, shown, waiting);
+            exemption.states.set_exemption(
+                index,
+                match shown {
+                    Shown::Quiet => ExemptionState::None,
+                    Shown::Raised => ExemptionState::Exempt,
+                    Shown::Frozen => ExemptionState::Frozen,
+                },
+            );
         }
         exemption.log.cap(
             exempt >= exemption.max_pending,
@@ -571,9 +599,17 @@ impl Reader {
     /// ([`together`](mod@super::together)).
     async fn room(&self) -> bool {
         // Room now: nothing to register.
-        if !self.lead.reached(&self.progress) {
+        let Some(bound) = self.lead.reached_by(&self.progress) else {
             return !self.stop.is_requested();
-        }
+        };
+        let began = Instant::now();
+        let room = self.wait_for_room().await;
+        self.observer.on_reader_wait(bound, began.elapsed());
+        room
+    }
+
+    /// [`room`](Self::room)'s wait, once the lead was found reached.
+    async fn wait_for_room(&self) -> bool {
         #[cfg(test)]
         if let Some(checked) = &self.checked {
             checked(Check::BeforeRegistering);

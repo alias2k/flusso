@@ -119,6 +119,12 @@ impl IngestEngine {
             if several {
                 self.fold(&mut runs, &mut builds);
             }
+            if let Some(index) = builds.index() {
+                // What `/status` shows holds the index (slice 7): one load
+                // unless the refusal started or ended.
+                self.index_states
+                    .budget(index, builds.refused() == Some(Work::Live));
+            }
             if reader_done
                 && !self.stop.is_requested()
                 && snapshot.is_none()

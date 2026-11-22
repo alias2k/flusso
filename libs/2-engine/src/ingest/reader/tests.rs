@@ -16,6 +16,7 @@ use stream::LaneKey;
 use super::*;
 use crate::ingest::together::together;
 use crate::observer::NoopObserver;
+use crate::observer::ReaderBound;
 
 const LIMIT: Duration = Duration::from_secs(5);
 
@@ -770,6 +771,7 @@ fn exempting(pending: usize) -> Arc<Lead> {
             users(),
         ])),
         Arc::new(ExemptionLog::new([orders(), users()])),
+        Arc::new(crate::IndexStates::new([orders(), users()])),
     )
 }
 
@@ -861,6 +863,7 @@ fn exempt_documents_count_toward_no_other_bound() {
             users(),
         ])),
         Arc::new(ExemptionLog::new([orders(), users()])),
+        Arc::new(crate::IndexStates::new([orders(), users()])),
     );
     lead.hold(0, true);
     mark_docs(&progress, orders(), 0, 20);
@@ -1149,5 +1152,54 @@ async fn an_exempt_index_whose_hold_ends_logs_that_it_is_frozen() {
         last.as_deref()
             .is_some_and(|line| line.contains("exempt index frozen")),
         "frozen, the last line names it: {last:?}"
+    );
+}
+
+/// Slice 7: the lead names the bound it is at, for
+/// `flusso.reader.waits{bound}`. One builder: one index at its cap is
+/// `per_index`; the indexes together at `max_waiting`, `total`; changes read
+/// ahead of the oldest one queued, `changes`.
+#[test]
+fn the_lead_names_the_bound_it_is_at_with_one_builder() {
+    let max = MaxWaiting {
+        per_index: 3,
+        total: 4,
+    };
+    let progress = progress();
+    let lead = Lead::new(max, 0);
+    assert_eq!(lead.reached_by(&progress), None);
+    mark_docs(&progress, users(), 0, 3);
+    assert_eq!(lead.reached_by(&progress), Some(ReaderBound::PerIndex));
+    progress.take(&users(), 1, &|_| false).unwrap();
+    mark_docs(&progress, orders(), 100, 2);
+    assert_eq!(progress.waiting(), 4);
+    assert_eq!(lead.reached_by(&progress), Some(ReaderBound::Total));
+
+    let progress = self::progress();
+    let lead = Lead::new(max, 0);
+    progress.read_changes(4);
+    lead.routed(0, 1, 4);
+    assert_eq!(lead.reached_by(&progress), Some(ReaderBound::Changes));
+}
+
+/// With the exemption: an index at its cap and not exempt is `per_index`;
+/// exempt ones together at `max_pending_documents`, `pending`.
+#[test]
+fn the_lead_names_the_pending_cap_and_a_cap_per_index() {
+    let progress = progress();
+    let lead = exempting(4);
+    mark_docs(&progress, orders(), 0, 2);
+    assert_eq!(
+        lead.reached_by(&progress),
+        Some(ReaderBound::PerIndex),
+        "not held: not exempt"
+    );
+    lead.hold(0, true);
+    assert_eq!(lead.reached_by(&progress), None, "held: exempt");
+    mark_docs(&progress, orders(), 100, 2);
+    assert_eq!(
+        lead.reached_by(&progress),
+        Some(ReaderBound::Pending),
+        "four exempt documents: the pending cap"
     );
 }

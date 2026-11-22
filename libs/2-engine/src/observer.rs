@@ -325,6 +325,33 @@ impl std::fmt::Display for EngineId {
     }
 }
 
+/// The bound of the reader's lead it stopped at (ADR 0012 stage 8a, slice
+/// 7): what `flusso.reader.waits{bound}` counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderBound {
+    /// One index (not exempt, or exempt and frozen) at its cap,
+    /// `max_waiting_per_index` (or the count it froze at).
+    PerIndex,
+    /// The non-exempt indexes' documents together at `max_waiting`.
+    Total,
+    /// `max_waiting` changes read ahead of a builder's oldest queued one.
+    Changes,
+    /// The exempt indexes' documents together at `max_pending_documents`.
+    Pending,
+}
+
+impl ReaderBound {
+    /// `per_index`, `total`, `changes` or `pending`: the metric's label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReaderBound::PerIndex => "per_index",
+            ReaderBound::Total => "total",
+            ReaderBound::Changes => "changes",
+            ReaderBound::Pending => "pending",
+        }
+    }
+}
+
 /// Lifecycle and progress events. Every method has a no-op default.
 pub trait Observer: std::fmt::Debug + Send + Sync {
     /// The ingest engine opened the live stream and is following it.
@@ -388,6 +415,12 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
     /// let it go.
     fn on_budget_wait(&self, work: Work, wake: Wake, waited: Duration) {
         let _ = (work, wake, waited);
+    }
+
+    /// The reader waited `waited` at its lead before reading on, stopped by
+    /// `bound` (reported when the wait ends; a wait cut by the stop too).
+    fn on_reader_wait(&self, bound: ReaderBound, waited: Duration) {
+        let _ = (bound, waited);
     }
 
     /// A sink recorded `index` as seeded.
@@ -568,6 +601,12 @@ impl Observer for FanOut {
     fn on_budget_wait(&self, work: Work, wake: Wake, waited: Duration) {
         for observer in &self.observers {
             observer.on_budget_wait(work, wake, waited);
+        }
+    }
+
+    fn on_reader_wait(&self, bound: ReaderBound, waited: Duration) {
+        for observer in &self.observers {
+            observer.on_reader_wait(bound, waited);
         }
     }
 

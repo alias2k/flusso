@@ -49,6 +49,7 @@ mod dispatcher;
 mod gate;
 mod live;
 mod outstanding;
+pub(crate) use outstanding::Outstanding;
 mod reader;
 mod snapshot;
 #[cfg(test)]
@@ -70,6 +71,7 @@ use tokio::time::{Duration, Instant, timeout_at};
 
 use crate::budget::Budget;
 use crate::error::{EngineError, Result};
+use crate::index_states::IndexStates;
 use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep};
 use crate::policy::{BatchPolicy, FailurePolicies, MaxWaiting};
 use crate::progress::Progress;
@@ -133,6 +135,9 @@ pub struct IngestEngine {
     /// lanes are kept), and its log lines. `None` with one index, which has
     /// no exemption and pays nothing for it.
     exemption: Option<Exemption>,
+    /// What an operator reads of each index (slice 7): kept across engine
+    /// runs, read by the daemon's `Status`.
+    index_states: Arc<IndexStates>,
     budget: Option<Arc<Budget>>,
     /// The budget waits open across engine runs (see [`Builds::with_waits`]).
     budget_waits: Arc<std::sync::Mutex<builds::Waits>>,
@@ -170,8 +175,15 @@ impl IngestEngine {
         progress: Arc<Progress>,
     ) -> Self {
         let indexes: Vec<IndexName> = progress.indexes().cloned().collect();
-        let exemption = (indexes.len() > 1).then(|| Exemption {
-            outstanding: Arc::new(outstanding::Outstanding::new(indexes.iter().cloned())),
+        let outstanding = (indexes.len() > 1)
+            .then(|| Arc::new(outstanding::Outstanding::new(indexes.iter().cloned())));
+        let index_states = IndexStates::new(indexes.iter().cloned());
+        let index_states = match &outstanding {
+            Some(outstanding) => index_states.with_outstanding(Arc::clone(outstanding)),
+            None => index_states,
+        };
+        let exemption = outstanding.map(|outstanding| Exemption {
+            outstanding,
             log: Arc::new(reader::ExemptionLog::new(indexes)),
         });
         Self {
@@ -185,6 +197,7 @@ impl IngestEngine {
             max_waiting: None,
             max_pending_documents: DEFAULT_MAX_PENDING_DOCUMENTS,
             exemption,
+            index_states: Arc::new(index_states),
             budget: None,
             budget_waits: Arc::default(),
             key_reads: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -215,6 +228,12 @@ impl IngestEngine {
     /// that failed where the last one did.
     pub fn advances(&self) -> u64 {
         self.advances.load(Ordering::Relaxed)
+    }
+
+    /// What the engine knows of each index's exemption, holds and walk, for
+    /// the daemon's `Status` to read (ADR 0012 stage 8a, slice 7).
+    pub fn index_states(&self) -> Arc<IndexStates> {
+        Arc::clone(&self.index_states)
     }
 
     /// How far each lane has landed what this engine routed.
@@ -422,6 +441,7 @@ impl IngestEngine {
                 self.max_pending_documents,
                 Arc::clone(&exemption.outstanding),
                 Arc::clone(&exemption.log),
+                Arc::clone(&self.index_states),
             )
         } else {
             Lead::over(

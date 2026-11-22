@@ -681,7 +681,17 @@ impl IngestEngine {
                 .into_iter()
                 .map(|(lane, producer, routed, item)| async move {
                     let key = item.key();
-                    producer.publish(item).await?;
+                    let publishing = producer.publish(item);
+                    tokio::pin!(publishing);
+                    match futures::poll!(publishing.as_mut()) {
+                        Poll::Ready(published) => published?,
+                        // A full lane holds the index until it takes the
+                        // item: what `/status` names (slice 7).
+                        Poll::Pending => {
+                            let _full = self.index_states.lane_full(&lane.index, &lane.sink);
+                            publishing.await?;
+                        }
+                    }
                     if let (Some((oldest, last, token, step)), Some(key)) = (routed, key) {
                         self.progress
                             .published_build(lane, key, oldest, last, token, step);
