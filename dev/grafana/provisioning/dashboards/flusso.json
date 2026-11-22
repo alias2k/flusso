@@ -552,6 +552,56 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 21,
+      "title": "Indexes down or retrying a backfill (1 = yes)",
+      "description": "Per index: down (its live work failed and its builder waits to restart: its documents wait, the slot stays before them; FlussoIndexBacklog fires after 10 minutes while documents wait), and a backfill retrying (its walk failed and waits to retry, its live changes flowing: no alert fires for it). Always 0 with one index, whose failure restarts the whole run.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 84 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (index) (flusso_index_down)",
+          "legendFormat": "{{index}} down",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (index) (flusso_index_backfill_retrying)",
+          "legendFormat": "{{index}} backfill retrying",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Index restarts, by kind (per second)",
+      "description": "How often an index's work started again after a failure: live (its builder restarted after a live build or document failed) or backfill (its walk started again after a key read or a backfill batch failed).",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 84 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (index, kind) (rate(flusso_index_restarts_total[5m]))",
+          "legendFormat": "{{index}} {{kind}}",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }
