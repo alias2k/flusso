@@ -3489,6 +3489,70 @@ over more seeds and reproduce no defect).
 | 9 (R14) | the predicate takes `Stream` | `a_lane_failure_ends_the_run_and_restarts_no_index_alone`, the predicate's unit test |
 | 4 | a release wakes nobody | `a_dropped_request_wakes_a_recv_already_waiting`, `a_nack_or_a_drop_wakes_a_recv_already_waiting_in_lane_order` |
 
+#### Slice 8-1, fix round 2 (the review of `b2728c8c`): a walk fails alone (design, before building)
+
+**The rule.** With two or more builders, a failure of a builder's **walk** takes down the walk, not the
+builder; a failure of its **live** work takes down the builder, as before. The walk's failures are the
+three of its own work: a key read (failed or panicked on its task), a backfill batch's build (failed or
+panicked), a document of a backfill batch failed under `on_error = "stop"`. Before this round a walk
+failure returned an error from the builder's loop, so the whole builder waited the walk's backoff (up to
+`max_ms`, 60 s) and the index's live documents waited with it (the review: 15.9 s for the slowest live
+change in the first 30 s, growing to 60 s).
+
+**What a walk failure does** (in the builder's loop, no error returned):
+
+1. The snapshot is dropped: its walk and its key-read task end (6b-3's `Drop`).
+2. Its backfill slots not yet published, and its completion, are **discarded** in place (`Builds`
+   marks them; a discarded slot publishes nothing when it reaches the front, and its build, if still
+   running, finishes and is dropped; its reservation and charge go back with the slot). Live slots
+   granted around them keep their places and publish in grant order. The build that failed is that
+   walk's: a backfill failure never halts the builder's grants (`halts` is the live work's).
+3. Its requests are kept, unacknowledged, each lane's `after` moved to the last walk mark published to
+   it (fix round 1's `reached`), and gathered as a coalescing set **held until the walk's retry time**
+   (the walk's schedule): the set's deadline is the retry time, and "every sink asked" doesn't start it
+   early. A request arriving meanwhile (a reindex, a new sink's backfill) joins that set and waits for
+   the retry: the walk it would start reads the same rows.
+4. The failure is reported (`on_index_failed` with the wait, an `error!` saying the index's live changes
+   keep flowing). Nothing about the index's live work changes: no hold, no fold, no give-back.
+
+**Order per index.** A lane's live items and the resumed walk's batches interleave in grant order, as
+any live and backfill grants of one builder do. A backfill batch is built from the database when it
+builds, so a batch granted after a live item reads the row as of then or later; a later message is the
+newer state, the guarantee a walk and live changes already share (`a_backfill_page_and_a_live_batch_of_one_document_build_one_after_the_other`).
+
+**While only its walk waits** the index is not down: not held, not folding, its live items granted,
+built and published; it is free for the exemption (6b-2) while its lanes acknowledge, and `working` as
+slice 7 defines it. `IndexStates.backfill` is `null` while the walk waits (the snapshot that shows it is
+dropped); 8-2 shows the wait.
+
+**A stop during the wait** drops the held set like any coalescing set: the requests go back to the
+request lane unacknowledged and are served on the next start, as any walk in progress (O3: a stop does
+not finish a backfill). **A live failure during the wait** takes the builder down as before; `down`
+keeps the held set as it is (its deadline is not moved earlier) and adds the snapshot's requests, if a
+walk had started again. **The stream's end during the wait**: the builder isn't idle while a set is
+held, so the run goes on until the walk completes (or fails again, waiting longer). A walk failure at
+the stream's end, inside `settle`, is held the same way and the builder goes back to its loop instead of
+returning.
+
+**The walk's schedule** (item 2): it starts over once the walk **published a backfill batch since its
+last failure** (counted per index as each backfill batch is published: some lane's resume point moved).
+Distinct one-off failures along a walk then each wait the first wait; a poison row, which never lets
+the walk publish past itself, still doubles to `max_ms`. The live schedule is unchanged: it starts over
+once the index published a live item since its last failure.
+
+**One index** keeps the whole-run restart for every failure, its walk's included (its predicate is
+unchanged: `several` is false).
+
+| Rule | Test (written first) | Mutation |
+| --- | --- | --- |
+| W1 a walk failure keeps the index's live documents flowing | `a_failing_walk_leaves_the_index_live_documents_flowing` (the reviewer's: the slowest live change of the first 30 s lands within 5 s) | the walk failure returns an error from the loop |
+| W2 the failed walk's later backfill slots are discarded, the live ones publish | `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks` | the later backfill slots kept |
+| W3 a request arriving during the wait waits with the walk | `a_request_during_a_walks_wait_joins_its_retry` | the held set started by "every sink asked" |
+| W4 the walk's schedule starts over once the walk published a batch | `distinct_one_off_walk_failures_each_wait_the_first_wait` (the reviewer's) | reset only on a completed walk |
+| W5 a stop during the wait ends the run cleanly, the walk re-requested next start | `a_stop_while_a_walk_waits_to_retry_ends_cleanly` | — |
+| W6 a live failure during the wait keeps the walk's wait and resume points | `a_live_failure_while_a_walk_waits_keeps_its_retry` | `down` moves the held set's deadline to now |
+| W7 the index isn't held while only its walk waits | `an_index_whose_walk_waits_is_not_held` | the walk failure holds the index |
+
 ## 4. Guarantees
 
 | Invariant (CLAUDE.md) | After 8a | Existing guards | New test |
