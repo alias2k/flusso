@@ -84,7 +84,7 @@ The order is load-bearing twice. Rebuilds are staged **before** `prepare` create
 
 ## Reindex is an operation on one sink
 
-A reindex reaches a running sink engine as a control message from the daemon (`DaemonControl::reindex(index, Option<sink>)`, behind `POST /reindex`). Once the writes in flight have returned, the engine stages a fresh generation (`reindex` + `ensure_index`, several indexes at once as at start) and sends a new `Backfill` request; the current generation keeps serving until the snapshot completes and `SnapshotComplete` lets the sink swap. Nothing restarts, and untargeted sinks are untouched; forcing every sink coalesces into one snapshot. A sink with `backfill = false` ignores it (nothing to rebuild), as does an index whose snapshot is still outstanding. The OpenSearch sink's own `reindex` also stages nothing for an index that is still unseeded, so a second reindex can't orphan the generation being built. Guards: `reindex_control_stages_and_requests_a_snapshot_without_restarting`, the daemon's `reindex_operation_targets_one_sink`.
+A reindex reaches a running sink engine as a control message from the daemon (`DaemonControl::reindex(index, Option<sink>)`, behind `POST /indexes/<name>/reindex`). Once the writes in flight have returned, the engine stages a fresh generation (`reindex` + `ensure_index`, several indexes at once as at start) and sends a new `Backfill` request; the current generation keeps serving until the snapshot completes and `SnapshotComplete` lets the sink swap. Nothing restarts, and untargeted sinks are untouched; forcing every sink coalesces into one snapshot. A sink with `backfill = false` ignores it (nothing to rebuild), as does an index whose snapshot is still outstanding. The OpenSearch sink's own `reindex` also stages nothing for an index that is still unseeded, so a second reindex can't orphan the generation being built. Guards: `reindex_control_stages_and_requests_a_snapshot_without_restarting`, the daemon's `reindex_operation_targets_one_sink`.
 
 ## A stop is a drain
 
@@ -148,6 +148,15 @@ An item refused as **busy** (429 or 503) is neither rejected nor blocked. The si
 ## Observability is a trait
 
 Both engines report lifecycle and progress to an `Observer` (`observer.rs`): sync, cheap, no-op by default, set with `with_observer`. Every sink-side event carries the `SinkName`; engine errors carry an `EngineId` (`Ingest` or `Sink(name)`). The daemon fans events to its per-sink `Status`; the binary attaches an OpenTelemetry observer. Guard: `reports_lifecycle_and_progress_to_the_observer`.
+
+**What an operator reads of each index** (ADR 0012 stage 8a, slice 7) is not events either. The ingest engine keeps one `IndexStates` (`index_states.rs`) for its life and the daemon's `Status` reads it as a handle, as it reads `Progress`; it is written only at edges, never on the path a change takes:
+
+- **exemption** (`none`, `exempt`, `frozen`) on the dispatcher's 1 s tick, from the rule the reader decides by (`Lead::deciding`), with the time it entered that state;
+- **held by the budget** in the builder's loop, a lock only when the live batch's refusal starts or ends (one atomic load otherwise);
+- **held by a lane** while a publish pends on a full lane, with the sink, through a guard dropped when the publish goes through;
+- **walking** from a snapshot's start until it is dropped (completed, stopped or failed), with the sinks it serves.
+
+`working` is read, not stored: not held, and none of the index's items has waited on a lane 5 s unacknowledged (the exemption's record, `ingest/outstanding.rs`). `Status` adds `documents_waiting` (`Progress::waiting_on`) and `backlog_seconds`, which `Stalls` samples each second as it samples a lane's stall age: how long the index's oldest unbuilt change (`Progress::oldest_unbuilt`: waiting, or in a build not yet sent to a lane) has stayed its oldest. `/status`'s `ingest.indexes.<name>` and `GET /indexes/<name>/status` serve the same entry; the binary's `flusso.index.*` gauges read it at collection. The reader reports each wait at its lead with the bound that stopped it (`Observer::on_reader_wait`, from `Lead::reached_by`), the one event here. Guards: `index_states::tests`, `ingest::tests::states`, `reader::tests`' `the_lead_names_*`, `status::tests`, the daemon's `the_status_reads_each_index_from_the_ingest_engine`.
 
 A sink's `changes_committed` is not an event: `Status` reads it from `Progress` when asked (`Progress::committed`). It counts changes read, per sink, once every lane of the sink has landed them or needed nothing for them, in read order.
 
