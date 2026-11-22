@@ -121,7 +121,7 @@ struct IndexFailures {
     /// A walk was running when its live work failed: its requests wait for
     /// the builder's restart (review of #457, B3).
     walk_waiting: bool,
-    last_error: Option<IndexFailure>,
+    last_error: IndexErrors,
     restarts: IndexRestarts,
 }
 
@@ -427,7 +427,13 @@ impl Status {
         };
         let (down_since, retry_at, walk_waiting, last_error, restarts) =
             lock(&self.index_failures).get(index).map_or(
-                (None, None, false, None, IndexRestarts::default()),
+                (
+                    None,
+                    None,
+                    false,
+                    IndexErrors::default(),
+                    IndexRestarts::default(),
+                ),
                 |failures| {
                     (
                         failures.down_since,
@@ -666,22 +672,21 @@ impl Status {
                 .is_some_and(|view| view.backfill.is_some());
         let mut failures = lock(&self.index_failures);
         let failures = failures.entry(index.clone()).or_default();
-        let kind = match kind {
-            engine::Work::Live => {
-                failures.down_since.get_or_insert(now);
-                failures.walk_waiting |= walking;
-                FailureKind::Live
-            }
-            engine::Work::Backfill => {
-                failures.retry_at = Some(wall_clock(now, Duration::ZERO, retry_in));
-                FailureKind::Backfill
-            }
-        };
-        failures.last_error = Some(IndexFailure {
-            kind,
+        let failure = Some(IndexFailure {
             message: cut_error(error),
             at: rfc3339(now),
         });
+        match kind {
+            engine::Work::Live => {
+                failures.down_since.get_or_insert(now);
+                failures.walk_waiting |= walking;
+                failures.last_error.live = failure;
+            }
+            engine::Work::Backfill => {
+                failures.retry_at = Some(wall_clock(now, Duration::ZERO, retry_in));
+                failures.last_error.backfill = failure;
+            }
+        }
     }
 
     /// `index`'s work of `kind` started again (slice 8-2).
@@ -1075,9 +1080,10 @@ pub struct IndexIngestSnapshot {
     /// When it went down (RFC 3339, UTC); absent while running.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub down_since: Option<String>,
-    /// Its last failure of either kind, kept after it recovered; null before
-    /// any.
-    pub last_error: Option<IndexFailure>,
+    /// Its last failure of each kind, kept after it recovered: `live` and
+    /// `backfill`, each null before any. One kind never hides the other: a
+    /// walk failing as the index goes down keeps the live error beside it.
+    pub last_error: IndexErrors,
     /// How often its builder restarted after a live failure, and its walk
     /// started again after a walk failure, since the process started.
     pub restarts: IndexRestarts,
@@ -1186,26 +1192,23 @@ pub enum IngestState {
     Down,
 }
 
-/// An index's last failure, in `/status` (slice 8-2).
+/// An index's last failure of each kind, in `/status` (slice 8-2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct IndexErrors {
+    /// Its live work's: a live build or document. Null before any.
+    pub live: Option<IndexFailure>,
+    /// Its walk's: a key read, a backfill build or document. Null before
+    /// any.
+    pub backfill: Option<IndexFailure>,
+}
+
+/// One failure of an index's work, in `/status` (slice 8-2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IndexFailure {
-    /// `live` or `backfill`.
-    pub kind: FailureKind,
-    /// The error.
+    /// The error, cut at [`INDEX_ERROR_BYTES`].
     pub message: String,
     /// When (RFC 3339, UTC).
     pub at: String,
-}
-
-/// What kind of an index's work failed, in `/status` (slice 8-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum FailureKind {
-    /// A live build or document.
-    Live,
-    /// Its walk: a key read, a backfill build or document.
-    Backfill,
 }
 
 /// How often an index's work restarted after a failure, by kind (slice 8-2).
@@ -1479,7 +1482,7 @@ mod tests {
                 pacing_reader: false,
                 state: IngestState::Running,
                 down_since: None,
-                last_error: None,
+                last_error: IndexErrors::default(),
                 restarts: IndexRestarts::default(),
             }
         );
@@ -1490,7 +1493,7 @@ mod tests {
                 "documents_waiting": 0,
                 "backlog_seconds": 0.0,
                 "state": "running",
-                "last_error": null,
+                "last_error": {"live": null, "backfill": null},
                 "restarts": {"live": 0, "backfill": 0},
                 "exemption": "none",
                 "working": true,
@@ -1673,16 +1676,18 @@ mod tests {
         assert_eq!(down.held_by, None, "a down builder holds nothing");
         assert_eq!(
             down.last_error
+                .live
                 .as_ref()
-                .map(|error| (error.kind, error.message.as_str())),
-            Some((FailureKind::Live, "the build failed"))
+                .map(|error| error.message.as_str()),
+            Some("the build failed")
         );
+        assert_eq!(down.last_error.backfill, None);
         let json = serde_json::to_value(&down).unwrap();
         assert_eq!(json["state"], "down");
         assert!(json["down_since"].is_string());
-        assert_eq!(json["last_error"]["kind"], "live");
-        assert_eq!(json["last_error"]["message"], "the build failed");
-        assert!(json["last_error"]["at"].is_string());
+        assert_eq!(json["last_error"]["live"]["message"], "the build failed");
+        assert!(json["last_error"]["live"]["at"].is_string());
+        assert_eq!(json["last_error"]["backfill"], serde_json::Value::Null);
         assert_eq!(
             status.index_ingest(&users()).unwrap().state,
             IngestState::Running
@@ -1699,7 +1704,7 @@ mod tests {
                 backfill: 0
             }
         );
-        assert!(up.last_error.is_some(), "the last error is kept");
+        assert!(up.last_error.live.is_some(), "the last error is kept");
         let json = serde_json::to_value(&up).unwrap();
         assert_eq!(
             json["restarts"],
@@ -1734,7 +1739,11 @@ mod tests {
         assert_eq!(json["backfill"]["state"], "retrying");
         assert!(json["backfill"]["retry_at"].is_string());
         assert!(json["backfill"].get("sinks").is_none());
-        assert_eq!(json["last_error"]["kind"], "backfill");
+        assert_eq!(
+            json["last_error"]["backfill"]["message"],
+            "the key read failed"
+        );
+        assert_eq!(json["last_error"]["live"], serde_json::Value::Null);
         observer.on_index_restarted(&orders(), engine::Work::Backfill);
         let _walking =
             states.walking([(orders(), std::collections::BTreeSet::from([sink("audit")]))]);
@@ -1790,7 +1799,7 @@ mod tests {
             let users = status.index_ingest(&users()).unwrap();
             assert_eq!(orders.state, IngestState::Running, "end {end}");
             assert_eq!(users.backfill, None, "end {end}");
-            assert!(orders.last_error.is_some() && users.last_error.is_some());
+            assert!(orders.last_error.live.is_some() && users.last_error.backfill.is_some());
             assert_eq!(users.restarts.live, 1, "end {end}");
         }
     }
@@ -1860,6 +1869,7 @@ mod tests {
             .index_ingest(&orders())
             .unwrap()
             .last_error
+            .live
             .unwrap()
             .message;
         assert!(
@@ -1880,9 +1890,45 @@ mod tests {
                 .index_ingest(&orders())
                 .unwrap()
                 .last_error
+                .live
                 .unwrap()
                 .message,
             short
+        );
+    }
+
+    /// Review of #456 (final): a live failure and then the walk's, in one
+    /// pass (the A2 path). The index is down for the live error, and
+    /// `last_error` still names it beside the walk's.
+    #[test]
+    fn a_down_index_keeps_the_live_error_that_took_it_down() {
+        use engine::Observer;
+        let (status, _, _, _) = ingest_status();
+        let status = Arc::new(status);
+        let observer = crate::observer::StatusObserver::new(Arc::clone(&status));
+        observer.on_index_failed(
+            &orders(),
+            engine::Work::Live,
+            "the live build failed",
+            Duration::from_secs(1),
+        );
+        observer.on_index_failed(
+            &orders(),
+            engine::Work::Backfill,
+            "the walk's batch failed",
+            Duration::from_secs(2),
+        );
+        let entry = status.index_ingest(&orders()).unwrap();
+        assert_eq!(entry.state, IngestState::Down);
+        let message = |failure: Option<IndexFailure>| failure.map(|failure| failure.message);
+        assert_eq!(
+            message(entry.last_error.live),
+            Some("the live build failed".to_owned()),
+            "down, and its live error is still there"
+        );
+        assert_eq!(
+            message(entry.last_error.backfill),
+            Some("the walk's batch failed".to_owned())
         );
     }
 

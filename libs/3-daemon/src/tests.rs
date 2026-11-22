@@ -1447,7 +1447,7 @@ async fn a_panicking_build_restarts_the_ingest_engine_and_never_hangs() {
         for (name, entry) in status.snapshot().ingest.indexes {
             assert_eq!(entry.state, crate::IngestState::Running, "{name}");
             assert_eq!(entry.restarts, crate::IndexRestarts::default(), "{name}");
-            assert_eq!(entry.last_error, None, "{name}");
+            assert_eq!(entry.last_error, crate::IndexErrors::default(), "{name}");
         }
     }
 }
@@ -1475,7 +1475,7 @@ async fn one_index_is_never_down() {
         for (name, entry) in status.snapshot().ingest.indexes {
             assert_eq!(entry.state, crate::IngestState::Running, "{name}");
             assert_eq!(entry.restarts, crate::IndexRestarts::default(), "{name}");
-            assert_eq!(entry.last_error, None, "{name}");
+            assert_eq!(entry.last_error, crate::IndexErrors::default(), "{name}");
         }
     };
     while !run.is_finished() {
