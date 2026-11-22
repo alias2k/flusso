@@ -401,3 +401,76 @@ async fn a_deprecated_capacity_warns_once_and_is_ignored() {
     });
     assert_eq!(quiet.0.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+/// A request dropped unacked while a `recv` already waits on the request
+/// lane wakes that `recv`, which hands it back (review of #456: the ledger
+/// marked it due, but the waiting `recv` awaited the channel alone, so the
+/// request waited for another one to arrive).
+#[tokio::test]
+async fn a_dropped_request_wakes_a_recv_already_waiting() {
+    let stream = ChannelStream::new(8, [key("a")]);
+    let requests = stream.requests().unwrap();
+    let request = Request::Backfill {
+        index: index("users"),
+        sink: sink("a"),
+        after: None,
+        ticket: stream::Ticket::new(1),
+    };
+    requests.producer.publish(request.clone()).await.unwrap();
+    let consumer = Arc::new(tokio::sync::Mutex::new(requests.consumer));
+    let delivery = consumer.lock().await.recv().await.unwrap().unwrap();
+    let pending = {
+        let consumer = Arc::clone(&consumer);
+        tokio::spawn(async move { consumer.lock().await.recv().await.unwrap().unwrap() })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    drop(delivery);
+    let again = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+        .await
+        .expect("the dropped request reaches the recv that was already waiting")
+        .unwrap();
+    assert_eq!(again.item(), &request);
+}
+
+/// On a lane: a nack and a dropped handle, while a `recv` waits, come back
+/// to it in lane order, each once, and nothing newer passes them.
+#[tokio::test]
+async fn a_nack_or_a_drop_wakes_a_recv_already_waiting_in_lane_order() {
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
+    for position in 1..=2 {
+        lane.producer.publish(batch(position)).await.unwrap();
+    }
+    let consumer = Arc::new(tokio::sync::Mutex::new(lane.consumer));
+    let first = consumer.lock().await.recv().await.unwrap().unwrap();
+    let second = consumer.lock().await.recv().await.unwrap().unwrap();
+    let pending = {
+        let consumer = Arc::clone(&consumer);
+        tokio::spawn(async move { consumer.lock().await.recv().await.unwrap().unwrap() })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let (_, second) = second.into_parts();
+    second.nack().await.unwrap();
+    drop(first);
+    let again = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+        .await
+        .expect("the released deliveries reach the recv that was already waiting")
+        .unwrap();
+    let mut consumer = consumer.lock().await;
+    let (item, first) = again.into_parts();
+    let (next, second) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(
+        (item.position(), next.position()),
+        (Some(Position::new(1)), Some(Position::new(2))),
+        "in lane order"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), consumer.recv())
+            .await
+            .is_err(),
+        "each released delivery comes back once"
+    );
+    first.ack().await.unwrap();
+    second.ack().await.unwrap();
+    assert!(stream.is_idle());
+}

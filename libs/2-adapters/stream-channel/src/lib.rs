@@ -6,6 +6,7 @@ mod config;
 pub use config::ChannelConfig;
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -176,6 +177,9 @@ struct Channel<T> {
     /// reads it without taking the lock the ingest engine shares (a sink
     /// asks once or twice per lane item).
     due: AtomicUsize,
+    /// Woken by every release: a `recv` already waiting on the channel
+    /// hands the released delivery back instead of waiting for a new item.
+    released: tokio::sync::Notify,
 }
 
 /// Delivered, not yet acknowledged items in lane order, each under a ticket
@@ -238,6 +242,10 @@ impl<T> Channel<T> {
         }
         ledger.due += released;
         self.due.store(ledger.due, Ordering::Release);
+        drop(ledger);
+        if released > 0 {
+            self.released.notify_waiters();
+        }
     }
 
     /// Nothing queued behind the deliveries already handed out. A hint read
@@ -268,18 +276,40 @@ impl<T: Clone + Send + 'static> Channel<T> {
                 due: 0,
             }),
             due: AtomicUsize::new(0),
+            released: tokio::sync::Notify::new(),
         }
     }
 
+    /// The next delivery: the earliest released one, else the next item on
+    /// the channel. A release while it waits on the channel wakes it (the
+    /// wake-up is registered before the ledger is read, so none is missed),
+    /// and it hands the released delivery back; nothing else wakes it.
     async fn recv(&self) -> Option<(Ticket, T)> {
-        if self.due.load(Ordering::Acquire) > 0 {
-            let mut ledger = self.lock();
-            if let Some(redelivery) = ledger.take_due() {
-                self.due.store(ledger.due, Ordering::Release);
-                return Some(redelivery);
+        let item = loop {
+            let released = self.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            if self.due.load(Ordering::Acquire) > 0 {
+                let mut ledger = self.lock();
+                if let Some(redelivery) = ledger.take_due() {
+                    self.due.store(ledger.due, Ordering::Release);
+                    return Some(redelivery);
+                }
             }
-        }
-        let item = self.rx.lock().await.recv().await?;
+            let mut rx = self.rx.lock().await;
+            // `recv` is cancel-safe: dropped for a release, it loses no item.
+            let mut receiving = std::pin::pin!(rx.recv());
+            let next = std::future::poll_fn(|cx| {
+                if released.as_mut().poll(cx).is_ready() {
+                    return std::task::Poll::Ready(None);
+                }
+                receiving.as_mut().poll(cx).map(Some)
+            })
+            .await;
+            if let Some(item) = next {
+                break item?;
+            }
+        };
         let mut ledger = self.lock();
         let ticket = ledger.next_ticket;
         ledger.next_ticket += 1;
