@@ -222,6 +222,62 @@ With two or more indexes, one stuck index doesn't stop the others, as long as an
 - **Raise it to keep the others running longer beside one stuck index**, when memory allows. The WAL the slot keeps grows either way.
 - **Don't raise it for a whole sink down.** Reading stops there within seconds; beside an index that sends nothing, a larger cap only takes more memory before it stops. Fix the sink.
 
+### A failing index
+
+With two or more enabled indexes, a failure of one index's own work restarts that index alone, after a wait. The other indexes keep indexing, and a [`/wait`](http.md#get-waitpositionposition) that names only them passes.
+
+| What failed | What waits | What goes on |
+| --- | --- | --- |
+| **Its live work**: a build that fails (Postgres refuses the document query, a connection lost mid-build) or panics, or a live document that fails to build under [`on_error = "stop"`](index-and-on-error.md#on_error) | The whole index is **down** until it restarts. A backfill it was running stops and starts again after the restart. | Every other index. |
+| **Its backfill**: reading its root keys, building a backfill batch, a backfill document that fails to build under `stop` | Only the backfill, which is **retried**. | The index's live changes, and every other index. |
+
+**What still restarts the whole ingest engine** (with [`[backoff]`](#backoff), reading again from the slot): a failure of the change stream, of resolving a change to its documents, of a lane or the request lane; any failure while flusso stops; any failure with one enabled index.
+
+**While an index is down:**
+
+- **Its changes are kept** as documents to build. Nothing is read again: when it restarts, it builds them oldest first, then follows the stream with the others.
+- **The slot stays before its oldest unbuilt change**, so WAL grows. A `/wait` covering the index waits for it.
+- **It can grow past its waiting bound.** From [`max_waiting_per_index`](#reading-ahead) documents on it is [exempt](#a-stuck-index) while another index is working, up to `max_pending_documents`. Then reading stops for every index.
+- **Backfill requests for it wait** (a reindex, a new sink) and are served once it is back.
+
+**While a backfill waits to retry:**
+
+- **Live changes keep flowing**: the index isn't down.
+- **Each sink resumes after the last batch it received.** Nothing is backfilled again from the first row.
+- **A new request for the index joins the retry** (a reindex, a new sink's backfill).
+- **The retry starts once no other backfill of that index runs**, so its due time can pass while one does.
+
+**The waits** follow [`[backoff]`](#backoff): `initial_ms`, doubling to `max_ms` (1 s to 60 s by default). Each index has two schedules, one per kind of failure, each starting over on its own progress only:
+
+- **Live**: starts over once the index hands a live batch to its sinks again.
+- **Backfill**: starts over once the backfill gets further than at its last failure. A row that always fails doubles it to `max_ms`, where it stays.
+
+**A document that fails every time** (a poison row under `stop`, a script that always throws on it) keeps its index down, tried again every `max_ms`. The other indexes go on until the down index has `max_pending_documents` documents waiting. Fix the row or the script, or set `on_error = "skip"` for that index and restart.
+
+**A stop:**
+
+- **With an index down**, the stop cuts its wait short and tries it once more, within `--shutdown-timeout-secs`. If that fails too, flusso exits `1` with the error. The next start reads again from the slot, which stayed at the down index's oldest change, so **the other indexes' changes since then are read and built again**. The longer the index was down, the larger that replay. Writes are idempotent, so it costs time, not correctness.
+- **During a backfill's wait**, the stop exits `0`. The backfill is asked for again at the next start.
+
+**What it costs.**
+
+- **Memory, and reverse queries.** Beside a healthy index, a down index can grow to `max_pending_documents` documents waiting (about 270–320 MB at the default) before reading stops for every index. Meanwhile flusso keeps resolving every change for it, so its reverse queries run for an index that builds nothing.
+- **It helps with one index's faults only.** A database-wide fault (Postgres down or unreachable) fails resolving changes too, and that restarts the whole ingest engine. A per-index restart covers a query one schema makes Postgres refuse, a poison row, a script.
+- **A replay after a failed stop**, above.
+
+**With one index**, every failure restarts the whole ingest engine, as before. One change: a build that panics as it starts now restarts the ingest engine too, where it used to end the deployment with `ingest engine task failed`. A panic that happens every time is an endless restart loop, paced by `[backoff]`.
+
+**Shown per index.** `/status`'s [`ingest.indexes.<index>`](http.md#per-index-ingest-state) carries `state`, `down_since`, `last_error`, `restarts` and `backfill.state`; the metrics are `flusso_index_down`, `flusso_index_backfill_retrying` and `flusso_index_restarts_total{kind}` ([Metrics](metrics.md)). The runbook is [When an index is down or its backfill keeps failing](../operate/stalled-lane.md#when-an-index-is-down-or-its-backfill-keeps-failing).
+
+**The log.** Each failure and each restart logs one line, carrying `index` and `kind` (`"live"` or `"backfill"`); a failure adds `error` and `retry_in`:
+
+| Level | Line |
+| --- | --- |
+| `ERROR` | `the index's builder failed; it restarts alone after the wait while the other indexes go on: its documents wait, and the replication slot stays before the oldest of them` |
+| `INFO` | `the index's builder restarted: building its backlog first` |
+| `ERROR` | `the index's backfill failed; it is walked again after the wait, each sink from where it got, while the index's live changes keep flowing` |
+| `INFO` | `the index's backfill started again, each sink from where it got` |
+
 ## backoff
 
 | Key | Type | Default | Meaning |
@@ -234,6 +290,8 @@ Each wait doubles, up to `max_ms`. One schedule times every retry flusso makes o
 - **A failed engine's restart**, sink or ingest, and a restarted sink's staging when it fails. The wait goes back to `initial_ms` after a run that made progress.
 - **A parked lane's probe**: its oldest batch written again alone, while the lane is `refused` or `blocked` ([lane health](http.md#lane-health)). Only that lane's probe landing resets the wait.
 - **A restaging lane's next staging**, when staging the index again fails.
+- **One index's restart**, with two or more indexes, after its live work failed. The wait goes back to `initial_ms` once the index hands a live batch to its sinks again ([A failing index](#a-failing-index)).
+- **One index's backfill retry**, after its backfill failed. The wait goes back to `initial_ms` once the backfill gets further than at its last failure.
 
 The OpenSearch sink's bulk retry is not on this schedule: it has its own, 200 ms doubling, up to [`max_retries`](sink-opensearch.md#retries) times.
 

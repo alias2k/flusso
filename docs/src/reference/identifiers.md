@@ -62,7 +62,7 @@ What a failing pair does depends on the index's [`on_error`](index-and-on-error.
 
 | Pair | `stop` (the default) | `skip` |
 | --- | --- | --- |
-| fails to build | the ingest engine stops and restarts on the same change, so **the whole deployment** (every index, every sink) makes no progress | the document keeps its previous indexed version (none on a first backfill); the rest go on |
+| fails to build | the change is retried after a wait and fails again, so **that index** makes no progress on any sink; with two or more indexes the others go on ([A failing index](config-toml.md#a-failing-index)), with one the ingest engine restarts | the document keeps its previous indexed version (none on a first backfill); the rest go on |
 | rejected by OpenSearch | that index's lane on the sink parks and retries the same batch, so **that index** makes no progress there while the sink's other indexes go on, and the replication slot keeps the WAL | the document is quarantined; the rest go on |
 
 Elsewhere:

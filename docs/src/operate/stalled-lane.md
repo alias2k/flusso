@@ -13,6 +13,7 @@ A **lane** is one index flowing into one sink. Open this page when any of these 
 - The log says `index held at max_waiting_per_index: exempt, …`, `exempt index frozen: …` or `reading stopped for every index: …`: an index is stuck and its changes are piling up. See [When one index is stuck beside others](#when-one-index-is-stuck-beside-others).
 - [`/status`](../reference/http.md#get-status) shows a lane whose `health` isn't `open`, or whose `stall_seconds` keeps climbing.
 - `pinned_by` names an index with `"sink": null` and keeps naming it: no lane is stuck, the index's backlog is. See [When an index's backlog holds the slot](#when-an-indexs-backlog-holds-the-slot).
+- The log says `the index's builder failed` or `the index's backfill failed`, or `/status` shows an index `"state": "down"` or its `backfill` `retrying`: one index's own work failed and restarts alone. See [When an index is down or its backfill keeps failing](#when-an-index-is-down-or-its-backfill-keeps-failing).
 
 A lane that keeps writing is not stalled, however long its backlog. For a whole sink that is down or refusing requests, the lane is `open` and the sink's `phase` is `failed`: the cause is the sink, covered in [step 3](#the-sink-itself-health-open).
 
@@ -194,17 +195,71 @@ curl -s localhost:9464/indexes/users/status | jq
 | `held_by: null`, `working: true`, `backlog_seconds` past 60 | Nothing holds it and its sinks acknowledge, yet its oldest change has waited a minute: its builds are that slow. | The `build` stage and the document queries, in [the same table](#when-an-indexs-backlog-holds-the-slot). |
 | `exemption: "frozen"` | Its hold ended, or no other index works: it drains but doesn't grow. | Watch `documents_waiting` fall. |
 | `pacing_reader: true` | Reading for every index waits on this one right now. | Nothing on its own: this index sets the pace. |
+| `state: "down"` | Its live work failed, and it waits to restart alone. | Read `last_error`: [When an index is down](#when-an-index-is-down-or-its-backfill-keeps-failing). |
 
 Once the cause is fixed, the index builds its waiting documents down, `exemption` returns to `none`, `backlog_seconds` falls to 0, and the alert clears.
 
 - **A planned catch-up pages too.** With several indexes, after a sink outage or a burst, an index slower than the others is exempt while they read on, for as long as it trails. A catch-up longer than 10 minutes fires the alert: silence it for the catch-up, or raise `indexBacklogFor`.
-- **Quiet** for a healthy index at its sink's limit, for an index merely behind its source (its backlog stays seconds old), while flusso starts, between engine runs (a restart's backoff, a source down) and while it stops.
+- **Quiet** for a down index with nothing waiting and for a backfill that keeps failing ([above](#when-an-index-is-down-or-its-backfill-keeps-failing)), for a healthy index at its sink's limit, for an index merely behind its source (its backlog stays seconds old), while flusso starts, between engine runs (a restart's backoff, a source down) and while it stops.
 - **Not a lag alert.** How far an index trails the source is its lanes' WAL behind (`wal_behind_bytes` in `/status`, `flusso_lane_wal_behind_bytes{sink,index}`) and the slot lag (`flusso_replication_slot_lag_bytes`).
+
+## When an index is down or its backfill keeps failing
+
+With two or more indexes, a failure of one index's own work restarts that index alone, after a wait ([A failing index](../reference/config-toml.md#a-failing-index)). It isn't a lane: every lane stays `open`. It comes in two shapes:
+
+| | An index is down | A backfill keeps failing |
+| --- | --- | --- |
+| **What failed** | its live work: a build, or a live document under `on_error = "stop"` | its backfill: reading root keys, a backfill batch, a backfill document under `stop` |
+| **The log** | `ERROR the index's builder failed; …` with `kind="live"`, then `INFO the index's builder restarted: …` after the wait | `ERROR the index's backfill failed; …` with `kind="backfill"`, then `INFO the index's backfill started again, …` |
+| **`/status`** | `"state": "down"`, `down_since`, `working: false` | `"state": "running"`, `"backfill": {"state": "retrying", "retry_at": …}` |
+| **Metrics** | `flusso_index_down{index} 1` | `flusso_index_backfill_retrying{index} 1` |
+| **Still working** | every other index; a `/wait` naming only them; `/readyz` | the index's live changes, and every other index |
+| **Growing** | its documents waiting, and the WAL the slot keeps | nothing; the index stays unseeded on the sinks that asked until the backfill completes |
+| **Pages** | `FlussoIndexBacklog` after 10 minutes, **while documents of it wait** | nobody |
+
+Both count in `flusso_index_restarts_total{index,kind}` each time the work starts again. The dev dashboard plots both: *Indexes down or retrying a backfill* and *Index restarts, by kind*.
+
+**Two cases page nobody**, since no alert ships for them yet ([#455](https://github.com/alias2k/flusso/issues/455)):
+
+- **A down index with nothing waiting**: no live change touched it since it went down (its backfill failed, or the index is quiet). Its backlog is 0 and it isn't exempt.
+- **A backfill that keeps failing while live changes flow**: the index is running and working.
+
+To page on them, add a rule of your own on `flusso_index_down`, `flusso_index_backfill_retrying` or a climbing `flusso_index_restarts_total`, with the `for:` your team tolerates. For example:
+
+```promql
+max by (index) (flusso_index_down) > 0 or max by (index) (flusso_index_backfill_retrying) > 0
+```
+
+**Read why.** `last_error` holds the index's last failure, whatever its kind, and stays after it recovered ([fields](../reference/http.md#per-index-ingest-state)):
+
+```sh
+curl -s localhost:9464/indexes/orders/status | jq '{state, down_since, last_error, restarts, backfill}'
+```
+
+`message` is the error as the log printed it, cut at 4 KiB. What it usually says:
+
+| `message` | Cause | What to do |
+| --- | --- | --- |
+| ``document `42` in index `orders` could not be built: …`` | A script failed on that row, or an `array: true` column held an object, under `on_error = "stop"`. It fails every time. | Fix the row or the script; or set `on_error = "skip"` for the index and restart, then fix it ([Run scripts in production](../author/scripts/production.md)). |
+| A query Postgres refuses, naming the index and `flusso check` | The schema and the database disagree: a column dropped or retyped, a link Postgres can't compare. | Run `flusso check`, then fix the schema or the database. The next retry builds it, with no restart. |
+| An integer out of range | An [aggregate expression](../reference/aggregates.md) overflows on one row. | Fix the schema or the row. |
+| A connection lost, a timeout | Postgres was briefly unreachable for that build. | Usually nothing: the next retry builds it. Many in a row mean the database, not the index. |
+
+**What to do.**
+
+1. **Read `last_error`** as above, and fix the cause. A fix in the data or the database needs no restart: the next retry picks it up, at most `[backoff] max_ms` later (60 s by default). A schema, script or `on_error` change needs one.
+2. **Watch the WAL** while an index is down: `flusso_replication_slot_lag_bytes` climbs while `pinned_by` names the index. Past `max_slot_wal_keep_size`, Postgres drops the slot ([Recover from a dropped slot](dropped-slot.md)).
+3. **Watch the cap.** A down index's documents count toward `max_pending_documents` once it is exempt; when they reach it, reading stops for every index ([When one index is stuck beside others](#when-one-index-is-stuck-beside-others)).
+4. **Don't stop flusso to fix it**, if you can avoid it. A stop tries the down index once more; if that fails, flusso exits `1`, and the next start reads again every change since the down index's oldest, for every index.
+
+**Watch it recover.** The `INFO` line logs, `state` returns to `running` (or `backfill` to `walking`, then `null`), `flusso_index_down` and `flusso_index_backfill_retrying` drop to 0, `restarts` counts one more, and `last_error` stays as the record of what happened.
+
+**With one index**, none of this applies: a failure restarts the whole ingest engine. `phase` goes back to `starting`, `flusso_errors_total{engine="ingest"}` climbs, and the per-index `state` stays `running`.
 
 ## Options and variations
 
 - **The lane alerts.** `FlussoLaneParked` fires once `flusso_lane_parked > 0` has held for 5 minutes. `FlussoLaneStalled` fires on a lane landing nothing for 10 minutes (`reason: age`), or on more than 1 GiB of WAL kept behind a lane that has landed nothing for a minute (`reason: wal`). Both ship in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`; tune them in the [Helm values](../reference/helm-values.md). Only `FlussoLaneParked` sees a refused **backfill** page: backfill rows carry no position, so their lane never ages. The per-index alert is [`FlussoIndexBacklog`](#when-flussoindexbacklog-fires).
-- **Probe sooner, or less often.** [`[backoff]`](../reference/config-toml.md#backoff) sets the first and the longest wait between probes, for every lane and every engine restart. A short `max_ms` unparks a lane sooner once its cause is fixed; each probe of a lane still refused costs one bulk request.
+- **Probe sooner, or less often.** [`[backoff]`](../reference/config-toml.md#backoff) sets the first and the longest wait between probes, for every lane, every engine restart and every index restart. A short `max_ms` unparks a lane sooner once its cause is fixed; each probe of a lane still refused costs one bulk request.
 - **`/readyz` stays ready.** A parked lane doesn't make flusso unready: the other indexes are written and served, and a restart wouldn't help. Alert on the lane, not on readiness.
 - **A slow lane isn't stalled.** A lane that lands, just slowly, fires neither alert; `flusso:backlog_drain_eta_seconds` shows how long it will take. flusso logs a warning once a lane passes 10 minutes without landing, and every 10 minutes after.
 - **A backfill that stops making progress** shows as the index staying `backfilling` in `/status` while `flusso.documents.built` stops moving. A live change queued behind it on the same lane does age, and alerts.

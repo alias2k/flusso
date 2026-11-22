@@ -31,7 +31,7 @@ The live status document as JSON: the deployment, then one block per sink.
 | `phase` | `starting` \| `backfilling` \| `live` \| `stopping` \| `stopped` | Where the deployment is: `starting` until the ingest engine follows the source and every sink has staged (and again while a failed ingest engine restarts), `backfilling` while any sink still seeds, `stopping` from a [stop](cli.md#stopping) until its drain ends, `stopped` once the source stream ended. |
 | `uptime_seconds` | int | Since the daemon started. A reindex does not restart anything. |
 | `indexes` | map of name to `pending` \| `backfilling` \| `seeded` | Per-index state across sinks: the least advanced sink's state. Disabled indexes are listed too. |
-| `ingest.indexes.<index>` | object | What the ingest side knows of each enabled index: is it behind or stuck, and why. See [Per-index ingest state](#per-index-ingest-state). |
+| `ingest.indexes.<index>` | object | What the ingest side knows of each enabled index: is it behind, stuck or down, and why. See [Per-index ingest state](#per-index-ingest-state). |
 | `changes_captured` | int | Changes the ingest engine pulled from the source. |
 | `changes_in_flight` | int | Captured minus the slowest sink's `changes_committed`. `0` means every sink has written everything read. |
 | `documents_built` | int | Documents assembled by the ingest engine (once, however many sinks). |
@@ -43,8 +43,8 @@ The live status document as JSON: the deployment, then one block per sink.
 | `memory.limit_bytes` | int | `[concurrency] max_built_mib` in bytes. |
 | `memory.built_bytes` | int | Built documents not yet acknowledged by every sink, builds in flight included. See [config.toml](config-toml.md#concurrency). |
 | `memory.backfill_bytes` | int | Backfills' share of `built_bytes`, every index's together: at most half the limit, past one batch per index backfilling ([memory budget](config-toml.md#concurrency)). |
-| `errors` | int | Engine errors, ingest and sink. |
-| `last_error` | string or null | |
+| `errors` | int | Engine errors, ingest and sink. An index that restarts alone isn't one: its failure is under [`ingest.indexes.<index>`](#per-index-ingest-state). |
+| `last_error` | string or null | The latest engine error. |
 | `script_failures.<index>.count` | int | Documents of that index that failed to build: a [script failed](scripts.md#failures), or an [`array: true`](field-types.md#array) column held an object. Under either `on_error` policy (a `stop` index counts each retry). The key is absent until one fails. |
 | `script_failures.<index>.last` | object | The most recent: `id`, `field` (path, e.g. `variants[2].gross`), `message`, `line` and `column` in the script (null without a position), `at` (RFC 3339). |
 | `sinks.<name>.phase` | `starting` \| `backfilling` \| `live` \| `failed` \| `stopped` | `failed` while the daemon waits to restart that sink engine; the others keep running. |
@@ -76,9 +76,9 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
   "phase": "live",
   "ingest": {
     "indexes": {
-      "orders": { "documents_waiting": 0, "backlog_seconds": 0.0, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false },
-      "products": { "documents_waiting": 0, "backlog_seconds": 0.0, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false },
-      "users": { "documents_waiting": 0, "backlog_seconds": 0.0, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false }
+      "orders": { "documents_waiting": 0, "backlog_seconds": 0.0, "state": "running", "last_error": null, "restarts": { "live": 0, "backfill": 0 }, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false },
+      "products": { "documents_waiting": 0, "backlog_seconds": 0.0, "state": "running", "last_error": null, "restarts": { "live": 0, "backfill": 0 }, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false },
+      "users": { "documents_waiting": 0, "backlog_seconds": 0.0, "state": "running", "last_error": null, "restarts": { "live": 0, "backfill": 0 }, "exemption": "none", "working": true, "held_by": null, "backfill": null, "pacing_reader": false }
     }
   },
   "uptime_seconds": 412,
@@ -118,19 +118,23 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
 
 ### Per-index ingest state
 
-`ingest.indexes.<index>` answers "which index is behind or stuck, and why", from the ingest side: documents read and not built yet, the [exemption](config-toml.md#a-stuck-index), and what holds the index's builds. What each sink has landed of it stays under `sinks.<sink>.lanes.<index>`. One entry per **enabled** index, with one index too. [`GET /indexes/<name>/status`](#get-indexesnamestatus) serves one entry alone.
+`ingest.indexes.<index>` answers "which index is behind, stuck or down, and why", from the ingest side: documents read and not built yet, whether the index is [down](config-toml.md#a-failing-index) and what failed last, the [exemption](config-toml.md#a-stuck-index), what holds the index's builds, and its backfill. What each sink has landed of it stays under `sinks.<sink>.lanes.<index>`. One entry per **enabled** index, with one index too. [`GET /indexes/<name>/status`](#get-indexesnamestatus) serves one entry alone.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `documents_waiting` | int | Documents of the index read and not yet taken by a build. |
 | `backlog_seconds` | number | How long ago the index's oldest change not built yet was read (waiting, or in a build not yet handed to a sink). `0` when there is none. Grows only while the index is stuck or exempt: [below](#what-backlog_seconds-shows). |
+| `state` | `running` \| `down` | `down` from a failure of the index's live work until it restarts alone ([A failing index](config-toml.md#a-failing-index)); `running` otherwise. Always `running` with one index, where a failure restarts the whole ingest engine. |
+| `down_since` | string, absent | When its live work failed (RFC 3339, UTC). A restart clears it, so in a loop of failures it is the latest one's time: `restarts.live` counts the loop. Absent while `running`. |
+| `last_error` | object or null | The index's last failure of either kind: `{"kind": "live" \| "backfill", "message", "at"}`, `at` in RFC 3339, UTC. Kept after it recovered, for the life of the process. `message` is the error as logged, cut at 4 KiB with ` … (cut)` appended. Null before any failure, and always with one index. |
+| `restarts` | object | `{"live": n, "backfill": n}`: how often the index restarted after a live failure, and its backfill started again after a backfill failure, since the process started. A failure that ends the whole run restarts nothing here. Always `0` with one index. |
 | `exemption` | `none` \| `exempt` \| `frozen` | `exempt`: held at `max_waiting_per_index` while another index works, so reading goes on for the others; its documents count only toward `max_pending_documents`. `frozen`: exempt, but its hold ended or no other index works, so it may drain but not grow. Always `none` with one index, and between engine runs. See [A stuck index](config-toml.md#a-stuck-index). |
 | `exemption_since` | string, absent | When it entered that state (RFC 3339, UTC), to within a second. Absent while `none`. |
-| `working` | bool | `false` while items of the index wait at a sink and none has been acknowledged for 5 s. About progress, not holds: an index held by the memory budget whose sink keeps acknowledging is working. [Below](#working-with-one-index-and-with-several). |
-| `held_by` | `budget` \| `lane` \| null | What holds the index's builds right now. `budget`: its live batch is refused by the [memory budget](config-toml.md#concurrency). `lane`: a publish (a batch, or a backfill's end) waits on a full lane. For information: a hold alone isn't a fault. Cleared when an engine run ends. |
+| `working` | bool | `false` while items of the index wait at a sink and none has been acknowledged for 5 s, and while the index is `down`. About progress, not holds: an index held by the memory budget whose sink keeps acknowledging is working. [Below](#working-with-one-index-and-with-several). |
+| `held_by` | `budget` \| `lane` \| null | What holds the index's builds right now. `budget`: its live batch is refused by the [memory budget](config-toml.md#concurrency). `lane`: a publish (a batch, or a backfill's end) waits on a full lane. For information: a hold alone isn't a fault. Null while the index is `down`: it holds nothing, and `state` says why it builds nothing. Cleared when an engine run ends. |
 | `held_sinks` | list of string, absent | With `lane`, the sinks whose lanes are full. Absent otherwise. |
 | `held_since` | string, absent | When this hold began (RFC 3339, UTC); a new hold starts its own. Absent while nothing holds it. |
-| `backfill` | object or null | `{"sinks": [...]}` while the index's backfill runs, naming the sinks it serves. Null otherwise. |
+| `backfill` | object or null | The index's backfill, by its `state`. `{"state": "walking", "sinks": [...]}`: it runs, for these sinks. `{"state": "retrying", "retry_at": "…"}`: it failed and waits to retry, its live changes flowing; `retry_at` (RFC 3339, UTC) is when it is due, and can be in the past while another backfill of the index runs, or while the index waits on a full lane or is down. `{"state": "waiting"}`: the index went `down` while it ran, and it starts again once the index restarts. Null while none. |
 | `pacing_reader` | bool | The reader is stopped at this index's bound right now (`max_waiting_per_index`, or the count a frozen index froze at): this index sets the pace of reading for every index. |
 
 An index that is exempt and waits on a full lane of `primary`:
@@ -138,10 +142,24 @@ An index that is exempt and waits on a full lane of `primary`:
 ```json
 "users": {
   "documents_waiting": 48211, "backlog_seconds": 734.0,
+  "state": "running", "last_error": null, "restarts": { "live": 0, "backfill": 0 },
   "exemption": "exempt", "exemption_since": "2026-11-19T12:03:14Z",
   "working": false,
   "held_by": "lane", "held_sinks": ["primary"], "held_since": "2026-11-19T12:03:09Z",
   "backfill": null, "pacing_reader": false
+}
+```
+
+An index that is down after a document failed under `on_error = "stop"`, restarted twice already, and exempt while the others read on:
+
+```json
+"orders": {
+  "documents_waiting": 1840, "backlog_seconds": 312.0,
+  "state": "down", "down_since": "2026-11-19T12:08:41Z",
+  "last_error": { "kind": "live", "message": "document `42` in index `orders` could not be built: …", "at": "2026-11-19T12:08:41Z" },
+  "restarts": { "live": 2, "backfill": 0 },
+  "exemption": "exempt", "exemption_since": "2026-11-19T12:04:02Z",
+  "working": false, "held_by": null, "backfill": null, "pacing_reader": false
 }
 ```
 
@@ -225,7 +243,7 @@ A `503` for an index being seeded or rebuilt also names the lanes holding it up:
 
 - **It only waits.** Nothing is flushed or refreshed on a caller's behalf. Under a draining backlog `searchable` trails `applied` by up to the sink's [`refresh_interval`](sink-opensearch.md#refresh).
 - **It vouches only for what reads see.** While a sink seeds an index for the first time, reads see it filling; while it rebuilds one (a [reindex](../operate/reindex.md), or every seeded index after the [slot was lost](../operate/dropped-slot.md)), reads see the old copy and live writes go to the new one. A wait that needs such an index holds, and is answered `200` the moment the index is seeded and covers the position. If the timeout comes first it is `503` with `reason: backfilling` or `rebuilding` instead of `408`. During a reindex the old copy still serves everything written before the reindex began, so a wait for such a position is `200` throughout. A process that starts in the middle of a reindex knows nothing of what the old copy holds, so it vouches for nothing of that index until the swap. Without the slot, the old copy misses changes, so after a lost slot nothing is vouched for until the rebuild is seeded. The reason is `rebuilding` when any lane holding the wait rebuilds, else `backfilling`.
-- **Each index gets there on its own.** One commit that touches two indexes can be written to one well before the other. A wait naming one index passes once that index has it; a wait naming both, or none, passes once both have it.
+- **Each index gets there on its own.** One commit that touches two indexes can be written to one well before the other, or one index can be [down](config-toml.md#a-failing-index) while the other is written. A wait naming one index passes once that index has it; a wait naming both, or none, passes once both have it.
 - **A position already passed answers at once**, however old it is.
 - **During a stop it keeps answering.** A wait open when the stop begins, or opened during the drain, is answered `200` if its position lands meanwhile: that is when in-flight commits reach the sinks. While a wait on `searchable` is open the drain also waits out the sink's refresh interval, inside the stop's deadline. Once the drain is over every wait still open is answered `503` with `reason: stopping`, and so is a new one.
 - **A `503` means ask again**, against the same address, until your own timeout. The position is the source's own (a WAL LSN), so the next process answers the same question: it starts from the position the last one confirmed, which after a graceful stop covers everything the last one indexed.
