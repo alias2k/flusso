@@ -3610,6 +3610,78 @@ became counts of failures: a walk's failure restarts nothing now.
 | item 3 | a give-back keeps the newer waiting mark | `an_id_waiting_again_takes_its_older_change_back` |
 | item 4 | `restarting` keeps `counted` | `a_hold_after_a_lone_held_index_restarted_is_counted` |
 
+### 3.11 Slice 8-2: reporting a down index and a walk waiting to retry (design, before building)
+
+**What an operator needs to tell apart**, per index: running; down (its builder waits to restart after a
+failure of its live work); its walk walking, waiting to retry after a failure, or none; what failed last
+and how often each kind restarted. Slice 7's fields stay; three are added and one is extended.
+
+**`/status` `ingest.indexes.<name>`** (and `GET /indexes/<name>/status`):
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `state` | `"running"` / `"down"` | `down` from a failure of its live work until its builder restarted (8-1's `on_index_failed`/`on_index_restarted` of kind `live`); `running` otherwise. Always `running` with one index: a failure there ends the run, which restarts every builder |
+| `down_since` | RFC 3339, UTC; absent while running | when its live work failed |
+| `last_error` | `null` or `{"kind": "live" \| "backfill", "message": "…", "at": RFC 3339}` | its last failure of either kind, kept after it recovered (for the process's life) |
+| `restarts` | `{"live": n, "backfill": n}` | how often its builder restarted after a live failure, and its walk started again after a walk failure, since the process started |
+| `backfill` | `null`, `{"state": "walking", "sinks": […]}` or `{"state": "retrying", "retry_at": RFC 3339}` | slice 7's walk in progress, now with `state`; `retrying` while a failed walk waits for its retry (`sinks` only while walking: the retry's requests are the walk's, served when it starts) |
+
+**`working` and `held_by` while down.** `working` reads **false** while the index is down: it builds
+nothing, whatever its lanes acknowledge (slice 7's rule, "false while items wait unacknowledged 5 s",
+gains "or while it is down"). `held_by` keeps its meaning (what holds its builder: the budget or a full
+lane) and reads `null` while down: a down builder holds nothing, and `state` says why it builds nothing.
+The slice 7 table's terms stay true: `held_by` is information; `working` is about progress, and a down
+index makes none.
+
+**Where it comes from.** The engine reports the kind with each event: `Observer::on_index_failed(index,
+kind, error, retry_in)` and `on_index_restarted(index, kind)` (`kind`: `Work::Live` / `Work::Backfill`; a
+walk's restart is reported when its retry starts). The daemon's `StatusObserver` feeds `Status`
+(per index: down since, retry at, last error, restarts by kind). **Across a whole-run restart** the down
+state and a pending retry are cleared (`mark_ingest_failed`, `mark_ingest_live`, the stop's end): the new
+run restarts every builder and its walks start again from the requests; `last_error` and `restarts` are
+kept (they are the process's history). `backfill`'s `walking` is slice 7's `IndexStates` walk.
+
+**Metrics** (observable instruments over `Status`, so every enabled index has its series from the
+start, as slice 7's gauges):
+
+| OTel | Prometheus | Labels | Value |
+| --- | --- | --- | --- |
+| `flusso.index.down` | `flusso_index_down` | `index` | 1 while `state` is `down` |
+| `flusso.index.restarts` (counter) | `flusso_index_restarts_total` | `index`, `kind` (`live`, `backfill`) | `restarts` |
+| `flusso.index.backfilling` (slice 7) | `flusso_index_backfilling` | `index` | 1 while walking (not while retrying) |
+| `flusso.index.backfill_retrying` | `flusso_index_backfill_retrying` | `index` | 1 while a failed walk waits to retry |
+| `flusso.index.working` (slice 7) | `flusso_index_working` | `index` | 0 while down too |
+
+With one index `down` and `backfill_retrying` are always 0 and `restarts` stays 0: a failure ends the run
+and the daemon's engine restart is reported as before (`flusso.engine.errors`).
+
+**Logs** (built in 8-1): the failure line carries `kind`, a walk failure's line says the index's live
+changes keep flowing; the restart line carries `kind`; a walk's retry starting logs `info` with
+`kind = "backfill"`.
+
+**The alert.** No rule is added. `FlussoIndexBacklog` covers a down index **with documents waiting**:
+nothing of it builds, its backlog age grows a second a second past 60 s (and it is exempt past its cap),
+so it fires after 10 minutes. Two cases page nobody, for issue #455: **a down index with nothing waiting**
+(no live change touched it since; its backlog is 0, it is not exempt) and **a backfill that keeps failing
+while live changes flow** (the index is running and working; only `backfill.state` and
+`flusso_index_backfill_retrying` show it). `flusso_index_down` and `flusso_index_restarts_total` are what
+such rules can read.
+
+**Dashboard.** The per-index row gains "Indexes down or retrying a backfill" (`flusso_index_down`,
+`flusso_index_backfill_retrying`) and "Index restarts, by kind" (`rate(flusso_index_restarts_total[5m])`).
+
+| Rule | Test (written first) | Mutation |
+| --- | --- | --- |
+| S1 a live failure shows the index down, since then, with its error | daemon `status::tests`' `a_live_failure_shows_the_index_down_until_it_restarts` | `down_since` never set |
+| S2 the restart shows it running and counts it | the same | restarts not counted |
+| S3 a walk failure shows it retrying until its retry starts, running all the while | `a_walk_failure_shows_the_backfill_retrying_until_it_walks_again` | `retry_at` never cleared |
+| S4 a whole-run restart clears down and retrying, keeps the history | `a_run_restart_clears_down_and_retrying_and_keeps_the_history` | not cleared |
+| S5 `working` is false while down | the first | `working` ignores down |
+| S6 one index stays running | the daemon's `one_index_is_never_down` (a real engine, a failing build) | — |
+| S7 the engine reports the kind of each failure and restart | engine `ingest::tests::restart`'s observers (kind asserted) | the kind swapped |
+| S8 the metrics: `flusso_index_down`, `flusso_index_restarts_total{kind}`, `flusso_index_backfill_retrying`, `backfilling` only while walking | the CLI's `each_index_is_exported_with_its_ingest_state` | — |
+| S9 the HTTP route serves the new fields | `http::tests`' index route case | — |
+
 ## 4. Guarantees
 
 | Invariant (CLAUDE.md) | After 8a | Existing guards | New test |
