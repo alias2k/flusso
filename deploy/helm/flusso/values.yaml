@@ -142,11 +142,15 @@ prometheusRule:
   laneWalBehindBytes: 1073741824
   laneWalStallSeconds: 60
   for: 5m
-  # FlussoIndexBacklog fires once an index has been exempt, or its oldest
-  # change not built yet was read more than `indexBacklogSeconds` ago, for
-  # `indexBacklogFor`. Reading ahead is bounded, so a healthy index at its
-  # sink's limit stays seconds behind; 60 s leaves room for slow builds and
-  # a catch-up.
+  # FlussoIndexBacklog fires once an index has been exempt, or stuck (its
+  # oldest change not built yet read more than `indexBacklogSeconds` ago),
+  # for `indexBacklogFor`. Reading stops at an index's cap, so an index that
+  # isn't exempt is never more than its read-ahead (seconds) behind here,
+  # even at its sink's limit or falling behind its source (that lag is the
+  # lanes' WAL behind and the slot lag); 60 s leaves room for slow builds.
+  # It also fires during a planned catch-up longer than `indexBacklogFor`
+  # when one index is slower than the others (it is exempt meanwhile, the
+  # slot pinned by it): silence it, or raise `indexBacklogFor`.
   indexBacklogSeconds: 60
   indexBacklogFor: 10m
   severity: page

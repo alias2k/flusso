@@ -466,7 +466,7 @@
     {
       "id": 18,
       "title": "Index backlog age (s; how long ago an index's oldest unbuilt change was read)",
-      "description": "Per index: how long ago its oldest change not built yet (waiting, or in a build not sent to a lane) was read. Near 0 while the index keeps up, even at its sink's limit; it grows while it is exempt, stuck or falling behind, and falls as it catches up. 0 while no engine run reads.",
+      "description": "Per index: how long ago its oldest change not built yet (waiting, or in a build not sent to a lane) was read. Grows only while the index is exempt or stuck, and falls as it catches up. Reading stops at an index's cap, so an index that paces the reader stays within its read-ahead (seconds), at its sink's limit and however far it falls behind its source: that lag is its lanes' WAL behind (the WAL held per lane panel) and the slot lag. 0 while no engine run reads.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
@@ -488,7 +488,7 @@
     {
       "id": 19,
       "title": "Indexes exempt, frozen, held or not working (1 = yes)",
-      "description": "Per index: exempt (held at its cap while the others read on), frozen (exempt, may drain but not grow), held by the memory budget or a full lane, not working (a sink has acknowledged nothing of it for 5 s; held is not enough). FlussoIndexBacklog fires once exempt, or behind by over a minute (backlog age), for 10 minutes.",
+      "description": "Per index: exempt (held at its cap while the others read on), frozen (exempt, may drain but not grow), held by the memory budget or a full lane, not working (a sink has acknowledged nothing of it for 5 s; held is not enough). FlussoIndexBacklog fires once exempt, or stuck (backlog age over a minute), for 10 minutes; also during a planned catch-up longer than that when one index is slower than the others.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
@@ -528,7 +528,7 @@
     {
       "id": 20,
       "title": "Reader waits at its lead, by bound (waits per second; seconds waiting per second)",
-      "description": "How often the reader stops at its lead and for how long, by the bound that stopped it: per_index (an index at its cap), total (the non-exempt indexes' documents), changes (changes read ahead), pending (the exempt indexes at max_pending_documents).",
+      "description": "How often the reader stops at its lead and for how long, by the bound that stopped it: per_index (an index at its cap, labelled with the index), total (the non-exempt indexes' documents), changes (changes read ahead), pending (the exempt indexes at max_pending_documents).",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 76 },

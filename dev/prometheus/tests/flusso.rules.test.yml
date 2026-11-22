@@ -142,7 +142,9 @@ tests:
 
   # FlussoIndexBacklog over several indexes: `orders` exempt the whole
   # time, `items` stuck (its oldest unbuilt change ages a minute a minute),
-  # `users` a healthy sink at its limit (seconds behind, never exempt),
+  # `users` a healthy sink at its limit, or an index falling behind its
+  # source (either way its oldest unbuilt change is seconds old: reading
+  # stops at its cap; never exempt),
   # `carts` exempt for 5 minutes at a time, twice (flapping under `for`).
   # `orders` fires after 10 minutes; `items` once it has been over a minute
   # behind for 10 (at 12); `users` and `carts` never.
@@ -175,18 +177,22 @@ tests:
               severity: page
               index: orders
             exp_annotations:
-              summary: "flusso's orders index has been exempt or behind for 10m"
+              summary: "flusso's orders index has been exempt or stuck for 10m"
               description: >-
                 The index has been exempt (held at max_waiting_per_index while the
                 other indexes read on: its changes are kept as documents to build, up
-                to max_pending_documents, and the slot stays pinned by it), or its
-                oldest change not built yet was read over a minute ago, the whole
-                period. /status names why under ingest.indexes.<index>: held_by and
-                held_sinks (a full lane: the sink is slow, refusing, or down; see
-                FlussoLaneStalled and FlussoLaneParked; or the memory budget), working
-                (false: a sink has acknowledged nothing for 5 s), backlog_seconds. A
-                backlog with nothing held and every sink working means its documents
-                build slower than they change: the database or the scripts.
+                to max_pending_documents, and the slot stays pinned by it), or stuck
+                (its oldest change not built yet was read over 60 s ago: nothing of it
+                is being built), the whole period. It also fires during a planned
+                catch-up longer than 10m when one index is slower than the others
+                (it is exempt meanwhile): silence it, or raise the period. /status names
+                why under ingest.indexes.<index>: held_by and held_sinks (a full lane: the
+                sink is slow, refusing or down, see FlussoLaneStalled and
+                FlussoLaneParked; or the memory budget), working (false: a sink has
+                acknowledged nothing for 5 s), backlog_seconds, pacing_reader. How far
+                an index is behind the source is not this alert: read its lanes' WAL
+                behind (flusso_lane_wal_behind_bytes) and the slot lag
+                (flusso_replication_slot_lag_bytes).
               runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
       - eval_time: 12m
         alertname: FlussoIndexBacklog
@@ -195,35 +201,43 @@ tests:
               severity: page
               index: orders
             exp_annotations:
-              summary: "flusso's orders index has been exempt or behind for 10m"
+              summary: "flusso's orders index has been exempt or stuck for 10m"
               description: >-
                 The index has been exempt (held at max_waiting_per_index while the
                 other indexes read on: its changes are kept as documents to build, up
-                to max_pending_documents, and the slot stays pinned by it), or its
-                oldest change not built yet was read over a minute ago, the whole
-                period. /status names why under ingest.indexes.<index>: held_by and
-                held_sinks (a full lane: the sink is slow, refusing, or down; see
-                FlussoLaneStalled and FlussoLaneParked; or the memory budget), working
-                (false: a sink has acknowledged nothing for 5 s), backlog_seconds. A
-                backlog with nothing held and every sink working means its documents
-                build slower than they change: the database or the scripts.
+                to max_pending_documents, and the slot stays pinned by it), or stuck
+                (its oldest change not built yet was read over 60 s ago: nothing of it
+                is being built), the whole period. It also fires during a planned
+                catch-up longer than 10m when one index is slower than the others
+                (it is exempt meanwhile): silence it, or raise the period. /status names
+                why under ingest.indexes.<index>: held_by and held_sinks (a full lane: the
+                sink is slow, refusing or down, see FlussoLaneStalled and
+                FlussoLaneParked; or the memory budget), working (false: a sink has
+                acknowledged nothing for 5 s), backlog_seconds, pacing_reader. How far
+                an index is behind the source is not this alert: read its lanes' WAL
+                behind (flusso_lane_wal_behind_bytes) and the slot lag
+                (flusso_replication_slot_lag_bytes).
               runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
           - exp_labels:
               severity: page
               index: items
             exp_annotations:
-              summary: "flusso's items index has been exempt or behind for 10m"
+              summary: "flusso's items index has been exempt or stuck for 10m"
               description: >-
                 The index has been exempt (held at max_waiting_per_index while the
                 other indexes read on: its changes are kept as documents to build, up
-                to max_pending_documents, and the slot stays pinned by it), or its
-                oldest change not built yet was read over a minute ago, the whole
-                period. /status names why under ingest.indexes.<index>: held_by and
-                held_sinks (a full lane: the sink is slow, refusing, or down; see
-                FlussoLaneStalled and FlussoLaneParked; or the memory budget), working
-                (false: a sink has acknowledged nothing for 5 s), backlog_seconds. A
-                backlog with nothing held and every sink working means its documents
-                build slower than they change: the database or the scripts.
+                to max_pending_documents, and the slot stays pinned by it), or stuck
+                (its oldest change not built yet was read over 60 s ago: nothing of it
+                is being built), the whole period. It also fires during a planned
+                catch-up longer than 10m when one index is slower than the others
+                (it is exempt meanwhile): silence it, or raise the period. /status names
+                why under ingest.indexes.<index>: held_by and held_sinks (a full lane: the
+                sink is slow, refusing or down, see FlussoLaneStalled and
+                FlussoLaneParked; or the memory budget), working (false: a sink has
+                acknowledged nothing for 5 s), backlog_seconds, pacing_reader. How far
+                an index is behind the source is not this alert: read its lanes' WAL
+                behind (flusso_lane_wal_behind_bytes) and the slot lag
+                (flusso_replication_slot_lag_bytes).
               runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
 
   # One index, stuck: its sink down, its builder held by the budget, the
@@ -246,16 +260,20 @@ tests:
               severity: page
               index: users
             exp_annotations:
-              summary: "flusso's users index has been exempt or behind for 10m"
+              summary: "flusso's users index has been exempt or stuck for 10m"
               description: >-
                 The index has been exempt (held at max_waiting_per_index while the
                 other indexes read on: its changes are kept as documents to build, up
-                to max_pending_documents, and the slot stays pinned by it), or its
-                oldest change not built yet was read over a minute ago, the whole
-                period. /status names why under ingest.indexes.<index>: held_by and
-                held_sinks (a full lane: the sink is slow, refusing, or down; see
-                FlussoLaneStalled and FlussoLaneParked; or the memory budget), working
-                (false: a sink has acknowledged nothing for 5 s), backlog_seconds. A
-                backlog with nothing held and every sink working means its documents
-                build slower than they change: the database or the scripts.
+                to max_pending_documents, and the slot stays pinned by it), or stuck
+                (its oldest change not built yet was read over 60 s ago: nothing of it
+                is being built), the whole period. It also fires during a planned
+                catch-up longer than 10m when one index is slower than the others
+                (it is exempt meanwhile): silence it, or raise the period. /status names
+                why under ingest.indexes.<index>: held_by and held_sinks (a full lane: the
+                sink is slow, refusing or down, see FlussoLaneStalled and
+                FlussoLaneParked; or the memory budget), working (false: a sink has
+                acknowledged nothing for 5 s), backlog_seconds, pacing_reader. How far
+                an index is behind the source is not this alert: read its lanes' WAL
+                behind (flusso_lane_wal_behind_bytes) and the slot lag
+                (flusso_replication_slot_lag_bytes).
               runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
