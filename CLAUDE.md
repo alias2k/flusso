@@ -761,8 +761,9 @@ is the one concrete piece.
   names each index left with documents read and not built (`shutdown::unbuilt_indexes`,
   `daemon::Status::waiting_by_index`).
   A reader error (through the builder, which joins the reader) or a builder error reaches the
-  dispatcher over the builder's one-shot and ends the run; a panic in any of the three unwinds the run's
-  task, as `main`'s did; returning drops the reader and the builder in place (nothing spawned, nothing
+  dispatcher over the builder's one-shot and ends the run (with two or more builders, a failure of a
+  builder's own index restarts it alone instead: slice 8, below); a panic in any of the three unwinds
+  the run's task, as `main`'s did; returning drops the reader and the builder in place (nothing spawned, nothing
   outlives the run), and an engine restart forgets the
   old marks before the new reader starts. A change read always counts read: the run being read is a guard that counts what wasn't
   handed over when it drops, so `changes_captured` and the read count move together. `Idle` ends where the reader began the run that woke the
@@ -788,6 +789,46 @@ is the one concrete piece.
   running build, nothing committed ahead, confirmation pinned, the stop mid-run and
   far ahead, both errors, a reader panic, a burst past tokio's cooperative budget, the idle/resolve split, a parked lane bounding pending memory), the CLI's
   `max_waiting` binary and `run::tests`, the daemon's `a_waiting_bound_below_one_index_stops_the_start`.
+- **A failure of one index's own work restarts its builder alone (ADR 0012 stage 8a, slice 8-1; the
+  stage note's §3.10).** With two or more builders, an `EngineError::Source` or `DocumentFailed` a
+  builder returns (a build that failed or panicked, inline included through `catch_unwind` on its first
+  poll; a document under `on_error = "stop"`; its walk's key read, failed or panicked on its own task)
+  is its index's (`ingest/restart.rs`'s `restarts_alone`, the one predicate); a lane or request-lane
+  error, a bug variant, the reader, the dispatcher, any failure while stopping and any failure of a lone
+  builder end the run as before (one index keeps the whole-run restart and its replay, and pays nothing;
+  a build panicking at its first poll is a failed build there too, so the daemon restarts the run where
+  the unwound task used to end the deployment: the daemon's
+  `a_panicking_build_restarts_the_ingest_engine_and_never_hangs`).
+  The builder (`builder.rs`'s `build` loop and `down`): waits for its running builds (`Builds::abandon`),
+  gives every unreleased build of its index back to the pending set (`Progress::give_back`: each id
+  waits again at its own change and read number, kept per id in the build, an id marked again
+  meanwhile at the older of the two; never `forget`: nothing is read again, and its lanes stay `Before`
+  the oldest of them, so the slot and every fence of the index stay pinned while the other indexes'
+  pass; the `newest` invariant needs no reset, since `newest` moved only past builds already taken),
+  keeps its requests (the snapshot's, the coalescing set's and a finished walk's still queued to
+  complete, carried as a coalescing set due at once: the channel adapter makes a dropped delivery due
+  but wakes no pending `recv`, so a request handed back could sit until another one arrived), sets its
+  lead queue `held` and `folding` (the reader hands it nothing, and at its cap it is exempt while
+  another index is free, 6b-2's mechanism), clears its budget hold, takes fresh `Builds`, and waits its
+  `Retry` (`[backoff]` via `IngestEngine::with_backoff`, 1 s doubling to `max_ms`, started over once a
+  live item of the index was numbered since the last restart; a stop cuts it short: one more try under
+  the stop, O3). The restarted builder folds and asks for its backlog once as it starts (nothing else
+  would: the reader hands a folding builder nothing). A backlog candidate never carries a position
+  older than the builder's last live grant (`Runs::backlog`, the floor), so a lane's positions never go
+  down within a run. Reported as `Observer::on_index_failed` / `on_index_restarted` and an `error!` /
+  `info!` line; `/status` and metrics are slice 8-2. Guards: `ingest::tests::restart` (each kind of
+  failure restarts alone with the other index landing, every given-back document rebuilt, the slot and
+  the index's lane `Before` its oldest unbuilt change at the restart while the sibling's answers
+  `Through`, exempt past its cap while down, the waits doubling and starting over, a stop cutting the
+  wait, a failure while stopping ending the run, an inline build panic, one index ending the run, an
+  open stream's backlog and walk served after the restart, a lane's positions never going down across
+  a restart), `restart::tests` (the predicate, the
+  waits), `pending::tests`' `a_give_back_*`, `tests::builders`'
+  `a_failed_walk_restarts_its_index_alone_and_the_other_walk_reads_on`,
+  `a_build_error_restarts_its_builder_alone_beside_a_held_builder`,
+  `a_key_read_panicking_on_its_own_task_restarts_its_index_alone`, and the random schedules, whose
+  two-index seeds restart builders at random build failures and, in half of them, fail one whole run
+  (a resolve) too.
 
 - **One lane per `(index, sink)` (ADR 0012 stage 7).** `stream::LaneKey { index, sink }`; the daemon
   builds every enabled index × every sink (`Backends::stream(config, &[LaneKey])`), `Stream::lanes(sink)`
@@ -2853,7 +2894,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 
 | To work on… | Go to |
 | --- | --- |
-| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the builder's loop; `ingest/reader.rs` the reader: read, resolve, mark, the lead; `ingest/together.rs` the reader, the dispatcher and the builders polled as one task; `ingest/dispatcher.rs` requests forwarded, confirmation, the tick, the end and the stop; `ingest/builder.rs` the builder's loop and request coalescing; `ingest/live.rs` the queued runs formed into batches, `ingest/builds.rs` admission and the grant-ordered slots, `ingest/gate.rs` the build permits (live first, every fourth contested grant to backfill), `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`; `budget.rs` the memory budget: `Budget`, `Reservation`/`Charge`, the heap walk), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in item-key order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `sink_engine/walked.rs` (the landed prefix of a backfill walk, recorded for resume), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
+| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the builder's loop; `ingest/reader.rs` the reader: read, resolve, mark, the lead; `ingest/together.rs` the reader, the dispatcher and the builders polled as one task; `ingest/dispatcher.rs` requests forwarded, confirmation, the tick, the end and the stop; `ingest/builder.rs` the builder's loop, request coalescing and its restart in place (slice 8); `ingest/restart.rs` whose failure restarts one builder alone, and its waits; `ingest/live.rs` the queued runs formed into batches, `ingest/builds.rs` admission and the grant-ordered slots, `ingest/gate.rs` the build permits (live first, every fourth contested grant to backfill), `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`; `budget.rs` the memory budget: `Budget`, `Reservation`/`Charge`, the heap walk), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in item-key order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `sink_engine/walked.rs` (the landed prefix of a backfill walk, recorded for resume), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Per-index ingest state an operator reads (slice 7: exemption, holds, walk, working) | engine `libs/2-engine/src/index_states.rs` (`IndexStates`); daemon `status.rs` (`ingest.indexes.<name>`, `index_ingest`), `stall.rs` (`backlog`); CLI `http/mod.rs` (`/indexes/{name}/status`), `telemetry/metrics.rs` (`register_index_gauges`), `telemetry/observer.rs` (`flusso.reader.waits`); alert `FlussoIndexBacklog` in `dev/prometheus/rules/` and `deploy/helm/flusso/templates/prometheusrule.yaml` |
 | Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
