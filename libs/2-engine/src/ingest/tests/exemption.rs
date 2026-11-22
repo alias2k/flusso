@@ -867,9 +867,9 @@ async fn on_an_idle_stream_the_last_lines_name_the_state_within_a_minute() {
 /// restarts (a build's failure would restart `users` alone, slice 8). The
 /// log state is the engine's, so the throttled line is still logged. Changes keep arriving every 100 ms to the end, so lead
 /// checks keep coming (not the idle case). Two minutes in, the last line
-/// should name the current state (not exempt).
-#[tokio::test(start_paused = true)]
-async fn across_an_ingest_restart_the_last_line_names_the_state_within_a_minute() {
+/// should name the current state (not exempt). With `alone`, a `users`
+/// build fails instead, which restarts `users` alone (slice 8).
+async fn last_line_across_a_restart(alone: bool) {
     let lines = Captured::default();
     let subscriber = tracing_subscriber::fmt()
         .with_ansi(false)
@@ -888,7 +888,16 @@ async fn across_an_ingest_restart_the_last_line_names_the_state_within_a_minute(
     let builder = Builder::two(
         &db,
         Behaviour {
-            resolve_fails_once: Mutex::new(HashSet::from([200])),
+            resolve_fails_once: Mutex::new(if alone {
+                HashSet::new()
+            } else {
+                HashSet::from([200])
+            }),
+            fail_once: Mutex::new(if alone {
+                HashSet::from([200])
+            } else {
+                HashSet::new()
+            }),
             ..Behaviour::default()
         },
     );
@@ -935,7 +944,7 @@ async fn across_an_ingest_restart_the_last_line_names_the_state_within_a_minute(
             (before, after, waiting)
         })
     };
-    let failed = tokio::time::timeout(LIMIT * 4, deployment.run_to_end(1))
+    let failed = tokio::time::timeout(LIMIT * 4, deployment.run_to_end(usize::from(!alone)))
         .await
         .expect("the run ends at the stop");
     let (before, after, waiting) = watcher.await.unwrap();
@@ -945,7 +954,11 @@ async fn across_an_ingest_restart_the_last_line_names_the_state_within_a_minute(
             .is_some_and(|l| l.contains("exempt, so reading goes on")),
         "setup: exempt logged by 3 s: {before:?}"
     );
-    assert_eq!(failed, 1, "setup: the ingest run failed once");
+    assert_eq!(
+        failed,
+        usize::from(!alone),
+        "setup: the ingest run failed once, or users restarted alone"
+    );
     assert!(
         waiting < 4,
         "setup: orders is below its cap at 2 min ({waiting} waiting)"
@@ -957,6 +970,17 @@ async fn across_an_ingest_restart_the_last_line_names_the_state_within_a_minute(
         "two minutes in, under steady traffic, after an ingest restart, the last line still \
          names exempt: {after:?}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn across_an_ingest_restart_the_last_line_names_the_state_within_a_minute() {
+    last_line_across_a_restart(false).await;
+}
+
+/// The same across a restart of `users` alone (review of #456).
+#[tokio::test(start_paused = true)]
+async fn across_an_index_restart_the_last_line_names_the_state_within_a_minute() {
+    last_line_across_a_restart(true).await;
 }
 
 /// Review round 3 of #452: an item is outstanding until **every** lane lets

@@ -382,6 +382,8 @@ struct Behaviour {
     keys_fail_once: Mutex<HashSet<String>>,
     /// Resolving one of these ids fails, once.
     resolve_fails_once: Mutex<HashSet<i64>>,
+    /// Walks can be resumed: a mark is the key's id, ordered by id.
+    resumable: bool,
     /// Every build takes this long.
     delay: Option<Duration>,
     /// Every key page takes this long to read.
@@ -723,6 +725,27 @@ impl DocumentBuilder for Builder {
             .map(|index| IndexMapping { index, ..mapping() })
             .collect())
     }
+
+    async fn walk_mark(&self, _: &IndexName, key: &RowKey) -> source::Result<Option<String>> {
+        Ok(self.behaviour.resumable.then(|| id_of(key).to_string()))
+    }
+
+    async fn resume_after(&self, _: &IndexName, mark: &str) -> source::Result<Option<RowKey>> {
+        Ok(self
+            .behaviour
+            .resumable
+            .then(|| mark.parse().ok().map(key))
+            .flatten())
+    }
+
+    async fn compare_keys(
+        &self,
+        _: &IndexName,
+        a: &RowKey,
+        b: &RowKey,
+    ) -> source::Result<Option<std::cmp::Ordering>> {
+        Ok(self.behaviour.resumable.then(|| id_of(a).cmp(&id_of(b))))
+    }
 }
 
 /// What the sink was written, in lane order (it writes one item at a time):
@@ -936,7 +959,11 @@ impl Sink for Recorder {
 struct Spy {
     inner: Arc<ChannelStream>,
     published: Published,
+    failing: FailingLanes,
 }
+
+/// The indexes whose lanes fail their next publish, once each.
+type FailingLanes = Arc<Mutex<HashSet<String>>>;
 
 /// Every position published, per lane, in lane order.
 type Published = Arc<Mutex<BTreeMap<stream::LaneKey, Vec<u64>>>>;
@@ -949,6 +976,7 @@ struct SpyProducer {
     inner: Box<dyn stream::Producer<stream::LaneItem>>,
     lane: stream::LaneKey,
     published: Published,
+    failing: FailingLanes,
 }
 
 #[async_trait]
@@ -957,6 +985,14 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
         // The engine awaits each item's send before the next one's: logged
         // after the send, the log is lane order.
         let position = item.position();
+        if self
+            .failing
+            .lock()
+            .unwrap()
+            .remove(self.lane.index.as_ref())
+        {
+            return Err(stream::QueueError::Publish("the lane failed".to_owned()));
+        }
         self.inner.publish(item).await?;
         if let Some(position) = position {
             self.published
@@ -978,6 +1014,7 @@ impl Stream for Spy {
                 inner: lane.producer,
                 lane: key.clone(),
                 published: Arc::clone(&self.published),
+                failing: Arc::clone(&self.failing),
             }),
             consumer: lane.consumer,
         })
@@ -1001,6 +1038,8 @@ struct Deployment {
     stream: Arc<ChannelStream>,
     /// Every position published, per lane, in lane order.
     published: Published,
+    /// Lanes to fail on their next publish.
+    failing: FailingLanes,
     feed: Arc<Feed>,
     recorder: Arc<Recorder>,
     ingest: IngestEngine,
@@ -1034,9 +1073,11 @@ impl Deployment {
         ));
         let feed = Arc::new(feed);
         let published: Published = Arc::default();
+        let failing: FailingLanes = Arc::default();
         let spy = Arc::new(Spy {
             inner: Arc::clone(&stream),
             published: Arc::clone(&published),
+            failing: Arc::clone(&failing),
         });
         let ingest = IngestEngine::new(
             Arc::clone(&feed) as Arc<dyn ChangeCapture>,
@@ -1058,6 +1099,7 @@ impl Deployment {
         Self {
             stream,
             published,
+            failing,
             feed,
             recorder,
             ingest,
@@ -3111,6 +3153,82 @@ async fn a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment() {
     assert!(
         live[0] < Duration::from_secs(60),
         "up to the end of the run, not over the outage: {live:?}"
+    );
+    assert!(
+        live[0] > Duration::from_millis(500),
+        "from the first refusal to the release: {live:?}"
+    );
+}
+
+/// The twin across a restart of `orders` alone (review of #456, item 3):
+/// `users`' wait is not cut by it (one wait, counted once), and lasts until
+/// the release; `orders` is down an hour meanwhile.
+#[tokio::test(start_paused = true)]
+async fn a_wait_open_when_another_index_restarts_is_not_cut() {
+    // `users` (even ids) builds ten documents of about 8 KiB, one per run,
+    // past its 64 KiB share while the sink is stalled; then `users` 0 again
+    // waits, and `orders` 1..9 build beside it, one per run.
+    let mut log: Vec<Change> = (0..10).map(|n| Change::upsert(2 * n)).collect();
+    log.push(Change::upsert(0));
+    log.extend([1, 3, 5, 7, 9].map(Change::upsert));
+    let db = Database::new(0, log);
+    let builder = Builder::over(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            fail_once: Mutex::new(HashSet::from([9])),
+            ..Behaviour::default()
+        },
+        2,
+    );
+    let recorder = Recorder::seeded(true);
+    recorder.stall();
+    let waits = Arc::new(BudgetWaits::default());
+    let observer = Arc::clone(&waits);
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_millis(100)),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(16))
+            .with_builds(4)
+            .with_observer(observer)
+            .with_backoff(
+                crate::Backoff::new(Duration::from_secs(3600), Duration::from_secs(3600)).unwrap(),
+            )
+    })
+    .with_budget(128 * KIB, usize::MAX);
+    let budget = deployment.budget.clone().unwrap();
+    let resumer = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(3_000)).await;
+            recorder.resume();
+        })
+    };
+    assert_eq!(
+        deployment.run_to_end(0).await,
+        0,
+        "orders 9's build failed once: orders restarted alone, after an hour"
+    );
+    resumer.await.unwrap();
+    assert_eq!(deployment.recorder.state(), db.expected());
+
+    assert_eq!(budget.refused(crate::Work::Live), 1, "{:?}", waits.0);
+    let live: Vec<Duration> = waits
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(work, _, _)| *work == crate::Work::Live)
+        .map(|(_, _, waited)| *waited)
+        .collect();
+    assert_eq!(live.len(), 1, "one wait: {live:?}");
+    assert!(
+        live[0] < Duration::from_secs(60),
+        "up to the release, not cut by orders' restart: {live:?}"
     );
     assert!(
         live[0] > Duration::from_millis(500),
