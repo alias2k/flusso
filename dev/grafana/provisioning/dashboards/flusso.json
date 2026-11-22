@@ -465,8 +465,8 @@
     },
     {
       "id": 18,
-      "title": "Index backlog age (s; how long an index's oldest unbuilt change has stayed its oldest)",
-      "description": "Per index: how long its oldest change read and not built yet (waiting, or in a build not sent to a lane) has stayed its oldest. Near 0 while the index builds steadily; it grows while the index is exempt, frozen or held.",
+      "title": "Index backlog age (s; how long ago an index's oldest unbuilt change was read)",
+      "description": "Per index: how long ago its oldest change not built yet (waiting, or in a build not sent to a lane) was read. Near 0 while the index keeps up, even at its sink's limit; it grows while it is exempt, stuck or falling behind, and falls as it catches up. 0 while no engine run reads.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
@@ -488,7 +488,7 @@
     {
       "id": 19,
       "title": "Indexes exempt, frozen, held or not working (1 = yes)",
-      "description": "Per index: exempt (held at its cap while the others read on), frozen (exempt, may drain but not grow), held by the memory budget or a full lane, not working (held, or items unacknowledged on a lane for 5 s). FlussoIndexBacklog fires once exempt or not working for 10 minutes.",
+      "description": "Per index: exempt (held at its cap while the others read on), frozen (exempt, may drain but not grow), held by the memory budget or a full lane, not working (a sink has acknowledged nothing of it for 5 s; held is not enough). FlussoIndexBacklog fires once exempt, or behind by over a minute (backlog age), for 10 minutes.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
