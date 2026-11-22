@@ -1322,7 +1322,7 @@ fn batch(max_changes: usize) -> BatchPolicy {
 struct IndexRestarts(AtomicUsize);
 
 impl crate::Observer for IndexRestarts {
-    fn on_index_restarted(&self, _: &IndexName) {
+    fn on_index_restarted(&self, _: &IndexName, _: crate::Work) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 }

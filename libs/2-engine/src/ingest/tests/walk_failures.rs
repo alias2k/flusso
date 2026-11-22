@@ -190,7 +190,7 @@ struct Counts {
 }
 
 impl Observer for Counts {
-    fn on_index_failed(&self, _: &IndexName, _: &str, wait: Duration) {
+    fn on_index_failed(&self, _: &IndexName, _: crate::Work, _: &str, wait: Duration) {
         self.failed.fetch_add(1, Ordering::SeqCst);
         self.waits.lock().unwrap().push(wait);
         self.failed_at
@@ -199,8 +199,10 @@ impl Observer for Counts {
             .push(tokio::time::Instant::now());
     }
 
-    fn on_index_restarted(&self, _: &IndexName) {
-        self.restarted.fetch_add(1, Ordering::SeqCst);
+    fn on_index_restarted(&self, _: &IndexName, kind: crate::Work) {
+        if kind == crate::Work::Live {
+            self.restarted.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     fn on_snapshot_started(&self, _: &[IndexName]) {
