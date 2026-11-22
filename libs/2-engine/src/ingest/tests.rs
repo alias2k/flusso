@@ -1303,6 +1303,7 @@ mod exemption;
 mod reading;
 mod restart;
 mod states;
+mod walk_failures;
 mod walks;
 
 fn instant(db: &Arc<Database>) -> Arc<Builder> {

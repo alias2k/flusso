@@ -71,6 +71,10 @@ pub(super) struct Coalescing {
     /// When the first request arrived: the snapshot's start is timed from
     /// here, as `main` timed its gathering.
     started: Instant,
+    /// A failed walk's retry (slice 8, fix round 2): it starts at its
+    /// deadline, the walk's wait, even once every sink asked; a request
+    /// arriving meanwhile joins it.
+    retry: bool,
 }
 
 /// What the builder borrows for one engine run.
@@ -96,9 +100,8 @@ pub(super) struct Building<'a> {
     /// a restart keeps their requests (slice 8).
     pub(super) snapshot: Option<Snapshot>,
     pub(super) coalescing: Option<Coalescing>,
-    /// Its last error came from its walk (a key read): which of its waits a
-    /// restart takes (slice 8).
-    pub(super) walk_failed: bool,
+    /// Its waits after a failure, live and walk (slice 8).
+    pub(super) retry: Retry,
 }
 
 impl IngestEngine {
@@ -111,7 +114,6 @@ impl IngestEngine {
         mut building: Building<'_>,
         done: oneshot::Sender<Result<BuilderEnd>>,
     ) {
-        let mut retry = Retry::new(self.backoff);
         let result = loop {
             let error = match self.building(&mut building).await {
                 Ok(end) => break Ok(end),
@@ -125,20 +127,14 @@ impl IngestEngine {
                 }
                 _ => break Err(error),
             };
-            // A walk's key read, or a backfill slot's publish, failed: its
-            // walk's waits; else the live ones.
-            let work = if std::mem::take(&mut building.walk_failed)
-                || building.builds.publishing() == Some(Work::Backfill)
-            {
-                Work::Backfill
-            } else {
-                Work::Live
-            };
+            // Its walk fails alone (in its loop): what reaches here is its
+            // live work's.
             self.down(&mut building, &index).await;
-            let wait = retry.failed(work, self.done(&index));
+            let wait = building.retry.failed(Work::Live, self.done(&index));
             tracing::error!(
                 %index,
                 %error,
+                kind = "live",
                 retry_in = ?wait,
                 "the index's builder failed; it restarts alone after the wait while the other \
                  indexes go on: its documents wait, and the replication slot stays before the \
@@ -152,8 +148,11 @@ impl IngestEngine {
                 () = tokio::time::sleep(wait) => {}
                 () = self.stop.requested() => {}
             }
-            retry.restarted(self.done(&index));
-            tracing::info!(%index, "the index's builder restarted: building its backlog first");
+            tracing::info!(
+                %index,
+                kind = "live",
+                "the index's builder restarted: building its backlog first"
+            );
             self.observer.on_index_restarted(&index);
         };
         // The dispatcher is gone only once the run ended.
@@ -175,32 +174,37 @@ impl IngestEngine {
         building.runs.lead().fold(slot, true);
         building.runs.clear();
         self.index_states.budget(index, false);
-        // Its requests are kept, unacknowledged, and gathered again at once
-        // by the restart: handed back to the request lane, nothing would
-        // bring them back before another request arrived. Dropping the
-        // snapshot stops its walk and its key read.
-        let mut requests = building
-            .coalescing
-            .take()
-            .map(|gathered| gathered.deliveries)
-            .unwrap_or_default();
+        // Its requests are kept, unacknowledged, each lane resumed where it
+        // got, and gathered for the restart: at once, or at a failed walk's
+        // retry time when it waits for one (a set gathered already keeps its
+        // deadline). Dropping the snapshot stops its walk and its key read.
+        let mut requests = Vec::new();
         if let Some(snapshot) = building.snapshot.take() {
             requests.extend(snapshot.into_requests());
         }
         // A walk that finished but whose end waits behind unpublished
-        // batches answered nobody yet either.
+        // batches answered nobody yet either, nor a walk that failed.
         for finished in building.builds.abandon().await {
             requests.extend(finished.into_requests());
         }
-        if !requests.is_empty() {
+        if let Some(failure) = building.builds.take_walk_failure() {
+            requests.extend(failure.requests);
+        }
+        if !requests.is_empty() || building.coalescing.is_some() {
             let now = Instant::now();
-            building.coalescing = Some(Coalescing {
-                deliveries: requests,
-                deadline: now,
-                started: now,
-            });
+            building
+                .coalescing
+                .get_or_insert_with(|| Coalescing {
+                    deliveries: Vec::new(),
+                    deadline: now,
+                    started: now,
+                    retry: false,
+                })
+                .deliveries
+                .extend(requests);
         }
         self.progress.give_back(index);
+        building.builds.restarting();
         *building.builds = self.builds_of(building.gate, index.clone(), building.several);
         building.builds.set_folding(true);
     }
@@ -219,7 +223,7 @@ impl IngestEngine {
         let mut builds = LeavesLines(&mut *building.builds);
         let snapshot = &mut building.snapshot;
         let coalescing = &mut building.coalescing;
-        let walk_failed = &mut building.walk_failed;
+        let retry = &mut building.retry;
         // The reader ended: every slice of this builder is handed over (its
         // channel closed after the last one).
         let mut reader_done = false;
@@ -233,6 +237,11 @@ impl IngestEngine {
         }
 
         loop {
+            // A walk failed (a batch, at publish): it waits to retry while
+            // the live work goes on (slice 8, fix round 2).
+            if let Some(failure) = builds.take_walk_failure() {
+                self.retry_walk(failure, coalescing, retry, builds.index());
+            }
             // A live stream that ends while a snapshot runs or requests wait
             // still gets those served; the builder settles once the
             // dispatcher saw nothing left to forward either.
@@ -253,6 +262,10 @@ impl IngestEngine {
             {
                 if signals.ended() {
                     self.settle(runs, &mut builds, lanes).await?;
+                    // A walk that failed as it settled is retried first.
+                    if builds.walk_failure_mut().is_some() {
+                        continue;
+                    }
                     return Ok(BuilderEnd { stopped: false });
                 }
                 signals.report_idle(reports);
@@ -348,10 +361,20 @@ impl IngestEngine {
                         active.page_wait += mark.elapsed();
                     }
                     match step {
-                        Err(error) => {
-                            *walk_failed = true;
-                            return Err(error.into());
+                        // Beside other builders a key read's failure is
+                        // its walk's alone (slice 8, fix round 2).
+                        Err(error) if several => {
+                            if let Some(failed) = snapshot.take() {
+                                let reached = Arc::clone(&failed.reached);
+                                builds.fail_walk(error.into(), &reached);
+                                if let Some(failure) = builds.walk_failure_mut() {
+                                    failure.requests.extend(failed.into_requests());
+                                }
+                            }
+                            mark = Instant::now();
+                            continue;
                         }
+                        Err(error) => return Err(error.into()),
                         Ok(Step::Keys) => active.take_keys(),
                         Ok(Step::Done) => active.done = true,
                     }
@@ -367,13 +390,14 @@ impl IngestEngine {
                         deliveries: Vec::new(),
                         deadline: at + self.batch.max_delay,
                         started: at,
+                        retry: false,
                     });
                     gathered.deliveries.push(delivery);
                     while let Ok(more) = inbox.try_recv() {
                         signals.received();
                         gathered.deliveries.push(more);
                     }
-                    if everyone_asked(&gathered.deliveries, lanes) {
+                    if !gathered.retry && everyone_asked(&gathered.deliveries, lanes) {
                         // Planning awaits (its reads take the key-read
                         // permit): out of every line first (G9′).
                         builds.leave_lines();
@@ -404,6 +428,48 @@ impl IngestEngine {
                 }
             }
         }
+    }
+
+    /// A walk failed: its requests (each lane resumed where it got, and any
+    /// gathered since) wait for its retry, after the walk's own wait, in a
+    /// set nothing starts earlier; the builder's live work goes on (slice
+    /// 8, fix round 2).
+    fn retry_walk(
+        &self,
+        failure: super::builds::WalkFailure,
+        coalescing: &mut Option<Coalescing>,
+        retry: &mut Retry,
+        index: Option<&IndexName>,
+    ) {
+        let super::builds::WalkFailure {
+            error, requests, ..
+        } = failure;
+        let mut deliveries = requests;
+        if let Some(gathered) = coalescing.take() {
+            deliveries.extend(gathered.deliveries);
+        }
+        let wait = index.map_or(self.backoff.initial(), |index| {
+            retry.failed(Work::Backfill, self.done(index))
+        });
+        if let Some(index) = index {
+            tracing::error!(
+                %index,
+                %error,
+                kind = "backfill",
+                retry_in = ?wait,
+                "the index's backfill failed; it is walked again after the wait, each sink from \
+                 where it got, while the index's live changes keep flowing"
+            );
+            self.observer
+                .on_index_failed(index, &error.to_string(), wait);
+        }
+        let now = Instant::now();
+        *coalescing = Some(Coalescing {
+            deliveries,
+            deadline: now + wait,
+            started: now,
+            retry: true,
+        });
     }
 
     /// Enter the fold when the budget held the live batch back, and leave it

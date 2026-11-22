@@ -197,11 +197,6 @@ impl IngestEngine {
         let indexes: Vec<IndexName> = snapshot.indexes.iter().cloned().collect();
         tracing::info!(indexes = indexes.len(), "snapshot complete");
         self.advances.fetch_add(1, Ordering::Relaxed);
-        for index in &indexes {
-            if let Some(walks) = self.walks.get(index) {
-                walks.fetch_add(1, Ordering::Relaxed);
-            }
-        }
         self.observer.on_snapshot_completed(&indexes);
         Ok(())
     }

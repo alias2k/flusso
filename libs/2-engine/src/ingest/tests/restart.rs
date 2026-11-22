@@ -1256,7 +1256,8 @@ async fn a_restarted_walk_resumes_where_its_lanes_are() {
     tokio::time::timeout(LIMIT, deployment.run_to_end(0))
         .await
         .expect("the run ends");
-    assert_eq!(restarts.restarts().len(), 2, "{:?}", restarts.failures());
+    assert_eq!(restarts.failures().len(), 2, "the walk failed twice");
+    assert!(restarts.restarts().is_empty(), "and failed alone");
     let built_1 = builder
         .grants()
         .iter()

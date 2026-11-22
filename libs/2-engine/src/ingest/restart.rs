@@ -1,28 +1,35 @@
-//! Restarting one index's builder alone (ADR 0012 stage 8a, slice 8; the
-//! design is the stage note's §3.10).
+//! Restarting one index's builder alone, and retrying its walk alone (ADR
+//! 0012 stage 8a, slice 8; the design is the stage note's §3.10).
 //!
 //! **Whose failure.** With two or more builders, an error a builder returns
-//! from its own index's work restarts that builder alone: a build that failed
-//! or panicked, a document `Failed` under `on_error = "stop"`, its walk's key
-//! read. Those are the [`EngineError::Source`] and
+//! from its own index's live work restarts that builder alone: a live build
+//! that failed or panicked, a live document `Failed` under `on_error =
+//! "stop"`. Those are the [`EngineError::Source`] and
 //! [`EngineError::DocumentFailed`] errors a builder returns: it reaches the
-//! source only through its builds and its walk. Everything else is the run's
-//! (a lane or the request lane, a bug, the reader, the dispatcher), as is any
-//! failure while stopping (a stop never restarts anything) and any failure of
-//! a lone builder (one index keeps the whole-run restart and its replay).
+//! source only through its builds and its walk, and its walk's failures (a
+//! key read, a backfill batch) it handles in its loop, retrying the walk
+//! alone (fix round 2). Everything else is the run's (a lane or the request
+//! lane, a bug, the reader, the dispatcher), as is any failure while
+//! stopping (a stop never restarts anything) and any failure of a lone
+//! builder (one index keeps the whole-run restart and its replay).
 //!
 //! **The wait.** Per builder, the `[backoff]` schedule, one per kind of work
-//! that failed: the first wait, then doubling to the longest. A live failure
-//! (a live build, a live document) starts over once the index published a
-//! live item since its last restart; a backfill failure (its walk's key read,
-//! a backfill build or document) once a walk of the index completed since.
-//! Progress of the other kind is no sign the failure is past: a bad backfill
-//! row beside live traffic would otherwise be retried every first wait for
-//! ever (review of #456). A stop cuts the wait short.
+//! that failed: the first wait, then doubling to the longest, started over
+//! once that kind moved since its last failure. A live failure starts over
+//! once the index published a live item; a walk failure once the walk
+//! published a backfill batch carrying a walk mark (some lane's resume
+//! point moved; a source that can't mark walks starts every retry from the
+//! first key, which is no progress): distinct
+//! one-off failures along a walk each wait the first wait, while a poison
+//! row, which the walk never publishes past, doubles to the longest.
+//! Progress of the other kind is no sign the failure is past (review of
+//! #456). A stop cuts a live wait short; a walk's wait it drops with the
+//! walk.
 //!
 //! ```text
 //! live fail ─▶ 1 s ─▶ live fail ─▶ 2 s ─▶ … published live ─▶ live fail ─▶ 1 s
-//! walk fail ─▶ 1 s ─▶ walk fail ─▶ 2 s ─▶ 4 s (live published meanwhile: no reset)
+//! walk fail ─▶ 1 s ─▶ fail ─▶ 2 s ─▶ 4 s (nothing published past it; live flows)
+//! walk fail ─▶ 1 s ─▶ published batches ─▶ fail further on ─▶ 1 s
 //! ```
 
 use tokio::time::Duration;
@@ -48,8 +55,9 @@ pub(super) fn restarts_alone(several: bool, stopping: bool, error: &EngineError)
 pub(super) struct Done {
     /// Live items of the index numbered (published).
     pub(super) live: u64,
-    /// Walks of the index completed.
-    pub(super) walks: u64,
+    /// Backfill batches of the index published with a walk mark: some
+    /// lane's resume point moved.
+    pub(super) walk_batches: u64,
 }
 
 /// One builder's waits between restarts, for the life of an engine run: one
@@ -60,7 +68,7 @@ pub(super) struct Retry {
     walk: Schedule,
 }
 
-/// One kind's waits, and what that kind had done at the last restart.
+/// One kind's waits, and what that kind had done at its last failure.
 #[derive(Debug)]
 struct Schedule {
     backoff: Backoff,
@@ -73,6 +81,7 @@ impl Schedule {
         if done > self.done {
             self.next = self.backoff.initial();
         }
+        self.done = done;
         let wait = self.next;
         self.next = self.backoff.after(wait);
         wait
@@ -97,14 +106,8 @@ impl Retry {
     pub(super) fn failed(&mut self, work: Work, done: Done) -> Duration {
         match work {
             Work::Live => self.live.failed(done.live),
-            Work::Backfill => self.walk.failed(done.walks),
+            Work::Backfill => self.walk.failed(done.walk_batches),
         }
-    }
-
-    /// The builder restarted, its index having `done` so much.
-    pub(super) fn restarted(&mut self, done: Done) {
-        self.live.done = done.live;
-        self.walk.done = done.walks;
     }
 }
 
@@ -167,7 +170,7 @@ mod tests {
     }
 
     /// R8: the waits double up to the longest and start over once the index
-    /// published since its last restart.
+    /// published since its last failure.
     #[test]
     fn the_waits_double_and_start_over_after_a_published_item() {
         let mut retry =
@@ -175,39 +178,43 @@ mod tests {
         let mut waits = Vec::new();
         for _ in 0..4 {
             waits.push(retry.failed(Work::Live, done(0, 0)).as_secs());
-            retry.restarted(done(0, 0));
         }
         waits.push(retry.failed(Work::Live, done(3, 0)).as_secs());
-        retry.restarted(done(3, 0));
         waits.push(retry.failed(Work::Live, done(3, 0)).as_secs());
         assert_eq!(waits, [1, 2, 4, 5, 1, 2]);
     }
 
-    fn done(live: u64, walks: u64) -> Done {
-        Done { live, walks }
+    fn done(live: u64, walk_batches: u64) -> Done {
+        Done { live, walk_batches }
     }
 
-    /// R8 per kind (review of #456): a walk's failure starts over only once a
-    /// walk completed; live items published meanwhile don't, and a walk
-    /// completing doesn't start a live failure's waits over.
+    /// R8 per kind (review of #456, rounds 1 and 2): a walk's failure starts
+    /// over once the walk published a batch since its last failure; live
+    /// items published meanwhile don't start it over, and a walk's batches
+    /// don't start a live failure's waits over.
     #[test]
     fn each_kind_starts_over_only_on_its_own_progress() {
         let mut retry =
             Retry::new(Backoff::new(Duration::from_secs(1), Duration::from_secs(60)).unwrap());
         let mut walk = Vec::new();
         for live in 0..4 {
-            walk.push(retry.failed(Work::Backfill, done(live * 10, 0)).as_secs());
-            retry.restarted(done(live * 10, 0));
+            walk.push(retry.failed(Work::Backfill, done(live * 10, 5)).as_secs());
         }
-        assert_eq!(walk, [1, 2, 4, 8], "live published after every restart");
-        assert_eq!(retry.failed(Work::Backfill, done(40, 1)).as_secs(), 1);
-        retry.restarted(done(40, 1));
-        assert_eq!(retry.failed(Work::Live, done(40, 1)).as_secs(), 1);
-        retry.restarted(done(40, 1));
         assert_eq!(
-            retry.failed(Work::Live, done(40, 2)).as_secs(),
+            walk,
+            [1, 2, 4, 8],
+            "live published between, the walk nothing"
+        );
+        assert_eq!(
+            retry.failed(Work::Backfill, done(40, 6)).as_secs(),
+            1,
+            "the walk published past its last failure"
+        );
+        assert_eq!(retry.failed(Work::Live, done(40, 6)).as_secs(), 1);
+        assert_eq!(
+            retry.failed(Work::Live, done(40, 9)).as_secs(),
             2,
-            "a walk completing doesn't start the live waits over"
+            "a walk's batches don't start the live waits over"
         );
     }
 }
