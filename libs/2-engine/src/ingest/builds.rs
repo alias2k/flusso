@@ -41,9 +41,11 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::task::Poll;
 
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use kernel::{IndexName, Position, SinkName};
 use source::document::{Document, DocumentBuilder, DocumentId};
@@ -792,13 +794,24 @@ impl Builds {
                 bytes,
             }
         });
-        // A build that panics on this first poll panics the ingest task, as
-        // a build run inline always did: the daemon then ends the deployment
-        // with the task's error. One that panics later, on its own task,
-        // lands as a failed build (`land`), which ends the run.
-        if let Poll::Ready(output) = futures::poll!(build.as_mut()) {
-            self.land(seq, Some(output), halts);
-            return;
+        // A build that panics on this first poll lands as a failed build,
+        // as one that panics later on its own task does (`land`): the
+        // future touches only the document builder, no engine state, so
+        // its index's builder may restart alone (slice 8).
+        let first = {
+            let mut caught = AssertUnwindSafe(build.as_mut()).catch_unwind();
+            futures::poll!(&mut caught)
+        };
+        match first {
+            Poll::Ready(Ok(output)) => {
+                self.land(seq, Some(output), halts);
+                return;
+            }
+            Poll::Ready(Err(_)) => {
+                self.land(seq, None, halts);
+                return;
+            }
+            Poll::Pending => {}
         }
         if let Some(held) = held {
             self.holding.push((seq, held));
@@ -900,14 +913,22 @@ impl Builds {
         Some((slot.job, slot.built, slot.charges))
     }
 
-    /// Wait for every running build and drop what it built: the run is
-    /// ending on an error, and no read of the source should outlive it.
-    pub(super) async fn abandon(&mut self) {
+    /// Wait for every running build and drop what it built: the run, or
+    /// the builder (slice 8), is ending on an error, and no read of the
+    /// source should outlive it. Returns the finished snapshots still
+    /// queued to complete: their requests are not answered.
+    pub(super) async fn abandon(&mut self) -> Vec<Snapshot> {
         self.halted = true;
         while self.flights.next().await.is_some() {}
         self.holding.clear();
         self.backfilling.clear();
-        self.slots.clear();
+        self.slots
+            .drain(..)
+            .filter_map(|slot| match slot.job {
+                Job::Complete(snapshot) => Some(*snapshot),
+                _ => None,
+            })
+            .collect()
     }
 }
 

@@ -503,6 +503,20 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (lane, outcome);
     }
 
+    /// One index's builder failed on its own work (a build, a document
+    /// under `on_error = "stop"`, its walk's key read) and restarts alone
+    /// after `retry_in`, while the reader and the other indexes go on (ADR
+    /// 0012 stage 8a, slice 8). Its documents wait meanwhile. Not an
+    /// engine's error: the ingest engine keeps running.
+    fn on_index_failed(&self, index: &IndexName, error: &str, retry_in: Duration) {
+        let _ = (index, error, retry_in);
+    }
+
+    /// The index's builder restarted after its backoff.
+    fn on_index_restarted(&self, index: &IndexName) {
+        let _ = index;
+    }
+
     /// An engine stopped on an error. The daemon decides whether it restarts.
     fn on_engine_error(&self, engine: &EngineId, error: &str) {
         let _ = (engine, error);
@@ -681,6 +695,18 @@ impl Observer for FanOut {
     fn on_lane_probe(&self, lane: &LaneKey, outcome: crate::ProbeOutcome) {
         for observer in &self.observers {
             observer.on_lane_probe(lane, outcome);
+        }
+    }
+
+    fn on_index_failed(&self, index: &IndexName, error: &str, retry_in: Duration) {
+        for observer in &self.observers {
+            observer.on_index_failed(index, error, retry_in);
+        }
+    }
+
+    fn on_index_restarted(&self, index: &IndexName) {
+        for observer in &self.observers {
+            observer.on_index_restarted(index);
         }
     }
 
