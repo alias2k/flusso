@@ -1317,13 +1317,21 @@ fn batch(max_changes: usize) -> BatchPolicy {
     }
 }
 
-/// Counts the indexes restarted alone (slice 8).
+/// Counts the indexes' builders restarted alone and the walks retried
+/// alone (slice 8), apart.
 #[derive(Debug, Default)]
-struct IndexRestarts(AtomicUsize);
+struct IndexRestarts {
+    live: AtomicUsize,
+    walks: AtomicUsize,
+}
 
 impl crate::Observer for IndexRestarts {
-    fn on_index_restarted(&self, _: &IndexName, _: crate::Work) {
-        self.0.fetch_add(1, Ordering::SeqCst);
+    fn on_index_restarted(&self, _: &IndexName, kind: crate::Work) {
+        match kind {
+            crate::Work::Live => &self.live,
+            crate::Work::Backfill => &self.walks,
+        }
+        .fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -1332,8 +1340,9 @@ impl crate::Observer for IndexRestarts {
 /// its index alone (slice 8), and some schedules also fail a whole run once
 /// (a resolve), so the stream resumes from what was confirmed while an index
 /// may hold documents it gave back. Panics on the first broken guarantee.
-/// Returns how many indexes restarted alone and how many runs failed.
-async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize) {
+/// Returns how many indexes' builders restarted alone, how many walks were
+/// retried alone, and how many runs failed.
+async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize) {
     let mut random = Rng::new(seed);
     let ids = 2 + random.below(7) as i64;
     let rows = if random.below(2) == 0 {
@@ -1454,7 +1463,11 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize) {
         db.expected(),
         "the documents differ from the rows ({context})"
     );
-    (restarts.0.load(Ordering::SeqCst), failed)
+    (
+        restarts.live.load(Ordering::SeqCst),
+        restarts.walks.load(Ordering::SeqCst),
+        failed,
+    )
 }
 
 /// The seeds a schedule test runs: `FLUSSO_BUILD_SCHEDULE_SEED` alone, else
@@ -1466,26 +1479,31 @@ fn seeds(count: u64) -> Vec<u64> {
     }
 }
 
-/// Counts what restarted across schedules: indexes alone, whole runs.
+/// Counts what restarted across schedules: indexes' builders alone, walks
+/// alone, whole runs.
 #[derive(Debug, Default)]
 struct Restarted {
     indexes: usize,
+    walks: usize,
     runs: usize,
 }
 
 impl Restarted {
-    fn add(&mut self, (indexes, runs): (usize, usize)) {
+    fn add(&mut self, (indexes, walks, runs): (usize, usize, usize)) {
         self.indexes += indexes;
+        self.walks += walks;
         self.runs += runs;
     }
 
     /// Over every seed (not one replayed alone), the schedules restarted an
-    /// index alone and a whole run, at times both in one schedule.
+    /// index's builder alone, retried a walk alone, and restarted a whole
+    /// run, at times all in one schedule.
     fn assert_both(&self) {
         if std::env::var("FLUSSO_BUILD_SCHEDULE_SEED").is_ok() {
             return;
         }
         assert!(self.indexes > 0, "no schedule restarted an index alone");
+        assert!(self.walks > 0, "no schedule retried a walk alone");
         assert!(self.runs > 0, "no schedule restarted a whole run");
     }
 }

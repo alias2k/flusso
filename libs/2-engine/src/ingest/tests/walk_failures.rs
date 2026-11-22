@@ -186,11 +186,13 @@ struct Counts {
     restarted: AtomicUsize,
     waits: Mutex<Vec<Duration>>,
     failed_at: Mutex<Vec<tokio::time::Instant>>,
+    kinds: Mutex<Vec<crate::Work>>,
     snapshots: Mutex<Vec<tokio::time::Instant>>,
 }
 
 impl Observer for Counts {
-    fn on_index_failed(&self, _: &IndexName, _: crate::Work, _: &str, wait: Duration) {
+    fn on_index_failed(&self, _: &IndexName, kind: crate::Work, _: &str, wait: Duration) {
+        self.kinds.lock().unwrap().push(kind);
         self.failed.fetch_add(1, Ordering::SeqCst);
         self.waits.lock().unwrap().push(wait);
         self.failed_at
@@ -220,6 +222,14 @@ impl Counts {
 
     fn snapshots(&self) -> Vec<tokio::time::Instant> {
         self.snapshots.lock().unwrap().clone()
+    }
+
+    fn kinds(&self) -> Vec<crate::Work> {
+        self.kinds.lock().unwrap().clone()
+    }
+
+    fn waits(&self) -> Vec<Duration> {
+        self.waits.lock().unwrap().clone()
     }
 }
 
@@ -934,7 +944,7 @@ async fn a_backfill_batch_failing_beside_live_slots_discards_only_the_walks() {
                     let after = grants.get(at + 1..).unwrap_or_default();
                     after
                         .iter()
-                        .any(|ids| ids.iter().any(|id| (43..80).contains(id)))
+                        .any(|ids| ids.iter().any(|id| (49..80).contains(id)))
                         && after.iter().any(|ids| ids.iter().any(|id| *id >= 101))
                 });
                 if later {
@@ -1147,6 +1157,421 @@ async fn a_live_failure_while_a_walk_waits_keeps_its_retry() {
             .is_some_and(|at| *at >= second_walk + Duration::from_secs(4)),
         "the walk retried at its own time, 4 s after its second failure: {:?}",
         retried.first().map(|at| *at - second_walk)
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// A1 (review of #457, adopted): `orders`' first walk W1 reads all its keys and
+/// queues its end behind a held batch (row 21); a new request starts W2,
+/// whose key page takes 5 s; then W1's held batch fails. W1's retry (1 s)
+/// must not drop W2 while it reads: `orders` walks three times in all (W1,
+/// W2, W1's retry), `users` once.
+#[tokio::test(start_paused = true)]
+async fn a_retry_never_drops_a_walk_in_progress() {
+    let db = Database::new(40, Vec::new());
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([21])),
+            fail_once: Mutex::new(HashSet::from([21])),
+            resumable: true,
+            keys_delay: Some(Duration::from_secs(5)),
+            ..Behaviour::default()
+        },
+    );
+    let counts = Arc::new(Counts::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&counts) as Arc<dyn Observer>;
+    let mut deployment = Deployment::new(
+        Feed::new(&db),
+        Arc::clone(&builder),
+        Recorder::seeded(false),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(4)
+            .with_observer(observer)
+            .with_backoff(
+                crate::Backoff::new(Duration::from_secs(1), Duration::from_secs(60)).unwrap(),
+            )
+    });
+    let driver = {
+        let builder = Arc::clone(&builder);
+        let counts = Arc::clone(&counts);
+        let requests = deployment.stream.requests().unwrap().producer;
+        tokio::spawn(async move {
+            while !builder.grants().iter().any(|ids| ids.contains(&39)) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            requests
+                .publish(stream::Request::Backfill {
+                    index: orders(),
+                    sink: sink_name(),
+                    after: None,
+                    ticket: stream::Ticket::new(1_000),
+                })
+                .await
+                .unwrap();
+            while counts.snapshots().len() < 3 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            builder.release(21);
+        })
+    };
+    let failed = tokio::time::timeout(Duration::from_secs(300), deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    driver.await.unwrap();
+    assert_eq!(failed, 0);
+    assert_eq!(counts.failed.load(Ordering::SeqCst), 1, "W1 failed once");
+    assert_eq!(deployment.recorder.state(), db.expected());
+    let starts = counts.snapshots().len();
+    assert_eq!(
+        starts, 4,
+        "users once, orders W1, W2 and W1's retry: a walk in progress was dropped and walked again"
+    );
+}
+
+/// Review of #457 (adopted): a backfill row of `orders` fails a thousand times
+/// beside live traffic on both indexes, under a budget that refuses: every
+/// permit, reservation, charge and task comes back, the builder never
+/// restarts, and every row and change lands.
+#[tokio::test(start_paused = true)]
+async fn a_thousand_walk_failures_leak_nothing() {
+    let log: Vec<Change> = (0..400)
+        .map(|n| n % 40)
+        .filter(|id| *id != 21)
+        .map(Change::upsert)
+        .collect();
+    let db = Database::new(40, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            fail_times: Mutex::new(BTreeMap::from([(21, 1000)])),
+            resumable: true,
+            delay: Some(Duration::from_millis(1)),
+            padding: 4 * KIB,
+            ..Behaviour::default()
+        },
+    );
+    let counts = Arc::new(Counts::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&counts) as Arc<dyn Observer>;
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_millis(1)),
+        Arc::clone(&builder),
+        Recorder::seeded(false),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(4)
+            .with_observer(observer)
+            .with_backoff(
+                crate::Backoff::new(Duration::from_millis(1), Duration::from_millis(1)).unwrap(),
+            )
+    })
+    .with_budget(64 * KIB, usize::MAX);
+    let base = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    let failed = tokio::time::timeout(Duration::from_secs(3_600), deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    assert_eq!(failed, 0);
+    assert_eq!(counts.failed.load(Ordering::SeqCst), 1000);
+    assert_eq!(counts.restarted.load(Ordering::SeqCst), 0);
+    assert!(
+        !builder.overlapped.load(Ordering::SeqCst),
+        "two builds of one document at once"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+    let left = deployment.budget.as_ref().unwrap().held();
+    assert_eq!(left, crate::Held::default());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let alive = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    assert!(alive <= base + 1, "tasks left: {alive} past {base}");
+}
+
+/// Review of #457 (adopted): `orders`' key reads fail a thousand times (each read
+/// 0..1000 of it), two sinks, `audit` from its own mark: the key-read
+/// permit and every task come back, nothing restarts, every row lands.
+#[tokio::test(start_paused = true)]
+async fn a_thousand_key_read_failures_leak_nothing() {
+    let db = Database::new(300, Vec::new());
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            resumable: true,
+            ..Behaviour::default()
+        },
+    );
+    let reads = Reads::over(Arc::clone(&builder), 0..1000);
+    let base = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    let mut two = TwoSinks::new(
+        &db,
+        Arc::clone(&reads) as Arc<dyn DocumentBuilder>,
+        Feed::new(&db),
+        Some(101),
+        |ingest| {
+            ingest.with_batch(batch(8)).with_builds(4).with_backoff(
+                crate::Backoff::new(Duration::from_millis(1), Duration::from_millis(1)).unwrap(),
+            )
+        },
+    );
+    let failed = tokio::time::timeout(Duration::from_secs(3_600), two.run(&db, None, 0))
+        .await
+        .expect("the run ends");
+    assert_eq!(failed, 0);
+    assert_eq!(two.counts.failed.load(Ordering::SeqCst), 1000);
+    assert_eq!(two.counts.restarted.load(Ordering::SeqCst), 0);
+    two.assert_rows(&db, "key reads x1000");
+    two.assert_seeded("key reads x1000");
+    drop(two);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let alive = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    assert!(alive <= base + 1, "tasks left: {alive} past {base}");
+}
+
+/// A1's suspected case (review of #457): `primary`'s walk of `orders`
+/// grants every batch, its end waiting behind the batch of row 41, a poison
+/// row (held, then failing every time). `audit` holds everything already
+/// and asks for `orders` after 51, past the poison row: its walk starts
+/// while `primary`'s end is queued, and reads a page in 5 s. `primary`'s
+/// walk fails and retries every 1–2 s; its retries wait for `audit`'s walk,
+/// which completes: `audit` gets rows 53..79.
+#[tokio::test(start_paused = true)]
+async fn a_poisoned_walks_retries_let_a_newer_walk_past_the_poison_complete() {
+    let db = Database::new(80, Vec::new());
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([41])),
+            fail_times: Mutex::new(BTreeMap::from([(41, usize::MAX)])),
+            resumable: true,
+            keys_delay: Some(Duration::from_secs(5)),
+            ..Behaviour::default()
+        },
+    );
+    let mut two = TwoSinks::new(
+        &db,
+        Arc::clone(&builder) as Arc<dyn DocumentBuilder>,
+        Feed::new(&db).open(),
+        None,
+        |ingest| {
+            ingest.with_batch(batch(4)).with_builds(4).with_backoff(
+                crate::Backoff::new(Duration::from_secs(1), Duration::from_secs(2)).unwrap(),
+            )
+        },
+    );
+    for index in ["users", "orders"] {
+        two.audit
+            .inner
+            .seeded_indexes
+            .lock()
+            .unwrap()
+            .insert(index.to_owned());
+    }
+    let mut tasks = Vec::new();
+    for engine in std::mem::take(&mut two.engines) {
+        engine.stage(Continuity::Resumed).await.unwrap();
+        tasks.push(tokio::spawn(async move {
+            let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+            let _ = engine.run(&mut rx).await;
+        }));
+    }
+    let requests = two.stream.requests().unwrap().producer;
+    let ingest = two.ingest;
+    let run = tokio::spawn(async move { ingest.run().await });
+    while !builder.grants().iter().any(|ids| ids.contains(&79)) {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    requests
+        .publish(stream::Request::Backfill {
+            index: orders(),
+            sink: audit(),
+            after: Some(stream::WalkMark::new("51")),
+            ticket: stream::Ticket::new(1_000),
+        })
+        .await
+        .unwrap();
+    while two.counts.snapshots().len() < 3 {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    builder.release(41);
+    let wanted: Vec<i64> = (53..80).filter(|id| id % 2 == 1).collect();
+    let started = tokio::time::Instant::now();
+    loop {
+        let state = two.audit.inner.state();
+        if wanted.iter().all(|id| state.contains_key(id)) {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "audit's walk past the poison row never completed: {} walks started",
+            two.counts.snapshots().len()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    run.abort();
+    for task in tasks {
+        task.abort();
+    }
+}
+
+/// A2 (review of #457): in one pass, `orders`' backfill batch (row 21, its
+/// second failure: the walk's wait is 2 s) and a live batch (change 101,
+/// its first: 1 s) fail. The builder goes down for the live one; the walk's
+/// failure is reported too, with its own wait, and the walk starts again
+/// only after it, not at the builder's restart.
+#[tokio::test(start_paused = true)]
+async fn a_walk_failing_in_the_pass_a_live_batch_fails_is_reported_and_waits_its_own_wait() {
+    let db = Database::new(40, vec![Change::upsert(101)]);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([21, 101])),
+            fail_times: Mutex::new(BTreeMap::from([(21, 2)])),
+            fail_once: Mutex::new(HashSet::from([101])),
+            resumable: true,
+            ..Behaviour::default()
+        },
+    );
+    let counts = Arc::new(Counts::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&counts) as Arc<dyn Observer>;
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_arrivals(vec![Duration::from_millis(1_500)]),
+        Arc::clone(&builder),
+        Recorder::seeded(false),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(4)
+            .with_observer(observer)
+            .with_backoff(
+                crate::Backoff::new(Duration::from_secs(1), Duration::from_secs(60)).unwrap(),
+            )
+    });
+    let releaser = {
+        let builder = Arc::clone(&builder);
+        let counts = Arc::clone(&counts);
+        tokio::spawn(async move {
+            let granted = |id: i64| {
+                builder
+                    .grants()
+                    .iter()
+                    .filter(|ids| ids.contains(&id))
+                    .count()
+            };
+            while granted(21) < 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            builder.release(21);
+            while counts.failed.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            builder.behaviour.held.lock().unwrap().insert(21);
+            while granted(21) < 2 || granted(101) < 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            builder.release(21);
+            builder.release(101);
+        })
+    };
+    let failed = tokio::time::timeout(Duration::from_secs(300), deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    releaser.await.unwrap();
+    assert_eq!(failed, 0);
+    let kinds = counts.kinds();
+    let walks: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, kind)| **kind == crate::Work::Backfill)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        walks.len(),
+        2,
+        "both walk failures reported: {kinds:?}, grants {:?}",
+        builder.grants()
+    );
+    let second_walk = walks[1];
+    let waits = counts.waits();
+    assert_eq!(
+        waits[second_walk],
+        Duration::from_secs(2),
+        "the walk's own wait: {waits:?}"
+    );
+    let failed_at = counts.failed_at()[second_walk];
+    let retried = counts
+        .snapshots()
+        .into_iter()
+        .find(|at| *at > failed_at)
+        .expect("the walk started again");
+    assert!(
+        retried >= failed_at + Duration::from_secs(2),
+        "the walk waited its own 2 s, not the builder's 1 s: {:?}",
+        retried - failed_at
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// Adds up the idle time the engine reports.
+#[derive(Debug, Default)]
+struct Idle(Mutex<Duration>);
+
+impl Observer for Idle {
+    fn on_stage(&self, timing: crate::StageTiming<'_>) {
+        if timing.stage == crate::Stage::Idle {
+            *self.0.lock().unwrap() += timing.elapsed;
+        }
+    }
+}
+
+/// A3 (review of #457): while a failed walk waits its 20 s to retry and
+/// nothing else runs, the engine is idle, and says so.
+#[tokio::test(start_paused = true)]
+async fn a_walks_retry_wait_is_idle_time() {
+    let db = Database::new(20, Vec::new());
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            fail_once: Mutex::new(HashSet::from([1])),
+            resumable: true,
+            ..Behaviour::default()
+        },
+    );
+    let idle = Arc::new(Idle::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&idle) as Arc<dyn Observer>;
+    let mut deployment = Deployment::new(
+        Feed::new(&db),
+        Arc::clone(&builder),
+        Recorder::seeded(false),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(2)
+            .with_observer(observer)
+            .with_backoff(
+                crate::Backoff::new(Duration::from_secs(20), Duration::from_secs(60)).unwrap(),
+            )
+    });
+    tokio::time::timeout(Duration::from_secs(300), deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    let idle = *idle.0.lock().unwrap();
+    assert!(
+        idle >= Duration::from_secs(15),
+        "the 20 s retry wait was reported idle: {idle:?}"
     );
     assert_eq!(deployment.recorder.state(), db.expected());
 }

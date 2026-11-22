@@ -128,8 +128,8 @@ impl IngestEngine {
                 _ => break Err(error),
             };
             // Its walk fails alone (in its loop): what reaches here is its
-            // live work's.
-            self.down(&mut building, &index).await;
+            // live work's. Reported as it happens, before `down` waits for
+            // the running builds (review of #457, B1).
             let wait = building.retry.failed(Work::Live, self.done(&index));
             tracing::error!(
                 %index,
@@ -142,6 +142,7 @@ impl IngestEngine {
             );
             self.observer
                 .on_index_failed(&index, Work::Live, &error.to_string(), wait);
+            self.down(&mut building, &index).await;
             // A stop cuts the wait short: the builder tries once more, under
             // the stop's deadline (O3).
             tokio::select! {
@@ -187,8 +188,16 @@ impl IngestEngine {
         for finished in building.builds.abandon().await {
             requests.extend(finished.into_requests());
         }
+        // A walk that failed in the same pass is a walk failure like any:
+        // reported, and retried after the walk's own wait (review of #457,
+        // A2), its set joined by what the builder's end left.
         if let Some(failure) = building.builds.take_walk_failure() {
-            requests.extend(failure.requests);
+            self.retry_walk(
+                failure,
+                &mut building.coalescing,
+                &mut building.retry,
+                Some(index),
+            );
         }
         if !requests.is_empty() || building.coalescing.is_some() {
             let now = Instant::now();
@@ -302,7 +311,9 @@ impl IngestEngine {
                 return Ok(BuilderEnd { stopped: true });
             }
             let building = builds.running() > 0;
-            let quiet = building || coalescing.is_some();
+            // A failed walk's retry wait is no work: idle unless something
+            // else runs (review of #457, A3).
+            let quiet = building || coalescing.as_ref().is_some_and(|gathered| !gathered.retry);
             if let Some((clock, slot)) = clock {
                 clock.idle(slot, (!quiet && snapshot.is_none()).then_some(mark));
             }
@@ -401,14 +412,19 @@ impl IngestEngine {
                         // Planning awaits (its reads take the key-read
                         // permit): out of every line first (G9′).
                         builds.leave_lines();
+                        debug_assert!(snapshot.is_none(), "a walk starts only once none runs");
                         *snapshot = self
                             .start_coalesced(coalescing, scopes, lanes, several)
                             .await?;
                     }
                     mark = Instant::now();
                 }
-                () = until(deadline), if deadline.is_some() => {
+                // A set starts only once no walk runs: a failed walk's retry
+                // waits for a newer walk to finish, never drops it (review of
+                // #457, A1).
+                () = until(deadline), if deadline.is_some() && snapshot.is_none() => {
                     builds.leave_lines();
+                    debug_assert!(snapshot.is_none(), "a walk starts only once none runs");
                     let retrying = coalescing.as_ref().is_some_and(|gathered| gathered.retry);
                     *snapshot = self
                         .start_coalesced(coalescing, scopes, lanes, several)

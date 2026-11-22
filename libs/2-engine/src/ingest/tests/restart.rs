@@ -854,7 +854,7 @@ async fn a_hold_across_an_index_restart_is_one_wait() {
     resumer.await.unwrap();
     assert_eq!(deployment.recorder.state(), db.expected());
     assert_eq!(
-        restarts.0.load(Ordering::SeqCst),
+        restarts.live.load(Ordering::SeqCst),
         1,
         "orders restarted alone"
     );
@@ -911,7 +911,7 @@ async fn nothing_counts_or_fences_past_a_given_back_change() {
             for _ in 0..4_000 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
                 let built_1 = builder.behaviour.fail_times.lock().unwrap().get(&1) == Some(&0)
-                    && restarts.0.load(Ordering::SeqCst) >= 2;
+                    && restarts.live.load(Ordering::SeqCst) >= 2;
                 if built_1 {
                     break;
                 }
@@ -989,7 +989,7 @@ async fn a_thousand_failures_leak_nothing() {
         .await
         .expect("the run ends");
     assert_eq!(failed, 0);
-    assert_eq!(restarts.0.load(Ordering::SeqCst), 1000);
+    assert_eq!(restarts.live.load(Ordering::SeqCst), 1000);
     assert_eq!(deployment.recorder.state(), db.expected());
     let left = deployment.budget.as_ref().unwrap().held();
     assert_eq!(left, crate::Held::default());
@@ -1382,5 +1382,46 @@ async fn a_given_back_document_keeps_its_older_change() {
         .filter(|id| id % 2 == 1)
         .collect();
     assert_eq!(after, [3, 1, 5], "{grants:?}");
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// B1 (review of #457): a live failure is reported when it happens, before
+/// the builder waits for its running builds: `orders` 1's build fails at
+/// 0.5 s while its build of 3 is held until 4 s; `/status` must show it down
+/// from 0.5 s, so the event comes then.
+#[tokio::test(start_paused = true)]
+async fn a_live_failure_is_reported_before_its_slow_builds_return() {
+    let db = Database::new(0, [1, 3].into_iter().map(Change::upsert).collect());
+    let (mut deployment, builder, restarts) = two_indexes(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([1, 3])),
+            fail_once: Mutex::new(HashSet::from([1])),
+            ..Behaviour::default()
+        },
+        Recorder::seeded(true),
+        4,
+    );
+    let opened = tokio::time::Instant::now();
+    let releaser = {
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            builder.release(1);
+            tokio::time::sleep(Duration::from_millis(3_500)).await;
+            builder.release(3);
+        })
+    };
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    releaser.await.unwrap();
+    let failures = restarts.failures();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    let reported = failures[0].3 - opened;
+    assert!(
+        reported < Duration::from_secs(1),
+        "reported at the failure, not once the slow build returned: {reported:?}"
+    );
     assert_eq!(deployment.recorder.state(), db.expected());
 }
