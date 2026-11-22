@@ -168,7 +168,9 @@ impl OtelObserver {
                     "Each wait of the reader at its lead, by the bound that stopped it \
                      (per_index: an index at its cap, named by `index`; total: the non-exempt indexes' \
                      documents; changes: changes read ahead; pending: the exempt indexes at \
-                     max_pending_documents). _count is how often it stopped, _sum how long.",
+                     max_pending_documents). Each stretch under one bound is one observation: a \
+                     wait whose bound changes counts once per bound. _count is how often it \
+                     stopped at a bound, _sum how long.",
                 )
                 .build(),
             startup_duration: meter
