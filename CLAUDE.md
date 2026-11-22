@@ -1957,26 +1957,36 @@ the other's `/indexes/…` routes), both reading the daemon's `Status`, and owns
 (`daemon::IndexIngestSnapshot`: `documents_waiting`; `backlog_seconds`, how long ago the index's oldest
 unbuilt change was read, from `Stalls`' ring of `(changes read, instant)` per 1 s sample over
 `Progress::oldest_unbuilt`'s read number, at most `BACKLOG_SPAN` (3,600) samples, 0 while no engine run
-is live; `exemption`/`exemption_since`; `working`, about progress, not holds: false while items of it wait
+is live and forgotten when one goes live or fails (`Stalls::forget_backlog`); it grows only for an index
+stuck or exempt: reading stops at an index's cap, so one that paces the reader stays within its read-ahead
+(seconds) however far it falls behind the source, which is its lanes' `wal_behind` and the slot lag;
+`pacing_reader`, the reader stopped at this index's `per_index` bound now (the `PacingReader` guard);
+`exemption`/`exemption_since`; `working`, about progress, not holds: false while items of it wait
 on a lane unacknowledged for `engine::STUCK_AFTER` (5 s), from the engine's record with two or more
 indexes and from the lanes' stall ages with one (one index keeps no record); `held_by`/`held_sinks`/
-`held_since`, information only; `backfill`) reads the ingest engine's `engine::IndexStates`, kept for the
+`held_since`, information only; `backfill`), one entry per **enabled** index (`Status::with_ingest_indexes`:
+a disabled index has no entry, no `flusso.index.*` series and `404` on both index routes, while `indexes.<name>`
+and `GET /indexes` keep it, as on `main`), reads the ingest engine's `engine::IndexStates`, kept for the
 engine's life and attached to `Status` once the engine exists (`Status::attach_index_states`). The engine
 writes it only at edges (the tick's exemption, `IndexStates::budget` in the builder's loop on a change,
 `lane_full` while any publish pends, `IngestEngine::publish_to` being the one path, a snapshot's end
 included; the `Walking` guard on the snapshot), and an engine run's end, by any path, clears the
 exemption and the budget hold (`ClearsAtRunEnd` → `IndexStates::clear_run`). Metrics (observable gauges
 read from `Status`, `telemetry/metrics.rs`'s `register_index_gauges`): `flusso.index.{documents_waiting,
-backlog_age, exempt, frozen, working, held{by}, backfilling}`; `flusso.reader.waits{bound}` is a
+backlog_age, exempt, frozen, working, held{by}, backfilling}`; `flusso.reader.waits{bound}` (plus `index` on `per_index`) is a
 histogram (buckets up to 600 s) recorded by `Observer::on_reader_wait` (`ReaderBound`: `per_index`,
 `total`, `changes`, `pending`, from `Lead::reached_by`) only for a wait that pended past its first poll.
 Alert `FlussoIndexBacklog`: `max by (index) (flusso_index_exempt) > 0 or max by (index)
-(flusso_index_backlog_age_seconds) > 60`, `for: 10m` (the chart's `indexBacklogSeconds`/`indexBacklogFor`;
-never "held": a healthy sink at its limit holds its builder, while bounded reading keeps its backlog
-seconds old). Guards: `index_states::tests`, `ingest::tests::states` (incl.
+(flusso_index_backlog_age_seconds) > 60`, `for: 10m` (the chart's `indexBacklogSeconds`/`indexBacklogFor`):
+"exempt or stuck", never "held" (a healthy sink at its limit holds its builder) and not lag behind the
+source (bounded reading keeps a non-exempt backlog seconds old); it also fires during a planned catch-up
+longer than `for` when one index is slower than the others (it is exempt meanwhile). Guards: `index_states::tests`, `ingest::tests::states` (incl.
 `a_healthy_sink_bound_burst_is_never_stuck`, the failed-run and stopped-run clears, the snapshot end's lane
 hold), `reader::tests`' `the_lead_names_*` and `only_a_wait_that_pended_is_reported`, `stall::tests`'
-backlog cases (steady, stuck or exempt, draining, falling behind), `status::tests`' ingest cases, the
+backlog cases (steady, stuck or exempt, draining, the hour cap), `ingest::tests::states`'
+`an_index_falling_behind_its_source_keeps_a_backlog_within_its_read_ahead` and
+`the_index_that_stops_the_reader_is_named_and_shown_while_it_does`, the daemon's
+`a_disabled_index_has_no_ingest_entry`, `status::tests`' ingest cases, the
 daemon's `the_status_reads_each_index_from_the_ingest_engine`, `http::tests`' index-route cases,
 `telemetry::metrics::tests`' `each_index_is_exported_with_its_ingest_state`, `observer::tests`'
 `the_readers_waits_are_a_histogram_by_bound`, the promtool rule test, `agent_docs_paths`'
