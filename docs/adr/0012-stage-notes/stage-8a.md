@@ -3309,6 +3309,25 @@ The slice is two PRs:
 4. **A down index with nothing waiting pages nobody** until the crash-loop alert exists. Recommended:
    leave it to that alert (8-2 adds `flusso_index_down`, which it can read).
 
+**What the four decisions cost** (the review of #456, stated so they are taken knowingly):
+
+- **Exempt while down.** Beside a quiet or healthy index, a down index grows to `max_pending_documents`
+  (1,000,000 by default) before the reading stops for every index. The reader resolves every change
+  for it meanwhile: the source's reverse queries go on for an index that builds nothing.
+- **Isolation is for per-index faults.** A database-wide fault (Postgres down, a lost connection) fails
+  the reader's resolves too, which ends the run: the per-index restart helps only when the fault is one
+  index's (a query its schema makes Postgres refuse, a poison row, a script).
+- **The stop's retry.** It can use the whole `--shutdown-timeout-secs` and still exit 1. The restart then
+  replays from the slot, which stayed pinned at the down index's oldest change: every other index's
+  changes since then are read and rebuilt again, and the longer an index was down, the larger that
+  replay.
+- **One index.** A deterministic panic at a build's first poll is now an endless engine restart loop
+  (with `[backoff]`), where the deployment used to end with "ingest engine task failed". The crash-loop
+  alert the reviewer is filing is what pages for it.
+- **`/status` shows a down index as healthy until 8-2**: `working` true and `held_by` null while it waits
+  its backoff (slice 7 reads holds and acknowledgements, and a down index holds and owes nothing). Its
+  backlog age and `exemption` do move; `state` (`running`/`down`) comes with 8-2.
+
 #### Rules, tests, mutations
 
 | Rule | Test (written first) | Mutation |
@@ -3430,6 +3449,45 @@ only):
 | `IndexStates` budget hold | that index's builder | cleared at its failure | `/status` |
 | the request handles | the builder holding them | carried to its restart, or dropped with the run | the request lane (redelivery) |
 | the observer | the builder | at each failure and restart | the daemon (8-2), tests |
+
+#### Slice 8-1, fix round 1 (the review of `6c8ea440`)
+
+The review found no data loss, early confirmation, early fence, double count, leak or ordering fault
+(6,000 + 2,000 extra random schedules, 1,000 failures in a row leak nothing, every mutation killed),
+and four behaviour defects, each reproduced; its reproductions are adopted, renamed, in
+`ingest::tests::restart` (the two extra-seed schedule runs are not: they rerun the existing schedules
+over more seeds and reproduce no defect).
+
+| Finding | Fix | Tests (fail before the fix, or under the mutation) |
+| --- | --- | --- |
+| 1: a restarted index with nothing to build stays held for good: `down` sets the hold, only a live grant or a blocked publish ended it, and a quiet index makes neither, so it was never free again and a stuck neighbour froze at its cap | a hold ends when the builder leaves the fold with nothing waiting and nothing refused (`fold`). Every way a restart's hold ends: a live grant (a backlog take is one, `start_live`), leaving the fold with nothing waiting (the new rule), a blocked publish ending (`publish_ready`, as before), the run's end (a new run has a new lead) | `a_restarted_quiet_index_is_free_again` (the reviewer's: 300 read beside a quiet index that restarted, as beside one that didn't), `the_reader_reads_on_past_a_down_index_at_its_cap` (the live grant) |
+| 2: a backfill row that always fails, beside live traffic, never backed off: any live item published since the last restart started the wait over, and the walk re-ran from its start once a second | **one schedule per kind** (`restart::Retry`): a live failure (a live slot's publish) starts over once the index published a live item since its last restart; a walk failure (its key read, a backfill slot's publish: `walk_failed`, `Builds::publishing`) once a walk of the index completed (`IngestEngine::walks`, counted in `finish_snapshot`). **Resume**: a restarted walk resumes each lane's request after the last walk mark it published there (`Snapshot::reached`, recorded per lane as each backfill slot is published; `into_requests` rewrites `after`). That is right: a lane receives a walk's batches from its own point on, so the mark is past its point, and everything up to it is on the lane and lands (the stream redelivers what isn't acknowledged); no key order is needed. Before, the carried request kept the point the sink sent, so the walk restarted there (the start, for a fresh backfill): the sink records its walk marks for its own re-requests (8b), which a builder restart doesn't make | `a_poison_backfill_row_beside_live_traffic_backs_off` (the reviewer's: the longest wait ≥ 16 s in 55 s), `restart::tests`' `each_kind_starts_over_only_on_its_own_progress`, `a_restarted_walk_resumes_where_its_lanes_are` (row 41 fails twice: row 1 built once; the harness's builder marks walks only with `Behaviour::resumable`) |
+| 3: one index's restart split another index's budget wait: `Builds::drop` cleared the engine-wide `held` set and ended the shared wait (written for a run's end) | the drop removes only its own index from `held` and ends the wait only once no builder is held, so a run's end reports it once, when the last `Builds` drops, and the restarted builder's first grant ends no other index's hold (it removes only its own, and `counted` resets only once `held` is empty) | `a_hold_across_an_index_restart_is_one_wait` (the reviewer's: one refusal counted, one wait), `a_wait_open_when_another_index_restarts_is_not_cut`; the run-restart originals kept (`a_hold_across_an_engine_restart_is_one_wait`, `a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment`), and the exemption log's pair (`across_an_ingest_restart_…` / `across_an_index_restart_the_last_line_names_the_state_within_a_minute`) |
+| 4: the channel adapter (also on `main`): a delivery released (dropped unacked, or nacked) didn't wake a `recv` already waiting; latent on `main`, where every drop also ended the run | `fix(stream-channel)` in its own commit: the channel has a `Notify` every release wakes; `recv` registers for it before it reads the ledger (none missed), waits on the channel or a release, and on a release hands back the earliest due delivery. Nothing else wakes it (no busy wake); `take_due` marks an entry delivered under the ledger's lock (no double delivery). The builder still carries its requests across its restart (no round trip through the lane, and the resume point above needs them); the engine no longer depends on it to have them served | the adapter's `a_dropped_request_wakes_a_recv_already_waiting` (the reviewer's), `a_nack_or_a_drop_wakes_a_recv_already_waiting_in_lane_order` |
+| 5: `pacing_reader` stayed on the first index while the reader went on waiting at another bound, and `flusso.reader.waits` recorded the whole wait under the first bound | the reader reads its bound again on every wake (`room`): when it changes, the wait so far is reported under the old bound and a new one starts under the new bound, the pacing flag moving with it | `pacing_follows_the_bound_the_reader_waits_at` (the reviewer's, plus: a wait reported under `per_index` for `orders` and under `total`) |
+| 6: the daemon's panic test called `.ok()` and checked only `errors ≥ 1` | it asserts the deployment ends `Ok` at the stop | `a_panicking_build_restarts_the_ingest_engine_and_never_hangs` |
+| 7: the hold was set only after the running builds returned: a failure beside a slow build left the index at its cap neither held nor exempt, and the reading stopped for every index meanwhile | `down` sets held and folding first, then waits for the builds | `a_failed_index_is_held_while_its_slow_builds_finish` (22 of 102 changes read by 4 s before, all 102 after) |
+| 8: `/status` shows a down index as healthy until 8-2 | left for 8-2; stated in the decisions' costs above | — |
+| 9: R6, R13, R14 pinned by unit tests only | engine-level tests for R6 and R14; the harness's `Spy` stream fails a lane's next publish on demand (`Deployment::failing`) | `a_given_back_document_keeps_its_older_change` (two unpublished builds of `orders` 1 given back: the restart takes 3, 1, 5), `a_lane_failure_ends_the_run_and_restarts_no_index_alone`; R13 has `a_lanes_positions_never_go_down_across_a_restart` already |
+
+**Adopted unchanged** (they passed before the fixes and stay as guards):
+`nothing_counts_or_fences_past_a_given_back_change`, `a_thousand_failures_leak_nothing`,
+`every_index_down_stops_the_reading_and_a_stop_ends_with_an_error`.
+
+**Mutations** (fix round 1; each compiles, none hangs):
+
+| Finding | Mutation | Tests that fail |
+| --- | --- | --- |
+| 1 | leaving the fold keeps the hold | `a_restarted_quiet_index_is_free_again` |
+| 7 | held only once the running builds returned | `a_failed_index_is_held_while_its_slow_builds_finish` |
+| 3 | a dropped `Builds` clears every hold | `a_hold_across_an_index_restart_is_one_wait`, `a_wait_open_when_another_index_restarts_is_not_cut` |
+| 2 | a walk failure's waits start over on live progress | `each_kind_starts_over_only_on_its_own_progress`, `a_poison_backfill_row_beside_live_traffic_backs_off` |
+| 2 | one schedule for both kinds | the same two |
+| 2 | a restarted walk resumes from the request's own point | `a_restarted_walk_resumes_where_its_lanes_are` |
+| 5 | the bound read once per wait | `pacing_follows_the_bound_the_reader_waits_at` |
+| 9 (R6) | a give-back overwrites an older mark | `a_given_back_document_keeps_its_older_change`, `a_give_back_keeps_the_older_of_two_marks` |
+| 9 (R14) | the predicate takes `Stream` | `a_lane_failure_ends_the_run_and_restarts_no_index_alone`, the predicate's unit test |
+| 4 | a release wakes nobody | `a_dropped_request_wakes_a_recv_already_waiting`, `a_nack_or_a_drop_wakes_a_recv_already_waiting_in_lane_order` |
 
 ## 4. Guarantees
 
