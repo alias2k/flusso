@@ -1408,13 +1408,13 @@ impl DocumentBuilder for PanickingDocuments {
     }
 }
 
-/// A build that panics never hangs the deployment. On its own task (it
-/// awaited first) it is a failed build: an engine error, the ingest engine
-/// fails and the daemon restarts it. In the ingest task's own poll (it
-/// panicked before awaiting anything) it unwinds the ingest task, as main's
-/// inline builds did, and the deployment ends with an error.
+/// A build that panics never hangs the deployment. Whether it panicked on
+/// its own task (it awaited first) or in the ingest task's own first poll of
+/// it (it panicked before awaiting anything; caught since slice 8 of ADR
+/// 0012 stage 8a), it is a failed build: with one index an engine error, so
+/// the ingest engine fails and the daemon restarts it.
 #[tokio::test]
-async fn a_panicking_build_ends_or_restarts_the_ingest_engine_but_never_hangs() {
+async fn a_panicking_build_restarts_the_ingest_engine_and_never_hangs() {
     for at_once in [false, true] {
         let sink = Arc::new(RecordingSink::seeded());
         let backends = backends_with(
@@ -1428,19 +1428,15 @@ async fn a_panicking_build_ends_or_restarts_the_ingest_engine_but_never_hangs() 
             .unwrap();
         let status = running.status();
         let run = tokio::spawn(running.run(tokio::time::sleep(Duration::from_millis(500))));
-        let result = tokio::time::timeout(Duration::from_secs(20), run)
+        tokio::time::timeout(Duration::from_secs(20), run)
             .await
             .unwrap_or_else(|_| panic!("at_once {at_once}: the deployment hung"))
-            .unwrap();
-        if at_once {
-            let error = result.unwrap_err().to_string();
-            assert!(error.contains("ingest engine task failed"), "{error}");
-        } else {
-            assert!(
-                status.snapshot().errors >= 1,
-                "the failed build is an engine error"
-            );
-        }
+            .unwrap()
+            .ok();
+        assert!(
+            status.snapshot().errors >= 1,
+            "at_once {at_once}: the failed build is an engine error"
+        );
     }
 }
 

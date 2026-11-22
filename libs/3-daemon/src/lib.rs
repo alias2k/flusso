@@ -487,6 +487,7 @@ impl Daemon {
         .with_budget(Arc::clone(&budget))
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())
+        .with_backoff(backoff)
         .with_stop(stop.clone());
         status.attach_index_states(ingest.index_states());
 
