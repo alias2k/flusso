@@ -92,7 +92,7 @@ impl IngestEngine {
                 sink,
                 after,
                 ticket,
-            } = request;
+            } = request.clone();
             if scopes.contains(&index) {
                 let answered = requested
                     .entry(sink.clone())
@@ -104,7 +104,7 @@ impl IngestEngine {
             } else {
                 tracing::warn!(index = %index, %sink, "backfill requested for an index the source does not build; ignoring");
             }
-            handles.push(handle);
+            handles.push((request, handle));
         }
         let indexes: BTreeSet<IndexName> = requested
             .values()
@@ -190,7 +190,7 @@ impl IngestEngine {
             })
         });
         try_join_all(markers).await?;
-        for handle in snapshot.handles.drain(..) {
+        for (_, handle) in snapshot.handles.drain(..) {
             handle.ack().await?;
         }
         let indexes: Vec<IndexName> = snapshot.indexes.iter().cloned().collect();
@@ -203,12 +203,14 @@ impl IngestEngine {
 
 /// A running snapshot: the walk over its indexes' keys, who asked for what
 /// (each lane with the greatest ticket it is answered under), the request
-/// handles to acknowledge at the end, and the batch being filled.
+/// requests to acknowledge at the end, and the batch being filled.
 pub(super) struct Snapshot {
     pub(super) walk: Walk,
     pub(super) requested: BTreeMap<SinkName, BTreeMap<IndexName, Ticket>>,
     pub(super) indexes: HashSet<IndexName>,
-    pub(super) handles: Vec<Box<dyn AckHandle>>,
+    /// Each request it serves, with its handle: acknowledged at the end, or
+    /// handed back whole to a builder that restarts (slice 8).
+    pub(super) handles: Vec<(Request, Box<dyn AckHandle>)>,
     pub(super) batch: PendingBatch,
     /// Time spent getting keys since the last batch: waiting for pages and
     /// buffering keys.
@@ -221,6 +223,15 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
+    /// Its requests, unacknowledged, for a builder that restarts to serve
+    /// again (slice 8): dropping the snapshot stops its walk.
+    pub(super) fn into_requests(mut self) -> Vec<stream::Delivery<Request>> {
+        std::mem::take(&mut self.handles)
+            .into_iter()
+            .map(|(request, handle)| stream::Delivery::new(request, handle))
+            .collect()
+    }
+
     /// The lanes a batch built now goes to: each requested index to the
     /// lanes its walk has reached, with the ticket each lane is answered
     /// under.
@@ -335,18 +346,19 @@ impl Drop for KeyRead {
 impl Read {
     /// What the read brought back. Cancel-safe: dropped before it is ready,
     /// the read goes on and is asked again. A read that panicked on its own
-    /// task panics here, as one run inline did.
+    /// task (two or more builders) is a failed read, its index's failure, as
+    /// a build that panics on its task is (slice 8); one run inline panics
+    /// the run's task.
     async fn result(&mut self) -> source::Result<Fetched> {
         match self {
             Read::Inline(read) => read.await,
             Read::Apart(KeyRead(task)) => match task.await {
                 Ok(fetched) => fetched,
-                Err(error) => match error.try_into_panic() {
-                    Ok(panic) => std::panic::resume_unwind(panic),
-                    Err(error) => Err(SourceError::Query(format!(
-                        "the key read was cancelled: {error}"
-                    ))),
-                },
+                Err(error) => Err(SourceError::Query(if error.is_panic() {
+                    "the key read panicked".to_owned()
+                } else {
+                    format!("the key read was cancelled: {error}")
+                })),
             },
         }
     }

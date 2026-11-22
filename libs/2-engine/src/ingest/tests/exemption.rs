@@ -863,7 +863,8 @@ async fn on_an_idle_stream_the_last_lines_name_the_state_within_a_minute() {
 
 /// `orders` (odd ids) is refused for 3 s: exempt, logged. It recovers and
 /// drains within the minute (the "no longer exempt" line throttled). At
-/// 20 s a `users` build fails once: the ingest run fails and restarts. The
+/// 20 s resolving a `users` change fails once: the ingest run fails and
+/// restarts (a build's failure would restart `users` alone, slice 8). The
 /// log state is the engine's, so the throttled line is still logged. Changes keep arriving every 100 ms to the end, so lead
 /// checks keep coming (not the idle case). Two minutes in, the last line
 /// should name the current state (not exempt).
@@ -887,7 +888,7 @@ async fn across_an_ingest_restart_the_last_line_names_the_state_within_a_minute(
     let builder = Builder::two(
         &db,
         Behaviour {
-            fail_once: Mutex::new(HashSet::from([200])),
+            resolve_fails_once: Mutex::new(HashSet::from([200])),
             ..Behaviour::default()
         },
     );

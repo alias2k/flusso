@@ -357,6 +357,15 @@ impl Progress {
             .map(|next| ItemKey::new(next.fetch_add(1, Ordering::Relaxed)))
     }
 
+    /// How many items of `index` have been numbered: it moves once a live
+    /// item of the index is published (a restarted builder that published
+    /// again starts its backoff over, ADR 0012 stage 8a, slice 8).
+    pub(crate) fn numbered(&self, index: &IndexName) -> u64 {
+        self.keys
+            .get(index)
+            .map_or(0, |next| next.load(Ordering::Relaxed))
+    }
+
     /// `lane` took the item keyed `key` of a batch covering `oldest..=last`.
     /// Call it once the lane's own send succeeded, in key order per lane.
     /// It counts toward no [`Step`]: a live build's item is registered with
@@ -823,6 +832,20 @@ impl Progress {
             lock(pending).release(token);
         }
         self.registered();
+    }
+
+    /// Give every build of `index` taken and not yet released back to its
+    /// pending set (ADR 0012 stage 8a, slice 8): the index's builder failed
+    /// before publishing them and restarts alone, so nothing is read again.
+    /// Each id waits again at its own change, so the index's lanes stay
+    /// before the oldest of them, as they were while the builds held them.
+    /// Call it once none of the builds still runs.
+    pub fn give_back(&self, index: &IndexName) {
+        let Some(pending) = self.pending.get(index) else {
+            return;
+        };
+        let started = lock(pending).give_back();
+        self.started_waiting(index, started);
     }
 
     /// Forget every pending document: the run that marked it ended before

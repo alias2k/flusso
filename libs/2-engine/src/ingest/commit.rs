@@ -64,7 +64,7 @@ impl IngestEngine {
             // Beside a running live build only a full batch may start, so a
             // hand-over that can't fill one costs no walk.
             let candidate = if builds.folding() {
-                self.backlog(builds)
+                self.backlog(runs, builds)
             } else if builds.live_running() {
                 runs.full_candidate()
                     .or_else(|| self.full_leftover(runs, builds))
@@ -133,7 +133,7 @@ impl IngestEngine {
                 builds
                     .index()
                     .and_then(|index| self.progress.newest_waiting(index))
-                    .map(|position| Candidate::backlog(position, true))
+                    .map(|position| runs.backlog(position, true))
             } else {
                 runs.candidate(false)
             };
@@ -241,12 +241,12 @@ impl IngestEngine {
     /// documents waiting on its index, through the newest of them, full
     /// once `max_changes` wait (a full one may start beside a running live
     /// build). `None` with nothing waiting.
-    fn backlog(&self, builds: &Builds) -> Option<Candidate> {
+    fn backlog(&self, runs: &Runs, builds: &Builds) -> Option<Candidate> {
         let index = builds.index()?;
         let waiting = self.progress.waiting_on(index);
         let position = self.progress.newest_waiting(index)?;
         let full = waiting >= self.batch.max_changes;
-        (!builds.live_running() || full).then_some(Candidate::backlog(position, full))
+        (!builds.live_running() || full).then(|| runs.backlog(position, full))
     }
 
     /// Take the documents waiting through `candidate`'s last change of every
@@ -268,6 +268,7 @@ impl IngestEngine {
         admitted: &[IndexName],
     ) {
         let position = candidate.position;
+        runs.raise_floor(position);
         let backlog = builds.folding();
         // A live grant ends the hold (§3.9 §5).
         runs.lead().hold(runs.slot(), false);
