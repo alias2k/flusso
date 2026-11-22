@@ -1425,3 +1425,59 @@ async fn a_live_failure_is_reported_before_its_slow_builds_return() {
     );
     assert_eq!(deployment.recorder.state(), db.expected());
 }
+
+/// Review of #456 (final, item 3): the restart comes `retry_in` after the
+/// failure, not after `down` waited for the running builds too: `orders`
+/// 1's build fails at 0.5 s while its build of 3 is held. Released at 1 s,
+/// the restart is at the failure plus the wait; released at 4 s, past the
+/// wait, it is as soon as `down` returns.
+#[tokio::test(start_paused = true)]
+async fn a_restart_comes_its_wait_after_the_failure() {
+    for (held_until, restart) in [
+        (Duration::from_millis(1_000), None),
+        (
+            Duration::from_millis(4_000),
+            Some(Duration::from_millis(4_000)),
+        ),
+    ] {
+        let db = Database::new(0, [1, 3].into_iter().map(Change::upsert).collect());
+        let (mut deployment, builder, restarts) = two_indexes(
+            &db,
+            Behaviour {
+                held: Mutex::new(HashSet::from([1, 3])),
+                fail_once: Mutex::new(HashSet::from([1])),
+                ..Behaviour::default()
+            },
+            Recorder::seeded(true),
+            4,
+        );
+        let opened = tokio::time::Instant::now();
+        let releaser = {
+            let builder = Arc::clone(&builder);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                builder.release(1);
+                tokio::time::sleep(held_until - Duration::from_millis(500)).await;
+                builder.release(3);
+            })
+        };
+        tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+            .await
+            .expect("the run ends");
+        releaser.await.unwrap();
+        let failures = restarts.failures();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let (_, _, wait, failed_at) = failures[0].clone();
+        let restarted = restarts.restarts();
+        assert_eq!(restarted.len(), 1, "{held_until:?}");
+        let expected = restart.unwrap_or(failed_at - opened + wait);
+        let at = restarted[0].at - opened;
+        assert!(
+            at >= expected && at < expected + Duration::from_millis(20),
+            "held until {held_until:?}, failed at {:?}, retry in {wait:?}: restarted at {at:?}, \
+             expected {expected:?}",
+            failed_at - opened
+        );
+        assert_eq!(deployment.recorder.state(), db.expected());
+    }
+}

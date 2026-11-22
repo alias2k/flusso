@@ -900,12 +900,13 @@ async fn rows_changed_behind_the_resume_point_while_a_walk_waits_land() {
     two.assert_seeded("changed while down");
 }
 
-/// W2 (fix round 2): `orders`' backfill batch holding row 41 is held, then
-/// fails, while later batches of its walk and live batches of `orders` were
-/// granted behind it. The walk's later batches are discarded (published,
-/// they would move each lane's resume point past 41..47, losing those
-/// rows); the live ones publish. Nothing of `orders`' live work failed, so
-/// its builder never restarts, and every row and change lands.
+/// A backfill batch failing beside live slots once the walk has read every
+/// key (80 rows): its end is already queued, so the failure turns it into
+/// requests at once. Pins that path: the walk fails once and alone (its
+/// builder never restarts, the live batches granted behind it publish),
+/// and every row and change lands. The W2 rule itself, later walk batches
+/// discarded, is pinned while the walk still reads keys, by
+/// `a_walk_still_reading_keys_discards_its_later_batches_when_one_fails`.
 #[tokio::test(start_paused = true)]
 async fn a_backfill_batch_failing_beside_live_slots_discards_only_the_walks() {
     let log: Vec<Change> = (0..40).map(|n| Change::upsert(101 + 2 * n)).collect();
@@ -946,6 +947,81 @@ async fn a_backfill_batch_failing_beside_live_slots_discards_only_the_walks() {
                         .iter()
                         .any(|ids| ids.iter().any(|id| (49..80).contains(id)))
                         && after.iter().any(|ids| ids.iter().any(|id| *id >= 101))
+                });
+                if later {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            builder.release(41);
+        })
+    };
+    let failed = tokio::time::timeout(Duration::from_secs(300), deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    releaser.await.unwrap();
+    assert_eq!(failed, 0);
+    assert_eq!(
+        counts.failed.load(Ordering::SeqCst),
+        1,
+        "the walk failed once"
+    );
+    assert_eq!(
+        counts.restarted.load(Ordering::SeqCst),
+        0,
+        "the builder never went down: only its walk failed"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// W2 (fix round 2; the directed test since the final review of #456):
+/// `orders`' backfill batch holding row 41 is held, then fails, while later
+/// batches of its walk and live batches of `orders` were granted behind it,
+/// the walk still reading keys (400 rows). The walk's later batches are
+/// discarded: published, they would move each lane's resume point past
+/// 41..47, and those rows would never land. The live ones publish. Nothing
+/// of `orders`' live work failed, so its builder never restarts, and every
+/// row and change lands.
+#[tokio::test(start_paused = true)]
+async fn a_walk_still_reading_keys_discards_its_later_batches_when_one_fails() {
+    let log: Vec<Change> = (0..40).map(|n| Change::upsert(1001 + 2 * n)).collect();
+    let arrivals: Vec<Duration> = (0..40u64).map(|n| Duration::from_millis(10 * n)).collect();
+    let db = Database::new(400, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([41])),
+            fail_once: Mutex::new(HashSet::from([41])),
+            resumable: true,
+            delay: Some(Duration::from_millis(2)),
+            ..Behaviour::default()
+        },
+    );
+    let counts = Arc::new(Counts::default());
+    let observer: Arc<dyn Observer> = Arc::clone(&counts) as Arc<dyn Observer>;
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_arrivals(arrivals),
+        Arc::clone(&builder),
+        Recorder::seeded(false),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(4)
+            .with_observer(observer)
+    });
+    let releaser = {
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            loop {
+                let grants = builder.grants();
+                let at = grants.iter().position(|ids| ids.contains(&41));
+                let later = at.is_some_and(|at| {
+                    let after = grants.get(at + 1..).unwrap_or_default();
+                    after
+                        .iter()
+                        .any(|ids| ids.iter().any(|id| (49..80).contains(id)))
+                        && after.iter().any(|ids| ids.iter().any(|id| *id >= 1001))
                 });
                 if later {
                     break;

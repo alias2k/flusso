@@ -129,7 +129,9 @@ impl IngestEngine {
             };
             // Its walk fails alone (in its loop): what reaches here is its
             // live work's. Reported as it happens, before `down` waits for
-            // the running builds (review of #457, B1).
+            // the running builds (review of #457, B1), and restarted `wait`
+            // after it, or once `down` returns if that is later.
+            let failed_at = Instant::now();
             let wait = building.retry.failed(Work::Live, self.done(&index));
             tracing::error!(
                 %index,
@@ -146,7 +148,7 @@ impl IngestEngine {
             // A stop cuts the wait short: the builder tries once more, under
             // the stop's deadline (O3).
             tokio::select! {
-                () = tokio::time::sleep(wait) => {}
+                () = tokio::time::sleep_until(failed_at + wait) => {}
                 () = self.stop.requested() => {}
             }
             tracing::info!(
