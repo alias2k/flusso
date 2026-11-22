@@ -419,9 +419,10 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
     }
 
     /// The reader waited `waited` at its lead before reading on, stopped by
-    /// `bound` (reported when the wait ends; a wait cut by the stop too).
-    fn on_reader_wait(&self, bound: ReaderBound, waited: Duration) {
-        let _ = (bound, waited);
+    /// `bound` (reported when the wait ends; a wait cut by the stop too); for
+    /// a per-index bound, `index` is the index at its cap.
+    fn on_reader_wait(&self, bound: ReaderBound, index: Option<&IndexName>, waited: Duration) {
+        let _ = (bound, index, waited);
     }
 
     /// A sink recorded `index` as seeded.
@@ -605,9 +606,9 @@ impl Observer for FanOut {
         }
     }
 
-    fn on_reader_wait(&self, bound: ReaderBound, waited: Duration) {
+    fn on_reader_wait(&self, bound: ReaderBound, index: Option<&IndexName>, waited: Duration) {
         for observer in &self.observers {
-            observer.on_reader_wait(bound, waited);
+            observer.on_reader_wait(bound, index, waited);
         }
     }
 

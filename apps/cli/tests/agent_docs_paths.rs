@@ -147,10 +147,57 @@ fn every_repo_path_named_in_the_agent_docs_exists() {
     );
 }
 
-/// Routes the binary no longer serves: an agent following one gets a 404.
-/// `POST /reindex?index=` became `POST /indexes/<name>/reindex` in 0.19
-/// (ADR 0012 stage 8a, slice 7).
-const GONE_ROUTES: &[&str] = &["POST /reindex", "/reindex?index="];
+/// Where `body` names the reindex route the binary no longer serves (`POST
+/// /reindex?index=…`, removed in 0.19, ADR 0012 stage 8a slice 7): any
+/// `/reindex` not directly under `/indexes/<name>`. Catches the bare route in
+/// backticks, with any query, a `POST` on the line before, and a `…/reindex`
+/// shorthand.
+fn gone_reindex_routes(body: &str) -> Vec<String> {
+    body.match_indices("/reindex")
+        .filter(|(at, _)| {
+            let before = &body[..*at];
+            // The token `/reindex` ends: from the last space, backtick,
+            // quote or bracket. Prose like `generations/reindex` is no route.
+            let token = before
+                .rfind(|c: char| c.is_whitespace() || matches!(c, '`' | '\'' | '"' | '(' | '['))
+                .map_or(before, |start| &before[start + 1..]);
+            let route_like = token.is_empty() || token.starts_with('/') || token.starts_with('…');
+            // `/indexes/<name>` right before: the route that is served.
+            let served = token
+                .rfind('/')
+                .is_some_and(|last| last > 0 && token[..last].ends_with("/indexes"));
+            route_like && !served
+        })
+        .map(|(at, _)| {
+            let start = body[..at].rfind('\n').map_or(0, |line| line + 1);
+            let end = body[at..].find('\n').map_or(body.len(), |line| at + line);
+            body[start..end].trim().to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn the_gone_route_is_told_from_the_served_one() {
+    for served in [
+        "POST /indexes/<name>/reindex",
+        "`POST /indexes/{name}/reindex?sink=audit`",
+        "/indexes/users/reindex",
+        "generations/reindex, the analyzers",
+    ] {
+        assert!(gone_reindex_routes(served).is_empty(), "{served}");
+    }
+    for gone in [
+        "POST /reindex",
+        "`/reindex`",
+        "/reindex?sink=audit",
+        "/reindex?index=users",
+        "POST\n/reindex",
+        "the …/reindex route",
+        "/indexes/reindex",
+    ] {
+        assert!(!gone_reindex_routes(gone).is_empty(), "{gone:?}");
+    }
+}
 
 #[test]
 fn no_agent_doc_names_a_route_that_is_gone() {
@@ -163,10 +210,9 @@ fn no_agent_doc_names_a_route_that_is_gone() {
         .iter()
         .flat_map(|file| {
             let body = std::fs::read_to_string(file).unwrap();
-            GONE_ROUTES
-                .iter()
-                .filter(|route| body.contains(*route))
-                .map(|route| format!("{}: {route}", file.display()))
+            gone_reindex_routes(&body)
+                .into_iter()
+                .map(|line| format!("{}: {line}", file.display()))
                 .collect::<Vec<_>>()
         })
         .collect();

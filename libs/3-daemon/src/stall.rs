@@ -268,6 +268,16 @@ impl Stalls {
             .collect()
     }
 
+    /// Forget every backlog age and the reads kept for them: an engine run
+    /// started or ended, and what it left is the next run's to read again.
+    pub fn forget_backlog(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.reads.clear();
+        for age in state.backlogs.values_mut() {
+            *age = Duration::ZERO;
+        }
+    }
+
     /// How long ago `index`'s oldest change not built yet was read, as of
     /// the last sample (1 s resolution, at most [`BACKLOG_SPAN`] samples): 0
     /// while nothing waits to be built, or for an index with no lane.
@@ -454,44 +464,6 @@ mod tests {
         assert_eq!(stalls.backlog(&users.index), Duration::ZERO, "built");
     }
 
-    /// Review of #454, item 2: an index falling behind. Ten changes a second
-    /// are read, five built a second, oldest first: after five minutes the
-    /// oldest unbuilt change was read two and a half minutes ago and 1,500
-    /// documents wait; the backlog says so (it read about a second before:
-    /// the oldest moved every sample).
-    #[test]
-    fn a_slow_index_falling_behind_shows_its_backlog() {
-        let users = lane("users");
-        let progress = Progress::new([users.clone()]);
-        let stalls = Stalls::new([users.clone()]);
-        let start = Instant::now();
-        let id = |key: i64| source::document::DocumentId {
-            index: users.index.clone(),
-            key: source::RowKey(vec![(
-                kernel::ColumnName::try_new("id").unwrap(),
-                kernel::GenericValue::BigInt(key),
-            )]),
-        };
-        let mut next = 0i64;
-        for second in 1..=300u64 {
-            for _ in 0..10 {
-                next += 1;
-                progress.mark([(id(next), Position::new(next as u64))]);
-                progress.read_changes(1);
-            }
-            let taken = progress.take(&users.index, 5, &|_| false).unwrap();
-            progress.build_sending(&users.index, taken.token);
-            stalls.sample(at(start, second), &progress, &Lsns, None);
-        }
-        let waiting = progress.waiting_on(&users.index);
-        assert_eq!(waiting, 1500);
-        assert!(
-            stalls.backlog(&users.index) >= Duration::from_secs(60),
-            "{waiting} documents wait, the oldest read 150 s ago, the backlog reads {:?}",
-            stalls.backlog(&users.index)
-        );
-    }
-
     /// Reads `read` changes and builds `built` (oldest first, sent to the
     /// lanes) in each second of `seconds`, sampling at its end; returns the
     /// backlog age at each sample.
@@ -526,6 +498,19 @@ mod tests {
             ages.push(stalls.backlog(&users.index).as_secs());
         }
         ages
+    }
+
+    /// The hour cap: a stuck index's backlog grows a second a second up to
+    /// the samples kept (`BACKLOG_SPAN`), then reads an hour; nothing older is
+    /// kept.
+    #[test]
+    fn a_backlog_older_than_the_samples_kept_reads_their_span() {
+        let mut seconds = vec![(10, 0)];
+        seconds.extend(vec![(0, 0); BACKLOG_SPAN + 99]);
+        let ages = backlog_over(&seconds);
+        let span = (BACKLOG_SPAN - 1) as u64;
+        assert_eq!(ages.get(BACKLOG_SPAN - 1), Some(&span));
+        assert_eq!(ages.last(), Some(&span), "capped at the span");
     }
 
     /// Steady healthy load: everything read in a second is built in it; the

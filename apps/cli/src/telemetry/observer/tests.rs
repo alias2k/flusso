@@ -232,25 +232,35 @@ fn a_parked_lanes_probes_are_counted_by_outcome() {
 }
 
 /// Slice 7: each wait of the reader at its lead is one observation of
-/// `flusso.reader.waits`, by the bound that stopped it.
+/// `flusso.reader.waits`, by the bound that stopped it, and for a per-index
+/// bound by the index at it (the other bounds carry no `index` label).
 #[test]
 fn the_readers_waits_are_a_histogram_by_bound() {
     let (observer, registry, _provider) = recorder();
-    observer.on_reader_wait(daemon::ReaderBound::PerIndex, Duration::from_millis(30));
-    observer.on_reader_wait(daemon::ReaderBound::PerIndex, Duration::from_millis(70));
-    observer.on_reader_wait(daemon::ReaderBound::Pending, Duration::from_secs(2));
+    let orders = IndexName::try_new("orders").unwrap();
+    observer.on_reader_wait(
+        daemon::ReaderBound::PerIndex,
+        Some(&orders),
+        Duration::from_millis(30),
+    );
+    observer.on_reader_wait(
+        daemon::ReaderBound::PerIndex,
+        Some(&orders),
+        Duration::from_millis(70),
+    );
+    observer.on_reader_wait(daemon::ReaderBound::Pending, None, Duration::from_secs(2));
     let text = scrape(&registry);
     assert_eq!(
         value(
             &text,
-            r#"flusso_reader_waits_seconds_count{bound="per_index"}"#
+            r#"flusso_reader_waits_seconds_count{bound="per_index",index="orders"}"#
         ),
         2.0
     );
     assert!(
         (value(
             &text,
-            r#"flusso_reader_waits_seconds_sum{bound="per_index"}"#
+            r#"flusso_reader_waits_seconds_sum{bound="per_index",index="orders"}"#
         ) - 0.1)
             .abs()
             < 1e-9

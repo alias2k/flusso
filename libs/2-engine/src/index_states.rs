@@ -113,6 +113,9 @@ pub struct IndexView {
     pub stuck: Option<bool>,
     /// The sinks its walk in progress serves; `None` while none runs.
     pub backfill: Option<BTreeSet<SinkName>>,
+    /// The reader waits at this index's bound now: its cap
+    /// (`max_waiting_per_index`), or, frozen, the count it froze at.
+    pub pacing_reader: bool,
 }
 
 /// Every index's state, for the life of the ingest engine.
@@ -136,6 +139,7 @@ struct State {
     lanes: BTreeSet<SinkName>,
     held_since: Option<Instant>,
     walking: Option<BTreeSet<SinkName>>,
+    pacing_reader: bool,
 }
 
 impl Default for State {
@@ -145,6 +149,7 @@ impl Default for State {
             lanes: BTreeSet::new(),
             held_since: None,
             walking: None,
+            pacing_reader: false,
         }
     }
 }
@@ -195,6 +200,7 @@ impl IndexStates {
             held_since: held.as_ref().and(state.held_since),
             held,
             backfill: state.walking.clone(),
+            pacing_reader: state.pacing_reader,
         })
     }
 
@@ -240,6 +246,18 @@ impl IndexStates {
             state.held_since.get_or_insert_with(Instant::now);
         } else if state.lanes.is_empty() {
             state.held_since = None;
+        }
+    }
+
+    /// The reader waits at `index`'s bound, until the returned guard is
+    /// dropped (the wait ended, or was dropped with the run).
+    pub fn pacing_reader(&self, index: &IndexName) -> PacingReader<'_> {
+        if let Some(one) = self.indexes.get(index) {
+            lock(&one.state).pacing_reader = true;
+        }
+        PacingReader {
+            states: self,
+            index: index.clone(),
         }
     }
 
@@ -300,6 +318,21 @@ pub struct LaneFull<'a> {
 impl Drop for LaneFull<'_> {
     fn drop(&mut self) {
         self.states.lane_free(&self.index, &self.sink);
+    }
+}
+
+/// The reader waiting at an index's bound; dropping it clears it.
+#[derive(Debug)]
+pub struct PacingReader<'a> {
+    states: &'a IndexStates,
+    index: IndexName,
+}
+
+impl Drop for PacingReader<'_> {
+    fn drop(&mut self) {
+        if let Some(one) = self.states.indexes.get(&self.index) {
+            lock(&one.state).pacing_reader = false;
+        }
     }
 }
 

@@ -1536,3 +1536,42 @@ async fn the_status_reads_each_index_from_the_ingest_engine() {
         .unwrap();
     assert_eq!(status.index_ingest(&users()).unwrap().backfill, None);
 }
+
+/// Review round 2 of #454, item 2: a disabled index is no index of the
+/// deployment's ingest: no `ingest.indexes` entry, no `GET
+/// /indexes/<name>/status` (which answers 404 for what `index_ingest` returns
+/// `None`), no reindex. The older `indexes.<name>` section keeps listing it,
+/// as it did before slice 7.
+#[tokio::test]
+async fn a_disabled_index_has_no_ingest_entry() {
+    let sink = Arc::new(RecordingSink::seeded());
+    let backends = backends(
+        ScriptedSource::new(Vec::new()),
+        vec![(primary(), sink, SinkOptions::default())],
+    );
+    let mut config = backendless_config();
+    let archive = IndexName::try_new("archive").unwrap();
+    let mut disabled = config.indexes.get(&users()).unwrap().clone();
+    disabled.enabled = false;
+    config.indexes.insert(archive.clone(), disabled);
+    let running = Daemon::new(config, backends).start().await.unwrap();
+    let status = running.status();
+    let entries: Vec<String> = status
+        .snapshot()
+        .ingest
+        .indexes
+        .keys()
+        .map(|name| name.to_string())
+        .collect();
+    assert!(
+        status.index_ingest(&archive).is_none() && !status.tracks(&archive),
+        "a disabled index is tracked: entries {entries:?}, names {:?}",
+        status.index_names()
+    );
+    assert_eq!(entries, ["users"]);
+    assert_eq!(status.index_names(), ["users"]);
+    assert!(
+        status.snapshot().indexes.contains_key("archive"),
+        "the older indexes.<name> section is unchanged"
+    );
+}

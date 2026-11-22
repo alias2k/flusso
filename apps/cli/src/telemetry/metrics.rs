@@ -680,10 +680,15 @@ mod tests {
         );
         let status = Arc::new(
             Status::new(
-                [orders.clone(), users.clone()],
+                [
+                    orders.clone(),
+                    users.clone(),
+                    IndexName::try_new("archive").unwrap(),
+                ],
                 [primary.clone()],
                 std::time::Instant::now(),
             )
+            .with_ingest_indexes([orders.clone(), users.clone()])
             .with_progress(progress)
             .with_stalls(stalls),
         );
@@ -722,6 +727,10 @@ mod tests {
         ] {
             assert!(text.contains(line), "{line} missing from:\n{text}");
         }
+        assert!(
+            !text.contains(r#"index="archive""#),
+            "a disabled index has no series:\n{text}"
+        );
     }
 
     #[test]

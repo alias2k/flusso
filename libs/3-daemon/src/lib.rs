@@ -438,6 +438,13 @@ impl Daemon {
                 sink_names.iter().cloned(),
                 Instant::now(),
             )
+            .with_ingest_indexes(
+                config
+                    .indexes
+                    .iter()
+                    .filter(|(_, index)| index.enabled)
+                    .map(|(name, _)| name.clone()),
+            )
             .with_fence(fence.clone())
             .with_progress(Arc::clone(&progress))
             .with_source(Arc::clone(&capture))

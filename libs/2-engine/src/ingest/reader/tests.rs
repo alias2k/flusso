@@ -229,6 +229,7 @@ fn reader(
         },
         lead: Arc::clone(&lead),
         runs: vec![(IndexName::try_new("users").unwrap(), sender)],
+        states: None,
         handing,
         checked: None,
     };
@@ -567,7 +568,7 @@ async fn a_take_before_the_wake_up_is_registered_is_seen_by_the_check_after_it()
 struct Waits(Mutex<Vec<ReaderBound>>);
 
 impl Observer for Waits {
-    fn on_reader_wait(&self, bound: ReaderBound, _: Duration) {
+    fn on_reader_wait(&self, bound: ReaderBound, _: Option<&IndexName>, _: Duration) {
         self.0.lock().unwrap().push(bound);
     }
 }
@@ -623,6 +624,7 @@ async fn a_take_at(point: Check) -> Vec<ReaderBound> {
             },
             lead,
             runs: vec![(IndexName::try_new("users").unwrap(), sender)],
+            states: None,
             handing: None,
             checked: Some(checked),
         },
@@ -759,6 +761,7 @@ async fn an_untouched_index_is_handed_nothing() {
             },
             lead: Lead::over(plenty(), 0, 2),
             runs: vec![(users(), to_users), (orders(), to_orders)],
+            states: None,
             handing: None,
             checked: None,
         },
@@ -1193,19 +1196,28 @@ fn the_lead_names_the_bound_it_is_at_with_one_builder() {
     };
     let progress = progress();
     let lead = Lead::new(max, 0);
-    assert_eq!(lead.reached_by(&progress), None);
+    assert_eq!(lead.reached_by(&progress).map(|(bound, _)| bound), None);
     mark_docs(&progress, users(), 0, 3);
-    assert_eq!(lead.reached_by(&progress), Some(ReaderBound::PerIndex));
+    assert_eq!(
+        lead.reached_by(&progress).map(|(bound, _)| bound),
+        Some(ReaderBound::PerIndex)
+    );
     progress.take(&users(), 1, &|_| false).unwrap();
     mark_docs(&progress, orders(), 100, 2);
     assert_eq!(progress.waiting(), 4);
-    assert_eq!(lead.reached_by(&progress), Some(ReaderBound::Total));
+    assert_eq!(
+        lead.reached_by(&progress).map(|(bound, _)| bound),
+        Some(ReaderBound::Total)
+    );
 
     let progress = self::progress();
     let lead = Lead::new(max, 0);
     progress.read_changes(4);
     lead.routed(0, 1, 4);
-    assert_eq!(lead.reached_by(&progress), Some(ReaderBound::Changes));
+    assert_eq!(
+        lead.reached_by(&progress).map(|(bound, _)| bound),
+        Some(ReaderBound::Changes)
+    );
 }
 
 /// With the exemption: an index at its cap and not exempt is `per_index`;
@@ -1216,15 +1228,19 @@ fn the_lead_names_the_pending_cap_and_a_cap_per_index() {
     let lead = exempting(4);
     mark_docs(&progress, orders(), 0, 2);
     assert_eq!(
-        lead.reached_by(&progress),
+        lead.reached_by(&progress).map(|(bound, _)| bound),
         Some(ReaderBound::PerIndex),
         "not held: not exempt"
     );
     lead.hold(0, true);
-    assert_eq!(lead.reached_by(&progress), None, "held: exempt");
+    assert_eq!(
+        lead.reached_by(&progress).map(|(bound, _)| bound),
+        None,
+        "held: exempt"
+    );
     mark_docs(&progress, orders(), 100, 2);
     assert_eq!(
-        lead.reached_by(&progress),
+        lead.reached_by(&progress).map(|(bound, _)| bound),
         Some(ReaderBound::Pending),
         "four exempt documents: the pending cap"
     );

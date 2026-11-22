@@ -253,11 +253,19 @@ async fn a_walk_stopped_is_no_longer_shown() {
 
 /// Records every wait of the reader at its lead.
 #[derive(Debug, Default)]
-struct ReaderWaits(Mutex<Vec<(crate::ReaderBound, Duration)>>);
+struct ReaderWaits(Mutex<Vec<(crate::ReaderBound, Option<String>, Duration)>>);
 
 impl crate::Observer for ReaderWaits {
-    fn on_reader_wait(&self, bound: crate::ReaderBound, waited: Duration) {
-        self.0.lock().unwrap().push((bound, waited));
+    fn on_reader_wait(
+        &self,
+        bound: crate::ReaderBound,
+        index: Option<&IndexName>,
+        waited: Duration,
+    ) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((bound, index.map(|index| index.to_string()), waited));
     }
 }
 
@@ -296,15 +304,15 @@ async fn each_wait_of_the_reader_is_reported_with_its_bound() {
     let waits = waits.0.lock().unwrap().clone();
     assert!(!waits.is_empty(), "the reader waited");
     assert!(
-        waits
-            .iter()
-            .all(|(bound, _)| *bound == crate::ReaderBound::PerIndex),
-        "{waits:?}"
+        waits.iter().all(|(bound, index, _)| {
+            *bound == crate::ReaderBound::PerIndex && index.as_deref() == Some("users")
+        }),
+        "each wait at users' cap, naming it: {waits:?}"
     );
     assert!(
         waits
             .iter()
-            .any(|(_, waited)| *waited >= Duration::from_millis(50)),
+            .any(|(_, _, waited)| *waited >= Duration::from_millis(50)),
         "a wait lasts until a build takes: {waits:?}"
     );
 }
@@ -597,4 +605,174 @@ async fn a_snapshot_end_blocked_on_a_full_lane_shows_the_lane_hold() {
         Some(HeldBy::Lanes(BTreeSet::from([sink_name()])))
     );
     assert_eq!(recorder.state(), db.expected());
+}
+
+/// Review round 2 of #454: what the backlog age does NOT show. One index
+/// whose healthy sink lands fewer documents a second than change: flusso
+/// falls further behind the source every second, but the reader stops at
+/// `max_waiting_per_index` for an index that isn't exempt, so its oldest
+/// unbuilt change is never older than about the cap's worth of builds (4
+/// documents at one a 400 ms write: under two seconds). The backlog age
+/// (measured as `daemon::Stalls` does: from the first 1 s sample whose read
+/// count covers the oldest unbuilt read number) stays that small; how far
+/// behind the source an index is shows as its lanes' WAL behind and the
+/// slot's lag, not here. Kept true so nobody reads it as a source lag.
+#[tokio::test(start_paused = true)]
+async fn an_index_falling_behind_its_source_keeps_a_backlog_within_its_read_ahead() {
+    let changes: i64 = 3000;
+    let log: Vec<Change> = (0..changes).map(Change::upsert).collect();
+    let every = Duration::from_millis(50);
+    let arrivals: Vec<Duration> = (0..changes as u64).map(|n| every * n as u32).collect();
+    let db = Database::new(0, log);
+    let builder = Builder::new(&db, Behaviour::default());
+    let recorder = Recorder::seeded(true);
+    *recorder.write_delay.lock().unwrap() = Some(Duration::from_millis(400));
+    let stop = Stop::new();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_arrivals(arrivals).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        1,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_max_waiting(MaxWaiting {
+                per_index: 4,
+                total: 8,
+            })
+            .with_stop(stop.clone())
+    });
+    let progress = deployment.ingest.progress();
+    let users = IndexName::try_new("users").unwrap();
+    let sampler = {
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            let opened = tokio::time::Instant::now();
+            let mut reads: Vec<(u64, tokio::time::Instant)> = Vec::new();
+            let mut seen = Vec::new();
+            for _ in 0..150 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let now = tokio::time::Instant::now();
+                let read = progress.changes_read();
+                reads.push((read, now));
+                let age = progress.oldest_unbuilt(&users).map_or(0, |oldest| {
+                    let at = reads.partition_point(|(read, _)| *read < oldest);
+                    reads.get(at).map_or(0, |(_, when)| (now - *when).as_secs())
+                });
+                // The newest change read arrived `read - 1` steps after the
+                // stream opened: how far behind the source flusso is.
+                let behind = (now - opened)
+                    .saturating_sub(every * read.saturating_sub(1) as u32)
+                    .as_secs();
+                seen.push((behind, age));
+            }
+            stop.request();
+            seen
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(900), deployment.run_to_end(0))
+        .await
+        .expect("the run ends at the stop");
+    let seen = sampler.await.unwrap();
+    let (behind, _) = *seen.last().unwrap();
+    assert!(
+        behind > 60,
+        "setup: flusso falls behind its source: {seen:?}"
+    );
+    let most = seen.iter().map(|(_, age)| *age).max().unwrap_or(0);
+    assert!(
+        most <= 3,
+        "the backlog stays within the read-ahead (4 documents at 400 ms each), {behind} s \
+         behind the source: {most} s at most"
+    );
+}
+
+/// Review round 2 of #454, item 1: which index stops the reader. Two indexes,
+/// every build 100 ms, one at a time, two documents a cap: the reader waits
+/// at one index's cap, each per-index wait names its index, and while it
+/// waits `pacing_reader` is true for that index alone; once the stream is
+/// read and built, neither paces it.
+#[tokio::test(start_paused = true)]
+async fn the_index_that_stops_the_reader_is_named_and_shown_while_it_does() {
+    let log: Vec<Change> = (0..40).map(Change::upsert).collect();
+    let db = Database::new(0, log);
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            delay: Some(Duration::from_millis(100)),
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(true);
+    let waits = Arc::new(ReaderWaits::default());
+    let mut deployment =
+        Deployment::new(Feed::new(&db), Arc::clone(&builder), Arc::clone(&recorder)).ingest(
+            |ingest| {
+                ingest
+                    .with_batch(batch(1))
+                    .with_builds(1)
+                    .with_max_waiting(MaxWaiting {
+                        per_index: 2,
+                        total: 100,
+                    })
+                    .with_observer(Arc::clone(&waits) as Arc<dyn crate::Observer>)
+            },
+        );
+    let states = deployment.ingest.index_states();
+    let watcher = {
+        let states = Arc::clone(&states);
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            loop {
+                let shown: Vec<(String, bool)> = ["orders", "users"]
+                    .into_iter()
+                    .map(|name| {
+                        let view = states.view(&IndexName::try_new(name).unwrap()).unwrap();
+                        (name.to_owned(), view.pacing_reader)
+                    })
+                    .collect();
+                if shown.iter().any(|(_, pacing)| *pacing) {
+                    return shown;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the reader never waited"
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(120), deployment.run_to_end(0))
+        .await
+        .expect("the run ends with the stream");
+    let shown = watcher.await.unwrap();
+    assert_eq!(recorder.state(), db.expected());
+    let pacing: Vec<&str> = shown
+        .iter()
+        .filter(|(_, pacing)| *pacing)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        pacing.len(),
+        1,
+        "one index paces the reader at a time: {shown:?}"
+    );
+    let waits = waits.0.lock().unwrap().clone();
+    assert!(!waits.is_empty(), "the reader waited");
+    assert!(
+        waits
+            .iter()
+            .all(|(bound, index, _)| *bound != crate::ReaderBound::PerIndex || index.is_some()),
+        "a per-index wait always names its index: {waits:?}"
+    );
+    for name in ["orders", "users"] {
+        assert!(
+            !states
+                .view(&IndexName::try_new(name).unwrap())
+                .unwrap()
+                .pacing_reader,
+            "{name}: nothing paces the reader once it ended"
+        );
+    }
 }

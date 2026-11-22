@@ -370,13 +370,17 @@ fn index(name: &str) -> IndexName {
 
 /// A status over `users` and `orders` into `primary`, with the engine's
 /// per-index states attached.
+/// `archive` is configured and disabled.
 fn indexed_status() -> (Arc<Status>, Arc<daemon::IndexStates>) {
     let states = Arc::new(daemon::IndexStates::new([index("users"), index("orders")]));
-    let status = Arc::new(Status::new(
-        [index("users"), index("orders")],
-        [SinkName::try_new("primary").unwrap()],
-        Instant::now(),
-    ));
+    let status = Arc::new(
+        Status::new(
+            [index("users"), index("orders"), index("archive")],
+            [SinkName::try_new("primary").unwrap()],
+            Instant::now(),
+        )
+        .with_ingest_indexes([index("users"), index("orders")]),
+    );
     status.attach_index_states(Arc::clone(&states));
     (status, states)
 }
@@ -547,4 +551,27 @@ async fn a_reindex_is_refused_with_why() {
     let (code, body) = post_reindex(&base, "/indexes/users/reindex").await;
     assert_eq!(code, 503, "{body}");
     assert!(body.contains("stopping"), "{body}");
+}
+
+/// Review round 2 of #454, item 2: a disabled index has no status route and
+/// no reindex (both `404`), and isn't named among the indexes a `404` lists;
+/// `/status`'s older `indexes.<name>` keeps it, as before slice 7.
+#[tokio::test]
+async fn a_disabled_index_has_no_index_routes() {
+    let (status, _) = indexed_status();
+    let public = serve_status(Arc::clone(&status)).await;
+    let (private, _receivers, _stop) = serve_private(status).await;
+    let (code, body) = get_json(&format!("{public}/indexes/archive/status")).await;
+    assert_eq!(code, 404);
+    assert_eq!(body["indexes"], serde_json::json!(["orders", "users"]));
+    assert_eq!(
+        post_reindex(&private, "/indexes/archive/reindex").await.0,
+        404
+    );
+    let (_, whole) = get_json(&format!("{public}/status")).await;
+    assert!(whole["ingest"]["indexes"].get("archive").is_none());
+    assert!(
+        whole["indexes"].get("archive").is_some(),
+        "unchanged: {whole}"
+    );
 }

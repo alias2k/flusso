@@ -88,6 +88,9 @@ pub struct Status {
     script_failures: Mutex<BTreeMap<IndexName, ScriptFailures>>,
     sinks: BTreeMap<SinkName, SinkStatus>,
     indexes: Vec<IndexName>,
+    /// The indexes the ingest side builds (enabled ones): `ingest.indexes`,
+    /// the per-index routes and metrics. `indexes` until set.
+    ingest: Vec<IndexName>,
     /// Where each sink's committed count comes from; `None` reports none.
     progress: Option<Arc<Progress>>,
     /// Where the fence positions come from; `None` reports none.
@@ -312,6 +315,7 @@ impl Status {
                 .into_iter()
                 .map(|sink| (sink, SinkStatus::new(&indexes)))
                 .collect(),
+            ingest: indexes.clone(),
             indexes,
             progress: None,
             fence: None,
@@ -321,6 +325,15 @@ impl Status {
             lane_health: Mutex::new(BTreeMap::new()),
             index_states: OnceLock::new(),
         }
+    }
+
+    /// The indexes the ingest side builds: the enabled ones (slice 7). A
+    /// disabled index keeps its `indexes.<name>` entry and its place in each
+    /// sink's states, as before slice 7, but has no `ingest.indexes` entry,
+    /// no per-index route or metric.
+    pub fn with_ingest_indexes(mut self, indexes: impl IntoIterator<Item = IndexName>) -> Self {
+        self.ingest = indexes.into_iter().collect();
+        self
     }
 
     /// Read each index's exemption, holds, walk and whether it works from
@@ -336,15 +349,15 @@ impl Status {
         self.tracks(index).then(|| self.ingest_of(index))
     }
 
-    /// Whether `index` is one this status tracks (enabled).
+    /// Whether `index` is one the ingest side builds (enabled).
     pub fn tracks(&self, index: &IndexName) -> bool {
-        self.indexes.contains(index)
+        self.ingest.contains(index)
     }
 
-    /// The indexes this status tracks (enabled), by name.
+    /// The indexes the ingest side builds (enabled), by name.
     pub fn index_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
-            .indexes
+            .ingest
             .iter()
             .map(|index| index.as_ref().to_owned())
             .collect();
@@ -405,6 +418,7 @@ impl Status {
                 held_sinks: None,
                 held_since: None,
                 backfill: None,
+                pacing_reader: false,
             };
         };
         IndexIngestSnapshot {
@@ -431,13 +445,14 @@ impl Status {
             backfill: view.backfill.map(|sinks| BackfillSnapshot {
                 sinks: sinks.iter().map(|sink| sink.as_ref().to_owned()).collect(),
             }),
+            pacing_reader: view.pacing_reader,
         }
     }
 
     /// Every index's `ingest.indexes` entry, by name: what the per-index
     /// gauges read at collection.
     pub fn ingest_indexes(&self) -> Vec<(IndexName, IndexIngestSnapshot)> {
-        self.indexes
+        self.ingest
             .iter()
             .map(|index| (index.clone(), self.ingest_of(index)))
             .collect()
@@ -563,13 +578,23 @@ impl Status {
 
     pub(crate) fn mark_ingest_live(&self) {
         self.ingest_live.store(true, Ordering::Relaxed);
+        self.forget_backlog();
         self.recompute_phase();
+    }
+
+    /// A run started or ended: its backlog ages from before are no one's
+    /// (the next run forgets what the last left, then reads anew).
+    fn forget_backlog(&self) {
+        if let Some(stalls) = &self.stalls {
+            stalls.forget_backlog();
+        }
     }
 
     /// The ingest engine stopped on an error and the daemon is restarting it:
     /// not ready until it follows the source again.
     pub(crate) fn mark_ingest_failed(&self) {
         self.ingest_live.store(false, Ordering::Relaxed);
+        self.forget_backlog();
         self.recompute_phase();
     }
 
@@ -899,6 +924,12 @@ pub struct IndexIngestSnapshot {
     /// How long ago its oldest change not built yet (waiting, or in a build
     /// not yet sent to a lane) was read, in seconds; 0 when none, and while
     /// no engine run follows the source. Sampled each second, at most an hour.
+    ///
+    /// Grows only while the index is stuck or exempt: reading stops at an
+    /// index's cap, so one that paces the reader stays within its read-ahead
+    /// (seconds) however far it falls behind the source. That lag is its
+    /// lanes' WAL behind and the slot lag. A build blocked at its publish
+    /// with nothing else waiting reads 0 while its lane is full.
     pub backlog_seconds: f64,
     /// Its place in the exemption: `none`, `exempt` (held at its cap while
     /// another index works: the reading goes on for the others) or `frozen`
@@ -911,6 +942,11 @@ pub struct IndexIngestSnapshot {
     /// none was acknowledged for 5 s (with one index, while a lane of it has
     /// landed nothing for 5 s). About progress, not holds: an index held by
     /// the budget whose sink keeps acknowledging works.
+    ///
+    /// The two rules differ on backfill: with two or more indexes the
+    /// engine's record counts backfill items too; with one, the lanes' stall
+    /// ages count live items only, so a backfill nothing acknowledges still
+    /// reads as working there (`FlussoLaneParked` covers a refused page).
     pub working: bool,
     /// What holds its builder: `budget` (its live batch refused by the memory
     /// budget) or `lane` (a publish blocked on a full lane); null while
@@ -925,6 +961,10 @@ pub struct IndexIngestSnapshot {
     /// Its backfill walk in progress and the sinks it serves; null while none
     /// runs.
     pub backfill: Option<BackfillSnapshot>,
+    /// The reader waits at this index's bound now (`max_waiting_per_index`,
+    /// or the count a frozen index froze at): it is the one pacing the
+    /// reading.
+    pub pacing_reader: bool,
 }
 
 /// An index's place in the exemption, in `/status`.
@@ -1201,6 +1241,7 @@ mod tests {
                 held_sinks: None,
                 held_since: None,
                 backfill: None,
+                pacing_reader: false,
             }
         );
         let json = serde_json::to_value(&snapshot.ingest.indexes["users"]).unwrap();
@@ -1213,6 +1254,7 @@ mod tests {
                 "working": true,
                 "held_by": null,
                 "backfill": null,
+                "pacing_reader": false,
             })
         );
     }
@@ -1223,6 +1265,7 @@ mod tests {
     #[test]
     fn documents_waiting_and_the_backlog_age_are_read_per_index() {
         let (status, _, progress, stalls) = ingest_status();
+        status.mark_ingest_live();
         progress.mark([(
             source::document::DocumentId {
                 index: orders(),
@@ -1234,16 +1277,48 @@ mod tests {
         let start = tokio::time::Instant::now();
         stalls.sample(start, &progress, &NoSource, None);
         stalls.sample(start + Duration::from_secs(42), &progress, &NoSource, None);
-        assert_eq!(
-            status.index_ingest(&orders()).unwrap().backlog_seconds,
-            0.0,
-            "no engine run follows the source: no backlog grows"
-        );
-        status.mark_ingest_live();
         let orders = status.index_ingest(&orders()).unwrap();
         assert_eq!(orders.documents_waiting, 1);
         assert_eq!(orders.backlog_seconds, 42.0, "read 42 s ago, not built");
         assert_eq!(status.index_ingest(&users()).unwrap().documents_waiting, 0);
+        status.mark_ingest_failed();
+        assert_eq!(
+            status
+                .index_ingest(&self::orders())
+                .unwrap()
+                .backlog_seconds,
+            0.0,
+            "no engine run follows the source: no backlog"
+        );
+    }
+
+    /// Review round 2 of #454, item 5: a run fails with a change of `orders`
+    /// unbuilt; the sampler goes on through the backoff (the old run's pending
+    /// is forgotten only once the next run starts reading). When the next run
+    /// goes live (`on_live_started` comes before `forget_all`), no backlog
+    /// from before it is shown.
+    #[test]
+    fn a_restarted_run_shows_no_backlog_from_before_it() {
+        let (status, _, progress, stalls) = ingest_status();
+        status.mark_ingest_live();
+        progress.mark([(
+            source::document::DocumentId {
+                index: orders(),
+                key: source::RowKey(Vec::new()),
+            },
+            kernel::Position::new(1),
+        )]);
+        progress.read_changes(1);
+        let start = tokio::time::Instant::now();
+        stalls.sample(start, &progress, &NoSource, None);
+        status.mark_ingest_failed();
+        stalls.sample(start + Duration::from_secs(90), &progress, &NoSource, None);
+        status.mark_ingest_live();
+        assert_eq!(
+            status.index_ingest(&orders()).unwrap().backlog_seconds,
+            0.0,
+            "the new run has read nothing yet"
+        );
     }
 
     /// Review of #454, item 1, with one index (the engine keeps no record):

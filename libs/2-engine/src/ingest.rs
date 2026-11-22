@@ -526,6 +526,7 @@ impl IngestEngine {
                 batch: self.batch,
                 lead,
                 runs: senders,
+                states: Some(Arc::clone(&self.index_states)),
                 #[cfg(test)]
                 handing: None,
                 #[cfg(test)]
