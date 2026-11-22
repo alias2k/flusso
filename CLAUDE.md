@@ -1949,26 +1949,38 @@ choice), serves **two** HTTP surfaces (`http/mod.rs`): a **public** one (`/healt
 is live or once flusso is stopping; `/status` adds the process `pid`; `GET /indexes/{name}/status`
 is one index's `ingest.indexes.<name>` entry, `404` naming the known indexes for an unknown or
 disabled one, `400` for no index name) and a **private** one (`GET /indexes`, `POST
-/indexes/{name}/reindex[?sink=]`: `202` queued, `400` an invalid index or sink name, `404` an unknown
-one, `503` stopping or not running; `POST /reindex` is gone since slice 7; HTTP Basic auth in
+/indexes/{name}/reindex[?sink=]`: `202` `{"index", "sink", "queued": true}`, `400` an invalid index
+or sink name, `404` an unknown one, `503` stopping or not running; `POST /reindex` is gone since slice 7; HTTP Basic auth in
 `http/auth.rs`, default `admin`/`flusso` with a loud startup warning; each listener answers `404` for
 the other's `/indexes/…` routes), both reading the daemon's `Status`, and owns the process signals.
 **Per-index ingest state (ADR 0012 stage 8a, slice 7)**: `/status`'s `ingest.indexes.<name>`
-(`daemon::IndexIngestSnapshot`: `documents_waiting`, `backlog_seconds` (sampled by `Stalls` over
-`Progress::oldest_unbuilt`, as a lane's stall age), `exemption`/`exemption_since`, `working`,
-`held_by`/`held_sinks`/`held_since`, `backfill`) reads the ingest engine's `engine::IndexStates`, kept
-for the engine's life and attached to `Status` once the engine exists (`Status::attach_index_states`);
-the engine writes it only at edges (the tick's exemption, `IndexStates::budget` in the builder's loop on
-a change, `lane_full` while a publish pends, the `Walking` guard on the snapshot). Metrics (observable
-gauges read from `Status`, `telemetry/metrics.rs`'s `register_index_gauges`): `flusso.index.{documents_waiting,
+(`daemon::IndexIngestSnapshot`: `documents_waiting`; `backlog_seconds`, how long ago the index's oldest
+unbuilt change was read, from `Stalls`' ring of `(changes read, instant)` per 1 s sample over
+`Progress::oldest_unbuilt`'s read number, at most `BACKLOG_SPAN` (3,600) samples, 0 while no engine run
+is live; `exemption`/`exemption_since`; `working`, about progress, not holds: false while items of it wait
+on a lane unacknowledged for `engine::STUCK_AFTER` (5 s), from the engine's record with two or more
+indexes and from the lanes' stall ages with one (one index keeps no record); `held_by`/`held_sinks`/
+`held_since`, information only; `backfill`) reads the ingest engine's `engine::IndexStates`, kept for the
+engine's life and attached to `Status` once the engine exists (`Status::attach_index_states`). The engine
+writes it only at edges (the tick's exemption, `IndexStates::budget` in the builder's loop on a change,
+`lane_full` while any publish pends, `IngestEngine::publish_to` being the one path, a snapshot's end
+included; the `Walking` guard on the snapshot), and an engine run's end, by any path, clears the
+exemption and the budget hold (`ClearsAtRunEnd` → `IndexStates::clear_run`). Metrics (observable gauges
+read from `Status`, `telemetry/metrics.rs`'s `register_index_gauges`): `flusso.index.{documents_waiting,
 backlog_age, exempt, frozen, working, held{by}, backfilling}`; `flusso.reader.waits{bound}` is a
-histogram recorded by `Observer::on_reader_wait` (`ReaderBound`: `per_index`, `total`, `changes`,
-`pending`, from `Lead::reached_by`). Alert `FlussoIndexBacklog` (dev rules and the chart's
-`indexBacklogFor`). Guards: `index_states::tests`, `ingest::tests::states`, `reader::tests`'
-`the_lead_names_*`, `status::tests`' ingest cases, the daemon's
-`the_status_reads_each_index_from_the_ingest_engine`, `http::tests`' index-route cases,
-`telemetry::metrics::tests`' `each_index_is_exported_with_its_ingest_state`,
-`observer::tests`' `the_readers_waits_are_a_histogram_by_bound`, the promtool rule test. It binds **both** listeners up front (a bad
+histogram (buckets up to 600 s) recorded by `Observer::on_reader_wait` (`ReaderBound`: `per_index`,
+`total`, `changes`, `pending`, from `Lead::reached_by`) only for a wait that pended past its first poll.
+Alert `FlussoIndexBacklog`: `max by (index) (flusso_index_exempt) > 0 or max by (index)
+(flusso_index_backlog_age_seconds) > 60`, `for: 10m` (the chart's `indexBacklogSeconds`/`indexBacklogFor`;
+never "held": a healthy sink at its limit holds its builder, while bounded reading keeps its backlog
+seconds old). Guards: `index_states::tests`, `ingest::tests::states` (incl.
+`a_healthy_sink_bound_burst_is_never_stuck`, the failed-run and stopped-run clears, the snapshot end's lane
+hold), `reader::tests`' `the_lead_names_*` and `only_a_wait_that_pended_is_reported`, `stall::tests`'
+backlog cases (steady, stuck or exempt, draining, falling behind), `status::tests`' ingest cases, the
+daemon's `the_status_reads_each_index_from_the_ingest_engine`, `http::tests`' index-route cases,
+`telemetry::metrics::tests`' `each_index_is_exported_with_its_ingest_state`, `observer::tests`'
+`the_readers_waits_are_a_histogram_by_bound`, the promtool rule test, `agent_docs_paths`'
+`no_agent_doc_names_a_route_that_is_gone`. It binds **both** listeners up front (a bad
 `--public-address`/`--private-address` fails fast; a taken one names the flusso there, from its
 `/status` pid), then `Daemon::with_observer(otel).start()`
 → register the `in_flight` observable gauge (read from `Status` at collection) → serve both →
