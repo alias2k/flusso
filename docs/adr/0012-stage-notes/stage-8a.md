@@ -2560,6 +2560,81 @@ builder nothing else holds the permit.
 The "not pinned" list above loses "no read ahead" and "the abort of a read still waiting for the
 permit"; it keeps the expected gain.
 
+#### Slice 7 as designed against the code (checked before building)
+
+Checked against `059f3602` (6b-3 after its fix round). The plan above names the section
+(`ingest.indexes.<name>`, decision (b)4), `flusso.index.backlog_age`, `flusso.reader.waits{bound}`,
+the two routes and `FlussoIndexBacklog`; ADR 0012 §6's per-index list ("phase, pending, builds, bytes
+held, and per sink the stall age, WAL behind and items in flight") predates decision 4 and 6b: the
+per-sink half is already `sinks.<sink>.lanes.<index>` (stall age, WAL behind, outstanding, health).
+So the section holds what the ingest side alone knows, the answer to "which index is behind or stuck,
+and why". Where the plan is silent, chosen here:
+
+**Where it comes from.** The engine keeps one `engine::IndexStates` for its life (as it keeps
+`Outstanding` and the exemption's log lines), handed to the daemon's `Status` as a read handle
+(`Status::with_index_states`), as `Progress`, `Budget` and `Stalls` are. Written only at edges: the
+dispatcher's 1 s tick (the exemption state, from `Lead::deciding`, the rule the log lines already
+read), a hold's start and end (where `Lead::hold` is called, and for one builder too), a walk's start
+and end (the `Snapshot` carries a guard that clears its index on drop, so a stop or a failure clears
+it). Nothing on the path a change takes; the daemon stays transport-free (data and a handle).
+
+**`ingest.indexes.<name>`**, one entry per enabled index with lanes:
+
+| Field | Type | What | From |
+| --- | --- | --- | --- |
+| `documents_waiting` | integer | documents read and not yet taken by a build | `Progress::waiting_on` (live) |
+| `backlog_seconds` | number | how long the index's oldest unbuilt change has stayed its oldest (waiting, or in a build not yet sent): 0 when none. Sampled each second, as a lane's stall age is; a busy index building steadily stays near 0 | `Stalls`, over `Progress::oldest_unbuilt` |
+| `exemption` | `"none"` / `"exempt"` / `"frozen"` | 6b-2's three states: not exempt; exempt and growing (reading goes on for the others); exempt and frozen (may drain, not grow). Always `"none"` with one index | the tick |
+| `exemption_since` | RFC 3339 / absent | when it entered that state (to the tick); absent while `"none"` | the tick |
+| `working` | bool | 6b-2's rule: not held, and none of its items has waited on a lane 5 s unacknowledged (`STUCK_AFTER`). With one index (no record): not held | `IndexStates` + `Outstanding` (live) |
+| `held_by` | `null` / `"budget"` / `"lane"` | what holds its builder: its live batch refused by the memory budget, or a publish blocked on a full lane | the hold's edges |
+| `held_sinks` | array | with `"lane"`, the sinks whose lanes are full; absent otherwise | the publish |
+| `held_since` | RFC 3339 / absent | when the hold began | the hold's edges |
+| `backfill` | `null` / `{"sinks": [...]}` | the index's walk in progress, and the sinks it serves | the walk's start and drop |
+
+The budget's reason (share or limit) is not split out: the builder sees one refusal per batch, and
+`memory` above already says whether the whole budget is full. The per-sink lane fields stay where
+they are; the section names no sink but in `held_sinks` and `backfill`.
+
+**`GET /indexes/<name>/status`** (public): that entry alone, `200`. `400` for a name that is not a
+valid index name, `404` (`{"error": …, "indexes": [...]}`) for an unknown or disabled index.
+**`POST /indexes/<name>/reindex[?sink=<name>]`** (private, Basic auth): `202` queued; `400` invalid
+index or sink name; `404` unknown index or sink; `503` stopping or the engine not running
+(`ControlError`'s other cases). `POST /reindex` is removed. axum 0.8 path syntax (`/indexes/{name}/…`).
+
+**Metrics** (observable gauges read from `Status` at collection, `index` label, one series per index
+with one index too):
+
+| Instrument | Prometheus | Unit | What |
+| --- | --- | --- | --- |
+| `flusso.index.documents_waiting` | `flusso_index_documents_waiting` | documents | `documents_waiting` (the pending documents: there is one count; the exempt ones are the exempt indexes' share of it) |
+| `flusso.index.backlog_age` | `flusso_index_backlog_age_seconds` | s | `backlog_seconds` |
+| `flusso.index.exempt` | `flusso_index_exempt` | 0/1 | 1 while `"exempt"` or `"frozen"` |
+| `flusso.index.frozen` | `flusso_index_frozen` | 0/1 | 1 while `"frozen"` |
+| `flusso.index.working` | `flusso_index_working` | 0/1 | `working` |
+| `flusso.index.held` | `flusso_index_held` | 0/1, label `by` (`budget`, `lane`) | 1 on the series of what holds it; both 0 while not held |
+| `flusso.index.backfilling` | `flusso_index_backfilling` | 0/1 | 1 while its walk runs |
+
+**`flusso.reader.waits{bound}`** (`flusso_reader_waits_seconds_{bucket,sum,count}`): a histogram of each
+wait of the reader at its lead, by the bound that stopped it, recorded when the wait ends (`count` is
+how often, `sum` how long): `per_index` (a non-exempt or frozen index at its cap), `total` (the
+non-exempt indexes' documents), `changes` (changes read ahead), `pending` (the exempt indexes at
+`max_pending_documents`). The budget is no bound of the reader's: it holds builders, which the lead then
+sees as one of these. Reported through a new `Observer::on_reader_wait(ReaderBound, Duration)`; the
+lead's check returns the bound it found (`Lead::reached_by`), so a check costs what it did.
+
+**`FlussoIndexBacklog`**: `max by (index) (flusso_index_exempt) > 0 or max by (index)
+(flusso_index_working) == 0`, `for: 10m` (a value in the chart). It fires for an index exempt (its
+backlog growing or frozen while the others go on) or not working (held, or its items unacknowledged
+for 5 s) for ten minutes; `backlog_age` is in the annotation. The dev dashboard gets a per-index row:
+backlog age, the exempt / not working / held states, and the reader's waits by bound.
+
+**Tests, written first**: one per field (daemon `status::tests` over a hand-built `IndexStates`, and an
+engine test that each edge writes it), one per endpoint and refusal (`http::tests`), one per metric
+(`telemetry::metrics::tests`' pattern), the reader's bound per kind (`reader::tests`), the alert with
+promtool's unit tests. No `flusso-cli` e2e calls `/reindex` today (checked): the route moves with its
+unit tests and the admin client.
+
 #### 12. Rules, bounds, guarantees, mutation skeleton
 
 | Rule | |
