@@ -106,6 +106,20 @@ pub struct Status {
     /// What the ingest engine knows of each index (slice 7), attached once
     /// the engine exists; until then the section shows nothing held.
     index_states: OnceLock<Arc<IndexStates>>,
+    /// Each index's failures and restarts (slice 8-2), from the engine's
+    /// events.
+    index_failures: Mutex<BTreeMap<IndexName, IndexFailures>>,
+}
+
+/// One index's failures and restarts, as `/status` shows them (slice 8-2).
+#[derive(Debug, Default)]
+struct IndexFailures {
+    /// Its live work failed and its builder hasn't restarted.
+    down_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Its walk failed and its retry hasn't started.
+    retry_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_error: Option<IndexFailure>,
+    restarts: IndexRestarts,
 }
 
 /// A lane's health in `/status`. Its name ([`name`](Self::name)) is the
@@ -324,6 +338,7 @@ impl Status {
             stalls: None,
             lane_health: Mutex::new(BTreeMap::new()),
             index_states: OnceLock::new(),
+            index_failures: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -407,30 +422,58 @@ impl Status {
                 Duration::ZERO,
             ))
         };
+        let (down_since, retry_at, last_error, restarts) = lock(&self.index_failures)
+            .get(index)
+            .map_or((None, None, None, IndexRestarts::default()), |failures| {
+                (
+                    failures.down_since,
+                    failures.retry_at,
+                    failures.last_error.clone(),
+                    failures.restarts,
+                )
+            });
+        let state = if down_since.is_some() {
+            IngestState::Down
+        } else {
+            IngestState::Running
+        };
+        let retrying = retry_at.map(|at| BackfillSnapshot {
+            state: BackfillState::Retrying,
+            sinks: None,
+            retry_at: Some(rfc3339(at)),
+        });
         let Some(view) = view else {
             return IndexIngestSnapshot {
                 documents_waiting,
                 backlog_seconds,
+                state,
+                down_since: down_since.map(rfc3339),
+                last_error,
+                restarts,
                 exemption: Exemption::None,
                 exemption_since: None,
-                working: !self.stuck(index, None),
+                working: state == IngestState::Running && !self.stuck(index, None),
                 held_by: None,
                 held_sinks: None,
                 held_since: None,
-                backfill: None,
+                backfill: retrying,
                 pacing_reader: false,
             };
         };
         IndexIngestSnapshot {
             documents_waiting,
             backlog_seconds,
+            state,
+            down_since: down_since.map(rfc3339),
+            last_error,
+            restarts,
             exemption: match view.exemption {
                 ExemptionState::Exempt => Exemption::Exempt,
                 ExemptionState::Frozen => Exemption::Frozen,
                 _ => Exemption::None,
             },
             exemption_since: view.exemption_since.map(at),
-            working: !self.stuck(index, view.stuck),
+            working: state == IngestState::Running && !self.stuck(index, view.stuck),
             held_by: view.held.as_ref().map(|held| match held {
                 HeldBy::Lanes(_) => IndexHold::Lane,
                 _ => IndexHold::Budget,
@@ -442,9 +485,14 @@ impl Status {
                 _ => None,
             },
             held_since: view.held_since.map(at),
-            backfill: view.backfill.map(|sinks| BackfillSnapshot {
-                sinks: sinks.iter().map(|sink| sink.as_ref().to_owned()).collect(),
-            }),
+            backfill: view
+                .backfill
+                .map(|sinks| BackfillSnapshot {
+                    state: BackfillState::Walking,
+                    sinks: Some(sinks.iter().map(|sink| sink.as_ref().to_owned()).collect()),
+                    retry_at: None,
+                })
+                .or(retrying),
             pacing_reader: view.pacing_reader,
         }
     }
@@ -579,7 +627,70 @@ impl Status {
     pub(crate) fn mark_ingest_live(&self) {
         self.ingest_live.store(true, Ordering::Relaxed);
         self.forget_backlog();
+        self.forget_index_runs();
         self.recompute_phase();
+    }
+
+    /// `index`'s work of `kind` failed and is tried again in `retry_in`
+    /// (slice 8-2): live, the index is down; backfill, its walk waits to
+    /// retry.
+    pub(crate) fn index_failed(
+        &self,
+        index: &IndexName,
+        kind: engine::Work,
+        error: &str,
+        retry_in: Duration,
+    ) {
+        let now = chrono::Utc::now();
+        let mut failures = lock(&self.index_failures);
+        let failures = failures.entry(index.clone()).or_default();
+        let kind = match kind {
+            engine::Work::Live => {
+                failures.down_since.get_or_insert(now);
+                FailureKind::Live
+            }
+            engine::Work::Backfill => {
+                failures.retry_at = Some(wall_clock(now, Duration::ZERO, retry_in));
+                FailureKind::Backfill
+            }
+        };
+        failures.last_error = Some(IndexFailure {
+            kind,
+            message: error.to_owned(),
+            at: rfc3339(now),
+        });
+    }
+
+    /// `index`'s work of `kind` started again (slice 8-2).
+    pub(crate) fn index_restarted(&self, index: &IndexName, kind: engine::Work) {
+        let mut failures = lock(&self.index_failures);
+        let failures = failures.entry(index.clone()).or_default();
+        match kind {
+            engine::Work::Live => {
+                failures.down_since = None;
+                failures.restarts.live += 1;
+            }
+            engine::Work::Backfill => {
+                failures.retry_at = None;
+                failures.restarts.backfill += 1;
+            }
+        }
+    }
+
+    /// A run started or ended: every builder and walk of it ended with it,
+    /// so no index is down nor waits to retry; what failed before and how
+    /// often each restarted is kept.
+    fn forget_index_runs(&self) {
+        for failures in lock(&self.index_failures).values_mut() {
+            failures.down_since = None;
+            failures.retry_at = None;
+        }
+    }
+
+    /// The ingest engine stopped without an error.
+    pub(crate) fn mark_ingest_stopped(&self) {
+        self.forget_index_runs();
+        self.set_phase(Phase::Stopped);
     }
 
     /// A run started or ended: its backlog ages from before are no one's
@@ -595,6 +706,7 @@ impl Status {
     pub(crate) fn mark_ingest_failed(&self) {
         self.ingest_live.store(false, Ordering::Relaxed);
         self.forget_backlog();
+        self.forget_index_runs();
         self.recompute_phase();
     }
 
@@ -931,6 +1043,19 @@ pub struct IndexIngestSnapshot {
     /// lanes' WAL behind and the slot lag. A build blocked at its publish
     /// with nothing else waiting reads 0 while its lane is full.
     pub backlog_seconds: f64,
+    /// `running`, or `down` from a failure of its live work until its
+    /// builder restarted (slice 8-2). Always `running` with one index: a
+    /// failure there ends the run.
+    pub state: IngestState,
+    /// When it went down (RFC 3339, UTC); absent while running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub down_since: Option<String>,
+    /// Its last failure of either kind, kept after it recovered; null before
+    /// any.
+    pub last_error: Option<IndexFailure>,
+    /// How often its builder restarted after a live failure, and its walk
+    /// started again after a walk failure, since the process started.
+    pub restarts: IndexRestarts,
     /// Its place in the exemption: `none`, `exempt` (held at its cap while
     /// another index works: the reading goes on for the others) or `frozen`
     /// (exempt, may drain but not grow). Always `none` with one index.
@@ -940,8 +1065,9 @@ pub struct IndexIngestSnapshot {
     pub exemption_since: Option<String>,
     /// Whether it makes progress: false while items of it wait on a lane and
     /// none was acknowledged for 5 s (with one index, while a lane of it has
-    /// landed nothing for 5 s). About progress, not holds: an index held by
-    /// the budget whose sink keeps acknowledging works.
+    /// landed nothing for 5 s), and while it is down (it builds nothing).
+    /// About progress, not holds: an index held by the budget whose sink
+    /// keeps acknowledging works.
     ///
     /// The two rules differ on backfill: with two or more indexes the
     /// engine's record counts backfill items too; with one, the lanes' stall
@@ -950,7 +1076,8 @@ pub struct IndexIngestSnapshot {
     pub working: bool,
     /// What holds its builder: `budget` (its live batch refused by the memory
     /// budget) or `lane` (a publish blocked on a full lane); null while
-    /// nothing does.
+    /// nothing does, a down builder included (`state` says why it builds
+    /// nothing).
     pub held_by: Option<IndexHold>,
     /// With `lane`, the sinks whose lanes are full.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -958,8 +1085,8 @@ pub struct IndexIngestSnapshot {
     /// When the hold began (RFC 3339, UTC); absent while not held.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_since: Option<String>,
-    /// Its backfill walk in progress and the sinks it serves; null while none
-    /// runs.
+    /// Its backfill: `walking` (with the sinks it serves), `retrying` (a
+    /// failed walk waits for its retry, with when), or null while neither.
     pub backfill: Option<BackfillSnapshot>,
     /// The reader waits at this index's bound now (`max_waiting_per_index`,
     /// or the count a frozen index froze at): it is the one pacing the
@@ -994,8 +1121,67 @@ pub enum IndexHold {
 /// An index's walk in progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BackfillSnapshot {
-    /// The sinks it serves.
-    pub sinks: Vec<String>,
+    /// `walking`, or `retrying` after a failure.
+    pub state: BackfillState,
+    /// While walking, the sinks it serves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sinks: Option<Vec<String>>,
+    /// While retrying, when the walk starts again (RFC 3339, UTC).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<String>,
+}
+
+/// Where an index's backfill is, in `/status` (slice 8-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BackfillState {
+    /// Its walk runs.
+    Walking,
+    /// Its walk failed and waits for its retry.
+    Retrying,
+}
+
+/// Whether an index's builder runs, in `/status` (slice 8-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IngestState {
+    /// Its builder runs (its walk may be retrying).
+    Running,
+    /// Its live work failed: its builder waits to restart.
+    Down,
+}
+
+/// An index's last failure, in `/status` (slice 8-2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IndexFailure {
+    /// `live` or `backfill`.
+    pub kind: FailureKind,
+    /// The error.
+    pub message: String,
+    /// When (RFC 3339, UTC).
+    pub at: String,
+}
+
+/// What kind of an index's work failed, in `/status` (slice 8-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FailureKind {
+    /// A live build or document.
+    Live,
+    /// Its walk: a key read, a backfill build or document.
+    Backfill,
+}
+
+/// How often an index's work restarted after a failure, by kind (slice 8-2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct IndexRestarts {
+    /// Its builder, after a live failure.
+    pub live: u64,
+    /// Its walk, after a walk failure.
+    pub backfill: u64,
 }
 
 /// The `/status` document.
@@ -1242,6 +1428,10 @@ mod tests {
                 held_since: None,
                 backfill: None,
                 pacing_reader: false,
+                state: IngestState::Running,
+                down_since: None,
+                last_error: None,
+                restarts: IndexRestarts::default(),
             }
         );
         let json = serde_json::to_value(&snapshot.ingest.indexes["users"]).unwrap();
@@ -1250,6 +1440,9 @@ mod tests {
             serde_json::json!({
                 "documents_waiting": 0,
                 "backlog_seconds": 0.0,
+                "state": "running",
+                "last_error": null,
+                "restarts": {"live": 0, "backfill": 0},
                 "exemption": "none",
                 "working": true,
                 "held_by": null,
@@ -1397,13 +1590,160 @@ mod tests {
         assert_eq!(
             users.backfill,
             Some(BackfillSnapshot {
-                sinks: vec!["audit".to_owned(), "primary".to_owned()]
+                state: BackfillState::Walking,
+                sinks: Some(vec!["audit".to_owned(), "primary".to_owned()]),
+                retry_at: None,
             })
         );
         assert_eq!(
             serde_json::to_value(&users).unwrap()["backfill"],
-            serde_json::json!({"sinks": ["audit", "primary"]})
+            serde_json::json!({"state": "walking", "sinks": ["audit", "primary"]})
         );
+    }
+
+    /// Slice 8-2 (S1, S2, S5): a failure of `orders`' live work shows it
+    /// down, since then, with the error, not working and held by nothing;
+    /// `users` runs on. Its restart shows it running again, counted, the
+    /// error kept.
+    #[test]
+    fn a_live_failure_shows_the_index_down_until_it_restarts() {
+        use engine::Observer;
+        let (status, _, _, _) = ingest_status();
+        let status = Arc::new(status);
+        let observer = crate::observer::StatusObserver::new(Arc::clone(&status));
+        observer.on_index_failed(
+            &orders(),
+            engine::Work::Live,
+            "the build failed",
+            Duration::from_secs(2),
+        );
+        let down = status.index_ingest(&orders()).unwrap();
+        assert_eq!(down.state, IngestState::Down);
+        assert!(down.down_since.is_some());
+        assert!(!down.working, "a down index makes no progress");
+        assert_eq!(down.held_by, None, "a down builder holds nothing");
+        assert_eq!(
+            down.last_error
+                .as_ref()
+                .map(|error| (error.kind, error.message.as_str())),
+            Some((FailureKind::Live, "the build failed"))
+        );
+        let json = serde_json::to_value(&down).unwrap();
+        assert_eq!(json["state"], "down");
+        assert!(json["down_since"].is_string());
+        assert_eq!(json["last_error"]["kind"], "live");
+        assert_eq!(json["last_error"]["message"], "the build failed");
+        assert!(json["last_error"]["at"].is_string());
+        assert_eq!(
+            status.index_ingest(&users()).unwrap().state,
+            IngestState::Running
+        );
+        observer.on_index_restarted(&orders(), engine::Work::Live);
+        let up = status.index_ingest(&orders()).unwrap();
+        assert_eq!(up.state, IngestState::Running);
+        assert_eq!(up.down_since, None);
+        assert!(up.working);
+        assert_eq!(
+            up.restarts,
+            IndexRestarts {
+                live: 1,
+                backfill: 0
+            }
+        );
+        assert!(up.last_error.is_some(), "the last error is kept");
+        let json = serde_json::to_value(&up).unwrap();
+        assert_eq!(
+            json["restarts"],
+            serde_json::json!({"live": 1, "backfill": 0})
+        );
+        assert!(json.get("down_since").is_none());
+    }
+
+    /// Slice 8-2 (S3): a walk's failure leaves the index running and
+    /// working; its backfill shows retrying, with when, until the retry
+    /// starts, which is counted; walking again, it shows walking.
+    #[tokio::test(start_paused = true)]
+    async fn a_walk_failure_shows_the_backfill_retrying_until_it_walks_again() {
+        use engine::Observer;
+        let (status, states, _, _) = ingest_status();
+        let status = Arc::new(status);
+        let observer = crate::observer::StatusObserver::new(Arc::clone(&status));
+        observer.on_index_failed(
+            &orders(),
+            engine::Work::Backfill,
+            "the key read failed",
+            Duration::from_secs(8),
+        );
+        let retrying = status.index_ingest(&orders()).unwrap();
+        assert_eq!(retrying.state, IngestState::Running);
+        assert!(retrying.working);
+        assert_eq!(
+            retrying.backfill.as_ref().map(|backfill| backfill.state),
+            Some(BackfillState::Retrying)
+        );
+        let json = serde_json::to_value(&retrying).unwrap();
+        assert_eq!(json["backfill"]["state"], "retrying");
+        assert!(json["backfill"]["retry_at"].is_string());
+        assert!(json["backfill"].get("sinks").is_none());
+        assert_eq!(json["last_error"]["kind"], "backfill");
+        observer.on_index_restarted(&orders(), engine::Work::Backfill);
+        let _walking =
+            states.walking([(orders(), std::collections::BTreeSet::from([sink("audit")]))]);
+        let walking = status.index_ingest(&orders()).unwrap();
+        assert_eq!(
+            walking.backfill,
+            Some(BackfillSnapshot {
+                state: BackfillState::Walking,
+                sinks: Some(vec!["audit".to_owned()]),
+                retry_at: None,
+            })
+        );
+        assert_eq!(
+            walking.restarts,
+            IndexRestarts {
+                live: 0,
+                backfill: 1
+            }
+        );
+        drop(_walking);
+        assert_eq!(status.index_ingest(&orders()).unwrap().backfill, None);
+    }
+
+    /// Slice 8-2 (S4): a whole run failing, starting, or stopping ends
+    /// every builder and walk: down and retrying are cleared; the last error
+    /// and the restarts are the process's history, kept.
+    #[test]
+    fn a_run_restart_clears_down_and_retrying_and_keeps_the_history() {
+        use engine::Observer;
+        for end in 0..3 {
+            let (status, _, _, _) = ingest_status();
+            let status = Arc::new(status);
+            let observer = crate::observer::StatusObserver::new(Arc::clone(&status));
+            observer.on_index_failed(
+                &orders(),
+                engine::Work::Live,
+                "live",
+                Duration::from_secs(1),
+            );
+            observer.on_index_failed(
+                &users(),
+                engine::Work::Backfill,
+                "walk",
+                Duration::from_secs(1),
+            );
+            observer.on_index_restarted(&users(), engine::Work::Live);
+            match end {
+                0 => observer.on_engine_error(&engine::EngineId::Ingest, "the run failed"),
+                1 => observer.on_live_started(),
+                _ => observer.on_engine_stopped(&engine::EngineId::Ingest),
+            }
+            let orders = status.index_ingest(&orders()).unwrap();
+            let users = status.index_ingest(&users()).unwrap();
+            assert_eq!(orders.state, IngestState::Running, "end {end}");
+            assert_eq!(users.backfill, None, "end {end}");
+            assert!(orders.last_error.is_some() && users.last_error.is_some());
+            assert_eq!(users.restarts.live, 1, "end {end}");
+        }
     }
 
     /// An index the status doesn't track (unknown, or disabled) has no entry.

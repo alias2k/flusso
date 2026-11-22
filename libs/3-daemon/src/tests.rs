@@ -1413,7 +1413,8 @@ impl DocumentBuilder for PanickingDocuments {
 /// it (it panicked before awaiting anything; caught since slice 8 of ADR
 /// 0012 stage 8a), it is a failed build: with one index an engine error, so
 /// the ingest engine fails and the daemon restarts it, and the deployment
-/// runs on until the stop, which ends it `Ok`.
+/// runs on until the stop, which ends it `Ok`. Its index is never shown
+/// down (slice 8-2): one index's failure is the run's.
 #[tokio::test]
 async fn a_panicking_build_restarts_the_ingest_engine_and_never_hangs() {
     for at_once in [false, true] {
@@ -1442,6 +1443,12 @@ async fn a_panicking_build_restarts_the_ingest_engine_and_never_hangs() {
             status.snapshot().errors >= 1,
             "at_once {at_once}: the failed build is an engine error"
         );
+        // Slice 8-2 (S6): one index is never down, its failure the run's.
+        for (name, entry) in status.snapshot().ingest.indexes {
+            assert_eq!(entry.state, crate::IngestState::Running, "{name}");
+            assert_eq!(entry.restarts, crate::IndexRestarts::default(), "{name}");
+            assert_eq!(entry.last_error, None, "{name}");
+        }
     }
 }
 
@@ -1528,7 +1535,7 @@ async fn the_status_reads_each_index_from_the_ingest_engine() {
     })
     .await
     .expect("the walk shows in the status");
-    assert_eq!(walking.sinks, vec!["primary".to_owned()]);
+    assert_eq!(walking.sinks, Some(vec!["primary".to_owned()]));
     documents.released.notify_one();
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
