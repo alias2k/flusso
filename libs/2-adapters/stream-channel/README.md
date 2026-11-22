@@ -10,7 +10,7 @@ The in-process stream adapter: one bounded `tokio` mpsc channel per sink lane pl
 | **Lanes** | [`lane`](stream::Stream::lane) hands out a producer + consumer over the *same* channel every time, so a restarted engine re-attaches |
 | **Requests** | [`requests`](stream::Stream::requests): the upward lane sink engines put `Backfill` requests on |
 | **Backpressure** | `publish` waits when a lane is full — the slowest sink paces ingest |
-| **Redelivery** | every delivered item stays in an in-flight ledger until acked; nacked or dropped unacked → that delivery alone redelivered, in lane order |
+| **Redelivery** | every delivered item stays in an in-flight ledger until acked; nacked or dropped unacked → that delivery alone redelivered, in lane order, to the next `recv` or one already waiting |
 | **Progress** | none here: how far each lane has landed is the engine's `Progress` |
 
 ## How it works

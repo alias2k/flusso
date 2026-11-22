@@ -41,9 +41,11 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::task::Poll;
 
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use kernel::{IndexName, Position, SinkName};
 use source::document::{Document, DocumentBuilder, DocumentId};
@@ -80,9 +82,26 @@ pub(super) enum Job {
     Backfill {
         requested: BTreeMap<SinkName, BTreeMap<IndexName, stream::Ticket>>,
         marks: BTreeMap<IndexName, stream::WalkMark>,
+        /// Its snapshot's record of the last mark published to each lane.
+        reached: super::snapshot::Reached,
     },
     /// A snapshot's end: `SnapshotComplete` to every lane that asked.
     Complete(Box<Snapshot>),
+    /// A walk's batch or end, discarded because the walk failed (slice 8,
+    /// fix round 2): publishes nothing, its place kept so the slots around
+    /// it publish in grant order.
+    Discarded,
+}
+
+/// A walk of this builder failed (ADR 0012 stage 8a, slice 8-1 fix round
+/// 2): its later slots are discarded, and the builder's loop takes it to
+/// retry the walk after its wait, with these requests.
+pub(super) struct WalkFailure {
+    pub(super) error: EngineError,
+    /// The walk's record of how far each lane got: which walk it is.
+    pub(super) reached: super::snapshot::Reached,
+    /// The walk's requests, each lane's resume point moved to its record.
+    pub(super) requests: Vec<stream::Delivery<stream::Request>>,
 }
 
 /// A build's result and how long it ran.
@@ -111,7 +130,7 @@ struct Slot {
 
 impl Slot {
     fn is_ready(&self) -> bool {
-        self.built.is_some() || matches!(self.job, Job::Complete(_))
+        self.built.is_some() || matches!(self.job, Job::Complete(_) | Job::Discarded)
     }
 }
 
@@ -223,6 +242,8 @@ pub(super) struct Builds {
     granted: Option<Permit>,
     /// A build failed: nothing more is granted.
     halted: bool,
+    /// A walk failed and the builder's loop hasn't taken it yet.
+    walk_failure: Option<WalkFailure>,
     spare: Vec<Vec<DocumentId>>,
     budget: Option<Arc<Budget>>,
     /// Bytes per document, per index, live and backfill: a running average
@@ -269,15 +290,22 @@ pub(super) struct Builds {
 
 impl Drop for Builds {
     /// The engine run ends (an error, an abort, a clean end with a hold
-    /// still open): a wait still open is reported up to now, so an outage
-    /// before the next run doesn't stretch it; the hold stays counted.
+    /// still open), or this builder restarts alone (slice 8): it is held no
+    /// more, and once no builder is, a wait still open is reported up to
+    /// now, so an outage before the next run doesn't stretch it; the hold
+    /// stays counted. Another builder's hold goes on, one wait (review of
+    /// #456).
     fn drop(&mut self) {
         for work in [Work::Live, Work::Backfill] {
             let since = {
                 let mut waits = lock(&self.waits);
                 let wait = waits.of(work);
-                wait.held.clear();
-                wait.since.take()
+                wait.held.remove(&self.index);
+                if wait.held.is_empty() {
+                    wait.since.take()
+                } else {
+                    None
+                }
             };
             if let Some(since) = since {
                 self.observer
@@ -318,6 +346,7 @@ impl Builds {
             ),
             granted: None,
             halted: false,
+            walk_failure: None,
             spare: Vec::new(),
             budget,
             per_document: PerDocument::default(),
@@ -792,13 +821,24 @@ impl Builds {
                 bytes,
             }
         });
-        // A build that panics on this first poll panics the ingest task, as
-        // a build run inline always did: the daemon then ends the deployment
-        // with the task's error. One that panics later, on its own task,
-        // lands as a failed build (`land`), which ends the run.
-        if let Poll::Ready(output) = futures::poll!(build.as_mut()) {
-            self.land(seq, Some(output), halts);
-            return;
+        // A build that panics on this first poll lands as a failed build,
+        // as one that panics later on its own task does (`land`): the
+        // future touches only the document builder, no engine state, so
+        // its index's builder may restart alone (slice 8).
+        let first = {
+            let mut caught = AssertUnwindSafe(build.as_mut()).catch_unwind();
+            futures::poll!(&mut caught)
+        };
+        match first {
+            Poll::Ready(Ok(output)) => {
+                self.land(seq, Some(output), halts);
+                return;
+            }
+            Poll::Ready(Err(_)) => {
+                self.land(seq, None, halts);
+                return;
+            }
+            Poll::Pending => {}
         }
         if let Some(held) = held {
             self.holding.push((seq, held));
@@ -883,7 +923,10 @@ impl Builds {
                 took: Duration::ZERO,
             },
         };
-        if halts(&built) {
+        // A walk's failure is the walk's alone beside other builders (slice
+        // 8, fix round 2): it halts no live grant.
+        let live = matches!(slot.job, Job::Live { .. });
+        if halts(&built) && (live || !self.several) {
             self.halted = true;
         }
         slot.built = Some(built);
@@ -900,14 +943,89 @@ impl Builds {
         Some((slot.job, slot.built, slot.charges))
     }
 
-    /// Wait for every running build and drop what it built: the run is
-    /// ending on an error, and no read of the source should outlive it.
-    pub(super) async fn abandon(&mut self) {
+    /// This builder restarts alone (slice 8): it is held by the budget no
+    /// more. Once no builder is, the wait is reported up to now and the
+    /// next refusal is a new hold, counted (review of #456, round 2: unlike
+    /// a run's end, which keeps the hold counted for the next run).
+    pub(super) fn restarting(&mut self) {
+        for work in [Work::Live, Work::Backfill] {
+            let since = {
+                let mut waits = lock(&self.waits);
+                let wait = waits.of(work);
+                if wait.held.remove(&self.index) && wait.held.is_empty() {
+                    wait.counted = false;
+                    wait.since.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(since) = since {
+                self.observer
+                    .on_budget_wait(work, Wake::Settle, since.elapsed());
+            }
+        }
+    }
+
+    /// The walk whose record is `reached` failed with `error`: discard its
+    /// slots not yet published (its batches and its end: each publishes
+    /// nothing, and its budget goes back as it leaves the front), and keep
+    /// the requests of an end discarded. The builder's loop takes it
+    /// ([`take_walk_failure`](Self::take_walk_failure)).
+    pub(super) fn fail_walk(&mut self, error: EngineError, reached: &super::snapshot::Reached) {
+        let mut requests = Vec::new();
+        for slot in &mut self.slots {
+            let of_the_walk = match &slot.job {
+                Job::Backfill { reached: its, .. } => Arc::ptr_eq(its, reached),
+                Job::Complete(snapshot) => Arc::ptr_eq(&snapshot.reached, reached),
+                Job::Live { .. } | Job::Discarded => false,
+            };
+            if !of_the_walk {
+                continue;
+            }
+            if let Job::Complete(snapshot) = std::mem::replace(&mut slot.job, Job::Discarded) {
+                requests.extend(snapshot.into_requests());
+            }
+            slot.reservations.clear();
+            slot.charges.clear();
+        }
+        match &mut self.walk_failure {
+            Some(failure) => failure.requests.extend(requests),
+            None => {
+                self.walk_failure = Some(WalkFailure {
+                    error,
+                    reached: Arc::clone(reached),
+                    requests,
+                });
+            }
+        }
+    }
+
+    /// The walk failure not yet taken, to add the walk's own requests to.
+    pub(super) fn walk_failure_mut(&mut self) -> Option<&mut WalkFailure> {
+        self.walk_failure.as_mut()
+    }
+
+    /// Take the walk failure, if any.
+    pub(super) fn take_walk_failure(&mut self) -> Option<WalkFailure> {
+        self.walk_failure.take()
+    }
+
+    /// Wait for every running build and drop what it built: the run, or
+    /// the builder (slice 8), is ending on an error, and no read of the
+    /// source should outlive it. Returns the finished snapshots still
+    /// queued to complete: their requests are not answered.
+    pub(super) async fn abandon(&mut self) -> Vec<Snapshot> {
         self.halted = true;
         while self.flights.next().await.is_some() {}
         self.holding.clear();
         self.backfilling.clear();
-        self.slots.clear();
+        self.slots
+            .drain(..)
+            .filter_map(|slot| match slot.job {
+                Job::Complete(snapshot) => Some(*snapshot),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -1066,6 +1184,56 @@ mod tests {
     }
 
     /// `kib` of live documents of `name`, settled.
+    /// Review of #456 round 2, item 4: the only index held by the budget
+    /// restarts alone (its builds end, the wait with them); another index
+    /// refused afterwards is a new hold: its refusal is counted and its wait
+    /// reported.
+    #[tokio::test(start_paused = true)]
+    async fn a_hold_after_a_lone_held_index_restarted_is_counted() {
+        let budget = Arc::new(Budget::new(64 * 1024));
+        let _orders = held(&budget, "orders", 30);
+        let _users = held(&budget, "users", 30);
+        let waits = Arc::default();
+        let observer = Arc::new(Waited::default());
+        let builds = |name: &str| {
+            Builds::new(4, Some(Arc::clone(&budget)))
+                .of_index(index(name))
+                .with_observer(Arc::clone(&observer) as Arc<dyn Observer>)
+                .with_waits(Arc::clone(&waits))
+        };
+        let mut orders = builds("orders");
+        assert!(
+            orders
+                .affordable(Work::Live, &[(index("orders"), 1)])
+                .is_none()
+        );
+        assert_eq!(budget.refused(Work::Live), 1);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        orders.restarting();
+        drop(orders);
+        let mut users = builds("users");
+        assert!(
+            users
+                .affordable(Work::Live, &[(index("users"), 1)])
+                .is_none()
+        );
+        assert_eq!(budget.refused(Work::Live), 2, "a new hold, counted");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        drop(users);
+        let waited: Vec<Duration> = observer
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, _, waited)| *waited)
+            .collect();
+        assert_eq!(
+            waited,
+            [Duration::from_secs(1), Duration::from_secs(2)],
+            "two holds, two waits"
+        );
+    }
+
     fn held(budget: &Arc<Budget>, name: &str, kib: usize) -> Vec<Charge> {
         budget
             .reserve(Work::Live, &[(index(name), kib * 1024)])

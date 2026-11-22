@@ -712,11 +712,12 @@ async fn a_stop_mid_walks_ends_every_key_read_and_serves_every_request_next_star
     sink_task.abort();
 }
 
-/// A failure in one walk ends the run (§3.9 §8; per-index restart is slice
-/// 8): `orders`' bound read fails while `users`' walk is reading; the run
-/// returns the error and `users`' read ends with it.
+/// A failure in one walk restarts its index alone (slice 8): `orders`'
+/// bound read fails, so its walk starts again after its wait, while
+/// `users`' walk keeps reading (and holds the one key-read permit, K1). The stop ends the run cleanly, and no
+/// key read outlives it.
 #[tokio::test(start_paused = true)]
-async fn a_failed_walk_ends_the_run_and_every_other_key_read() {
+async fn a_failed_walk_restarts_its_index_alone_and_the_other_walk_reads_on() {
     let walks = Arc::new(HangingWalks {
         failing: Some(orders()),
         ..HangingWalks::default()
@@ -724,7 +725,7 @@ async fn a_failed_walk_ends_the_run_and_every_other_key_read() {
     let started = Arc::new(Snapshots::default());
     let stop = Stop::new();
     let base = tasks();
-    let running = start_observed(
+    let mut running = start_observed(
         vec![orders(), users()],
         Vec::new(),
         4,
@@ -735,16 +736,29 @@ async fn a_failed_walk_ends_the_run_and_every_other_key_read() {
         1,
     )
     .await;
-    let ended = tokio::time::timeout(Duration::from_secs(5), running.run)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(ended.is_err(), "the failed walk ends the run");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), &mut running.run)
+            .await
+            .is_err(),
+        "orders' failed walk ends no run"
+    );
     assert_eq!(
         started.0.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "both walks had started"
+        3,
+        "orders' walk started again after its wait; its read now waits for the key-read permit \
+         users' hanging read holds (K1)"
     );
+    assert_eq!(
+        walks.alive.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "users' read goes on"
+    );
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(5), running.run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     running.sink.abort();
     tasks_back_to(base).await;
     assert_eq!(walks.alive.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -777,32 +791,42 @@ async fn one_index_spawns_no_task_for_its_key_reads() {
     running.sink.abort();
 }
 
-/// A key read that panics on its own task panics the run's task, as a read
-/// run inline did (§3.9 §8: a panic unwinds the task), not an error the run
-/// returns.
+/// A key read that panics on its own task (two or more builders read
+/// apart) is its index's failure (slice 8), as a build that panics is: its
+/// builder restarts alone and the run goes on. One builder reads inline,
+/// where a panic still unwinds the run's task.
 #[tokio::test(start_paused = true)]
-async fn a_key_read_panicking_on_its_own_task_panics_the_run() {
+async fn a_key_read_panicking_on_its_own_task_restarts_its_index_alone() {
     let walks = Arc::new(HangingWalks {
         panicking: Some(orders()),
         ..HangingWalks::default()
     });
+    let started = Arc::new(Snapshots::default());
     let stop = Stop::new();
-    let running = start(
+    let mut running = start_observed(
         vec![orders(), users()],
         Vec::new(),
         4,
         Arc::clone(&walks) as Arc<dyn DocumentBuilder>,
         Arc::new(Unseeded) as Arc<dyn Sink>,
         &stop,
+        Arc::clone(&started) as Arc<dyn crate::Observer>,
+        1,
     )
     .await;
-    let ended = tokio::time::timeout(Duration::from_secs(5), running.run)
-        .await
-        .unwrap();
     assert!(
-        ended.as_ref().is_err_and(tokio::task::JoinError::is_panic),
-        "the run's task panicked: {ended:?}"
+        tokio::time::timeout(Duration::from_secs(5), &mut running.run)
+            .await
+            .is_err(),
+        "the panic ends no run"
     );
+    assert!(started.0.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(5), running.run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     running.sink.abort();
 }
 
@@ -1309,15 +1333,15 @@ async fn a_capped_takes_leftovers_build_at_once_up_to_builds() {
     running.sink.abort();
 }
 
-/// I13 (until slice 8): a build error in one builder ends the run for every
-/// index at once, while another builder still has work outstanding (its
-/// sink holds `orders`' write) and its stream is open; the run's future
-/// drops that builder in place rather than waiting for it.
+/// I13 (slice 8): a build error in one builder restarts it alone, while
+/// another builder still has work outstanding (its sink holds `orders`'
+/// write) and its stream is open: `users` is built again after its wait and
+/// written, the run goes on, and the stop ends it once `orders` is released.
 #[tokio::test(start_paused = true)]
-async fn a_build_error_ends_the_run_and_drops_every_builder_in_place() {
+async fn a_build_error_restarts_its_builder_alone_beside_a_held_builder() {
     let sink = Gated::holding_index(orders());
     let stop = Stop::new();
-    let running = start(
+    let mut running = start(
         vec![orders(), users()],
         vec![change("orders", 2), change("users", 1)],
         1,
@@ -1326,11 +1350,22 @@ async fn a_build_error_ends_the_run_and_drops_every_builder_in_place() {
         &stop,
     )
     .await;
-    let ended = tokio::time::timeout(Duration::from_secs(5), running.run)
-        .await
-        .expect("the error ended the run beside the orders builder")
-        .unwrap();
-    assert!(ended.is_err(), "users' build failed");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), &mut running.run)
+            .await
+            .is_err(),
+        "users' failed build ends no run"
+    );
+    assert!(
+        !sink.written("users").is_empty(),
+        "users was built again and written while orders' write is held"
+    );
     sink.release();
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(5), running.run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     running.sink.abort();
 }

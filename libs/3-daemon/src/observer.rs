@@ -3,11 +3,13 @@
 
 use std::sync::Arc;
 
-use engine::{BuildStats, CommitStats, EngineId, Observer};
+use std::time::Duration;
+
+use engine::{BuildStats, CommitStats, EngineId, Observer, Work};
 use kernel::{IndexName, SinkName};
 use source::document::BuildFailure;
 
-use crate::status::{Phase, Status};
+use crate::status::Status;
 
 /// Updates a shared [`Status`] from the engines' events.
 #[derive(Debug)]
@@ -85,9 +87,17 @@ impl Observer for StatusObserver {
         }
     }
 
+    fn on_index_failed(&self, index: &IndexName, kind: Work, error: &str, retry_in: Duration) {
+        self.status.index_failed(index, kind, error, retry_in);
+    }
+
+    fn on_index_restarted(&self, index: &IndexName, kind: Work) {
+        self.status.index_restarted(index, kind);
+    }
+
     fn on_engine_stopped(&self, engine: &EngineId) {
         match engine {
-            EngineId::Ingest => self.status.set_phase(Phase::Stopped),
+            EngineId::Ingest => self.status.mark_ingest_stopped(),
             EngineId::Sink(sink) => self.status.mark_sink_stopped(sink),
         }
     }

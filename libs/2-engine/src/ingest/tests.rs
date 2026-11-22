@@ -372,6 +372,18 @@ struct Behaviour {
     fail_once: Mutex<HashSet<i64>>,
     /// A build reports this id's document failed once.
     document_fails_once: Mutex<HashSet<i64>>,
+    /// A build touching one of these ids fails, this many times each
+    /// (slice 8: an index failing again after its restart).
+    fail_times: Mutex<BTreeMap<i64, usize>>,
+    /// A build touching one of these ids panics as it starts, once (on its
+    /// first poll, which the builder runs inline).
+    panic_once: Mutex<HashSet<i64>>,
+    /// Reading a key page of one of these indexes fails, once.
+    keys_fail_once: Mutex<HashSet<String>>,
+    /// Resolving one of these ids fails, once.
+    resolve_fails_once: Mutex<HashSet<i64>>,
+    /// Walks can be resumed: a mark is the key's id, ordered by id.
+    resumable: bool,
     /// Every build takes this long.
     delay: Option<Duration>,
     /// Every key page takes this long to read.
@@ -515,6 +527,15 @@ impl Builder {
         let failing = {
             let mut fail_once = self.behaviour.fail_once.lock().unwrap();
             ids.iter().any(|id| fail_once.remove(id))
+        } || {
+            let mut fail_times = self.behaviour.fail_times.lock().unwrap();
+            ids.iter().any(|id| match fail_times.get_mut(id) {
+                Some(left) if *left > 0 => {
+                    *left -= 1;
+                    true
+                }
+                _ => false,
+            })
         };
         if fail || failing {
             return Err(SourceError::Connection("the build failed".to_owned()));
@@ -591,6 +612,17 @@ impl DocumentBuilder for Builder {
         {
             self.release(held);
         }
+        if self
+            .behaviour
+            .resolve_fails_once
+            .lock()
+            .unwrap()
+            .remove(&id)
+        {
+            return Err(SourceError::Connection(format!(
+                "resolving {id} failed once"
+            )));
+        }
         if self.behaviour.resolve_fails.lock().unwrap().contains(&id) {
             return Err(SourceError::Connection(format!("resolving {id} failed")));
         }
@@ -611,6 +643,13 @@ impl DocumentBuilder for Builder {
 
     async fn build_many(&self, ids: &[DocumentId]) -> source::Result<Vec<Document>> {
         let ids: Vec<i64> = ids.iter().map(|id| id_of(&id.key)).collect();
+        {
+            let mut panic_once = self.behaviour.panic_once.lock().unwrap();
+            if let Some(id) = ids.iter().find(|id| panic_once.remove(id)) {
+                drop(panic_once);
+                panic!("building {id} panicked");
+            }
+        }
         self.grants.lock().unwrap().push(ids.clone());
         {
             let now = tokio::time::Instant::now();
@@ -661,6 +700,15 @@ impl DocumentBuilder for Builder {
         if let Some(delay) = self.behaviour.keys_delay {
             tokio::time::sleep(delay).await;
         }
+        if self
+            .behaviour
+            .keys_fail_once
+            .lock()
+            .unwrap()
+            .remove(index.as_ref())
+        {
+            return Err(SourceError::Query(format!("reading {index}'s keys failed")));
+        }
         let start = after.map_or(0, |after| id_of(after) + 1);
         let end = self.db.rows.min(id_of(through) + 1);
         Ok((start..end)
@@ -676,6 +724,27 @@ impl DocumentBuilder for Builder {
             .into_iter()
             .map(|index| IndexMapping { index, ..mapping() })
             .collect())
+    }
+
+    async fn walk_mark(&self, _: &IndexName, key: &RowKey) -> source::Result<Option<String>> {
+        Ok(self.behaviour.resumable.then(|| id_of(key).to_string()))
+    }
+
+    async fn resume_after(&self, _: &IndexName, mark: &str) -> source::Result<Option<RowKey>> {
+        Ok(self
+            .behaviour
+            .resumable
+            .then(|| mark.parse().ok().map(key))
+            .flatten())
+    }
+
+    async fn compare_keys(
+        &self,
+        _: &IndexName,
+        a: &RowKey,
+        b: &RowKey,
+    ) -> source::Result<Option<std::cmp::Ordering>> {
+        Ok(self.behaviour.resumable.then(|| id_of(a).cmp(&id_of(b))))
     }
 }
 
@@ -890,7 +959,11 @@ impl Sink for Recorder {
 struct Spy {
     inner: Arc<ChannelStream>,
     published: Published,
+    failing: FailingLanes,
 }
+
+/// The indexes whose lanes fail their next publish, once each.
+type FailingLanes = Arc<Mutex<HashSet<String>>>;
 
 /// Every position published, per lane, in lane order.
 type Published = Arc<Mutex<BTreeMap<stream::LaneKey, Vec<u64>>>>;
@@ -903,6 +976,7 @@ struct SpyProducer {
     inner: Box<dyn stream::Producer<stream::LaneItem>>,
     lane: stream::LaneKey,
     published: Published,
+    failing: FailingLanes,
 }
 
 #[async_trait]
@@ -911,6 +985,14 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
         // The engine awaits each item's send before the next one's: logged
         // after the send, the log is lane order.
         let position = item.position();
+        if self
+            .failing
+            .lock()
+            .unwrap()
+            .remove(self.lane.index.as_ref())
+        {
+            return Err(stream::QueueError::Publish("the lane failed".to_owned()));
+        }
         self.inner.publish(item).await?;
         if let Some(position) = position {
             self.published
@@ -932,6 +1014,7 @@ impl Stream for Spy {
                 inner: lane.producer,
                 lane: key.clone(),
                 published: Arc::clone(&self.published),
+                failing: Arc::clone(&self.failing),
             }),
             consumer: lane.consumer,
         })
@@ -955,6 +1038,8 @@ struct Deployment {
     stream: Arc<ChannelStream>,
     /// Every position published, per lane, in lane order.
     published: Published,
+    /// Lanes to fail on their next publish.
+    failing: FailingLanes,
     feed: Arc<Feed>,
     recorder: Arc<Recorder>,
     ingest: IngestEngine,
@@ -988,9 +1073,11 @@ impl Deployment {
         ));
         let feed = Arc::new(feed);
         let published: Published = Arc::default();
+        let failing: FailingLanes = Arc::default();
         let spy = Arc::new(Spy {
             inner: Arc::clone(&stream),
             published: Arc::clone(&published),
+            failing: Arc::clone(&failing),
         });
         let ingest = IngestEngine::new(
             Arc::clone(&feed) as Arc<dyn ChangeCapture>,
@@ -1012,6 +1099,7 @@ impl Deployment {
         Self {
             stream,
             published,
+            failing,
             feed,
             recorder,
             ingest,
@@ -1133,7 +1221,12 @@ impl Deployment {
         }
     }
 
-    async fn run_until_landed(&mut self, db: &Arc<Database>, stop: &Stop, most_restarts: usize) {
+    async fn run_until_landed(
+        &mut self,
+        db: &Arc<Database>,
+        stop: &Stop,
+        most_restarts: usize,
+    ) -> usize {
         let sink = self.start_sink().await;
         let watcher = {
             let db = Arc::clone(db);
@@ -1173,6 +1266,7 @@ impl Deployment {
         self.drained().await;
         self.assert_released().await;
         sink.abort();
+        failed
     }
 
     /// Run the ingest engine until its live stream ends, restarting it after
@@ -1207,7 +1301,9 @@ impl Deployment {
 mod builders;
 mod exemption;
 mod reading;
+mod restart;
 mod states;
+mod walk_failures;
 mod walks;
 
 fn instant(db: &Arc<Database>) -> Arc<Builder> {
@@ -1221,9 +1317,32 @@ fn batch(max_changes: usize) -> BatchPolicy {
     }
 }
 
+/// Counts the indexes' builders restarted alone and the walks retried
+/// alone (slice 8), apart.
+#[derive(Debug, Default)]
+struct IndexRestarts {
+    live: AtomicUsize,
+    walks: AtomicUsize,
+}
+
+impl crate::Observer for IndexRestarts {
+    fn on_index_restarted(&self, _: &IndexName, kind: crate::Work) {
+        match kind {
+            crate::Work::Live => &self.live,
+            crate::Work::Backfill => &self.walks,
+        }
+        .fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 /// One random schedule: changes over a few ids, random gaps, build delays and
-/// failures, maybe a backfill. Panics on the first broken guarantee.
-async fn schedule(seed: u64, builds: usize, open: bool) {
+/// failures, maybe a backfill. Over two indexes a build's failure restarts
+/// its index alone (slice 8), and some schedules also fail a whole run once
+/// (a resolve), so the stream resumes from what was confirmed while an index
+/// may hold documents it gave back. Panics on the first broken guarantee.
+/// Returns how many indexes' builders restarted alone, how many walks were
+/// retried alone, and how many runs failed.
+async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize) {
     let mut random = Rng::new(seed);
     let ids = 2 + random.below(7) as i64;
     let rows = if random.below(2) == 0 {
@@ -1255,9 +1374,11 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
     // Every other seed over two indexes (odd ids `orders`', even `users'`):
     // a batch splits by index, each lane in its own order.
     let two = seed % 2 == 0;
+    let run_failure = (two && random.below(2) == 0).then(|| random.below(ids as u64) as i64);
     let behaviour = Behaviour {
         random: Some(Mutex::new(Rng::new(seed.wrapping_mul(31)))),
         failures_left: AtomicUsize::new(random.below(4) as usize),
+        resolve_fails_once: Mutex::new(run_failure.into_iter().collect()),
         ..Behaviour::default()
     };
     let builder = if two {
@@ -1269,12 +1390,15 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
     let feed = if open { feed.open() } else { feed };
     let stop = Stop::new();
     let recorder = Recorder::seeded(rows == 0);
+    let restarts = Arc::new(IndexRestarts::default());
+    let observer: Arc<dyn crate::Observer> = Arc::clone(&restarts) as Arc<dyn crate::Observer>;
     let mut deployment =
         Deployment::new(feed, Arc::clone(&builder), Arc::clone(&recorder)).ingest(|ingest| {
             ingest
                 .with_batch(batch(max_changes))
                 .with_builds(builds)
                 .with_stop(stop.clone())
+                .with_observer(observer)
         });
     // Over two indexes, every third seed holds `orders` stuck for a random
     // stretch (every document refused, its lane parked): held at its cap it
@@ -1295,11 +1419,11 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
             recorder.refused_indexes.lock().unwrap().clear();
         })
     });
-    if open {
-        deployment.run_until_landed(&db, &stop, 8).await;
+    let failed = if open {
+        deployment.run_until_landed(&db, &stop, 8).await
     } else {
-        deployment.run_to_end(8).await;
-    }
+        deployment.run_to_end(8).await
+    };
     if let Some(stuck) = stuck {
         stuck.await.unwrap();
     }
@@ -1339,6 +1463,11 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
         db.expected(),
         "the documents differ from the rows ({context})"
     );
+    (
+        restarts.live.load(Ordering::SeqCst),
+        restarts.walks.load(Ordering::SeqCst),
+        failed,
+    )
 }
 
 /// The seeds a schedule test runs: `FLUSSO_BUILD_SCHEDULE_SEED` alone, else
@@ -1350,24 +1479,57 @@ fn seeds(count: u64) -> Vec<u64> {
     }
 }
 
+/// Counts what restarted across schedules: indexes' builders alone, walks
+/// alone, whole runs.
+#[derive(Debug, Default)]
+struct Restarted {
+    indexes: usize,
+    walks: usize,
+    runs: usize,
+}
+
+impl Restarted {
+    fn add(&mut self, (indexes, walks, runs): (usize, usize, usize)) {
+        self.indexes += indexes;
+        self.walks += walks;
+        self.runs += runs;
+    }
+
+    /// Over every seed (not one replayed alone), the schedules restarted an
+    /// index's builder alone, retried a walk alone, and restarted a whole
+    /// run, at times all in one schedule.
+    fn assert_both(&self) {
+        if std::env::var("FLUSSO_BUILD_SCHEDULE_SEED").is_ok() {
+            return;
+        }
+        assert!(self.indexes > 0, "no schedule restarted an index alone");
+        assert!(self.walks > 0, "no schedule retried a walk alone");
+        assert!(self.runs > 0, "no schedule restarted a whole run");
+    }
+}
+
 #[test]
 fn random_schedules_keep_every_document_in_order() {
+    let mut restarted = Restarted::default();
     for seed in seeds(500) {
         for builds in [1, 2, 4] {
-            crate::tests::paused_runtime().block_on(schedule(seed, builds, false));
+            restarted.add(crate::tests::paused_runtime().block_on(schedule(seed, builds, false)));
         }
     }
+    restarted.assert_both();
 }
 
 /// The same schedules on a stream that stays open, as a deployment's does:
 /// nothing ends the run but a stop, requested once every change has landed.
 #[test]
 fn random_schedules_on_an_open_stream_keep_every_document_in_order() {
+    let mut restarted = Restarted::default();
     for seed in seeds(200) {
         for builds in [1, 4] {
-            crate::tests::paused_runtime().block_on(schedule(seed, builds, true));
+            restarted.add(crate::tests::paused_runtime().block_on(schedule(seed, builds, true)));
         }
     }
+    restarted.assert_both();
 }
 
 #[tokio::test(start_paused = true)]
@@ -2889,7 +3051,7 @@ async fn a_hold_across_an_engine_restart_is_one_wait() {
         &db,
         Behaviour {
             padding: 8 * KIB,
-            fail_once: Mutex::new(HashSet::from([9])),
+            resolve_fails_once: Mutex::new(HashSet::from([9])),
             ..Behaviour::default()
         },
         2,
@@ -2921,7 +3083,7 @@ async fn a_hold_across_an_engine_restart_is_one_wait() {
     assert_eq!(
         deployment.run_to_end(1).await,
         1,
-        "the build of orders 9 failed once"
+        "resolving orders 9 failed once: the run restarted"
     );
     resumer.await.unwrap();
     assert_eq!(deployment.recorder.state(), db.expected());
@@ -2959,7 +3121,7 @@ async fn a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment() {
         &db,
         Behaviour {
             padding: 8 * KIB,
-            fail_once: Mutex::new(HashSet::from([9])),
+            resolve_fails_once: Mutex::new(HashSet::from([9])),
             ..Behaviour::default()
         },
         2,
@@ -2992,7 +3154,7 @@ async fn a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment() {
     assert_eq!(
         deployment.run_to_end(1).await,
         1,
-        "the build of orders 9 failed once"
+        "resolving orders 9 failed once: the run restarted"
     );
     resumer.await.unwrap();
     assert_eq!(deployment.recorder.state(), db.expected());
@@ -3010,6 +3172,82 @@ async fn a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment() {
     assert!(
         live[0] < Duration::from_secs(60),
         "up to the end of the run, not over the outage: {live:?}"
+    );
+    assert!(
+        live[0] > Duration::from_millis(500),
+        "from the first refusal to the release: {live:?}"
+    );
+}
+
+/// The twin across a restart of `orders` alone (review of #456, item 3):
+/// `users`' wait is not cut by it (one wait, counted once), and lasts until
+/// the release; `orders` is down an hour meanwhile.
+#[tokio::test(start_paused = true)]
+async fn a_wait_open_when_another_index_restarts_is_not_cut() {
+    // `users` (even ids) builds ten documents of about 8 KiB, one per run,
+    // past its 64 KiB share while the sink is stalled; then `users` 0 again
+    // waits, and `orders` 1..9 build beside it, one per run.
+    let mut log: Vec<Change> = (0..10).map(|n| Change::upsert(2 * n)).collect();
+    log.push(Change::upsert(0));
+    log.extend([1, 3, 5, 7, 9].map(Change::upsert));
+    let db = Database::new(0, log);
+    let builder = Builder::over(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            fail_once: Mutex::new(HashSet::from([9])),
+            ..Behaviour::default()
+        },
+        2,
+    );
+    let recorder = Recorder::seeded(true);
+    recorder.stall();
+    let waits = Arc::new(BudgetWaits::default());
+    let observer = Arc::clone(&waits);
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_millis(100)),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(16))
+            .with_builds(4)
+            .with_observer(observer)
+            .with_backoff(
+                crate::Backoff::new(Duration::from_secs(3600), Duration::from_secs(3600)).unwrap(),
+            )
+    })
+    .with_budget(128 * KIB, usize::MAX);
+    let budget = deployment.budget.clone().unwrap();
+    let resumer = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(3_000)).await;
+            recorder.resume();
+        })
+    };
+    assert_eq!(
+        deployment.run_to_end(0).await,
+        0,
+        "orders 9's build failed once: orders restarted alone, after an hour"
+    );
+    resumer.await.unwrap();
+    assert_eq!(deployment.recorder.state(), db.expected());
+
+    assert_eq!(budget.refused(crate::Work::Live), 1, "{:?}", waits.0);
+    let live: Vec<Duration> = waits
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(work, _, _)| *work == crate::Work::Live)
+        .map(|(_, _, waited)| *waited)
+        .collect();
+    assert_eq!(live.len(), 1, "one wait: {live:?}");
+    assert!(
+        live[0] < Duration::from_secs(60),
+        "up to the release, not cut by orders' restart: {live:?}"
     );
     assert!(
         live[0] > Duration::from_millis(500),

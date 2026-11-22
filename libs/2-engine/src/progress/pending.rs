@@ -115,7 +115,8 @@ struct Build {
     /// The least read number among its ids: what a run ending before it is
     /// released leaves unbuilt.
     least_read: u64,
-    ids: Vec<(Arc<RowKey>, Position)>,
+    /// Each id with its change and read number: what a give-back restores.
+    ids: Vec<(Arc<RowKey>, Position, u64)>,
     /// The sinks whose lane of the index has the build's item registered,
     /// or was told the batch had nothing for it.
     registered: Vec<SinkName>,
@@ -139,6 +140,22 @@ impl Pending {
             }
             None => {
                 self.insert(Arc::new(key), at, read);
+                true
+            }
+        }
+    }
+
+    /// [`mark`](Self::mark) a key already shared with a build.
+    fn mark_shared(&mut self, key: Arc<RowKey>, at: Position, read: u64) -> bool {
+        match self.waiting.get(&key) {
+            Some((held, _, _)) if held.seq <= at.seq => false,
+            Some(&(held, counter, _)) => {
+                self.order.remove(&(held.seq, counter));
+                self.insert(key, at, read);
+                false
+            }
+            None => {
+                self.insert(key, at, read);
                 true
             }
         }
@@ -238,7 +255,7 @@ impl Pending {
                 key: (*key).clone(),
             });
             self.building.insert(Arc::clone(&key));
-            taken.push((key, position));
+            taken.push((key, position, read));
         }
         let oldest = oldest?;
         let token = Token(self.next_token);
@@ -270,7 +287,7 @@ impl Pending {
         if std::mem::replace(&mut build.landed, true) {
             return;
         }
-        for (key, _) in &build.ids {
+        for (key, _, _) in &build.ids {
             self.building.remove(key);
         }
     }
@@ -290,7 +307,7 @@ impl Pending {
             return 0;
         };
         if !build.landed {
-            for (key, _) in &build.ids {
+            for (key, _, _) in &build.ids {
                 self.building.remove(key);
             }
         }
@@ -317,6 +334,26 @@ impl Pending {
         self.building.clear();
         self.builds.clear();
         forgotten
+    }
+
+    /// Give every build taken and not released back (ADR 0012 stage 8a,
+    /// slice 8): its builder failed before publishing it, so each id waits
+    /// again at its own change and read number, an id marked again meanwhile
+    /// at the older of the two. Call it once none of them is still building.
+    /// Returns how many ids started waiting.
+    pub(crate) fn give_back(&mut self) -> usize {
+        let mut started = 0;
+        for build in std::mem::take(&mut self.builds) {
+            for (key, at, read) in build.ids {
+                if !build.landed {
+                    self.building.remove(&key);
+                }
+                if self.mark_shared(key, at, read) {
+                    started += 1;
+                }
+            }
+        }
+        started
     }
 
     fn remove_build(&mut self, token: Token) -> Option<Build> {
@@ -577,6 +614,86 @@ mod tests {
         let again = pending.take(&index(), usize::MAX, None, &none).unwrap();
         assert_eq!(again.oldest, p(3), "marked afresh by the replay");
         assert_ne!(again.token, taken.token);
+    }
+
+    /// Slice 8 (R6): a builder that failed gives its unpublished builds
+    /// back. Each id waits again at its own change and read number; an id
+    /// the reader marked again while it built keeps the older of the two.
+    #[test]
+    fn a_give_back_keeps_the_older_of_two_marks() {
+        let mut pending = Pending::default();
+        pending.mark(key(1), p(1), 1);
+        pending.mark(key(2), p(4), 4);
+        let first = pending.take(&index(), usize::MAX, None, &none).unwrap();
+        pending.mark(key(1), p(6), 6);
+        pending.land(first.token);
+        let second = pending.take(&index(), usize::MAX, None, &none).unwrap();
+        assert_eq!(ids(&second), [key(1)], "1 again, marked while it built");
+        pending.mark(key(3), p(7), 7);
+        assert_eq!(
+            pending.give_back(),
+            2,
+            "1 and 2 wait again; 3 waited already"
+        );
+        assert!(pending.builds.is_empty() && pending.building.is_empty());
+        assert_eq!(pending.waiting(), 3);
+        assert_eq!(
+            pending.oldest_waiting(),
+            Some(p(1)),
+            "1 at its older change"
+        );
+        assert_eq!(pending.least_unbuilt(), Some(1), "with its own read number");
+        assert_eq!(pending.newest_waiting(), Some(p(7)));
+        let again = pending.take(&index(), usize::MAX, None, &none).unwrap();
+        assert_eq!(ids(&again), [key(1), key(2), key(3)], "oldest first");
+        assert_eq!(again.oldest, p(1));
+    }
+
+    /// R6 (review of #456, round 3): an id the reader marked again while it built
+    /// waits at the newer change; given back, it must wait at the older one,
+    /// and every lane's backlog answer stays at it.
+    #[test]
+    fn an_id_waiting_again_takes_its_older_change_back() {
+        let mut pending = Pending::default();
+        let primary = SinkName::try_new("primary").unwrap();
+        pending.mark(key(1), p(1), 1);
+        let taken = pending.take(&index(), usize::MAX, None, &none).unwrap();
+        pending.mark(key(1), p(6), 6);
+        let before = pending.backlog_for(&primary);
+        assert_eq!(before, Some(p(1)));
+        pending.give_back();
+        let _ = taken;
+        assert_eq!(
+            pending.oldest_waiting(),
+            Some(p(1)),
+            "1 at its older change"
+        );
+        assert_eq!(pending.least_unbuilt(), Some(1));
+        assert_eq!(
+            pending.backlog_for(&primary),
+            before,
+            "no lane's answer moves"
+        );
+    }
+
+    /// A give-back leaves the backlog's answer where it was: the oldest of
+    /// a build not yet sending holds every lane at its oldest id's change,
+    /// and that id now waits there.
+    #[test]
+    fn a_give_back_moves_no_lanes_answer() {
+        let mut pending = Pending::default();
+        let primary = SinkName::try_new("primary").unwrap();
+        pending.mark(key(1), p(3), 3);
+        pending.mark(key(2), p(5), 5);
+        let taken = pending.take(&index(), usize::MAX, None, &none).unwrap();
+        pending.land(taken.token);
+        pending.mark(key(9), p(8), 8);
+        let before = (pending.backlog_for(&primary), pending.oldest_unbuilt());
+        pending.give_back();
+        assert_eq!(
+            (pending.backlog_for(&primary), pending.oldest_unbuilt()),
+            before
+        );
     }
 
     /// A landed build leaves admission: a later change to one of its ids is

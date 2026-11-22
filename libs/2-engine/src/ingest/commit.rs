@@ -64,7 +64,7 @@ impl IngestEngine {
             // Beside a running live build only a full batch may start, so a
             // hand-over that can't fill one costs no walk.
             let candidate = if builds.folding() {
-                self.backlog(builds)
+                self.backlog(runs, builds)
             } else if builds.live_running() {
                 runs.full_candidate()
                     .or_else(|| self.full_leftover(runs, builds))
@@ -92,7 +92,16 @@ impl IngestEngine {
                     }
                 }
                 None => {
-                    if !self.publish_ready(builds, lanes, Some(&mut *runs)).await? {
+                    let published = self.publish_ready(builds, lanes, Some(&mut *runs)).await?;
+                    // The walk in progress failed: the failure keeps its
+                    // requests, and no more of it is granted.
+                    if let Some(failure) = builds.walk_failure_mut()
+                        && let Some(active) = snapshot
+                            .take_if(|active| Arc::ptr_eq(&active.reached, &failure.reached))
+                    {
+                        failure.requests.extend(active.into_requests());
+                    }
+                    if !published {
                         return Ok(());
                     }
                 }
@@ -133,7 +142,7 @@ impl IngestEngine {
                 builds
                     .index()
                     .and_then(|index| self.progress.newest_waiting(index))
-                    .map(|position| Candidate::backlog(position, true))
+                    .map(|position| runs.backlog(position, true))
             } else {
                 runs.candidate(false)
             };
@@ -241,12 +250,12 @@ impl IngestEngine {
     /// documents waiting on its index, through the newest of them, full
     /// once `max_changes` wait (a full one may start beside a running live
     /// build). `None` with nothing waiting.
-    fn backlog(&self, builds: &Builds) -> Option<Candidate> {
+    fn backlog(&self, runs: &Runs, builds: &Builds) -> Option<Candidate> {
         let index = builds.index()?;
         let waiting = self.progress.waiting_on(index);
         let position = self.progress.newest_waiting(index)?;
         let full = waiting >= self.batch.max_changes;
-        (!builds.live_running() || full).then_some(Candidate::backlog(position, full))
+        (!builds.live_running() || full).then(|| runs.backlog(position, full))
     }
 
     /// Take the documents waiting through `candidate`'s last change of every
@@ -268,6 +277,7 @@ impl IngestEngine {
         admitted: &[IndexName],
     ) {
         let position = candidate.position;
+        runs.raise_floor(position);
         let backlog = builds.folding();
         // A live grant ends the hold (§3.9 §5).
         runs.lead().hold(runs.slot(), false);
@@ -367,6 +377,7 @@ impl IngestEngine {
         let job = Job::Backfill {
             requested: snapshot.lanes_now(),
             marks,
+            reached: Arc::clone(&snapshot.reached),
         };
         builds
             .start(&self.documents, ids, job, &|built| self.halts(built))
@@ -409,6 +420,30 @@ impl IngestEngine {
         }
     }
 
+    /// The error a failed backfill build stands for: its build's, or its
+    /// first document failed under `on_error = "stop"` (reported as any).
+    fn walk_error(&self, built: Built) -> EngineError {
+        match built.documents {
+            Err(error) => error,
+            Ok(documents) => documents
+                .into_iter()
+                .find_map(|document| match document {
+                    Document::Failed { id, failure }
+                        if self.failure_policies.resolve(id.index.as_ref())
+                            == FailurePolicy::Stop =>
+                    {
+                        self.document_failed(&id, failure).err()
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    EngineError::Source(source::SourceError::Query(
+                        "a backfill batch failed".to_owned(),
+                    ))
+                }),
+        }
+    }
+
     /// Whether a build's result ends the run once it is published: the build
     /// failed, or a document failed under `on_error = "stop"`. Nothing more
     /// is granted from the moment it lands.
@@ -441,6 +476,18 @@ impl IngestEngine {
         let mut published = false;
         while let Some((job, built, charges)) = builds.pop_ready() {
             published = true;
+            // Beside other builders a failed backfill batch is its walk's
+            // failure (slice 8, fix round 2): nothing of it is published,
+            // its walk's later slots are discarded, and the live ones go on.
+            let (job, built) = match (job, built) {
+                (Job::Backfill { reached, .. }, Some(built))
+                    if builds.several() && self.halts(&built) =>
+                {
+                    builds.fail_walk(self.walk_error(built), &reached);
+                    continue;
+                }
+                other => other,
+            };
             let publishing = self.publish_slot(job, built, charges, lanes);
             tokio::pin!(publishing);
             if let Poll::Ready(result) = futures::poll!(publishing.as_mut()) {
@@ -494,11 +541,38 @@ impl IngestEngine {
                 self.publish_live(built, &taken, granted, charges, lanes)
                     .await?;
             }
-            (Job::Backfill { requested, marks }, Some(built)) => {
+            (
+                Job::Backfill {
+                    requested,
+                    marks,
+                    reached,
+                },
+                Some(built),
+            ) => {
                 self.publish_backfill(built, &requested, &marks, charges, lanes)
                     .await?;
+                // Its lanes' resume points moved (a batch the source marked:
+                // one that can't mark walks starts each retry from the first
+                // key, which is no progress): what starts the walk failure's
+                // waits over.
+                for index in marks.keys() {
+                    if let Some(batches) = self.walk_batches.get(index) {
+                        batches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                // Every lane sent this batch has the walk through its mark.
+                let mut reached = reached
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for (sink, indexes) in &requested {
+                    for index in indexes.keys() {
+                        if let Some(mark) = marks.get(index) {
+                            reached.insert(LaneKey::new(index.clone(), sink.clone()), mark.clone());
+                        }
+                    }
+                }
             }
-            (_, None) => {}
+            (_, None) | (Job::Discarded, _) => {}
         }
         Ok(())
     }

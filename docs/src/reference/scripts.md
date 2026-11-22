@@ -100,7 +100,7 @@ A script that fails on one document (a runtime error, or a result of the wrong t
 
 | `on_error` | A failed document |
 | --- | --- |
-| `"stop"` | Stops the ingest engine before anything in the batch is published. The change is retried after the restart and fails again until the script or the data changes. |
+| `"stop"` | Stops before anything in the batch is published: its index alone with two or more indexes ([A failing index](config-toml.md#a-failing-index)), the ingest engine with one. The change is retried after a wait and fails again until the script or the data changes. |
 | `"skip"` | Is published to no sink, so every sink keeps its indexed version. |
 
 Either way the failure is logged at `error` with the script line and a caret (the first per index and field each minute, carrying a count of the ones suppressed since), counted in [`flusso.script.failures`](metrics.md), and shown in [`/status`](http.md#get-status) under `script_failures`. The document as built is logged at `debug` under the `script` target, since it may hold personal data.

@@ -40,7 +40,7 @@ You have a validated config and want to run it, locally or in a deployment. The 
 - **Where it listens.** Both surfaces default to localhost. A container needs the public one on `0.0.0.0`; the private one should stay on localhost. Defaults and ports are in [HTTP endpoints](../reference/http.md).
 - **Change the admin password** before exposing anything: `--admin-password` / `FLUSSO_ADMIN_PASSWORD`. flusso warns on every start while it's the default.
 - **Logs** go to stderr; `RUST_LOG` filters them; `FLUSSO_LOG_FORMAT=json` structures them.
-- **Retry timing.** A failed engine restarts, and a parked lane is probed, after 1 s, doubling to 60 s. [`[backoff]`](../reference/config-toml.md#backoff) (or `--backoff-initial-ms` / `--backoff-max-ms`) changes both ends.
+- **Retry timing.** A failed engine restarts, a parked lane is probed, and a [failing index](../reference/config-toml.md#a-failing-index) restarts alone or retries its backfill, after 1 s, doubling to 60 s. [`[backoff]`](../reference/config-toml.md#backoff) (or `--backoff-initial-ms` / `--backoff-max-ms`) changes both ends.
 - **Memory.** `[concurrency] max_built_mib` (or `--max-built-mib`, default 512) bounds built documents waiting for the sinks. Ingest waits when it's full; that's back-pressure, not a fault. With two or more indexes, one index's live documents hold at most half of it (`index_budget_share`), so a burst on one leaves room for the others. See [config.toml](../reference/config-toml.md#concurrency).
 
 ## Run under a task runner or supervisor

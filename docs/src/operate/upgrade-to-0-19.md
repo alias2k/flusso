@@ -15,12 +15,13 @@
 - **Batches are per index**, so a slow index no longer delays a fast one's writes; one build takes at most `[batch] max_changes` documents; a change can be searchable in one index before another, and the stdout sink's `seq` is ordered per index only: [Batches are per index](#batches-are-per-index).
 - **A stuck index stops only itself**: with two or more indexes, the others keep being read and written while its changes wait as documents to build, up to `[concurrency] max_pending_documents`; the slot, and so the WAL, still waits for it: [A stuck index stops only itself](#a-stuck-index-stops-only-itself).
 - **Backfills of several indexes run at once**, within the same `builds` and Postgres connections; one stuck backfill no longer holds the others, and memory may pass `max_built_mib` by one backfill batch per index: [Backfills run at once](#backfills-run-at-once).
+- **One index's failure restarts only that index**: with two or more indexes, a failed build or a document failed under `on_error = "stop"` takes down its index alone, a failed backfill is retried alone while live changes flow, and the others keep indexing; with one index, a build that panics as it starts restarts the ingest engine instead of ending the deployment: [One index's failure restarts only that index](#one-indexs-failure-restarts-only-that-index).
 - **`POST /reindex` is gone** (breaking): reindex with `POST /indexes/<name>/reindex[?sink=<name>]`, which answers JSON; `flusso reindex` already does: [Reindex moved to the index path](#reindex-moved-to-the-index-path).
-- **Each index's state is shown**: `/status`'s `ingest.indexes`, `GET /indexes/<name>/status`, the `flusso_index_*` metrics, `flusso_reader_waits_seconds`, and a new alert, `FlussoIndexBacklog`: [Each index's state is shown](#each-indexs-state-is-shown).
+- **Each index's state is shown**: `/status`'s `ingest.indexes` (with `state`, `last_error` and `restarts`), `GET /indexes/<name>/status`, the `flusso_index_*` metrics, `flusso_reader_waits_seconds`, and a new alert, `FlussoIndexBacklog`: [Each index's state is shown](#each-indexs-state-is-shown).
 
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`, the per-index ingest state in `Status` and `Observer::on_reader_wait`**: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`, the per-index ingest state in `Status`, `Observer::on_reader_wait`, and per-index restart (`IngestEngine::with_backoff`, `Observer::on_index_failed` and `on_index_restarted`)**: [For code embedding the crates](#for-code-embedding-the-crates).
 
 ## One index's failure parks its own lane
 
@@ -64,7 +65,7 @@ A refused or blocked lane is **parked**: it writes its oldest batch again alone 
 
 ## Retry timing is configurable
 
-**What changed.** Every retry flusso makes on its own waits on one schedule: a failed sink or ingest engine's restart, a parked lane's probe, a restaging lane's next staging. 0.18 fixed it at 1 s doubling to 60 s (only code embedding the daemon could change the cap). 0.19 adds a `[backoff]` table, with a flag and a variable for each key:
+**What changed.** Every retry flusso makes on its own waits on one schedule: a failed sink or ingest engine's restart, a parked lane's probe, a restaging lane's next staging, and, new in 0.19, [one index's restart and its backfill's retry](#one-indexs-failure-restarts-only-that-index), each index with its own schedule per kind. 0.18 fixed it at 1 s doubling to 60 s (only code embedding the daemon could change the cap). 0.19 adds a `[backoff]` table, with a flag and a variable for each key:
 
 | `flusso.toml` | Flag | Variable | Default |
 | --- | --- | --- | --- |
@@ -293,6 +294,35 @@ The share has a flag and a variable, like the table's other keys:
 2. **Check the memory headroom** on a tight host: plan for one backfill batch per index above `max_built_mib`, and up to 1,024 root keys per index backfilling (about 110 KB for a one-column integer key) ([sizing](../reference/config-toml.md#concurrency)).
 3. **Don't rely on the order** indexes finish in: wait on each index's own state in [`/status`](../reference/http.md#get-status).
 
+## One index's failure restarts only that index
+
+**What changed.** In 0.18 a failed build ended the ingest engine's run: the daemon restarted it with backoff, every index paused, and the stream was read again from the slot. In 0.19, with two or more enabled indexes, a failure of one index's own work restarts that index alone, after a wait, and the others keep indexing ([A failing index](../reference/config-toml.md#a-failing-index)):
+
+| Failure | 0.18 | 0.19, two or more indexes |
+| --- | --- | --- |
+| A live build fails or panics, or a live document fails to build under `on_error = "stop"` | the ingest engine restarts and every index waits (a build that panicked as it started ended the deployment) | the index is **down**: its changes wait as documents to build, and it restarts alone after the wait |
+| A backfill fails: reading root keys, a backfill batch, a backfill document under `stop` | the ingest engine restarts; every index waits | only the backfill is retried, each sink after the last batch it received; the index's live changes keep flowing |
+| A document that fails every time under `stop` | every index stalls | its index stays down, retried every `[backoff] max_ms`; the others go on until it has `max_pending_documents` documents waiting |
+| The change stream, resolving a change, a lane, any failure while stopping | the ingest engine restarts | unchanged |
+| A stop with an index down | — | the index is tried once more at once; if that fails, flusso exits `1` |
+| One index, a build that panics as it starts | the deployment ends: `ingest engine task failed` | the ingest engine restarts with backoff |
+
+Every other failure with one index restarts the ingest engine, as in 0.18. The waits are `[backoff]`'s, one schedule per index and kind of failure: no new setting ([Retry timing is configurable](#retry-timing-is-configurable)).
+
+**Who is affected.** Deployments with two or more enabled indexes, when one index's builds or documents fail: a script that throws, a schema Postgres refuses, a row that overflows an aggregate. With one index, only the panic above changes.
+
+**What to do.**
+
+1. **Nothing, usually.**
+2. **Move alerts that watch the engine.** A failing index no longer moves `flusso_errors_total{engine="ingest"}`, `errors` or `phase`. Read `state`, `last_error` and `restarts` per index, and `flusso_index_down`, `flusso_index_backfill_retrying`, `flusso_index_restarts_total` ([Each index's state is shown](#each-indexs-state-is-shown)).
+3. **Add a rule for what pages nobody.** `FlussoIndexBacklog` fires for a down index only while documents of it wait. A down index with nothing waiting, and a backfill that keeps failing while live changes flow, need a rule of your own ([runbook](stalled-lane.md#when-an-index-is-down-or-its-backfill-keeps-failing)).
+
+**What to know.**
+
+- **The slot still waits for a down index**, so WAL grows, and its documents can grow to `max_pending_documents` beside a healthy index. flusso keeps resolving every change for it meanwhile. A database-wide fault still restarts the whole ingest engine. The full list is in [A failing index](../reference/config-toml.md#a-failing-index).
+- **A stop that fails costs a replay.** The next start reads again from the down index's oldest change, so every other index's changes since then are read and built again.
+- **One index, a panic every time** is now an endless restart loop paced by `[backoff]`, where 0.18 exited. Alert on `flusso_errors_total{engine="ingest"}` climbing.
+
 ## Reindex moved to the index path
 
 **What changed.** The private surface's reindex route is now `POST /indexes/<name>/reindex[?sink=<name>]`. `POST /reindex?index=…` is removed and answers `404`. Every answer is JSON ([the route](../reference/http.md#post-indexesnamereindexsinkname)):
@@ -312,11 +342,11 @@ The share has a flag and a variable, like the table's other keys:
 
 **What changed.** What 0.19 does per index (the [exemption](#a-stuck-index-stops-only-itself), holds, backfills) shows outside the log too:
 
-- **`/status`** gains `ingest.indexes.<index>` for each enabled index: documents waiting, `backlog_seconds`, `exemption`, `working`, `held_by` and `held_sinks`, `backfill`, `pacing_reader` ([per-index state](../reference/http.md#per-index-ingest-state)).
+- **`/status`** gains `ingest.indexes.<index>` for each enabled index: documents waiting, `backlog_seconds`, `state` (`running` or `down`), `down_since`, `last_error` and `restarts`, `exemption`, `working`, `held_by` and `held_sinks`, `backfill` (`walking`, `retrying` or `waiting`), `pacing_reader` ([per-index state](../reference/http.md#per-index-ingest-state)).
 - **`GET /indexes/<name>/status`**, on the public surface, serves one index's entry ([the route](../reference/http.md#get-indexesnamestatus)).
-- **Metrics**, one series per enabled index: `flusso_index_documents_waiting`, `flusso_index_backlog_age_seconds`, `flusso_index_exempt`, `flusso_index_frozen`, `flusso_index_working`, `flusso_index_held{by}`, `flusso_index_backfilling`; and `flusso_reader_waits_seconds`, how often and how long reading stops, by the bound that stopped it ([Metrics](../reference/metrics.md)).
+- **Metrics**, one series per enabled index: `flusso_index_documents_waiting`, `flusso_index_backlog_age_seconds`, `flusso_index_exempt`, `flusso_index_frozen`, `flusso_index_working`, `flusso_index_held{by}`, `flusso_index_backfilling`, `flusso_index_backfill_retrying`, `flusso_index_down`, `flusso_index_restarts_total{kind}`; and `flusso_reader_waits_seconds`, how often and how long reading stops, by the bound that stopped it ([Metrics](../reference/metrics.md)).
 - **`FlussoIndexBacklog`**, new in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`: an index exempt, or stuck past 60 s, for 10 minutes. New chart values `prometheusRule.indexBacklogSeconds` and `indexBacklogFor` ([runbook](stalled-lane.md#when-flussoindexbacklog-fires)).
-- **The dev dashboard** has a per-index row.
+- **The dev dashboard** has a per-index row, with which indexes are down or retrying a backfill and how often each restarted.
 
 **Who is affected.** Nobody has to change anything. With the chart's `prometheusRule` on, the new alert pages.
 
@@ -348,6 +378,7 @@ The share has a flag and a variable, like the table's other keys:
 - **`[concurrency] max_pending_documents`** is `ConcurrencyConfig.max_pending_documents: Option<config::CountValue>`: a struct literal of `ConcurrencyConfig` must set it. `daemon::max_pending_documents(&Config)` resolves and checks it (`engine::DEFAULT_MAX_PENDING_DOCUMENTS` is 1,000,000), and `Daemon::start` fails on `0`. `IngestEngine::with_max_pending_documents` sets it (at least 1); `config::parse_max_waiting` parses its flag or variable. New `EngineError::DocumentsLeft`: every builder returned with documents read and not built, named per index. New `daemon::Status::waiting_by_index`.
 - **Lane items are keyed per index.** New `stream::ItemKey`, and `stream::Batch` gains `key: Option<ItemKey>` (`None` on snapshot rows; a serialized item without it still reads). `Progress::published(lane, key, oldest, last)` takes the item's key, and `Progress::applied` and `Progress::searchable` take an `ItemKey` instead of a `Position`; the new `published_step` and `published_build` take it too. `Progress::next_key(index)` numbers an index's next item, the same on every lane of the index.
 - **Per-index ingest state.** New `engine::IndexStates`, shared by the ingest engine (`IngestEngine::index_states`), with `IndexView`, `ExemptionState`, `HeldBy` and the guards `LaneFull`, `PacingReader` and `Walking`; `engine::STUCK_AFTER` (5 s). `Observer::on_reader_wait(bound, index, waited)` is new, with a no-op default, and `engine::ReaderBound`. `Progress::oldest_unbuilt`, `daemon::Stalls::backlog` and `forget_backlog`, and `daemon::BACKLOG_SPAN` (an hour of samples) are new. `daemon::Status` gains `with_ingest_indexes` (the enabled indexes), `attach_index_states`, `index_ingest`, `ingest_indexes`, `tracks` and `index_names`; `StatusSnapshot` gains the public field `ingest` (`IngestSnapshot`, `IndexIngestSnapshot`, `Exemption`, `IndexHold`, `BackfillSnapshot`), so a struct literal must set it. `DaemonControl::detached` builds a control with no deployment behind it, for a transport's tests.
+- **Per-index restart.** `IngestEngine::with_backoff(Backoff)` sets the wait before one index restarts alone or retries its backfill (default 1 s doubling to 60 s; the daemon passes `[backoff]`). `Observer` gains `on_index_failed(index, kind, error, retry_in)` and `on_index_restarted(index, kind)`, `kind` an `engine::Work` (`Live` or `Backfill`), both with no-op defaults; an index's failure is not an `on_engine_error`. New in `daemon`: `IngestState` (`Running`, `Down`), `BackfillState` (`Walking`, `Retrying`, `Waiting`), `IndexFailure` (`message`, `at`), and `IndexErrors` and `IndexRestarts` (`live`, `backfill`); `IndexIngestSnapshot` carries `state`, `down_since`, `last_error` and `restarts`, and `BackfillSnapshot` carries `state`, `retry_at` and `sinks: Option<Vec<String>>`. The channel stream adapter now wakes a `recv` already waiting when a delivery is released (nacked, or dropped unacknowledged), so it is redelivered at once.
 - **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.
 
 ## Related

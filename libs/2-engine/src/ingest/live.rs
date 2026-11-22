@@ -32,6 +32,10 @@ pub(super) struct Runs {
     /// The last grant's candidate, kept while the budget leaves some of its
     /// documents waiting: a later grant takes them even if no run comes.
     kept: Option<Candidate>,
+    /// The newest position a live grant of this builder carried: a backlog
+    /// candidate never carries an older one, so its lanes' positions never
+    /// go down (§3.10).
+    floor: Option<Position>,
     max_changes: usize,
     max_delay: Duration,
     lead: Arc<Lead>,
@@ -94,6 +98,7 @@ impl Runs {
             short: false,
             last_grant: None,
             kept: None,
+            floor: None,
             max_changes: max_changes.max(1),
             max_delay,
             lead,
@@ -112,6 +117,20 @@ impl Runs {
     /// Which of the lead's queues is this builder's.
     pub(super) fn slot(&self) -> usize {
         self.slot
+    }
+
+    /// A live grant carried `position`.
+    pub(super) fn raise_floor(&mut self, position: Position) {
+        self.floor = Some(self.floor.map_or(position, |floor| floor.max(position)));
+    }
+
+    /// A backlog candidate through its newest waiting document, `newest`:
+    /// placed at the newest position a live grant carried when that is
+    /// newer. Sound: a lane's `newest` moves to a position only once every
+    /// document marked at or before it is taken.
+    pub(super) fn backlog(&self, newest: Position, full: bool) -> Candidate {
+        let position = self.floor.map_or(newest, |floor| floor.max(newest));
+        Candidate::backlog(position, full)
     }
 
     /// The lead the reader waits on.

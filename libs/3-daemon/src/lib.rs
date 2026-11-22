@@ -18,9 +18,10 @@ pub use fence::{
 pub use observer::StatusObserver;
 pub use stall::{BACKLOG_SPAN, LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};
 pub use status::{
-    BackfillSnapshot, Exemption, IndexHold, IndexIngestSnapshot, IndexState, IngestSnapshot,
-    LaneHealthState, LaneHealthView, LaneSnapshot, LastScriptFailure, Phase, PinnedBy,
-    ScriptFailures, SinkPhase, SinkSnapshot, Status, StatusSnapshot,
+    BackfillSnapshot, BackfillState, Exemption, IndexErrors, IndexFailure, IndexHold,
+    IndexIngestSnapshot, IndexRestarts, IndexState, IngestSnapshot, IngestState, LaneHealthState,
+    LaneHealthView, LaneSnapshot, LastScriptFailure, Phase, PinnedBy, ScriptFailures, SinkPhase,
+    SinkSnapshot, Status, StatusSnapshot,
 };
 pub use supervise::{ControlError, DaemonControl};
 
@@ -487,6 +488,7 @@ impl Daemon {
         .with_budget(Arc::clone(&budget))
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())
+        .with_backoff(backoff)
         .with_stop(stop.clone());
         status.attach_index_states(ingest.index_states());
 

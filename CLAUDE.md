@@ -761,8 +761,9 @@ is the one concrete piece.
   names each index left with documents read and not built (`shutdown::unbuilt_indexes`,
   `daemon::Status::waiting_by_index`).
   A reader error (through the builder, which joins the reader) or a builder error reaches the
-  dispatcher over the builder's one-shot and ends the run; a panic in any of the three unwinds the run's
-  task, as `main`'s did; returning drops the reader and the builder in place (nothing spawned, nothing
+  dispatcher over the builder's one-shot and ends the run (with two or more builders, a failure of a
+  builder's own index restarts it alone instead: slice 8, below); a panic in any of the three unwinds
+  the run's task, as `main`'s did; returning drops the reader and the builder in place (nothing spawned, nothing
   outlives the run), and an engine restart forgets the
   old marks before the new reader starts. A change read always counts read: the run being read is a guard that counts what wasn't
   handed over when it drops, so `changes_captured` and the read count move together. `Idle` ends where the reader began the run that woke the
@@ -788,6 +789,70 @@ is the one concrete piece.
   running build, nothing committed ahead, confirmation pinned, the stop mid-run and
   far ahead, both errors, a reader panic, a burst past tokio's cooperative budget, the idle/resolve split, a parked lane bounding pending memory), the CLI's
   `max_waiting` binary and `run::tests`, the daemon's `a_waiting_bound_below_one_index_stops_the_start`.
+- **A failure of one index's own work restarts its builder alone, or its walk alone (ADR 0012 stage
+  8a, slice 8-1; the stage note's §3.10).** With two or more builders, a failure of the builder's
+  **walk** (a key read failed or panicked on its own task; a backfill batch's build failed or panicked,
+  or one of its documents failed under `on_error = "stop"`) is taken in the builder's loop, no error
+  returned (fix round 2): the snapshot is dropped, that walk's unpublished slots discarded
+  (`Builds::fail_walk`, `Job::Discarded`, the walk known by its `reached` record; `land` halts no grant
+  for a backfill slot beside other builders), its requests kept with each lane resumed after the last
+  mark published to it, gathered as a coalescing set held until the walk's retry time (`retry: true`:
+  "every sink asked" doesn't start it, a new request joins it, and a set starts only once no walk runs,
+  so a retry never drops a newer walk; a walk failure `down` finds is reported and waits its own wait
+  too), and the index's live work goes on, not held, not folding; a retry wait is idle time. An `EngineError::Source` or `DocumentFailed` a builder returns (a live build that
+  failed or panicked, inline included through `catch_unwind` on its first poll; a live document under
+  `on_error = "stop"`) is its index's (`ingest/restart.rs`'s `restarts_alone`, the one predicate); a lane or request-lane
+  error, a bug variant, the reader, the dispatcher, any failure while stopping and any failure of a lone
+  builder end the run as before (one index keeps the whole-run restart and its replay, and pays nothing;
+  a build panicking at its first poll is a failed build there too, so the daemon restarts the run where
+  the unwound task used to end the deployment: the daemon's
+  `a_panicking_build_restarts_the_ingest_engine_and_never_hangs`).
+  The builder (`builder.rs`'s `build` loop and `down`): waits for its running builds (`Builds::abandon`),
+  gives every unreleased build of its index back to the pending set (`Progress::give_back`: each id
+  waits again at its own change and read number, kept per id in the build, an id marked again
+  meanwhile at the older of the two; never `forget`: nothing is read again, and its lanes stay `Before`
+  the oldest of them, so the slot and every fence of the index stay pinned while the other indexes'
+  pass; the `newest` invariant needs no reset, since `newest` moved only past builds already taken),
+  keeps its requests (the snapshot's, the coalescing set's and a finished walk's still queued to
+  complete, carried as a coalescing set due at once, each lane's `after` moved to the last walk mark
+  published to it: `Snapshot::reached`, recorded as each backfill slot is published, so the walk
+  resumes where its lanes are; the channel adapter wakes a waiting `recv` on a release too, so the
+  engine doesn't depend on carrying them), sets its lead queue `held` and `folding` **before** it waits
+  for its running builds (the reader hands it nothing, and at its cap it is exempt while another index
+  is free, 6b-2's mechanism), clears its budget hold, takes fresh `Builds` (whose drop removes only its
+  own index from the shared budget wait, ending it only when no builder is held), and waits its
+  `Retry`, counted from the failure (it restarts the wait after it, or once `down` returns if later)
+  (`[backoff]` via `IngestEngine::with_backoff`, 1 s doubling to `max_ms`, one schedule per
+  kind, each started over once its kind moved since its last failure: a live item of the index
+  numbered, or a backfill batch carrying a walk mark published (`IngestEngine::walk_batches`; a source
+  that can't mark walks never moves it, its retries starting from the first key); a stop cuts a live
+  wait short: one more try under the stop, O3; a walk's wait it drops with the held set, the request
+  served on the next start). `down` keeps a held set as it is and calls `Builds::restarting` (the index
+  leaves the budget's held set; once none is held, the wait ends and the next refusal is counted). The restarted builder folds and asks for its backlog once as it starts (nothing else
+  would: the reader hands a folding builder nothing); leaving the fold with nothing waiting and nothing
+  refused ends its hold (a quiet index makes no live grant to end it). A backlog candidate never carries a position
+  older than the builder's last live grant (`Runs::backlog`, the floor), so a lane's positions never go
+  down within a run. Reported as `Observer::on_index_failed` / `on_index_restarted` and an `error!` /
+  `info!` line; `/status` and metrics are slice 8-2. Guards: `ingest::tests::restart` (each kind of
+  failure restarts alone with the other index landing, every given-back document rebuilt, the slot and
+  the index's lane `Before` its oldest unbuilt change at the restart while the sibling's answers
+  `Through`, exempt past its cap while down, the waits doubling and starting over, a stop cutting the
+  wait, a failure while stopping ending the run, an inline build panic, one index ending the run, an
+  open stream's backlog and walk served after the restart, a lane's positions never going down across
+  a restart, a quiet restarted index free again, `ingest::tests::walk_failures` (a walk failing alone
+  over two sinks: live documents flowing, later backfill slots discarded, a request joining the retry, a
+  stop during the wait, a live failure keeping the walk's retry, one-off failures each waiting the first
+  wait, the random two-sink schedules), `builds::tests`' `a_hold_after_a_lone_held_index_restarted_is_counted`, a failure beside a slow build held at once, a walk
+  resuming where its lanes are, a poison backfill row backing off beside live traffic, one budget wait
+  across another index's restart, two builds of one document given back at the older change, a lane
+  failure ending the run; the review of #456's guards `nothing_counts_or_fences_past_a_given_back_change`,
+  `a_thousand_failures_leak_nothing`, `every_index_down_stops_the_reading_and_a_stop_ends_with_an_error`), `restart::tests` (the predicate, the
+  waits), `pending::tests`' `a_give_back_*`, `tests::builders`'
+  `a_failed_walk_restarts_its_index_alone_and_the_other_walk_reads_on`,
+  `a_build_error_restarts_its_builder_alone_beside_a_held_builder`,
+  `a_key_read_panicking_on_its_own_task_restarts_its_index_alone`, and the random schedules, whose
+  two-index seeds restart builders at random build failures and, in half of them, fail one whole run
+  (a resolve) too.
 
 - **One lane per `(index, sink)` (ADR 0012 stage 7).** `stream::LaneKey { index, sink }`; the daemon
   builds every enabled index × every sink (`Backends::stream(config, &[LaneKey])`), `Stream::lanes(sink)`
@@ -1247,7 +1312,10 @@ is the one concrete piece.
   ticket; a nacked or dropped-unacked delivery is marked due by its own ticket and redelivered alone,
   due ones in lane order, never the deliveries still in flight beside it, so a released delivery can
   follow later acked ones: the sink engine's admission keeps document order (issue #395; guards
-  `releasing_one_delivery_redelivers_only_that_one`, `released_deliveries_come_back_in_lane_order`). (A single redelivery slot
+  `releasing_one_delivery_redelivers_only_that_one`, `released_deliveries_come_back_in_lane_order`).
+  A release wakes a `recv` already waiting (the channel's `Notify`, registered before the ledger is
+  read), which hands the released delivery back first (review of #456; guards
+  `a_dropped_request_wakes_a_recv_already_waiting`, `a_nack_or_a_drop_wakes_a_recv_already_waiting_in_lane_order`). (A single redelivery slot
   made the coalescing loop receive the same request forever — the OOM behind the first attempts.)
   Guards: `an_unseeded_sink_requests_a_snapshot_then_marks_seeded`, `a_seeded_sink_requests_nothing`,
   `backfill_false_makes_a_stateless_sink_live_only`,
@@ -1964,7 +2032,14 @@ stuck or exempt: reading stops at an index's cap, so one that paces the reader s
 `exemption`/`exemption_since`; `working`, about progress, not holds: false while items of it wait
 on a lane unacknowledged for `engine::STUCK_AFTER` (5 s), from the engine's record with two or more
 indexes and from the lanes' stall ages with one (one index keeps no record); `held_by`/`held_sinks`/
-`held_since`, information only; `backfill`), one entry per **enabled** index (`Status::with_ingest_indexes`:
+`held_since`, information only; `backfill`: `{"state": "walking", "sinks"}`, `{"state": "retrying",
+"retry_at"}` while a failed walk waits (due at, can be past), or `{"state": "waiting"}` while a walk its
+live failure cut waits for the builder's restart (slice 8-2); `state` `running`/`down`, `down_since`, `last_error`
+`{live, backfill}`, each null or `{message, at}` (one kind never hides the other; the message cut at
+`INDEX_ERROR_BYTES`, 4096, on a char boundary), `restarts` `{live, backfill}` (slice 8-2: fed by `StatusObserver` from
+`on_index_failed`/`on_index_restarted`, which carry `engine::Work` as the kind; a whole run's failure,
+start or stop clears down and retrying (`Status::forget_index_runs`) and keeps the error and the counts;
+`working` reads false while down; one index is never down)), one entry per **enabled** index (`Status::with_ingest_indexes`:
 a disabled index has no entry, no `flusso.index.*` series and `404` on both index routes, while `indexes.<name>`
 and `GET /indexes` keep it, as on `main`), reads the ingest engine's `engine::IndexStates`, kept for the
 engine's life and attached to `Status` once the engine exists (`Status::attach_index_states`). The engine
@@ -1973,7 +2048,8 @@ writes it only at edges (the tick's exemption, `IndexStates::budget` in the buil
 included; the `Walking` guard on the snapshot), and an engine run's end, by any path, clears the
 exemption and the budget hold (`ClearsAtRunEnd` → `IndexStates::clear_run`). Metrics (observable gauges
 read from `Status`, `telemetry/metrics.rs`'s `register_index_gauges`): `flusso.index.{documents_waiting,
-backlog_age, exempt, frozen, working, held{by}, backfilling}`; `flusso.reader.waits{bound}` (plus `index` on `per_index`) is a
+backlog_age, exempt, frozen, working, held{by}, backfilling, backfill_retrying, down}` and the observable
+counter `flusso.index.restarts{index,kind}` (`flusso_index_restarts_total`; slice 8-2); `flusso.reader.waits{bound}` (plus `index` on `per_index`) is a
 histogram (buckets up to 600 s) recorded by `Observer::on_reader_wait` (`ReaderBound`: `per_index`,
 `total`, `changes`, `pending`, from `Lead::reached_by`) only for a wait that pended past its first poll.
 Alert `FlussoIndexBacklog`: `max by (index) (flusso_index_exempt) > 0 or max by (index)
@@ -2853,7 +2929,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 
 | To work on… | Go to |
 | --- | --- |
-| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the builder's loop; `ingest/reader.rs` the reader: read, resolve, mark, the lead; `ingest/together.rs` the reader, the dispatcher and the builders polled as one task; `ingest/dispatcher.rs` requests forwarded, confirmation, the tick, the end and the stop; `ingest/builder.rs` the builder's loop and request coalescing; `ingest/live.rs` the queued runs formed into batches, `ingest/builds.rs` admission and the grant-ordered slots, `ingest/gate.rs` the build permits (live first, every fourth contested grant to backfill), `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`; `budget.rs` the memory budget: `Budget`, `Reservation`/`Charge`, the heap walk), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in item-key order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `sink_engine/walked.rs` (the landed prefix of a backfill walk, recorded for resume), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
+| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the builder's loop; `ingest/reader.rs` the reader: read, resolve, mark, the lead; `ingest/together.rs` the reader, the dispatcher and the builders polled as one task; `ingest/dispatcher.rs` requests forwarded, confirmation, the tick, the end and the stop; `ingest/builder.rs` the builder's loop, request coalescing and its restart in place (slice 8); `ingest/restart.rs` whose failure restarts one builder alone, and its waits; `ingest/live.rs` the queued runs formed into batches, `ingest/builds.rs` admission and the grant-ordered slots, `ingest/gate.rs` the build permits (live first, every fourth contested grant to backfill), `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`; `budget.rs` the memory budget: `Budget`, `Reservation`/`Charge`, the heap walk), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in item-key order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `sink_engine/walked.rs` (the landed prefix of a backfill walk, recorded for resume), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Per-index ingest state an operator reads (slice 7: exemption, holds, walk, working) | engine `libs/2-engine/src/index_states.rs` (`IndexStates`); daemon `status.rs` (`ingest.indexes.<name>`, `index_ingest`), `stall.rs` (`backlog`); CLI `http/mod.rs` (`/indexes/{name}/status`), `telemetry/metrics.rs` (`register_index_gauges`), `telemetry/observer.rs` (`flusso.reader.waits`); alert `FlussoIndexBacklog` in `dev/prometheus/rules/` and `deploy/helm/flusso/templates/prometheusrule.yaml` |
 | Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |

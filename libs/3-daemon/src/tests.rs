@@ -1408,13 +1408,15 @@ impl DocumentBuilder for PanickingDocuments {
     }
 }
 
-/// A build that panics never hangs the deployment. On its own task (it
-/// awaited first) it is a failed build: an engine error, the ingest engine
-/// fails and the daemon restarts it. In the ingest task's own poll (it
-/// panicked before awaiting anything) it unwinds the ingest task, as main's
-/// inline builds did, and the deployment ends with an error.
+/// A build that panics never hangs the deployment. Whether it panicked on
+/// its own task (it awaited first) or in the ingest task's own first poll of
+/// it (it panicked before awaiting anything; caught since slice 8 of ADR
+/// 0012 stage 8a), it is a failed build: with one index an engine error, so
+/// the ingest engine fails and the daemon restarts it, and the deployment
+/// runs on until the stop, which ends it `Ok`. Its index is never shown
+/// down (slice 8-2): one index's failure is the run's.
 #[tokio::test]
-async fn a_panicking_build_ends_or_restarts_the_ingest_engine_but_never_hangs() {
+async fn a_panicking_build_restarts_the_ingest_engine_and_never_hangs() {
     for at_once in [false, true] {
         let sink = Arc::new(RecordingSink::seeded());
         let backends = backends_with(
@@ -1428,20 +1430,68 @@ async fn a_panicking_build_ends_or_restarts_the_ingest_engine_but_never_hangs() 
             .unwrap();
         let status = running.status();
         let run = tokio::spawn(running.run(tokio::time::sleep(Duration::from_millis(500))));
-        let result = tokio::time::timeout(Duration::from_secs(20), run)
+        let ended = tokio::time::timeout(Duration::from_secs(20), run)
             .await
             .unwrap_or_else(|_| panic!("at_once {at_once}: the deployment hung"))
             .unwrap();
-        if at_once {
-            let error = result.unwrap_err().to_string();
-            assert!(error.contains("ingest engine task failed"), "{error}");
-        } else {
-            assert!(
-                status.snapshot().errors >= 1,
-                "the failed build is an engine error"
-            );
+        assert!(
+            ended.is_ok(),
+            "at_once {at_once}: the deployment didn't end on the panic; the stop ended it \
+             cleanly: {ended:?}"
+        );
+        assert!(
+            status.snapshot().errors >= 1,
+            "at_once {at_once}: the failed build is an engine error"
+        );
+        // Slice 8-2 (S6): one index is never down, its failure the run's.
+        for (name, entry) in status.snapshot().ingest.indexes {
+            assert_eq!(entry.state, crate::IngestState::Running, "{name}");
+            assert_eq!(entry.restarts, crate::IndexRestarts::default(), "{name}");
+            assert_eq!(entry.last_error, crate::IndexErrors::default(), "{name}");
         }
     }
+}
+
+/// Slice 8-2 (S6): with one index, a build that fails restarts the whole
+/// ingest engine, never that index alone: the engine fails and is
+/// restarted, and the index's entry, sampled throughout and at the end,
+/// shows it running, with no restart and no error of its own (no per-index
+/// event is ever reported).
+#[tokio::test]
+async fn one_index_is_never_down() {
+    let sink = Arc::new(RecordingSink::seeded());
+    let backends = backends_with(
+        Arc::new(ScriptedSource::new(vec![row_event(false, 1)])),
+        Arc::new(PanickingDocuments { at_once: false }),
+        vec![(primary(), sink as Arc<dyn Sink>, SinkOptions::default())],
+    );
+    let running = Daemon::new(fast_restarts(), backends)
+        .start()
+        .await
+        .unwrap();
+    let status = running.status();
+    let run = tokio::spawn(running.run(tokio::time::sleep(Duration::from_millis(800))));
+    let never_down = || {
+        for (name, entry) in status.snapshot().ingest.indexes {
+            assert_eq!(entry.state, crate::IngestState::Running, "{name}");
+            assert_eq!(entry.restarts, crate::IndexRestarts::default(), "{name}");
+            assert_eq!(entry.last_error, crate::IndexErrors::default(), "{name}");
+        }
+    };
+    while !run.is_finished() {
+        never_down();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::timeout(Duration::from_secs(20), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        status.snapshot().errors >= 1,
+        "the engine failed and restarted"
+    );
+    never_down();
 }
 
 /// `ScriptedDocuments` whose bound read waits until released: a walk that
@@ -1527,7 +1577,7 @@ async fn the_status_reads_each_index_from_the_ingest_engine() {
     })
     .await
     .expect("the walk shows in the status");
-    assert_eq!(walking.sinks, vec!["primary".to_owned()]);
+    assert_eq!(walking.sinks, Some(vec!["primary".to_owned()]));
     documents.released.notify_one();
     tokio::time::timeout(Duration::from_secs(5), run)
         .await

@@ -52,6 +52,7 @@ mod outstanding;
 pub(crate) use outstanding::Outstanding;
 pub use outstanding::STUCK_AFTER;
 mod reader;
+mod restart;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -74,7 +75,7 @@ use crate::budget::Budget;
 use crate::error::{EngineError, Result};
 use crate::index_states::IndexStates;
 use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep};
-use crate::policy::{BatchPolicy, FailurePolicies, MaxWaiting};
+use crate::policy::{Backoff, BatchPolicy, FailurePolicies, MaxWaiting};
 use crate::progress::Progress;
 use crate::stop::Stop;
 
@@ -155,6 +156,12 @@ pub struct IngestEngine {
     /// The one key-read permit every walk shares (ADR 0012 stage 8a, K1).
     key_reads: Arc<tokio::sync::Semaphore>,
     failure_policies: FailurePolicies,
+    /// How long one index's builder waits before it restarts alone (slice 8).
+    backoff: Backoff,
+    /// How many backfill batches of each index carrying a walk mark were
+    /// published, across runs (each moved some lane's resume point): what
+    /// starts a walk failure's waits over (slice 8, fix round 2).
+    walk_batches: BTreeMap<IndexName, AtomicU64>,
     stop: Stop,
     /// How many times this engine moved the source forward (see
     /// [`advances`](Self::advances)), across restarts of its run.
@@ -213,6 +220,11 @@ impl IngestEngine {
             budget_waits: Arc::default(),
             key_reads: Arc::new(tokio::sync::Semaphore::new(1)),
             failure_policies: FailurePolicies::default(),
+            backoff: Backoff::default(),
+            walk_batches: progress
+                .indexes()
+                .map(|index| (index.clone(), AtomicU64::new(0)))
+                .collect(),
             stop: Stop::new(),
             advances: AtomicU64::new(0),
             furthest: Mutex::new(Furthest::default()),
@@ -273,6 +285,15 @@ impl IngestEngine {
     /// reports it and publishes nothing for it.
     pub fn with_failure_policies(mut self, policies: FailurePolicies) -> Self {
         self.failure_policies = policies;
+        self
+    }
+
+    /// With two or more indexes, how long an index's builder that failed on
+    /// its own work waits before it restarts alone (ADR 0012 stage 8a, slice
+    /// 8): `backoff`'s first wait, doubling to its longest, started over once
+    /// the index published again. Default: 1 s doubling to 60 s.
+    pub fn with_backoff(mut self, backoff: Backoff) -> Self {
+        self.backoff = backoff;
         self
     }
 
@@ -400,25 +421,14 @@ impl IngestEngine {
                 .insert(lane, producer);
         }
         let by_index: Vec<(IndexName, Lanes)> = by_index.into_iter().collect();
-        let builds: Vec<Builds> = by_index
+        let several = by_index.len() > 1;
+        let mut builds: Vec<Builds> = by_index
             .iter()
-            .map(|(index, _)| {
-                Builds::new(self.builds, self.budget.clone())
-                    .with_gate(Arc::clone(&gate))
-                    .of_index(index.clone())
-                    .with_observer(Arc::clone(&self.observer))
-                    .with_progress(Arc::clone(&self.progress))
-                    .with_waits(Arc::clone(&self.budget_waits))
-            })
-            .collect();
-        let several = builds.len() > 1;
-        let mut builds: Vec<Builds> = builds
-            .into_iter()
-            .map(|builds| builds.beside_others(several))
+            .map(|(index, _)| self.builds_of(&gate, index.clone(), several))
             .collect();
         let lanes: Vec<Lanes> = by_index.into_iter().map(|(_, lanes)| lanes).collect();
         let ended = self
-            .follow(&lanes, requests, &scopes, live, &mut builds)
+            .follow(&lanes, requests, &scopes, live, &mut builds, &gate)
             .await;
         if ended.is_err() {
             for builds in &mut builds {
@@ -426,6 +436,29 @@ impl IngestEngine {
             }
         }
         ended
+    }
+
+    /// A builder's builds of `index`, asking `gate` for their permits, beside
+    /// other builders when `several`.
+    fn builds_of(&self, gate: &Arc<gate::Gate>, index: IndexName, several: bool) -> Builds {
+        Builds::new(self.builds, self.budget.clone())
+            .with_gate(Arc::clone(gate))
+            .of_index(index)
+            .with_observer(Arc::clone(&self.observer))
+            .with_progress(Arc::clone(&self.progress))
+            .with_waits(Arc::clone(&self.budget_waits))
+            .beside_others(several)
+    }
+
+    /// What `index` has done so far, by kind (slice 8's waits).
+    fn done(&self, index: &IndexName) -> restart::Done {
+        restart::Done {
+            live: self.progress.numbered(index),
+            walk_batches: self
+                .walk_batches
+                .get(index)
+                .map_or(0, |batches| batches.load(Ordering::Relaxed)),
+        }
     }
 
     /// The run, from an open live stream to its end or a stop: the reader,
@@ -438,6 +471,7 @@ impl IngestEngine {
         scopes: &HashSet<IndexName>,
         live: LiveStream,
         builds: &mut [Builds],
+        gate: &Arc<gate::Gate>,
     ) -> Result<Ended> {
         // What an earlier run marked and never published is forgotten
         // before this run's reader marks anything (R10): confirmation stayed
@@ -506,6 +540,10 @@ impl IngestEngine {
                     lanes,
                     scopes,
                     builds,
+                    gate,
+                    snapshot: None,
+                    coalescing: None,
+                    retry: restart::Retry::new(self.backoff),
                 },
                 done,
             ));

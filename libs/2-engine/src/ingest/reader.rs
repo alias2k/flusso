@@ -55,7 +55,7 @@ use tokio::time::{Duration, Instant};
 use super::LiveStream;
 use super::outstanding::Outstanding;
 use crate::error::{EngineError, Result};
-use crate::index_states::{ExemptionState, IndexStates};
+use crate::index_states::{ExemptionState, IndexStates, PacingReader};
 use crate::observer::{Observer, ReaderBound};
 use crate::policy::{BatchPolicy, MaxWaiting};
 use crate::progress::Progress;
@@ -307,6 +307,7 @@ impl Lead {
     }
 
     /// Whether the reader is as far ahead as it may be.
+    #[cfg(test)]
     pub(super) fn reached(&self, progress: &Progress) -> bool {
         self.reached_by(progress).is_some()
     }
@@ -605,44 +606,47 @@ impl Reader {
     /// between the two still wakes it. The stop is read on every poll; what
     /// wakes a reader waiting here for it is the engine run's watch
     /// ([`together`](mod@super::together)).
+    ///
+    /// The bound it waits at is read again on every wake: when it changes,
+    /// the wait so far is reported under the bound it was, and a new one
+    /// starts under the new bound, `/status`'s `pacing_reader` moving with it
+    /// (review of #456). A wait that returned at its first poll stopped
+    /// nothing and is not reported.
     async fn room(&self) -> bool {
         // Room now: nothing to register.
-        let Some((bound, queue)) = self.lead.reached_by(&self.progress) else {
+        let Some(first) = self.lead.reached_by(&self.progress) else {
             return !self.stop.is_requested();
         };
-        let index = queue
-            .and_then(|queue| self.runs.get(queue))
-            .map(|(index, _)| index);
-        let began = Instant::now();
-        // `/status`'s `pacing_reader` for the index at its cap, while the
-        // reader waits on it (slice 7).
-        let _pacing = index
-            .zip(self.states.as_ref())
-            .map(|(index, states)| states.pacing_reader(index));
-        let (room, waited) = self.wait_for_room().await;
-        // A wait that returned at its first poll stopped nothing.
-        if waited {
-            self.observer.on_reader_wait(bound, index, began.elapsed());
-        }
-        room
-    }
-
-    /// [`room`](Self::room)'s wait, once the lead was found reached.
-    /// Returns whether there is room (not the stop) and whether it waited
-    /// past its first poll.
-    async fn wait_for_room(&self) -> (bool, bool) {
         #[cfg(test)]
         if let Some(checked) = &self.checked {
             checked(Check::BeforeRegistering);
         }
+        let mut at = first;
+        let mut began = Instant::now();
+        let mut pacing = self.pacing(at);
         let mut waited = false;
         let room = std::future::poll_fn(|cx| {
             self.lead.taken.register(cx.waker());
             self.lead.waiting.store(true, Ordering::Relaxed);
             fence(Ordering::SeqCst);
-            if self.stop.is_requested() || !self.lead.reached(&self.progress) {
+            let reached = if self.stop.is_requested() {
+                None
+            } else {
+                self.lead.reached_by(&self.progress)
+            };
+            let Some(now) = reached else {
                 self.lead.waiting.store(false, Ordering::Relaxed);
                 return Poll::Ready(!self.stop.is_requested());
+            };
+            if now != at {
+                if waited {
+                    self.observer
+                        .on_reader_wait(at.0, self.index_at(at), began.elapsed());
+                }
+                drop(pacing.take());
+                at = now;
+                began = Instant::now();
+                pacing = self.pacing(at);
             }
             #[cfg(test)]
             if let Some(checked) = &self.checked {
@@ -652,7 +656,27 @@ impl Reader {
             Poll::Pending
         })
         .await;
-        (room, waited)
+        if waited {
+            self.observer
+                .on_reader_wait(at.0, self.index_at(at), began.elapsed());
+        }
+        drop(pacing);
+        room
+    }
+
+    /// The index of the queue a bound names, if it names one.
+    fn index_at(&self, (_, queue): (ReaderBound, Option<usize>)) -> Option<&IndexName> {
+        queue
+            .and_then(|queue| self.runs.get(queue))
+            .map(|(index, _)| index)
+    }
+
+    /// `/status`'s `pacing_reader` for the index at its cap, while the
+    /// reader waits on it (slice 7).
+    fn pacing(&self, at: (ReaderBound, Option<usize>)) -> Option<PacingReader<'_>> {
+        self.index_at(at)
+            .zip(self.states.as_ref())
+            .map(|(index, states)| states.pacing_reader(index))
     }
 
     /// Read every change the stream has ready right now into the run, until

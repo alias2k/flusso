@@ -8,7 +8,7 @@ A script that fails on a document fails that document, and the index's [`on_erro
 
 | `on_error` | A failing document | Good for |
 | --- | --- | --- |
-| `"stop"` (default) | stops the ingest engine; the daemon restarts it with backoff, and the change fails again until the script or the row is fixed. The slot doesn't advance, so lag and WAL grow. | indexes where a wrong or missing document is worse than stale ones |
+| `"stop"` (default) | stops its index and retries it with backoff; the change fails again until the script or the row is fixed. With two or more indexes, the others keep indexing ([A failing index](../../reference/config-toml.md#a-failing-index)); with one, the whole ingest engine restarts. The slot doesn't advance past the change, so lag and WAL grow. | indexes where a wrong or missing document is worse than stale ones |
 | `"skip"` | is published to no sink; every sink keeps the version it already has. Sync carries on. | most indexes: one odd row shouldn't stall the rest |
 
 ```toml
@@ -46,7 +46,7 @@ The dev stack's Grafana dashboard has a **Script failures** panel built on the m
 | the data, in a few rows | fix the rows | each fixed row's document, through the normal change stream |
 | the data, in many rows | fix them, then [reindex](../../operate/reindex.md) | the whole index |
 
-Under `stop`, the engine resumes on its own once a fix lands: the failing change is retried after every restart. Under `skip`, a skipped document stays stale until its row changes again (or a reindex rebuilds it).
+Under `stop`, the index resumes on its own once a fix lands: the failing change is retried after every wait, at most `[backoff] max_ms` apart (60 s by default). Under `skip`, a skipped document stays stale until its row changes again (or a reindex rebuilds it).
 
 Reproduce a failure from the log with the id it names: `flusso script run --index products --id <id>`. See [Test and debug a script](debugging.md).
 

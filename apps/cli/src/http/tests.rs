@@ -451,6 +451,51 @@ async fn an_index_status_is_its_ingest_entry() {
     assert_eq!(whole["ingest"]["indexes"]["orders"], body);
 }
 
+/// Slice 8-2 (S9): the route serves a down index's state, since, last
+/// error and restarts, and a walk waiting to retry.
+#[tokio::test]
+async fn a_down_index_and_a_retrying_walk_are_served_on_the_index_route() {
+    use daemon::Observer;
+    let (status, _) = indexed_status();
+    let observer = daemon::StatusObserver::new(Arc::clone(&status));
+    observer.on_index_failed(
+        &index("orders"),
+        daemon::Work::Live,
+        "the build failed",
+        std::time::Duration::from_secs(4),
+    );
+    observer.on_index_failed(
+        &index("users"),
+        daemon::Work::Backfill,
+        "the key read failed",
+        std::time::Duration::from_secs(4),
+    );
+    let base = serve_status(Arc::clone(&status)).await;
+    let (code, orders) = get_json(&format!("{base}/indexes/orders/status")).await;
+    assert_eq!(code, 200);
+    assert_eq!(orders["state"], "down");
+    assert!(orders["down_since"].is_string());
+    assert_eq!(orders["working"], false);
+    assert_eq!(orders["held_by"], serde_json::Value::Null);
+    assert_eq!(orders["last_error"]["live"]["message"], "the build failed");
+    assert!(orders["last_error"]["live"]["at"].is_string());
+    assert_eq!(orders["last_error"]["backfill"], serde_json::Value::Null);
+    assert_eq!(
+        orders["restarts"],
+        serde_json::json!({"live": 0, "backfill": 0})
+    );
+    let (_, users) = get_json(&format!("{base}/indexes/users/status")).await;
+    assert_eq!(users["state"], "running");
+    assert_eq!(users["working"], true);
+    assert_eq!(users["backfill"]["state"], "retrying");
+    assert!(users["backfill"]["retry_at"].is_string());
+    assert_eq!(
+        users["last_error"]["backfill"]["message"],
+        "the key read failed"
+    );
+    assert_eq!(users["last_error"]["live"], serde_json::Value::Null);
+}
+
 /// An unknown (or disabled) index is `404`, naming the known ones; a name
 /// that is no index name is `400`.
 #[tokio::test]
