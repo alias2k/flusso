@@ -118,6 +118,9 @@ struct IndexFailures {
     down_since: Option<chrono::DateTime<chrono::Utc>>,
     /// Its walk failed and its retry hasn't started.
     retry_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// A walk was running when its live work failed: its requests wait for
+    /// the builder's restart (review of #457, B3).
+    walk_waiting: bool,
     last_error: Option<IndexFailure>,
     restarts: IndexRestarts,
 }
@@ -422,26 +425,37 @@ impl Status {
                 Duration::ZERO,
             ))
         };
-        let (down_since, retry_at, last_error, restarts) = lock(&self.index_failures)
-            .get(index)
-            .map_or((None, None, None, IndexRestarts::default()), |failures| {
-                (
-                    failures.down_since,
-                    failures.retry_at,
-                    failures.last_error.clone(),
-                    failures.restarts,
-                )
-            });
+        let (down_since, retry_at, walk_waiting, last_error, restarts) =
+            lock(&self.index_failures).get(index).map_or(
+                (None, None, false, None, IndexRestarts::default()),
+                |failures| {
+                    (
+                        failures.down_since,
+                        failures.retry_at,
+                        failures.walk_waiting,
+                        failures.last_error.clone(),
+                        failures.restarts,
+                    )
+                },
+            );
         let state = if down_since.is_some() {
             IngestState::Down
         } else {
             IngestState::Running
         };
-        let retrying = retry_at.map(|at| BackfillSnapshot {
-            state: BackfillState::Retrying,
-            sinks: None,
-            retry_at: Some(rfc3339(at)),
-        });
+        let retrying = retry_at
+            .map(|at| BackfillSnapshot {
+                state: BackfillState::Retrying,
+                sinks: None,
+                retry_at: Some(rfc3339(at)),
+            })
+            .or_else(|| {
+                (walk_waiting && down_since.is_some()).then_some(BackfillSnapshot {
+                    state: BackfillState::Waiting,
+                    sinks: None,
+                    retry_at: None,
+                })
+            });
         let Some(view) = view else {
             return IndexIngestSnapshot {
                 documents_waiting,
@@ -642,11 +656,20 @@ impl Status {
         retry_in: Duration,
     ) {
         let now = chrono::Utc::now();
+        // Read before the failures' lock: a walk in progress as its live
+        // work fails is cut, its requests kept for the restart.
+        let walking = kind == engine::Work::Live
+            && self
+                .index_states
+                .get()
+                .and_then(|states| states.view(index))
+                .is_some_and(|view| view.backfill.is_some());
         let mut failures = lock(&self.index_failures);
         let failures = failures.entry(index.clone()).or_default();
         let kind = match kind {
             engine::Work::Live => {
                 failures.down_since.get_or_insert(now);
+                failures.walk_waiting |= walking;
                 FailureKind::Live
             }
             engine::Work::Backfill => {
@@ -656,7 +679,7 @@ impl Status {
         };
         failures.last_error = Some(IndexFailure {
             kind,
-            message: error.to_owned(),
+            message: cut_error(error),
             at: rfc3339(now),
         });
     }
@@ -668,6 +691,7 @@ impl Status {
         match kind {
             engine::Work::Live => {
                 failures.down_since = None;
+                failures.walk_waiting = false;
                 failures.restarts.live += 1;
             }
             engine::Work::Backfill => {
@@ -684,6 +708,7 @@ impl Status {
         for failures in lock(&self.index_failures).values_mut() {
             failures.down_since = None;
             failures.retry_at = None;
+            failures.walk_waiting = false;
         }
     }
 
@@ -1086,7 +1111,9 @@ pub struct IndexIngestSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_since: Option<String>,
     /// Its backfill: `walking` (with the sinks it serves), `retrying` (a
-    /// failed walk waits for its retry, with when), or null while neither.
+    /// failed walk waits for its retry, with when), `waiting` (a walk its
+    /// live work's failure cut, walked again once the builder restarts), or
+    /// null while none.
     pub backfill: Option<BackfillSnapshot>,
     /// The reader waits at this index's bound now (`max_waiting_per_index`,
     /// or the count a frozen index froze at): it is the one pacing the
@@ -1126,7 +1153,10 @@ pub struct BackfillSnapshot {
     /// While walking, the sinks it serves.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sinks: Option<Vec<String>>,
-    /// While retrying, when the walk starts again (RFC 3339, UTC).
+    /// While retrying, when the walk is due to start again (RFC 3339,
+    /// UTC). It can be in the past: the walk starts at the builder's next
+    /// look once no other walk runs, so a builder busy publishing to a full
+    /// lane, or down, starts it later.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_at: Option<String>,
 }
@@ -1140,6 +1170,9 @@ pub enum BackfillState {
     Walking,
     /// Its walk failed and waits for its retry.
     Retrying,
+    /// A walk its live work's failure cut: its requests are kept and it is
+    /// walked again once the builder restarts.
+    Waiting,
 }
 
 /// Whether an index's builder runs, in `/status` (slice 8-2).
@@ -1332,6 +1365,22 @@ pub struct LaneSnapshot {
     /// Why it is not written, in the destination's words; absent while open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// The most bytes of an error a per-index `last_error` keeps (slice 8-2):
+/// a failure's text can carry a whole document.
+pub const INDEX_ERROR_BYTES: usize = 4096;
+
+/// `error` cut to [`INDEX_ERROR_BYTES`] at a char boundary, marked when cut.
+fn cut_error(error: &str) -> String {
+    if error.len() <= INDEX_ERROR_BYTES {
+        return error.to_owned();
+    }
+    let mut end = INDEX_ERROR_BYTES;
+    while !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} … (cut)", error.get(..end).unwrap_or_default())
 }
 
 fn rfc3339(at: chrono::DateTime<chrono::Utc>) -> String {
@@ -1744,6 +1793,97 @@ mod tests {
             assert!(orders.last_error.is_some() && users.last_error.is_some());
             assert_eq!(users.restarts.live, 1, "end {end}");
         }
+    }
+
+    /// B3 (review of #457): a live failure in the middle of a walk keeps
+    /// its requests for the restart: its backfill shows `waiting` while the
+    /// index is down, and no longer once it restarted. A walk already
+    /// waiting to retry stays `retrying`.
+    #[tokio::test(start_paused = true)]
+    async fn a_walk_cut_by_a_live_failure_shows_waiting_until_the_restart() {
+        use engine::Observer;
+        let (status, states, _, _) = ingest_status();
+        let status = Arc::new(status);
+        let observer = crate::observer::StatusObserver::new(Arc::clone(&status));
+        let walking =
+            states.walking([(orders(), std::collections::BTreeSet::from([sink("audit")]))]);
+        observer.on_index_failed(
+            &orders(),
+            engine::Work::Live,
+            "live",
+            Duration::from_secs(1),
+        );
+        drop(walking);
+        let down = status.index_ingest(&orders()).unwrap();
+        assert_eq!(
+            down.backfill,
+            Some(BackfillSnapshot {
+                state: BackfillState::Waiting,
+                sinks: None,
+                retry_at: None,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&down).unwrap()["backfill"],
+            serde_json::json!({"state": "waiting"})
+        );
+        observer.on_index_restarted(&orders(), engine::Work::Live);
+        assert_eq!(status.index_ingest(&orders()).unwrap().backfill, None);
+        observer.on_index_failed(
+            &users(),
+            engine::Work::Backfill,
+            "walk",
+            Duration::from_secs(9),
+        );
+        observer.on_index_failed(&users(), engine::Work::Live, "live", Duration::from_secs(1));
+        assert_eq!(
+            status
+                .index_ingest(&users())
+                .unwrap()
+                .backfill
+                .map(|backfill| backfill.state),
+            Some(BackfillState::Retrying)
+        );
+    }
+
+    /// B4 (review of #457): a long error is cut, at a char boundary, with a
+    /// marker, in the per-index `last_error`.
+    #[test]
+    fn a_long_index_error_is_cut_at_a_char_boundary() {
+        use engine::Observer;
+        let (status, _, _, _) = ingest_status();
+        let status = Arc::new(status);
+        let observer = crate::observer::StatusObserver::new(Arc::clone(&status));
+        let long = "é".repeat(10_000);
+        observer.on_index_failed(&orders(), engine::Work::Live, &long, Duration::from_secs(1));
+        let message = status
+            .index_ingest(&orders())
+            .unwrap()
+            .last_error
+            .unwrap()
+            .message;
+        assert!(
+            message.len() <= INDEX_ERROR_BYTES + 32,
+            "{} bytes",
+            message.len()
+        );
+        assert!(
+            message.ends_with(" … (cut)"),
+            "{}",
+            &message[message.len() - 20..]
+        );
+        assert!(message.starts_with("éé"));
+        let short = "the build failed";
+        observer.on_index_failed(&orders(), engine::Work::Live, short, Duration::from_secs(1));
+        assert_eq!(
+            status
+                .index_ingest(&orders())
+                .unwrap()
+                .last_error
+                .unwrap()
+                .message,
+            short
+        );
     }
 
     /// An index the status doesn't track (unknown, or disabled) has no entry.

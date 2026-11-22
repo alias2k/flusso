@@ -1452,6 +1452,48 @@ async fn a_panicking_build_restarts_the_ingest_engine_and_never_hangs() {
     }
 }
 
+/// Slice 8-2 (S6): with one index, a build that fails restarts the whole
+/// ingest engine, never that index alone: the engine fails and is
+/// restarted, and the index's entry, sampled throughout and at the end,
+/// shows it running, with no restart and no error of its own (no per-index
+/// event is ever reported).
+#[tokio::test]
+async fn one_index_is_never_down() {
+    let sink = Arc::new(RecordingSink::seeded());
+    let backends = backends_with(
+        Arc::new(ScriptedSource::new(vec![row_event(false, 1)])),
+        Arc::new(PanickingDocuments { at_once: false }),
+        vec![(primary(), sink as Arc<dyn Sink>, SinkOptions::default())],
+    );
+    let running = Daemon::new(fast_restarts(), backends)
+        .start()
+        .await
+        .unwrap();
+    let status = running.status();
+    let run = tokio::spawn(running.run(tokio::time::sleep(Duration::from_millis(800))));
+    let never_down = || {
+        for (name, entry) in status.snapshot().ingest.indexes {
+            assert_eq!(entry.state, crate::IngestState::Running, "{name}");
+            assert_eq!(entry.restarts, crate::IndexRestarts::default(), "{name}");
+            assert_eq!(entry.last_error, None, "{name}");
+        }
+    };
+    while !run.is_finished() {
+        never_down();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::timeout(Duration::from_secs(20), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        status.snapshot().errors >= 1,
+        "the engine failed and restarted"
+    );
+    never_down();
+}
+
 /// `ScriptedDocuments` whose bound read waits until released: a walk that
 /// stays in progress.
 #[derive(Debug, Default)]
