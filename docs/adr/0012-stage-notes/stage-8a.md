@@ -3551,7 +3551,64 @@ unchanged: `several` is false).
 | W4 the walk's schedule starts over once the walk published a batch | `distinct_one_off_walk_failures_each_wait_the_first_wait` (the reviewer's) | reset only on a completed walk |
 | W5 a stop during the wait ends the run cleanly, the walk re-requested next start | `a_stop_while_a_walk_waits_to_retry_ends_cleanly` | — |
 | W6 a live failure during the wait keeps the walk's wait and resume points | `a_live_failure_while_a_walk_waits_keeps_its_retry` | `down` moves the held set's deadline to now |
-| W7 the index isn't held while only its walk waits | `an_index_whose_walk_waits_is_not_held` | the walk failure holds the index |
+| W7 the index isn't held while only its walk waits | `a_restarted_quiet_index_is_free_again` (fix round 1's: its walk fails on a quiet index, a stuck neighbour reads on) | the walk failure holds the index |
+
+**As built** (fix round 2), where it differs from the design above:
+
+- **Which walk.** A walk is known by its `reached` record (the `Arc` its snapshot and its backfill slots
+  share): `Builds::fail_walk` discards the slots of that walk only, so a finished walk's end still
+  queued, and a newer walk's batches, are untouched. A discarded slot is `Job::Discarded`: ready at
+  once, publishing nothing, its reservation and charge dropped as it is marked.
+- **Where a failure is taken.** A failed backfill batch is found as its slot reaches the front
+  (`publish_ready`), recorded on `Builds` (`WalkFailure`: the error, the walk, the requests of an end it
+  discarded); `grant` hands it the active snapshot's requests when it is that walk's; the builder's loop
+  takes it at its top (`retry_walk`). A key read's failure is taken in the step arm. Neither returns an
+  error, and `land` no longer halts grants for a backfill slot beside other builders (`halts` is the live
+  work's); one builder keeps both as before (an error, the whole-run restart).
+- **The walk's progress** is counted per index as a backfill batch **carrying a walk mark** is published
+  (`IngestEngine::walk_batches`): a source that can't mark walks starts every retry from the first key,
+  which republishes the same batches and is no progress, so its walk's waits never start over (the
+  adopted poison-row test, over a builder that can't mark walks, caught counting every batch).
+- **`Retry`** records each kind's progress at the failure (no `restarted` step: a walk never restarts the
+  builder, and nothing of a live kind moves while the builder is down).
+- **`down`** keeps a held set as it is (deadline and all) and adds the requests of the snapshot, of a
+  finished walk's end and of a walk failure not yet taken.
+- **Item 4** (a refusal count drifting after a restart): `Builds::restarting`, called by `down`, removes
+  the index from the budget's held set and, once nothing is held, ends the wait and resets `counted`, so
+  the next refusal (another index's) is a new hold, counted. A run's end still keeps `counted` (the
+  next run's refusal of the same hold is the same hold).
+- **Item 5** (`flusso.reader.waits` `_count` when the bound flaps): kept as it is and stated: each
+  stretch of a wait under one bound is one observation, so a wait whose bound changes counts once per
+  bound (the metric's description says so). Merging short stretches would need a threshold nothing
+  measures.
+- **Item 3**: `an_id_waiting_again_takes_its_older_change_back` (the reviewer's) pins the give-back of an
+  id the reader marked again while it built: it waits at the older change and no lane's answer moves.
+
+**Adopted from the review** (`ingest::tests::walk_failures`, renamed): the two-sink harness (a sink
+recording its walk marks), `two_sinks_resume_each_lane_after_its_own_mark`,
+`a_key_read_failing_mid_walk_resumes_each_lane`, `a_run_failure_after_a_walk_failure_lands_every_row`,
+`a_failing_walk_leaves_the_index_live_documents_flowing`,
+`distinct_one_off_walk_failures_each_wait_the_first_wait`,
+`a_change_marked_while_its_build_runs_keeps_the_given_back_position`,
+`a_resumed_walk_beside_a_sink_that_has_applied_nothing_and_restarts`,
+`rows_changed_behind_the_resume_point_while_a_walk_waits_land`, and
+`random_two_sink_schedules_with_resumable_walks` (100 seeds × 3 by default;
+`FLUSSO_WALK_SCHEDULE_SEED_FROM` / `FLUSSO_WALK_SCHEDULE_SEEDS` widen it). Their counts of restarts
+became counts of failures: a walk's failure restarts nothing now.
+
+**Mutations** (fix round 2; each compiles, none hangs):
+
+| Rule | Mutation | Tests that fail |
+| --- | --- | --- |
+| W1 | a key read's failure ends the builder (returns its error) | `a_key_read_failing_mid_walk_resumes_each_lane` (no restart expected) |
+| W1 | a backfill batch's failure ends the builder | `a_poison_backfill_row_beside_live_traffic_backs_off`, `a_restarted_walk_resumes_where_its_lanes_are`, `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks`, `a_live_failure_while_a_walk_waits_keeps_its_retry`, `distinct_one_off_walk_failures_each_wait_the_first_wait`, `two_sinks_resume_each_lane_after_its_own_mark`, … |
+| W2 | the walk's later backfill slots kept | `a_backfill_batch_failing_beside_live_slots_discards_only_the_walks`, every random schedule (closed, open, three indexes, two sinks) |
+| W3 | the held set started when every sink asked | `a_request_during_a_walks_wait_joins_its_retry` |
+| W4 | the walk's waits never start over | `each_kind_starts_over_only_on_its_own_progress`, `distinct_one_off_walk_failures_each_wait_the_first_wait` |
+| W6 | `down` moves the held set's deadline to now | `a_live_failure_while_a_walk_waits_keeps_its_retry` |
+| W7 | a walk failure holds the index | `a_restarted_quiet_index_is_free_again` |
+| item 3 | a give-back keeps the newer waiting mark | `an_id_waiting_again_takes_its_older_change_back` |
+| item 4 | `restarting` keeps `counted` | `a_hold_after_a_lone_held_index_restarted_is_counted` |
 
 ## 4. Guarantees
 
