@@ -260,8 +260,9 @@ fn index_gauges(meter: &opentelemetry::metrics::Meter, status: Arc<Status>) -> I
         .f64_observable_gauge("flusso.index.backlog_age")
         .with_unit("s")
         .with_description(
-            "Seconds an index's oldest unbuilt change (waiting, or in a build not yet sent to a \
-             lane) has stayed its oldest; 0 while nothing waits to be built",
+            "Seconds since an index's oldest unbuilt change (waiting, or in a build not yet sent \
+             to a lane) was read; 0 while nothing waits to be built. It grows only while the \
+             index is stuck or exempt",
         )
         .with_callback(move |observer| {
             for (index, entry) in ages.ingest_indexes() {
@@ -308,8 +309,8 @@ fn index_gauges(meter: &opentelemetry::metrics::Meter, status: Arc<Status>) -> I
         ),
         flag(
             "flusso.index.working",
-            "1 while an index works: not held, and none of its items has waited on a lane 5 s \
-             unacknowledged",
+            "1 while an index works: nothing of it has waited at a sink 5 s with none \
+             acknowledged",
             |entry| entry.working,
         ),
         flag(
