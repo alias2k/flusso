@@ -797,8 +797,9 @@ is the one concrete piece.
   (`Builds::fail_walk`, `Job::Discarded`, the walk known by its `reached` record; `land` halts no grant
   for a backfill slot beside other builders), its requests kept with each lane resumed after the last
   mark published to it, gathered as a coalescing set held until the walk's retry time (`retry: true`:
-  "every sink asked" doesn't start it, a new request joins it), and the index's live work goes on, not
-  held, not folding. An `EngineError::Source` or `DocumentFailed` a builder returns (a live build that
+  "every sink asked" doesn't start it, a new request joins it, and a set starts only once no walk runs,
+  so a retry never drops a newer walk; a walk failure `down` finds is reported and waits its own wait
+  too), and the index's live work goes on, not held, not folding; a retry wait is idle time. An `EngineError::Source` or `DocumentFailed` a builder returns (a live build that
   failed or panicked, inline included through `catch_unwind` on its first poll; a live document under
   `on_error = "stop"`) is its index's (`ingest/restart.rs`'s `restarts_alone`, the one predicate); a lane or request-lane
   error, a bug variant, the reader, the dispatcher, any failure while stopping and any failure of a lone
@@ -2030,9 +2031,10 @@ stuck or exempt: reading stops at an index's cap, so one that paces the reader s
 `exemption`/`exemption_since`; `working`, about progress, not holds: false while items of it wait
 on a lane unacknowledged for `engine::STUCK_AFTER` (5 s), from the engine's record with two or more
 indexes and from the lanes' stall ages with one (one index keeps no record); `held_by`/`held_sinks`/
-`held_since`, information only; `backfill`: `{"state": "walking", "sinks"}`, or `{"state": "retrying",
-"retry_at"}` while a failed walk waits (slice 8-2); `state` `running`/`down`, `down_since`, `last_error`
-`{kind, message, at}`, `restarts` `{live, backfill}` (slice 8-2: fed by `StatusObserver` from
+`held_since`, information only; `backfill`: `{"state": "walking", "sinks"}`, `{"state": "retrying",
+"retry_at"}` while a failed walk waits (due at, can be past), or `{"state": "waiting"}` while a walk its
+live failure cut waits for the builder's restart (slice 8-2); `state` `running`/`down`, `down_since`, `last_error`
+`{kind, message, at}` (the message cut at `INDEX_ERROR_BYTES`, 4096, on a char boundary), `restarts` `{live, backfill}` (slice 8-2: fed by `StatusObserver` from
 `on_index_failed`/`on_index_restarted`, which carry `engine::Work` as the kind; a whole run's failure,
 start or stop clears down and retrying (`Status::forget_index_runs`) and keeps the error and the counts;
 `working` reads false while down; one index is never down)), one entry per **enabled** index (`Status::with_ingest_indexes`:
