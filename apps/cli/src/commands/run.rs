@@ -367,6 +367,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let _lane_outstanding_gauge = metrics::register_lane_outstanding_gauge(Arc::clone(&status));
     let _lane_parked_gauge = metrics::register_lane_parked_gauge(Arc::clone(&status));
     let _stall_gauges = metrics::register_stall_gauges(Arc::clone(&status));
+    let _index_gauges = metrics::register_index_gauges(Arc::clone(&status));
     let _memory_instruments = metrics::register_memory_instruments(running.budget());
 
     let waits = http::Waits::default();

@@ -46,6 +46,7 @@ pub(crate) struct OtelObserver {
     flush_size: Histogram<u64>,
     stage_duration: Histogram<f64>,
     memory_wait: Histogram<f64>,
+    reader_waits: Histogram<f64>,
     startup_duration: Gauge<f64>,
     slot_lag: Gauge<u64>,
     indexes: Gauge<u64>,
@@ -160,6 +161,16 @@ impl OtelObserver {
                      backstop; settle).",
                 )
                 .build(),
+            reader_waits: meter
+                .f64_histogram("flusso.reader.waits")
+                .with_unit("s")
+                .with_description(
+                    "Each wait of the reader at its lead, by the bound that stopped it \
+                     (per_index: an index at its cap; total: the non-exempt indexes' \
+                     documents; changes: changes read ahead; pending: the exempt indexes at \
+                     max_pending_documents). _count is how often it stopped, _sum how long.",
+                )
+                .build(),
             startup_duration: meter
                 .f64_gauge("flusso.startup.duration")
                 .with_unit("s")
@@ -216,6 +227,13 @@ impl Observer for OtelObserver {
         self.startup_duration.record(
             self.started.elapsed().as_secs_f64(),
             &[KeyValue::new("step", "live")],
+        );
+    }
+
+    fn on_reader_wait(&self, bound: daemon::ReaderBound, waited: std::time::Duration) {
+        self.reader_waits.record(
+            waited.as_secs_f64(),
+            &[KeyValue::new("bound", bound.as_str())],
         );
     }
 
