@@ -4,6 +4,7 @@
 //! ids, `orders` the odd. Every wait is bounded.
 
 use super::*;
+use crate::ingest::snapshot::KEY_PAGE;
 
 const LIMIT: Duration = Duration::from_secs(120);
 
@@ -124,5 +125,74 @@ async fn two_backfilling_indexes_take_backfill_grants_in_turn() {
     assert!(
         repeats <= 1,
         "while both walk, grants alternate (one repeat at the start at most): {order:?}"
+    );
+}
+
+/// K1 with several walks (6b-3), through the engine: `orders`' sink refuses
+/// every document and its lane holds two items, so its builder blocks in its
+/// third publish, right after its walk started its third page read (key reads
+/// take 50 ms, builds 1 ms, two batches a page). Read inline, that read would
+/// keep the one key-read permit and stop `users`' walk (five pages) at its
+/// next page; on its own task it finishes, gives the permit back, and
+/// `users` walks every page.
+#[tokio::test(start_paused = true)]
+async fn a_walk_blocked_on_a_full_lane_holds_no_other_walks_key_reads() {
+    let rows: i64 = 2 * 5 * KEY_PAGE as i64;
+    let db = Database::new(rows, Vec::new());
+    let builder = Builder::two(
+        &db,
+        Behaviour {
+            delay: Some(Duration::from_millis(1)),
+            keys_delay: Some(Duration::from_millis(50)),
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(false);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let stop = Stop::new();
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).open(),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        2,
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(KEY_PAGE / 2))
+            .with_builds(2)
+            .with_stop(stop.clone())
+    });
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        let stop = stop.clone();
+        let db = Arc::clone(&db);
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            while users_landed(&recorder, rows) < (rows / 2) as usize
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let landed = users_landed(&recorder, rows);
+            recorder.refused_indexes.lock().unwrap().clear();
+            while recorder.state() != db.expected() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            stop.request();
+            landed
+        })
+    };
+    tokio::time::timeout(LIMIT * 4, deployment.run_to_end(0))
+        .await
+        .expect("the run ends at the stop");
+    let landed = watcher.await.unwrap();
+    assert_eq!(
+        landed,
+        (rows / 2) as usize,
+        "users walks every page beside orders blocked on its lane"
     );
 }

@@ -715,16 +715,20 @@ async fn rows_added_ahead_of_the_walk_end_it_where_it_began_and_are_built_once()
     settles(&url, &pool, &sink).await;
     engines.abort();
 
-    // `items` is walked first: its 5,000 rows are 4 full pages and a short
-    // one. `live_items` starts after it and finds the 4 pages added meanwhile
-    // too: 9,096 rows, 8 full pages and a short one.
+    // Both indexes walk `items`, at once (6b-3): each walk ends at the
+    // greatest key it found when it started. 5,000 rows are 4 full pages and
+    // a short one. A walk whose bound is read before any page reads 4; one
+    // whose bound is read after the other's 4 pages (as when walks ran one
+    // at a time) finds the 4 pages added meanwhile too, 8. Following the
+    // pages added during it, a walk would never end.
     let page = engine::KEY_PAGE;
     let items = usize::try_from(ITEMS).unwrap() / page;
-    let live_items = (usize::try_from(ITEMS).unwrap() + items * page) / page;
-    assert_eq!(
-        pages.load(Ordering::SeqCst),
-        items + live_items,
-        "each walk reads the rows it found at its start, not the pages added during it"
+    let at_most = (usize::try_from(ITEMS).unwrap() + items * page) / page;
+    let read = pages.load(Ordering::SeqCst);
+    assert!(
+        (2 * items..=items + at_most).contains(&read),
+        "each walk reads the rows it found at its start, not the pages added during it: \
+         {read} full pages"
     );
     let twice: Vec<_> = sink
         .upserts
