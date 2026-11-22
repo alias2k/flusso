@@ -3117,6 +3117,228 @@ All three as recommended (issue #386, the owner's answer of 2026-11-21).
   for that backlog only, since leaving it unbuilt makes the restart rewrite every other index's
   documents. Designed for in §8.
 
+### 3.10 Slice 8: per-index restart (designed against the code, before building)
+
+**Against** `6acb30b8` (slice 7, fix round 2). The plan in §3.7 ("give back, its own `Backoff`, restart;
+its dropped requests come back through the lane") and §3.9 §8 ("each builder keeps its slot in
+`together`, so a restart replaces one future after giving its builds back, and catches that future's
+panic around its polls") predate 6b and slice 7. What changed under them: the fold (6b-1c), the
+exemption (6b-2), walks at once with key reads on their own tasks (6b-3), `IndexStates` (7). Re-derived
+here.
+
+**The rule in one line.** With two or more builders, an error that comes from one index's own work (its
+builds, its documents, its walk's key reads) gives that builder's unpublished builds back to its pending
+set, drops the rest of its run state, and restarts the builder in place after its own backoff; the
+reader, the dispatcher and every other builder go on. Everything else ends the run as today. One index
+behaves and costs as before.
+
+#### Which failures belong to one index
+
+| Failure | Where it surfaces | Whose | Why |
+| --- | --- | --- | --- |
+| a build's `build_many` fails (a document query Postgres refuses, a lost connection while building) | the slot's publish (`publish_live`/`publish_backfill`: `built.documents?`) | **the index** | a builder's build takes ids of its own index only (6b-1c, O2) |
+| a document `Failed` under `on_error = "stop"` | `envelopes` → `document_failed` | **the index** | its index's policy, its build |
+| a spawned build panics | `land` (`handle.await` is `Err`) → a failed build | **the index** | the panic stays on the build's task |
+| a build panics on its first poll (inline) | today: unwinds the ingest task | **the index** (new: `catch_unwind` around that one poll) | the build future touches only the `DocumentBuilder`, no engine state; it lands as a failed build, as a spawned one does |
+| a walk's key read fails or panics | `next_snapshot_step` → `Err` (a panic is `try_into_panic` → `SourceError::Query`) | **the index** | one walk per builder (6b-3); the read is its own |
+| planning a resumed walk | `plan_walk` | — | infallible: a point it can't place starts the walk from the beginning |
+| a lane or the request lane fails (`EngineError::Stream`): a publish, `SnapshotComplete`, a request's ack | `publish_to`, `finish_snapshot` | **the run** | the stream is shared: every builder would fail on it |
+| `LaneNotInProgress`, `UnregisteredLiveItem`, `DocumentsLeft` | commit, dispatcher | **the run** | a bug or the end check, never data |
+| the live stream fails, a resolve fails or panics | the reader | **the run** | one reader serves every index; a resolve is per change, across indexes |
+| the dispatcher (request lane, the end) | the dispatcher | **the run** | shared |
+| a panic in engine code on the task (reader, dispatcher, a builder's loop, `Progress`) | unwinds the task | **the run** | shared state (`Progress`, the lead, the gate) may be half written; the run's restart rebuilds it from the replay (`forget_all`) |
+| the budget, the gate | — | — | never fail; a failed builder's reservations, charges, permits and line places go back as its `Builds` is dropped |
+| any failure while stopping | the builder's stop path | **the run** | O3: a stop never restarts anything (below) |
+
+**The predicate** (one place, `ingest/restart.rs`): `restarts_alone(several, stopping, error) =
+several && !stopping && matches!(error, EngineError::Source(_) | EngineError::DocumentFailed { .. })`
+for an error a builder returned. Every builder error of those two kinds comes from the table's index
+rows (the builder reaches the source only through its builds and its walk); `Stream` and the bug
+variants are run errors. **A change touching several indexes** is resolved once by the reader and marked
+on each index's pending set; each index builds its own documents, so a failure of one index's build
+belongs to that index alone. The change counts committed on a sink only once every lane of the sink
+landed it (§3.6), so it stays uncommitted there until the failed index lands its part; the other
+indexes' lanes register it as soon as they publish theirs.
+
+#### What a failed builder's state becomes
+
+| State | At the failure | Why it is safe |
+| --- | --- | --- |
+| documents waiting (pending, not taken) | **kept** | marked by the reader, which does not read the WAL again for one index; they are what the restart builds |
+| live builds taken and not published: running, landed and waiting for their turn, the failed one | **given back** (`Progress::give_back`): each id waits again at its own oldest position and read number; an id marked again meanwhile keeps the older of the two | none of them registered on any lane: a slot publishes whole, in grant order, and the failure surfaces before the failed slot's `build_sending`; the slots after it never got there. Given back only after every running build returned (`Builds::abandon`, as a failed run waits today), so no document is ever built twice at once |
+| builds in flight on their own tasks | **waited for**, then dropped (`abandon`) | no read of the source outlives the builder that asked for it; their permits go back with them |
+| backfill builds and slots, the snapshot, the coalescing set | **dropped** | their requests' handles are dropped unacknowledged: the request lane redelivers them, the dispatcher forwards them again to the index's inbox, the restarted builder walks again (from each lane's resume point, 8b). Batches already published stay; a walk's batches are idempotent |
+| the walk's key-read task | **aborted** with the walk (6b-3's `Drop`) | none outlives it by more than one poll |
+| queued slices (`Runs`) | **dropped** (`Runs::clear`, as entering the fold) | their documents are pending: the backlog take builds them |
+| the reader's hand-over channel, the request inbox | **kept** | the builder's future is the same one; only its run state is rebuilt |
+| budget reservations and charges of unpublished slots | **released** with the old `Builds` | charges of published items stay on their lanes until acknowledged, as always |
+| gate line places, the granted permit | **released** (`LeavesLines`, `Builds` dropped) | G9′: a waiter left behind would be offered permits nobody asks for |
+| lane holds (`LaneFull`) | **released** with the publish dropped | — |
+| `IndexStates`: budget hold | **cleared** for the index | it holds nothing while down |
+| the lead: the queue's `held` and `folding` | **set** while down (below) | |
+
+**What the restart replays from**: the index's pending set (what waited, plus what was given back, plus
+what the reader marked while it was down). The restarted builder starts **folding**: it takes its
+backlog oldest first, at most `max_changes` documents a take (O2), and leaves the fold once nothing
+waits, when the reader hands it slices again (6b-1c's rule, unchanged).
+
+**Confirmation and fences: the invariant holds per index with no reset.** `forget_all` exists because a
+run that ends forgets its documents and must reset `routed` and cap the catch-up in one step. A builder
+restart forgets nothing: given back, its documents are pending again, so its index's backlog holds each
+of its lanes `Before` the oldest of them (`least_of`), and the slot and any fence covering a lane of the
+index stay pinned before its oldest unbuilt change for the whole time it is down. The other indexes'
+lanes answer from their own items and backlog, so their fences pass and the slot moves as far as the
+failed index's backlog allows. **The `newest` invariant** ("a lane's `newest` names only positions whose
+every document of its index has been taken") holds across a give-back: `newest` moves to `L` at a
+registration only while no other unreleased build of the index has its oldest change at or before `L`
+(`all_taken_through`), so every build given back later had its oldest change after `L`; documents marked
+after `L` are marked at positions after `L` (marks keep an older position only for a document still
+waiting, which `all_taken_through` also excludes). So nothing given back sits at or before any lane's
+`newest`. `committed` follows: a given-back document is waiting, so `least_unbuilt` caps the lane's
+catch-up, and no step of the index is registered while it is down.
+
+**Positions on a lane stay in order across a restart.** A backlog candidate's position is the newest
+waiting position. Given back, the documents of a capped take's leftovers can all be older than the
+position of a batch already published on the lane (a take that stopped at `max_changes` registered
+`last = P` with leftovers at `P' < P`). So a folding builder's backlog candidate is placed at
+`max(newest waiting, the newest position it granted)` (`Runs::floor`): claiming `P` again is sound,
+since `newest` moves only once `all_taken_through(P)` holds. The fold had the same edge before slice 8;
+this closes it there too.
+
+#### While the index is down
+
+**Exempt, reusing 6b-2, not a second mechanism.** At the failure the builder's queue is set `held` and
+`folding` in the lead. Folding, the reader hands it no slice, and its queue counts toward no changes
+bound. Held, at `max_waiting_per_index` documents it becomes **exempt** while another index is free (not
+held, nothing stuck 5 s), counting only toward `max_pending_documents`; when no other index is free it
+is **frozen** at its count. Below the cap its documents count toward `max_waiting` as any index's do. So
+the other indexes read on; the down index's documents grow up to `max_pending_documents` (with every
+other exempt index), where the reading stops for all, as for a parked index (6b-2). Pacing the reader at
+its cap instead would stop every index the moment the down one reached it: the isolation the slice is
+for would last `max_waiting_per_index` documents.
+
+The restart leaves `held` set: the first live grant clears it (`start_live`), as for any hold. Between
+the restart and that grant an exempt index is frozen (its hold has not ended, but `someone_free` still
+decides) and drains.
+
+**One index** has no other index to keep going and no exemption: a failure ends the run, the daemon
+restarts the engine with `[backoff]` and the stream replays, as today. One index pays nothing for slice 8:
+no new state, no new branch on its path.
+
+#### Backoff and limits
+
+Per index, the daemon's `[backoff]` schedule (`initial_ms`, 1 s by default, doubling to `max_ms`, 60 s),
+handed to the engine (`IngestEngine::with_backoff`), the same schedule the supervisor uses for whole
+engines. **Reset** once the restarted builder published a live item of its index (its item-key counter
+moved since the restart): a later failure is a new outage. A walk that fails every time never resets
+(capped at `max_ms`). No new setting.
+
+**The same change failing every time** (a poison document under `on_error = "stop"`, a query Postgres
+refuses for one row): the oldest-first take holds it every time, so the builder fails, gives back,
+waits, retries, capped at `max_ms` between tries. The index stays down; its lanes pin the slot before
+the document's change and WAL grows; the other indexes keep indexing, up to `max_pending_documents` of
+the down index's documents, then everything stops reading. What the operator sees: an `error!` per
+failure naming the index, the error and the wait (`on_error = "skip"` is named by the error itself for a
+failed document); `FlussoIndexBacklog` (the index's backlog age grows a second a second once nothing of
+it builds, and it is exempt past its cap); `/status` `pinned_by` names the index's backlog. Same as
+today's whole-run crash loop for that one index, without the other indexes paying for it.
+
+#### Order, counts, stop, requests
+
+- **Order per index.** Slots publish in grant order and the failed slot and every one after it are
+  discarded, so a lane got every item granted before the failure and nothing after. The restart builds
+  the given-back documents from the database as it is then: a later message is newer state, as across
+  a run restart.
+- **`changes_committed`**: per lane, from `Progress`, unchanged (above).
+- **The stop with an index down** (O3: never exit 0 with read changes unbuilt). Recommended and built:
+  **one more try at once**. The stop cuts the backoff short; the builder restarts, sees the stop and
+  settles (builds its backlog under the deadline, as every builder's stop does). If that fails too, the
+  error ends the run (a failure while stopping is never restarted), so the daemon's stop exits 1 naming
+  the error; the restart replays. Alternative: exit 1 at once naming the index (`DocumentsLeft`) without
+  trying. The try costs one build at most and turns a transient failure into a clean stop.
+- **A failure while stopping** is a run failure (the predicate's `!stopping`): the stop is bounded by
+  `--shutdown-timeout-secs` and a restart loop has no place in it.
+- **The live stream ends while an index is down**: the run ends only once every builder is idle; a down
+  builder is not, so the run goes on restarting it (a failure every time never ends the run, as a
+  whole-run crash loop never did).
+- **A reindex or backfill request for a down index** is forwarded to its inbox, which outlives the
+  restart, and served once the builder is back; one its snapshot held at the failure is redelivered by
+  the request lane. Other indexes' requests are served meanwhile.
+- **`Continuity::Fresh`** is staging, before the ingest engine runs: unchanged.
+
+#### Reporting
+
+- **Observer** (engine): `on_index_failed(index, error, retry_in)` and `on_index_restarted(index)`. Not an
+  `EngineId`: an index restart is not an engine's error (`on_engine_error` stays the run's), and the
+  daemon's `Status` treats `on_engine_error(Ingest)` as "the ingest engine is restarting".
+- **Logs**: `error!` at each failure (index, error, wait), `info!` at each restart (index, attempt).
+- **`/status`, metrics, the alert: proposed as slice 8-2** (below).
+- **Does a down index page someone today?** `FlussoIndexBacklog` fires for a down index with documents
+  waiting: nothing of it builds, so its backlog age grows a second a second past 60 s (and it is exempt
+  once past its cap), for 10 minutes. A down index with **nothing waiting** (its walk fails, no live
+  change touches it) shows no backlog and is not exempt: **it pages nobody**, as a whole-run crash loop
+  pages nobody today (the crash-loop alert the reviewer is filing). Owner's decision, below.
+
+#### What the supervisor still does
+
+It restarts the whole ingest engine for every run failure (the table's run rows, a failure while
+stopping excepted: that ends the deployment, exit 1), with its own `[backoff]` and its own reset (the
+engine moved the source forward). The two backoffs are independent and never nest: a per-index restart
+happens inside a run and its state ends with the run; a run restart starts every builder fresh (the
+per-index backoff starts at `initial_ms` again), after `forget_all`.
+
+#### The split
+
+The slice is two PRs:
+
+- **8-1 (this PR): failure isolation and state.** The predicate, give-back, the restart in place with
+  its backoff, exemption while down, the stop, the panic of an inline build, the observer events and the
+  log lines, `CLAUDE.md`, the contribute chapter.
+- **8-2: reporting.** `ingest.indexes.<name>` gains `state` (`running` / `down`), `down_since`,
+  `last_error`, `restarts`; `flusso_index_down{index}` and `flusso_index_restarts_total{index}`; the
+  dashboard row; the alert decision. It needs 8-1's observer events and nothing else, and moves no engine
+  rule.
+
+#### Owner's decisions (recommendation built, behind the predicate)
+
+1. **A down index is exempt** (other indexes read on, up to `max_pending_documents`), rather than pacing
+   the reader at its cap (every index stops once it is reached). Recommended: exempt.
+2. **The stop with an index down tries once more**, rather than exiting 1 at once. Recommended: try.
+3. **One index keeps today's whole-run restart.** Recommended: keep (the replay is what one index has).
+4. **A down index with nothing waiting pages nobody** until the crash-loop alert exists. Recommended:
+   leave it to that alert (8-2 adds `flusso_index_down`, which it can read).
+
+#### Rules, tests, mutations
+
+| Rule | Test (written first) | Mutation |
+| --- | --- | --- |
+| R1 an index's build failure restarts that builder alone | `a_build_failure_on_one_index_restarts_that_index_alone` | the predicate answers `false` |
+| R2 a document failed under `stop` likewise, the others land meanwhile | `a_stop_failure_on_one_index_lets_the_others_land` | the predicate leaves out `DocumentFailed` |
+| R3 a walk failure restarts its builder; its request is served again | `a_restarted_index_task_gives_back_its_builds_and_serves_its_request_again` | the snapshot's handles acknowledged at the failure |
+| R4 unpublished builds are given back, not forgotten | `a_failed_index_rebuilds_every_document_it_had_taken` | `forget` in place of `give_back` |
+| R5 the slot and the failed index's fences stay before its oldest unbuilt change; the other index's go on | `confirmation_stays_before_a_down_index_and_its_sibling_lands` | `forget` in place of `give_back` |
+| R6 a give-back keeps an id's older position | `progress` unit `a_give_back_keeps_the_older_of_two_marks` | the give-back overwrites |
+| R7 a down index is exempt: the reader reads on past its cap | `the_reader_reads_on_past_a_down_index_at_its_cap` | no hold at the failure |
+| R8 backoff doubles per index and resets after a published live item | `a_failing_index_waits_longer_each_time_and_starts_over_after_it_published` | no doubling; never reset |
+| R9 a stop cuts the backoff and tries once more | `a_stop_while_an_index_is_down_builds_its_backlog` | the stop waits the backoff out |
+| R10 a failure while stopping ends the run | `a_failure_while_stopping_ends_the_run` | the predicate ignores the stop |
+| R11 one index ends the run as before | `what_a_failed_run_left_behind_is_rebuilt_from_the_replay_in_batches` (existing) | the predicate ignores `several` |
+| R12 a build panicking on its first poll is that index's failure | `a_build_panicking_at_once_restarts_its_index_alone` | no `catch_unwind` |
+| R13 a lane's positions never go down across a restart | the schedules' per-lane order check | no floor |
+| R14 a stream error ends the run | `a_lane_failure_ends_the_run_with_an_index_restarting` | the predicate takes `Stream` |
+| the model | the random schedules over two indexes restart a builder at random failures (they used to end the run), the source resuming from the confirmed position on each run failure; every document in order, versions never down, the state equal to the rows | — |
+
+**Cost.** No failure: one `match` on the builder's result when it returns, which it does once a run;
+8 bytes more per document taken (its read number, kept for a give-back); one comparison per backlog
+candidate (the floor). Nothing per change and nothing per batch otherwise. One index: the same path as
+before (the predicate is never consulted with one builder).
+
+**Writers checked.** New writers of shared state: `Progress::give_back` (the builder, after its builds
+returned, under the index's pending lock alone: a reader's answer is the same before and after, since a
+build not yet sending holds every lane at its oldest change, which is its oldest id's, and that id now
+waits there); the lead's `held`/`folding` (the builder of that queue, as before); the observer. No new
+reader.
+
 ## 4. Guarantees
 
 | Invariant (CLAUDE.md) | After 8a | Existing guards | New test |
