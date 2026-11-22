@@ -690,8 +690,8 @@ is the one concrete piece.
   never joins a line (`one_index_never_waits_in_a_gate_line`). A builder held by the budget or by a
   publish blocked on a full lane **folds** (only with two or more): its queued slices are dropped
   (`Runs::clear`), the reader hands it nothing, and it takes its backlog oldest first in takes of at
-  most `max_changes` (each waking the reader, `Lead::wake`) until nothing waits on its index. Walks are one at a time (the walk token, a FIFO semaphore whose acquire a builder keeps
-  across polls while it coalesces on); `Idle` with several builders is one clock (`IdleClock`: reported
+  most `max_changes` (each waking the reader, `Lead::wake`) until nothing waits on its index. **Walks run at once** (6b-3: each
+  builder walks its own index as soon as its requests are gathered; 6b-1c's walk token is gone); `Idle` with several builders is one clock (`IdleClock`: reported
   only while every builder is idle). The reader
   owns the live stream and the resolver, reads a run as `main`'s `drain_ready` did (cut at
   `max_changes`, `max_delay`, would-block, the stop), resolves it, **marks** its documents
@@ -1184,7 +1184,20 @@ is the one concrete piece.
   nothing joined or woken (guards: `gate::tests`' `a_pass_alone_*`, `builds::tests`'
   `no_build_takes_room_by_the_limit_ahead_of_a_waiter_the_limit_refused`,
   `the_builder_leaves_the_lines_after_each_grant_pass`). Key reads (a page or an index's bound) take
-  one shared `tokio::sync::Semaphore` permit held inside the walk's stored fetch (K1). Guards:
+  one shared `tokio::sync::Semaphore` permit, inside the read, from before its query until it returns
+  (K1). With two or more builders each read runs on a task of its own (`snapshot::KeyRead`,
+  `Walk::reading_apart`, aborted on drop), so a builder that stops stepping its walk (a publish blocked
+  on a full lane, a batch waiting on the budget) still gives the permit back and keeps the page on the
+  task; one builder reads inline, spawning nothing. A walk reads no page ahead (at most `KEY_PAGE` keys
+  held per walk). A read panicking on its task panics the run, as inline. Guards:
+  `snapshot::tests`' `one_index_stuck_mid_walk_does_not_stop_another_indexs_key_reads`,
+  `a_dropped_walk_ends_its_key_read`; `tests::builders`' `indexes_walk_at_once`,
+  `a_stop_mid_walks_ends_every_key_read_and_serves_every_request_next_start`,
+  `a_failed_walk_ends_the_run_and_every_other_key_read`, `an_aborted_run_leaves_no_key_read_running`
+  (each counts the runtime's alive tasks), `one_index_spawns_no_task_for_its_key_reads`,
+  `a_key_read_panicking_on_its_own_task_panics_the_run`; `ingest::tests::walks`'
+  `two_backfilling_indexes_take_backfill_grants_in_turn`, `a_walk_blocked_on_a_full_lane_holds_no_other_walks_key_reads`
+  (the engine-level K1 case: a builder blocked in a publish mid-read). Guards:
   `gate::tests` (each mutation of the rules in the stage note's table, under the gate's bounds in
   `docs/adr/0012-stage-notes/stage-8a.md`, fails at least one test, but one shown equivalent), `snapshot::tests`'
   `walks_read_one_key_page_at_a_time`. A build is polled once
@@ -1419,10 +1432,14 @@ is the one concrete piece.
   to a counting allocator within 0.8–1.2) and the reservation settles to that, at least `FLOOR` (1 KiB).
   The `Arc<Charge>` rides every lane's piece as `stream::Batch.hold` (an opaque `Hold`, serde-skipped,
   equal to any other), so the bytes return when the last copy drops: every lane acknowledged and no
-  ledger can redeliver. Rules: total within the limit, backfill within half, and a kind holding nothing
-  is always granted one batch (so a batch larger than the budget builds alone); held stays within the
-  limit plus each in-flight build's **actual** batch and one batch per index (rule 4; a grant is checked
-  against its estimate, then settles to what it built). `[stream] capacity` / `--queue-capacity` are deprecated
+  ledger can redeliver. Rules: total within the limit, backfill within half, an index holding no live
+  bytes always granted one live batch (rule 5) and **an index holding no backfill bytes one backfill
+  batch** (rule 4, per index since 6b-3: one walk on a parked lane keeps backfill's half for as long
+  as it is stuck, and every other walk still goes on; guards `an_index_holding_no_backfill_bytes_gets_one_backfill_batch`,
+  `ingest::tests::walks`' `a_stuck_index_walking_does_not_hold_a_healthy_indexs_walk`), so a batch
+  larger than the budget builds alone; held stays within the limit plus each in-flight build's
+  **actual** batch and one live and one backfill batch per index (a grant is checked against its
+  estimate, then settles to what it built). `[stream] capacity` / `--queue-capacity` are deprecated
   (load, warn, ignored); `ChannelStream::from_config` gives lanes `LANE_BACKSTOP` (1,048,576) items,
   which the floor keeps from binding (`ChannelStream::new` keeps an explicit capacity for tests).
   Metrics `flusso.memory.built{work}`, `flusso.memory.refused{work}` (once per wait) and
