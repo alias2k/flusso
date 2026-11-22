@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795319427208,
+  "lastUpdate": 1795342461154,
   "repoUrl": "https://github.com/alias2k/flusso",
   "entries": {
     "flusso (bigger is better)": [
@@ -6286,6 +6286,54 @@ window.BENCHMARK_DATA = {
             "value": 754.4097413658982,
             "unit": "changes/s",
             "extra": "{\"images\": {\"drain\": \"every-lane-landed\", \"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 46.994, \"disk_write_ms\": 338.141, \"memory_copy_ms\": 187.351}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V74 80-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "89390131+JakubWasilczyk-Alias2k@users.noreply.github.com",
+            "name": "Jakub Wasilczyk",
+            "username": "JakubWasilczyk-Alias2k"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "90073906bc35c7075dba7b881ed736982d699d8e",
+          "message": "Merge pull request #456 from alias2k/feat/concurrency-8a-restart\n\nfeat(engine): restart one index alone and report it (stage 8a, slice 8)",
+          "timestamp": "2026-11-22T10:55:07+01:00",
+          "tree_id": "ed89953465778e90b9d708faf7d06654f49ce5ee",
+          "url": "https://github.com/alias2k/flusso/commit/90073906bc35c7075dba7b881ed736982d699d8e"
+        },
+        "date": 1795342460587,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "complex/ci/backfill_docs_per_s",
+            "value": 1197.1402584215678,
+            "unit": "docs/s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.534, \"disk_write_ms\": 82.017, \"memory_copy_ms\": 204.742}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/drain_changes_per_s",
+            "value": 1278.4847783696193,
+            "unit": "changes/s",
+            "extra": "{\"images\": {\"drain\": \"every-lane-landed\", \"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.534, \"disk_write_ms\": 82.017, \"memory_copy_ms\": 204.742}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/backfill_docs_per_s",
+            "value": 6923.800801983803,
+            "unit": "docs/s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.534, \"disk_write_ms\": 82.017, \"memory_copy_ms\": 204.742}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/drain_changes_per_s",
+            "value": 1244.813478626068,
+            "unit": "changes/s",
+            "extra": "{\"images\": {\"drain\": \"every-lane-landed\", \"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.534, \"disk_write_ms\": 82.017, \"memory_copy_ms\": 204.742}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
           }
         ]
       }
