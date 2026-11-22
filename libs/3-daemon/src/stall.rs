@@ -60,6 +60,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use engine::{Pin, Progress};
+use kernel::IndexName;
 use source::cdc::{ChangeCapture, Landed};
 use stream::LaneKey;
 use tokio::time::{Instant, MissedTickBehavior, interval};
@@ -110,7 +111,16 @@ pub struct Stalls {
 #[derive(Debug, Default)]
 struct State {
     lanes: BTreeMap<LaneKey, Tracked>,
+    /// Each index's oldest unbuilt change, and since when it is the oldest.
+    backlogs: BTreeMap<IndexName, Backlog>,
     pinned_by: Option<Pin>,
+}
+
+#[derive(Debug)]
+struct Backlog {
+    oldest: Option<u64>,
+    since: Instant,
+    age: Duration,
 }
 
 #[derive(Debug)]
@@ -126,8 +136,23 @@ impl Stalls {
     /// Tracking `lanes`, none stalled.
     pub fn new(lanes: impl IntoIterator<Item = LaneKey>) -> Self {
         let now = Instant::now();
+        let lanes: Vec<LaneKey> = lanes.into_iter().collect();
+        let backlogs = lanes
+            .iter()
+            .map(|lane| {
+                (
+                    lane.index.clone(),
+                    Backlog {
+                        oldest: None,
+                        since: now,
+                        age: Duration::ZERO,
+                    },
+                )
+            })
+            .collect();
         Self {
             state: Mutex::new(State {
+                backlogs,
                 lanes: lanes
                     .into_iter()
                     .map(|lane| {
@@ -198,6 +223,19 @@ impl Stalls {
                 });
             }
         }
+        // Each index's backlog age (slice 7): how long its oldest unbuilt
+        // change has stayed its oldest, measured as a lane's stall is.
+        for (index, backlog) in &mut state.backlogs {
+            let oldest = progress.oldest_unbuilt(index).map(|position| position.seq);
+            if oldest != backlog.oldest {
+                backlog.oldest = oldest;
+                backlog.since = now;
+            }
+            backlog.age = match oldest {
+                Some(_) => now.saturating_duration_since(backlog.since),
+                None => Duration::ZERO,
+            };
+        }
         // What `landed` itself is decided by: one computation, so a tie (two
         // lanes at one source position) names what holds the slot back, never
         // its neighbour.
@@ -223,6 +261,17 @@ impl Stalls {
             .iter()
             .map(|(lane, tracked)| (lane.clone(), tracked.stall))
             .collect()
+    }
+
+    /// How long `index`'s oldest unbuilt change has stayed its oldest, as of
+    /// the last sample: 0 while nothing waits to be built, or for an index
+    /// with no lane.
+    pub fn backlog(&self, index: &IndexName) -> Duration {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state
+            .backlogs
+            .get(index)
+            .map_or(Duration::ZERO, |backlog| backlog.age)
     }
 
     /// What holds the slot back the most, a lane or an index's pending
@@ -359,6 +408,46 @@ mod tests {
                 .is_empty(),
             "no lane is warned about"
         );
+    }
+
+    /// Slice 7's backlog age: an index's oldest unbuilt change that stays
+    /// its oldest ages a second a second; once it is taken and its build sent
+    /// to the lanes, nothing is unbuilt and the age is 0. A change that
+    /// builds right after it was read never ages past a sample.
+    #[test]
+    fn an_index_backlog_ages_while_its_oldest_change_stays_unbuilt() {
+        let users = lane("users");
+        let progress = Progress::new([users.clone()]);
+        let stalls = Stalls::new([users.clone()]);
+        let start = Instant::now();
+        let id = |key: i64| source::document::DocumentId {
+            index: users.index.clone(),
+            key: source::RowKey(vec![(
+                kernel::ColumnName::try_new("id").unwrap(),
+                kernel::GenericValue::BigInt(key),
+            )]),
+        };
+        stalls.sample(start, &progress, &Lsns, None);
+        assert_eq!(stalls.backlog(&users.index), Duration::ZERO, "none");
+        progress.mark([(id(1), Position::new(1))]);
+        stalls.sample(at(start, 1), &progress, &Lsns, None);
+        progress.mark([(id(2), Position::new(2))]);
+        stalls.sample(at(start, 31), &progress, &Lsns, None);
+        assert_eq!(
+            stalls.backlog(&users.index),
+            Duration::from_secs(30),
+            "the oldest stayed: its age, not the newest's"
+        );
+        let taken = progress.take(&users.index, 10, &|_| false).unwrap();
+        stalls.sample(at(start, 40), &progress, &Lsns, None);
+        assert_eq!(
+            stalls.backlog(&users.index),
+            Duration::from_secs(39),
+            "taken into a build, it is still unbuilt"
+        );
+        progress.build_sending(&users.index, taken.token);
+        stalls.sample(at(start, 41), &progress, &Lsns, None);
+        assert_eq!(stalls.backlog(&users.index), Duration::ZERO, "built");
     }
 
     #[test]

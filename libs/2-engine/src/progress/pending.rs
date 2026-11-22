@@ -360,6 +360,17 @@ impl Pending {
             .min()
     }
 
+    /// The oldest change of an id not built yet: one waiting, or in a build
+    /// no lane has been sent yet (slice 7's backlog age).
+    pub(crate) fn oldest_unbuilt(&self) -> Option<Position> {
+        self.builds
+            .iter()
+            .filter(|build| !build.sending)
+            .map(|build| build.oldest)
+            .chain(self.oldest_waiting())
+            .min()
+    }
+
     /// The oldest change any of its ids holds back on any lane.
     #[cfg(test)]
     pub(crate) fn minimum(&self) -> Option<Position> {

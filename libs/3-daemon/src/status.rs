@@ -6,12 +6,12 @@
 //! consistent-enough snapshot. Per-sink state is what makes a stalled or
 //! failing sink visible without stopping the others.
 
-use engine::{Budget, Progress};
+use engine::{Budget, ExemptionState, HeldBy, IndexStates, Progress};
 
 use crate::stall::{LaneStall, Stalls};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kernel::{IndexName, SinkName};
@@ -100,6 +100,9 @@ pub struct Status {
     /// The lanes that are not open (refused, blocked, restaging); an open
     /// lane has no entry.
     lane_health: Mutex<BTreeMap<stream::LaneKey, LaneHealthView>>,
+    /// What the ingest engine knows of each index (slice 7), attached once
+    /// the engine exists; until then the section shows nothing held.
+    index_states: OnceLock<Arc<IndexStates>>,
 }
 
 /// A lane's health in `/status`. Its name ([`name`](Self::name)) is the
@@ -316,7 +319,92 @@ impl Status {
             budget: None,
             stalls: None,
             lane_health: Mutex::new(BTreeMap::new()),
+            index_states: OnceLock::new(),
         }
+    }
+
+    /// Read each index's exemption, holds, walk and whether it works from
+    /// the ingest engine's `states` (ADR 0012 stage 8a, slice 7). Attached
+    /// once; a second call is ignored.
+    pub fn attach_index_states(&self, states: Arc<IndexStates>) {
+        let _ = self.index_states.set(states);
+    }
+
+    /// `index`'s `ingest.indexes.<name>` entry; `None` for an index this
+    /// status doesn't track (unknown or disabled). Read live.
+    pub fn index_ingest(&self, index: &IndexName) -> Option<IndexIngestSnapshot> {
+        self.indexes.contains(index).then(|| self.ingest_of(index))
+    }
+
+    fn ingest_of(&self, index: &IndexName) -> IndexIngestSnapshot {
+        let view = self
+            .index_states
+            .get()
+            .and_then(|states| states.view(index));
+        let documents_waiting = self
+            .progress
+            .as_ref()
+            .map_or(0, |progress| progress.waiting_on(index) as u64);
+        let backlog_seconds = self
+            .stalls
+            .as_ref()
+            .map_or(0.0, |stalls| stalls.backlog(index).as_secs_f64());
+        let now = tokio::time::Instant::now();
+        let wall = chrono::Utc::now();
+        let at = |instant: tokio::time::Instant| {
+            rfc3339(wall_clock(
+                wall,
+                now.saturating_duration_since(instant),
+                Duration::ZERO,
+            ))
+        };
+        let Some(view) = view else {
+            return IndexIngestSnapshot {
+                documents_waiting,
+                backlog_seconds,
+                exemption: Exemption::None,
+                exemption_since: None,
+                working: true,
+                held_by: None,
+                held_sinks: None,
+                held_since: None,
+                backfill: None,
+            };
+        };
+        IndexIngestSnapshot {
+            documents_waiting,
+            backlog_seconds,
+            exemption: match view.exemption {
+                ExemptionState::None => Exemption::None,
+                ExemptionState::Exempt => Exemption::Exempt,
+                ExemptionState::Frozen => Exemption::Frozen,
+            },
+            exemption_since: view.exemption_since.map(at),
+            working: view.working,
+            held_by: view.held.as_ref().map(|held| match held {
+                HeldBy::Budget => IndexHold::Budget,
+                HeldBy::Lanes(_) => IndexHold::Lane,
+            }),
+            held_sinks: match &view.held {
+                Some(HeldBy::Lanes(sinks)) => {
+                    Some(sinks.iter().map(|sink| sink.as_ref().to_owned()).collect())
+                }
+                _ => None,
+            },
+            held_since: view.held_since.map(at),
+            backfill: view.backfill.map(|sinks| BackfillSnapshot {
+                sinks: sinks.iter().map(|sink| sink.as_ref().to_owned()).collect(),
+            }),
+        }
+    }
+
+    /// Every index's `ingest.indexes` entry, by name: what the per-index
+    /// gauges read at collection.
+    pub fn ingest_indexes(&self) -> Vec<(IndexName, IndexIngestSnapshot)> {
+        self.indexes
+            .iter()
+            .map(|index| (index.clone(), self.ingest_of(index)))
+            .collect()
     }
 
     /// Record `lane`'s health, as the sink engine reported it.
@@ -688,8 +776,16 @@ impl Status {
                 (index.as_ref().to_owned(), state)
             })
             .collect();
+        let ingest = IngestSnapshot {
+            indexes: self
+                .ingest_indexes()
+                .into_iter()
+                .map(|(index, entry)| (index.as_ref().to_owned(), entry))
+                .collect(),
+        };
         StatusSnapshot {
             phase: *lock(&self.phase),
+            ingest,
             uptime_seconds: self.started_at.elapsed().as_secs(),
             indexes,
             changes_captured: captured,
@@ -750,11 +846,80 @@ pub struct MemorySnapshot {
     pub backfill_bytes: usize,
 }
 
+/// `/status`'s `ingest`: what the ingest side knows of each index (ADR 0012
+/// stage 8a, slice 7).
+#[derive(Debug, Clone, Serialize)]
+pub struct IngestSnapshot {
+    /// Each enabled index's entry, by name.
+    pub indexes: BTreeMap<String, IndexIngestSnapshot>,
+}
+
+/// One index's ingest state: which index is behind or stuck, and why. Also
+/// `GET /indexes/<name>/status`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IndexIngestSnapshot {
+    /// Documents read and not yet taken by a build.
+    pub documents_waiting: u64,
+    /// How long its oldest unbuilt change (waiting, or in a build not yet
+    /// sent to a lane) has stayed its oldest, in seconds; 0 when none.
+    /// Sampled each second.
+    pub backlog_seconds: f64,
+    /// Its place in the exemption: `none`, `exempt` (held at its cap while
+    /// another index works: the reading goes on for the others) or `frozen`
+    /// (exempt, may drain but not grow). Always `none` with one index.
+    pub exemption: Exemption,
+    /// When it entered that state (RFC 3339, UTC); absent while `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exemption_since: Option<String>,
+    /// Not held, and none of its items has waited on a lane for an
+    /// acknowledgement for 5 s with none acknowledged.
+    pub working: bool,
+    /// What holds its builder: `budget` (its live batch refused by the memory
+    /// budget) or `lane` (a publish blocked on a full lane); null while
+    /// nothing does.
+    pub held_by: Option<IndexHold>,
+    /// With `lane`, the sinks whose lanes are full.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_sinks: Option<Vec<String>>,
+    /// When the hold began (RFC 3339, UTC); absent while not held.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_since: Option<String>,
+    /// Its backfill walk in progress and the sinks it serves; null while none
+    /// runs.
+    pub backfill: Option<BackfillSnapshot>,
+}
+
+/// An index's place in the exemption, in `/status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Exemption {
+    None,
+    Exempt,
+    Frozen,
+}
+
+/// What holds an index's builder, in `/status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexHold {
+    Budget,
+    Lane,
+}
+
+/// An index's walk in progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BackfillSnapshot {
+    /// The sinks it serves.
+    pub sinks: Vec<String>,
+}
+
 /// The `/status` document.
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusSnapshot {
     /// Where the deployment as a whole is.
     pub phase: Phase,
+    /// What the ingest side knows of each index (slice 7).
+    pub ingest: IngestSnapshot,
     /// Seconds since the daemon started.
     pub uptime_seconds: u64,
     /// Each index's state across sinks: backfilling if any sink is seeding it,
@@ -930,6 +1095,185 @@ mod tests {
             since,
             next_probe: since + ahead,
         }
+    }
+
+    fn users() -> IndexName {
+        IndexName::try_new("users").unwrap()
+    }
+
+    fn orders() -> IndexName {
+        IndexName::try_new("orders").unwrap()
+    }
+
+    fn sink(name: &str) -> SinkName {
+        SinkName::try_new(name).unwrap()
+    }
+
+    /// A status over `users` and `orders` into `primary` and `audit`, with
+    /// the engine's states and a progress and stalls to read.
+    fn ingest_status() -> (Status, Arc<IndexStates>, Arc<Progress>, Arc<Stalls>) {
+        let lanes: Vec<stream::LaneKey> = [users(), orders()]
+            .into_iter()
+            .flat_map(|index| {
+                [sink("primary"), sink("audit")]
+                    .into_iter()
+                    .map(move |sink| stream::LaneKey::new(index.clone(), sink))
+            })
+            .collect();
+        let progress = Arc::new(Progress::new(lanes.clone()));
+        let stalls = Arc::new(Stalls::new(lanes));
+        let states = Arc::new(IndexStates::new([users(), orders()]));
+        let status = Status::new(
+            [users(), orders()],
+            [sink("primary"), sink("audit")],
+            Instant::now(),
+        )
+        .with_progress(Arc::clone(&progress))
+        .with_stalls(Arc::clone(&stalls));
+        status.attach_index_states(Arc::clone(&states));
+        (status, states, progress, stalls)
+    }
+
+    /// Slice 7: every enabled index has an entry; with nothing happening it
+    /// waits on nothing, works, and is neither exempt, held nor walking.
+    #[test]
+    fn every_index_has_an_ingest_entry_with_nothing_happening() {
+        let (status, _, _, _) = ingest_status();
+        let snapshot = status.snapshot();
+        assert_eq!(
+            snapshot.ingest.indexes.keys().collect::<Vec<_>>(),
+            ["orders", "users"]
+        );
+        assert_eq!(
+            snapshot.ingest.indexes["users"],
+            IndexIngestSnapshot {
+                documents_waiting: 0,
+                backlog_seconds: 0.0,
+                exemption: Exemption::None,
+                exemption_since: None,
+                working: true,
+                held_by: None,
+                held_sinks: None,
+                held_since: None,
+                backfill: None,
+            }
+        );
+        let json = serde_json::to_value(&snapshot.ingest.indexes["users"]).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "documents_waiting": 0,
+                "backlog_seconds": 0.0,
+                "exemption": "none",
+                "working": true,
+                "held_by": null,
+                "backfill": null,
+            })
+        );
+    }
+
+    /// `documents_waiting` from the progress, `backlog_seconds` from the
+    /// stalls' sample: a document waiting since the first sample, sampled
+    /// again 42 s later.
+    #[test]
+    fn documents_waiting_and_the_backlog_age_are_read_per_index() {
+        let (status, _, progress, stalls) = ingest_status();
+        progress.mark([(
+            source::document::DocumentId {
+                index: orders(),
+                key: source::RowKey(Vec::new()),
+            },
+            kernel::Position::new(1),
+        )]);
+        let start = tokio::time::Instant::now();
+        stalls.sample(start, &progress, &NoSource, None);
+        stalls.sample(start + Duration::from_secs(42), &progress, &NoSource, None);
+        let orders = status.index_ingest(&orders()).unwrap();
+        assert_eq!(orders.documents_waiting, 1);
+        assert_eq!(orders.backlog_seconds, 42.0);
+        assert_eq!(status.index_ingest(&users()).unwrap().documents_waiting, 0);
+    }
+
+    /// An exempt index held by a full lane: its state and since, the lane's
+    /// sink, the hold's start, not working; its JSON names them all.
+    #[tokio::test(start_paused = true)]
+    async fn an_exempt_index_held_by_a_full_lane_is_shown_with_since() {
+        let (status, states, _, _) = ingest_status();
+        states.set_exemption(&orders(), ExemptionState::Exempt);
+        let _full = states.lane_full(&orders(), &sink("audit"));
+        let orders = status.index_ingest(&orders()).unwrap();
+        assert_eq!(orders.exemption, Exemption::Exempt);
+        assert!(orders.exemption_since.is_some());
+        assert_eq!(orders.held_by, Some(IndexHold::Lane));
+        assert_eq!(orders.held_sinks, Some(vec!["audit".to_owned()]));
+        assert!(orders.held_since.is_some());
+        assert!(!orders.working);
+        let json = serde_json::to_value(&orders).unwrap();
+        assert_eq!(json["exemption"], "exempt");
+        assert_eq!(json["held_by"], "lane");
+        assert_eq!(json["held_sinks"], serde_json::json!(["audit"]));
+        states.set_exemption(&self::orders(), ExemptionState::Frozen);
+        assert_eq!(
+            status.index_ingest(&self::orders()).unwrap().exemption,
+            Exemption::Frozen
+        );
+    }
+
+    /// Held by the budget (no sinks named), and a walk with the sinks it
+    /// serves.
+    #[tokio::test(start_paused = true)]
+    async fn a_budget_hold_and_a_walk_are_shown() {
+        let (status, states, _, _) = ingest_status();
+        states.budget(&users(), true);
+        let _walking = states.walking([(
+            users(),
+            std::collections::BTreeSet::from([sink("primary"), sink("audit")]),
+        )]);
+        let users = status.index_ingest(&users()).unwrap();
+        assert_eq!(users.held_by, Some(IndexHold::Budget));
+        assert_eq!(users.held_sinks, None);
+        assert!(!users.working);
+        assert_eq!(
+            users.backfill,
+            Some(BackfillSnapshot {
+                sinks: vec!["audit".to_owned(), "primary".to_owned()]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&users).unwrap()["backfill"],
+            serde_json::json!({"sinks": ["audit", "primary"]})
+        );
+    }
+
+    /// An index the status doesn't track (unknown, or disabled) has no entry.
+    #[test]
+    fn an_unknown_index_has_no_ingest_entry() {
+        let (status, _, _, _) = ingest_status();
+        assert_eq!(
+            status.index_ingest(&IndexName::try_new("items").unwrap()),
+            None
+        );
+    }
+
+    #[derive(Debug)]
+    struct NoSource;
+
+    #[async_trait::async_trait]
+    impl ChangeCapture for NoSource {
+        async fn continuity(&self) -> source::Result<source::cdc::Continuity> {
+            Ok(source::cdc::Continuity::Resumed)
+        }
+        async fn prepare(&self) -> source::Result<()> {
+            Ok(())
+        }
+        async fn live(
+            &self,
+        ) -> source::Result<
+            futures::stream::BoxStream<'static, source::Result<source::cdc::LiveChange>>,
+        > {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+        fn confirm(&self, _: source::cdc::Landed) {}
     }
 
     /// A probe further ahead than a date can say reads as the latest date,

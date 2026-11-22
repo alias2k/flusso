@@ -18,7 +18,8 @@ pub use fence::{
 pub use observer::StatusObserver;
 pub use stall::{LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};
 pub use status::{
-    IndexState, LaneHealthState, LaneHealthView, LaneSnapshot, LastScriptFailure, Phase, PinnedBy,
+    BackfillSnapshot, Exemption, IndexHold, IndexIngestSnapshot, IndexState, IngestSnapshot,
+    LaneHealthState, LaneHealthView, LaneSnapshot, LastScriptFailure, Phase, PinnedBy,
     ScriptFailures, SinkPhase, SinkSnapshot, Status, StatusSnapshot,
 };
 pub use supervise::{ControlError, DaemonControl};
@@ -26,8 +27,8 @@ pub use supervise::{ControlError, DaemonControl};
 use supervise::ControlReceivers;
 
 pub use engine::{
-    BuildStats, CommitStats, EngineId, LaneHealth, Observer, ParkReason, ProbeOutcome, Stage,
-    StageTiming, StartupStep, Wake, Work,
+    BuildStats, CommitStats, EngineId, LaneHealth, Observer, ParkReason, ProbeOutcome, ReaderBound,
+    Stage, StageTiming, StartupStep, Wake, Work,
 };
 pub use kernel::{IndexName, SinkName};
 
@@ -479,6 +480,7 @@ impl Daemon {
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())
         .with_stop(stop.clone());
+        status.attach_index_states(ingest.index_states());
 
         let sink_engines: Vec<SinkEngine> = sinks
             .into_iter()

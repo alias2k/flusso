@@ -13,6 +13,9 @@
 //! | held by a lane | a publish that pends on a full lane, until it goes through |
 //! | walking | a snapshot's start; its drop (completed, stopped or failed) clears it |
 //!
+//! The writers are public so a status can be shown in a test; only the
+//! engine calls them in a deployment.
+//!
 //! **Working** is read, not stored: not held, and none of the index's items
 //! waits on a lane unacknowledged for 5 s (6b-2's rule). With one index the
 //! engine keeps no record of its items, so working is "not held".
@@ -188,7 +191,7 @@ impl IndexStates {
     }
 
     /// `index` is in `state` (the tick): its since moves only on a change.
-    pub(crate) fn set_exemption(&self, index: &IndexName, state: ExemptionState) {
+    pub fn set_exemption(&self, index: &IndexName, state: ExemptionState) {
         let Some(one) = self.indexes.get(index) else {
             return;
         };
@@ -201,7 +204,7 @@ impl IndexStates {
 
     /// Whether the budget refuses `index`'s live batch now: one load when
     /// nothing changed, a lock on a change.
-    pub(crate) fn budget(&self, index: &IndexName, held: bool) {
+    pub fn budget(&self, index: &IndexName, held: bool) {
         let Some(one) = self.indexes.get(index) else {
             return;
         };
@@ -219,7 +222,7 @@ impl IndexStates {
 
     /// A publish of `index` pends on `sink`'s full lane, until the returned
     /// guard is dropped (the publish went through, or was dropped).
-    pub(crate) fn lane_full(&self, index: &IndexName, sink: &SinkName) -> LaneFull<'_> {
+    pub fn lane_full(&self, index: &IndexName, sink: &SinkName) -> LaneFull<'_> {
         if let Some(one) = self.indexes.get(index) {
             let mut state = lock(&one.state);
             state.lanes.insert(sink.clone());
@@ -244,7 +247,7 @@ impl IndexStates {
 
     /// The walk of each of `indexes` runs, for `sinks` of each, until the
     /// returned guard is dropped.
-    pub(crate) fn walking(
+    pub fn walking(
         self: &Arc<Self>,
         indexes: impl IntoIterator<Item = (IndexName, BTreeSet<SinkName>)>,
     ) -> Walking {
@@ -265,7 +268,7 @@ impl IndexStates {
 
 /// A publish pending on a full lane; dropping it frees the lane.
 #[derive(Debug)]
-pub(crate) struct LaneFull<'a> {
+pub struct LaneFull<'a> {
     states: &'a IndexStates,
     index: IndexName,
     sink: SinkName,
@@ -280,7 +283,7 @@ impl Drop for LaneFull<'_> {
 /// A snapshot's walks in progress; dropping it (completed, stopped or
 /// failed) clears them.
 #[derive(Debug)]
-pub(crate) struct Walking {
+pub struct Walking {
     states: Arc<IndexStates>,
     indexes: Vec<IndexName>,
 }
