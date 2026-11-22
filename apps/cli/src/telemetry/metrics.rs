@@ -250,10 +250,14 @@ pub(crate) fn register_index_gauges(status: Arc<Status>) -> IndexGauges {
 }
 
 /// The gauges [`register_index_gauges`] keeps registered.
-pub(crate) type IndexGauges = (ObservableGauge<f64>, Vec<ObservableGauge<u64>>);
+pub(crate) type IndexGauges = (
+    ObservableGauge<f64>,
+    Vec<ObservableGauge<u64>>,
+    opentelemetry::metrics::ObservableCounter<u64>,
+);
 
 fn index_gauges(meter: &opentelemetry::metrics::Meter, status: Arc<Status>) -> IndexGauges {
-    use daemon::{Exemption, IndexHold, IndexIngestSnapshot};
+    use daemon::{BackfillState, Exemption, IndexHold, IndexIngestSnapshot, IngestState};
     let label = |index: &daemon::IndexName| KeyValue::new("index", index.as_ref().to_owned());
     let ages = Arc::clone(&status);
     let backlog_age = meter
@@ -308,14 +312,36 @@ fn index_gauges(meter: &opentelemetry::metrics::Meter, status: Arc<Status>) -> I
         ),
         flag(
             "flusso.index.working",
-            "1 while an index works: not held, and none of its items has waited on a lane 5 s \
-             unacknowledged",
+            "1 while an index works: nothing of it has waited at a sink 5 s with none \
+             acknowledged, and it isn't down",
             |entry| entry.working,
         ),
         flag(
             "flusso.index.backfilling",
-            "1 while an index's backfill walk runs",
-            |entry| entry.backfill.is_some(),
+            "1 while an index's backfill walk runs (not while a failed walk waits to retry)",
+            |entry| {
+                entry
+                    .backfill
+                    .as_ref()
+                    .is_some_and(|backfill| backfill.state == BackfillState::Walking)
+            },
+        ),
+        flag(
+            "flusso.index.backfill_retrying",
+            "1 while an index's backfill walk failed and waits to retry, its live changes \
+             flowing",
+            |entry| {
+                entry
+                    .backfill
+                    .as_ref()
+                    .is_some_and(|backfill| backfill.state == BackfillState::Retrying)
+            },
+        ),
+        flag(
+            "flusso.index.down",
+            "1 while an index is down: its live work failed and its builder waits to restart \
+             (always 0 with one index, whose failure restarts the whole run)",
+            |entry| entry.state == IngestState::Down,
         ),
         meter
             .u64_observable_gauge("flusso.index.held")
@@ -335,7 +361,25 @@ fn index_gauges(meter: &opentelemetry::metrics::Meter, status: Arc<Status>) -> I
             })
             .build(),
     ];
-    (backlog_age, gauges)
+    let restarted = Arc::clone(&status);
+    let restarts = meter
+        .u64_observable_counter("flusso.index.restarts")
+        .with_description(
+            "How often an index's work started again after a failure, by kind: live (its \
+             builder restarted) or backfill (its walk started again)",
+        )
+        .with_callback(move |observer| {
+            for (index, entry) in restarted.ingest_indexes() {
+                for (kind, count) in [
+                    ("live", entry.restarts.live),
+                    ("backfill", entry.restarts.backfill),
+                ] {
+                    observer.observe(count, &[label(&index), KeyValue::new("kind", kind)]);
+                }
+            }
+        })
+        .build();
+    (backlog_age, gauges, restarts)
 }
 
 /// Register `flusso.lane.outstanding` as an observable gauge read from the
@@ -697,6 +741,23 @@ mod tests {
         let _full = states.lane_full(&orders, &primary);
         let _walking =
             states.walking([(orders.clone(), std::collections::BTreeSet::from([primary]))]);
+        // Slice 8-2: `users` went down (a live failure) and restarted once
+        // before, and its walk waits to retry; `orders` restarted its walk
+        // once.
+        {
+            use daemon::Observer;
+            let observer = daemon::StatusObserver::new(Arc::clone(&status));
+            observer.on_index_failed(&users, daemon::Work::Live, "live", Duration::from_secs(1));
+            observer.on_index_restarted(&users, daemon::Work::Live);
+            observer.on_index_failed(&users, daemon::Work::Live, "live", Duration::from_secs(2));
+            observer.on_index_failed(
+                &users,
+                daemon::Work::Backfill,
+                "walk",
+                Duration::from_secs(1),
+            );
+            observer.on_index_restarted(&orders, daemon::Work::Backfill);
+        }
 
         let registry = Registry::new();
         let exporter = opentelemetry_prometheus::exporter()
@@ -724,6 +785,14 @@ mod tests {
             r#"flusso_index_working{index="users"} 0"#,
             r#"flusso_index_held{by="lane",index="users"} 0"#,
             r#"flusso_index_backfilling{index="users"} 0"#,
+            r#"flusso_index_down{index="orders"} 0"#,
+            r#"flusso_index_down{index="users"} 1"#,
+            r#"flusso_index_backfill_retrying{index="orders"} 0"#,
+            r#"flusso_index_backfill_retrying{index="users"} 1"#,
+            r#"flusso_index_restarts_total{index="orders",kind="backfill"} 1"#,
+            r#"flusso_index_restarts_total{index="orders",kind="live"} 0"#,
+            r#"flusso_index_restarts_total{index="users",kind="backfill"} 0"#,
+            r#"flusso_index_restarts_total{index="users",kind="live"} 1"#,
         ] {
             assert!(text.contains(line), "{line} missing from:\n{text}");
         }
