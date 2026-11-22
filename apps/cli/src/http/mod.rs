@@ -2,8 +2,12 @@
 //!
 //! | Surface | Routes | Auth |
 //! | --- | --- | --- |
-//! | **public** | `/healthz` `/readyz` `/status` `/metrics` `/wait` | none |
-//! | **private** | `/indexes` `/reindex` | HTTP Basic |
+//! | **public** | `/healthz` `/readyz` `/status` `/metrics` `/wait` `/indexes/{name}/status` | none |
+//! | **private** | `/indexes` `/indexes/{name}/reindex` | HTTP Basic |
+//!
+//! `/indexes/…` is served by both: `…/status` only by the public one,
+//! `GET /indexes` and `…/reindex` only by the private one; each answers `404`
+//! for the other's routes.
 //!
 //! Both read the daemon's [`Status`]; the public one also holds the daemon's
 //! [`Fence`] (`/wait` is how a client waits to read its own write), the
@@ -21,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -275,6 +279,7 @@ pub(crate) fn public_router(state: PublicState) -> Router {
         .route("/status", get(status))
         .route("/metrics", get(metrics))
         .route("/wait", get(wait))
+        .route("/indexes/{name}/status", get(index_status))
         .with_state(state)
 }
 
@@ -290,7 +295,7 @@ pub(crate) struct PrivateState {
 pub(crate) fn private_router(state: PrivateState, basic_auth: Arc<BasicAuth>) -> Router {
     Router::new()
         .route("/indexes", get(indexes))
-        .route("/reindex", post(reindex))
+        .route("/indexes/{name}/reindex", post(reindex))
         .layer(middleware::from_fn_with_state(
             basic_auth,
             auth::require_basic_auth,
@@ -471,35 +476,66 @@ async fn indexes(State(state): State<PrivateState>) -> impl IntoResponse {
     Json(per_sink)
 }
 
-/// Rebuild one index (`POST /reindex?index=<name>[&sink=<name>]`) on one sink
-/// or, without `sink`, on every sink. Validates the names, then hands the
-/// operation to the daemon; the targeted sink engines stage a fresh generation
-/// and request their snapshot, no restart involved.
+/// `name` as an index the deployment tracks: `400` when it is no index
+/// name, `404` (naming the known ones) when it is not one of them.
+fn known_index(status: &Status, name: &str) -> Result<IndexName, Box<Response>> {
+    let Ok(index) = IndexName::try_new(name.to_owned()) else {
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid index name {name:?}") })),
+            )
+                .into_response(),
+        ));
+    };
+    let known: Vec<String> = status.snapshot().indexes.into_keys().collect();
+    if !known.iter().any(|known| known == index.as_ref()) {
+        return Err(Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": format!("unknown index {}", index.as_ref()),
+                    "indexes": known,
+                })),
+            )
+                .into_response(),
+        ));
+    }
+    Ok(index)
+}
+
+/// One index's ingest state (`GET /indexes/<name>/status`): the same JSON as
+/// `/status`'s `ingest.indexes.<name>` (ADR 0012 stage 8a, slice 7).
+async fn index_status(State(state): State<PublicState>, Path(name): Path<String>) -> Response {
+    let index = match known_index(&state.status, &name) {
+        Ok(index) => index,
+        Err(refused) => return *refused,
+    };
+    match state.status.index_ingest(&index) {
+        Some(entry) => Json(entry).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("unknown index {}", index.as_ref()) })),
+        )
+            .into_response(),
+    }
+}
+
+/// Rebuild one index (`POST /indexes/<name>/reindex[?sink=<name>]`) on one
+/// sink or, without `sink`, on every sink. Validates the names, then hands
+/// the operation to the daemon; the targeted sink engines stage a fresh
+/// generation and request their snapshot, no restart involved. `202`
+/// queued; `400` an invalid index or sink name; `404` an unknown index or
+/// sink; `503` while stopping or with the engine not running.
 async fn reindex(
     State(state): State<PrivateState>,
+    Path(name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(raw) = params.get("index") else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "missing query parameter ?index=<name>\n",
-        )
-            .into_response();
+    let index = match known_index(&state.status, &name) {
+        Ok(index) => index,
+        Err(refused) => return *refused,
     };
-    let Ok(index) = IndexName::try_new(raw.clone()) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("invalid index name {raw:?}\n"),
-        )
-            .into_response();
-    };
-    if !state.status.snapshot().indexes.contains_key(index.as_ref()) {
-        return (
-            StatusCode::NOT_FOUND,
-            format!("unknown index {}\n", index.as_ref()),
-        )
-            .into_response();
-    }
     let sink = match params.get("sink") {
         None => None,
         Some(raw) => match SinkName::try_new(raw.clone()) {
@@ -507,7 +543,7 @@ async fn reindex(
             Err(_) => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    format!("invalid sink name {raw:?}\n"),
+                    Json(json!({ "error": format!("invalid sink name {raw:?}") })),
                 )
                     .into_response();
             }
@@ -522,10 +558,16 @@ async fn reindex(
             },
         )
             .into_response(),
-        Err(ControlError::UnknownSink(name)) => {
-            (StatusCode::NOT_FOUND, format!("unknown sink {name}\n")).into_response()
-        }
-        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, format!("{error}\n")).into_response(),
+        Err(ControlError::UnknownSink(name)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("unknown sink {name}") })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
     }
 }
 

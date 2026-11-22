@@ -257,14 +257,14 @@
             "string",
             "null"
           ],
-          "description": "Public, read-only surface (`/healthz`, `/readyz`, `/status`, `/metrics`),\ne.g. `0.0.0.0:9464`."
+          "description": "Public, read-only surface (`/healthz`, `/readyz`, `/status`, `/metrics`,\n`/wait`, `/indexes/<name>/status`), e.g. `0.0.0.0:9464`."
         },
         "private_address": {
           "type": [
             "string",
             "null"
           ],
-          "description": "Private, Basic-auth control surface (`/indexes`, `/reindex`), e.g.\n`0.0.0.0:9465`."
+          "description": "Private, Basic-auth control surface (`/indexes`,\n`/indexes/<name>/reindex`), e.g. `0.0.0.0:9465`."
         }
       },
       "description": "Bind addresses for the two operational HTTP surfaces, from a `flusso.toml`\n`[server]` table. Both are optional — the binary layers `FLUSSO_*` env vars\nand CLI flags on top (which win), falling back to built-in defaults when all\nare absent. Each is a `host:port` socket address, parsed and validated at\nconfig-read time by [`SocketAddr`]'s own deserializer."

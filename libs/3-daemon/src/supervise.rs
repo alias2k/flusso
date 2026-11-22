@@ -101,6 +101,15 @@ impl DaemonControl {
         )
     }
 
+    /// A control over `sinks` with no deployment behind it: each operation
+    /// lands on the returned receiver of its sink. For a transport's tests.
+    pub fn detached(
+        sinks: &[SinkName],
+        stop: Stop,
+    ) -> (Self, BTreeMap<SinkName, mpsc::Receiver<SinkControl>>) {
+        Self::new(sinks, stop)
+    }
+
     /// The sinks that accept operations.
     pub fn sinks(&self) -> impl Iterator<Item = &SinkName> {
         self.senders.keys()

@@ -27,8 +27,9 @@ pub use supervise::{ControlError, DaemonControl};
 use supervise::ControlReceivers;
 
 pub use engine::{
-    BuildStats, CommitStats, EngineId, LaneHealth, Observer, ParkReason, ProbeOutcome, ReaderBound,
-    Stage, StageTiming, StartupStep, Wake, Work,
+    BuildStats, CommitStats, EngineId, ExemptionState, IndexStates, LaneHealth, Observer,
+    ParkReason, ProbeOutcome, ReaderBound, SinkControl, Stage, StageTiming, StartupStep, Stop,
+    Wake, Work,
 };
 pub use kernel::{IndexName, SinkName};
 

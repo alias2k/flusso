@@ -105,13 +105,14 @@ pub(crate) struct RunArgs {
     queue_capacity: Option<usize>,
 
     /// Bind address for the public, read-only HTTP surface (`/healthz`,
-    /// `/readyz`, `/status`, `/metrics`). Overrides `[server].public_address`
+    /// `/readyz`, `/status`, `/metrics`, `/wait`, `/indexes/<name>/status`).
+    /// Overrides `[server].public_address`
     /// from config; defaults to `127.0.0.1:9464`.
     #[arg(long, env = "FLUSSO_PUBLIC_ADDRESS")]
     public_address: Option<SocketAddr>,
 
     /// Bind address for the private, Basic-auth control surface (`/indexes`,
-    /// `/reindex`). Overrides `[server].private_address` from config; defaults
+    /// `/indexes/<name>/reindex`). Overrides `[server].private_address` from config; defaults
     /// to `127.0.0.1:9465`.
     #[arg(long, env = "FLUSSO_PRIVATE_ADDRESS")]
     private_address: Option<SocketAddr>,

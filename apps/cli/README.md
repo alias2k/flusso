@@ -73,9 +73,10 @@ separate from the config's override variables (`SOURCE_POSTGRES_CONNECTION_URL`,
 `flusso run` serves two HTTP listeners (bound up front, so a bad address fails fast):
 
 - **Public** (`--public-address`, unauthenticated): `/healthz`, `/readyz`, `/status`,
-  `/metrics` (Prometheus; OTLP push when `OTEL_EXPORTER_OTLP_*` is set).
+  `/metrics` (Prometheus; OTLP push when `OTEL_EXPORTER_OTLP_*` is set), `/wait`,
+  `/indexes/<name>/status`.
 - **Private** (`--private-address`, HTTP Basic auth — default `admin`/`flusso` with a
-  loud startup warning): `/indexes`, `/reindex`. The `indexes`/`reindex` subcommands are
+  loud startup warning): `/indexes`, `POST /indexes/<name>/reindex`. The `indexes`/`reindex` subcommands are
   clients for this surface.
 
 Logging honors `RUST_LOG` (default `info`); `FLUSSO_LOG_FORMAT=json` for structured logs.

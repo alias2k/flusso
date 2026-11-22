@@ -97,10 +97,12 @@ fn default_stream() -> PortEntry {
 /// and CLI flags on top (which win).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// Public, read-only surface (`/healthz`, `/readyz`, `/status`, `/metrics`).
+    /// Public, read-only surface (`/healthz`, `/readyz`, `/status`, `/metrics`,
+    /// `/wait`, `/indexes/<name>/status`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_address: Option<SocketAddr>,
-    /// Private, Basic-auth control surface (`/indexes`, `/reindex`).
+    /// Private, Basic-auth control surface (`/indexes`,
+    /// `/indexes/<name>/reindex`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_address: Option<SocketAddr>,
 }

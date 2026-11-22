@@ -363,3 +363,181 @@ fn a_pid_that_is_not_a_flusso_here_is_not_called_one() {
     );
     assert!(!is_local_flusso(u64::from(u32::MAX)), "no such process");
 }
+
+fn index(name: &str) -> IndexName {
+    IndexName::try_new(name).unwrap()
+}
+
+/// A status over `users` and `orders` into `primary`, with the engine's
+/// per-index states attached.
+fn indexed_status() -> (Arc<Status>, Arc<daemon::IndexStates>) {
+    let states = Arc::new(daemon::IndexStates::new([index("users"), index("orders")]));
+    let status = Arc::new(Status::new(
+        [index("users"), index("orders")],
+        [SinkName::try_new("primary").unwrap()],
+        Instant::now(),
+    ));
+    status.attach_index_states(Arc::clone(&states));
+    (status, states)
+}
+
+/// Serve the public router over `status`; returns its base URL.
+async fn serve_status(status: Arc<Status>) -> String {
+    let source = Arc::new(SteadySource::default());
+    let lane = stream::LaneKey::new(index("users"), SinkName::try_new("primary").unwrap());
+    let fence = Fence::new(
+        source as Arc<dyn ChangeCapture>,
+        Arc::new(daemon::Progress::new([lane.clone()])),
+        [lane],
+    );
+    let state = PublicState {
+        status,
+        registry: None,
+        fence,
+        waits: Waits::default(),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, public_router(state)).await });
+    base
+}
+
+/// Serve the private router over `status` and a detached control of
+/// `primary`; returns its base URL, the control's receivers and its stop.
+async fn serve_private(
+    status: Arc<Status>,
+) -> (
+    String,
+    std::collections::BTreeMap<SinkName, tokio::sync::mpsc::Receiver<daemon::SinkControl>>,
+    daemon::Stop,
+) {
+    let stop = daemon::Stop::new();
+    let (control, receivers) =
+        DaemonControl::detached(&[SinkName::try_new("primary").unwrap()], stop.clone());
+    let state = PrivateState { status, control };
+    let auth = Arc::new(BasicAuth::new("admin".to_owned(), "secret".to_owned()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, private_router(state, auth)).await });
+    (base, receivers, stop)
+}
+
+async fn get_json(url: &str) -> (u16, serde_json::Value) {
+    let response = reqwest::get(url).await.unwrap();
+    let status = response.status().as_u16();
+    (
+        status,
+        response.json().await.unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// Slice 7: `GET /indexes/<name>/status` answers that index's
+/// `ingest.indexes.<name>` entry, the same JSON as `/status`'s.
+#[tokio::test]
+async fn an_index_status_is_its_ingest_entry() {
+    let (status, states) = indexed_status();
+    states.set_exemption(&index("orders"), daemon::ExemptionState::Frozen);
+    let base = serve_status(Arc::clone(&status)).await;
+    let (code, body) = get_json(&format!("{base}/indexes/orders/status")).await;
+    assert_eq!(code, 200);
+    assert_eq!(body["exemption"], "frozen");
+    assert_eq!(body["working"], true);
+    assert_eq!(body["documents_waiting"], 0);
+    let (_, whole) = get_json(&format!("{base}/status")).await;
+    assert_eq!(whole["ingest"]["indexes"]["orders"], body);
+}
+
+/// An unknown (or disabled) index is `404`, naming the known ones; a name
+/// that is no index name is `400`.
+#[tokio::test]
+async fn an_unknown_or_invalid_index_status_is_refused() {
+    let (status, _) = indexed_status();
+    let base = serve_status(status).await;
+    let (code, body) = get_json(&format!("{base}/indexes/items/status")).await;
+    assert_eq!(code, 404);
+    assert_eq!(body["indexes"], serde_json::json!(["orders", "users"]));
+    let (code, _) = get_json(&format!("{base}/indexes/no-such!/status")).await;
+    assert_eq!(code, 400);
+}
+
+/// Each surface answers `404` for the other's `/indexes/…` routes.
+#[tokio::test]
+async fn each_surface_serves_only_its_own_index_routes() {
+    let (status, _) = indexed_status();
+    let public = serve_status(Arc::clone(&status)).await;
+    let (private, _receivers, _stop) = serve_private(status).await;
+    let client = reqwest::Client::new();
+    let reindex_on_public = client
+        .post(format!("{public}/indexes/users/reindex"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reindex_on_public.status().as_u16(), 404);
+    let status_on_private = client
+        .get(format!("{private}/indexes/users/status"))
+        .basic_auth("admin", Some("secret"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status_on_private.status().as_u16(), 404);
+}
+
+async fn post_reindex(base: &str, path: &str) -> (u16, String) {
+    let response = reqwest::Client::new()
+        .post(format!("{base}{path}"))
+        .basic_auth("admin", Some("secret"))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
+}
+
+/// `POST /indexes/<name>/reindex` queues the rebuild on the named sink, or
+/// on every sink, and answers `202`; the old `POST /reindex` is gone.
+#[tokio::test]
+async fn a_reindex_is_queued_on_the_index_path() {
+    let (status, _) = indexed_status();
+    let (base, mut receivers, _stop) = serve_private(status).await;
+    let (code, body) = post_reindex(&base, "/indexes/users/reindex?sink=primary").await;
+    assert_eq!(code, 202, "{body}");
+    assert_eq!(body.trim(), "reindex of users on primary queued");
+    let (code, _) = post_reindex(&base, "/indexes/orders/reindex").await;
+    assert_eq!(code, 202);
+    let primary = receivers
+        .get_mut(&SinkName::try_new("primary").unwrap())
+        .unwrap();
+    for expected in ["users", "orders"] {
+        let daemon::SinkControl::Reindex { indexes } = primary.try_recv().unwrap();
+        assert_eq!(indexes, vec![index(expected)]);
+    }
+    let (code, _) = post_reindex(&base, "/reindex?index=users").await;
+    assert_eq!(code, 404, "the old route is gone");
+}
+
+/// The reindex route's refusals: `400` for an invalid index or sink name,
+/// `404` for an unknown index or sink, `503` while stopping, `401` without
+/// credentials.
+#[tokio::test]
+async fn a_reindex_is_refused_with_why() {
+    let (status, _) = indexed_status();
+    let (base, _receivers, stop) = serve_private(status).await;
+    for (path, code) in [
+        ("/indexes/no-such!/reindex", 400),
+        ("/indexes/users/reindex?sink=Not%20A%20Sink!", 400),
+        ("/indexes/items/reindex", 404),
+        ("/indexes/users/reindex?sink=audit", 404),
+    ] {
+        assert_eq!(post_reindex(&base, path).await.0, code, "{path}");
+    }
+    let anonymous = reqwest::Client::new()
+        .post(format!("{base}/indexes/users/reindex"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status().as_u16(), 401);
+    stop.request();
+    let (code, body) = post_reindex(&base, "/indexes/users/reindex").await;
+    assert_eq!(code, 503, "{body}");
+    assert!(body.contains("stopping"), "{body}");
+}

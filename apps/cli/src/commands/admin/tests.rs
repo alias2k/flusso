@@ -57,3 +57,11 @@ fn a_ca_file_without_a_certificate_is_refused() {
     let _ = std::fs::remove_file(path);
     assert!(error.contains("holds no PEM certificate"), "{error}");
 }
+
+/// `flusso reindex` posts to the index's own path (slice 7); a name that is
+/// no index name is refused before any request.
+#[test]
+fn a_reindex_posts_to_the_index_path() {
+    assert_eq!(reindex_path("users").unwrap(), "/indexes/users/reindex");
+    assert!(reindex_path("no such/index").is_err());
+}
