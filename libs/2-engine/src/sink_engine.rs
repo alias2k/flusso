@@ -287,6 +287,14 @@ impl SinkEngine {
         self.health.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// `lane`'s F9 map, if the engine keeps state for the lane (tests).
+    #[cfg(test)]
+    pub(crate) fn superseded_map(&self, lane: &LaneKey) -> Option<BTreeMap<String, u64>> {
+        self.lock_health()
+            .get(lane)
+            .map(|state| state.superseded.clone())
+    }
+
     /// `lane`'s state as the last run left it; open when never stored.
     pub(super) fn lane_state(&self, lane: &LaneKey) -> LaneState {
         self.lock_health()

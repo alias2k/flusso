@@ -193,6 +193,10 @@ struct LaneRun {
     /// The largest build number received in this run, noted while the lane
     /// has F9 entries (`prune_superseded`).
     newest: Option<u64>,
+    /// While the lane has F9 entries: every item of it received in this run
+    /// and not acknowledged, by receive order, with its build number (none:
+    /// unknown). What decides when an entry may go (the note's 14.10).
+    account: Option<BTreeMap<u64, Option<u64>>>,
 }
 
 impl LaneRun {
@@ -308,6 +312,8 @@ struct Refreshing {
     lane: usize,
     /// The waiting item's lane order.
     seq: Option<u64>,
+    /// The waiting item's build number.
+    build: Option<u64>,
     oldest: bool,
     covers_below: u64,
     /// Something of the lane landed while this was out: its position may be
@@ -385,8 +391,11 @@ impl<'a> Run<'a> {
             .into_iter()
             .map(|(key, consumer)| {
                 let blamed = blame.covers(&key);
+                let health = engine.lane_state(&key);
+                // A run starts its F9 account empty (14.10).
+                let account = (!health.superseded.is_empty()).then(BTreeMap::new);
                 LaneRun {
-                    health: engine.lane_state(&key),
+                    health,
                     barrier: blamed && !matches!(blame, Blame::Nobody),
                     counts: blamed,
                     key,
@@ -396,6 +405,7 @@ impl<'a> Run<'a> {
                     backfill_waiting: 0,
                     walked: Walked::default(),
                     newest: None,
+                    account,
                 }
             })
             .collect();
@@ -992,6 +1002,15 @@ impl<'a> Run<'a> {
         };
         let seq = self.next_seq;
         self.next_seq += 1;
+        // Received: into its lane's F9 account (14.10), while it keeps one.
+        if self.superseding > 0
+            && let Queue::Batch { batch, .. } = &item
+            && let Some(run) = self.lanes.get_mut(lane)
+            && let Some(account) = run.account.as_mut()
+        {
+            account.insert(seq, batch.build);
+            run.newest = run.newest.max(batch.build);
+        }
         if let Queue::Complete { .. } = &item
             && let Some(run) = self.lanes.get_mut(lane)
         {
@@ -1052,7 +1071,8 @@ impl<'a> Run<'a> {
                 run.walked.hold(seq);
             }
             let oldest = self.is_oldest(lane, seq);
-            self.acknowledge(handle, lane, seq, oldest, None).await?;
+            self.acknowledge(handle, lane, seq, batch.build, oldest, None)
+                .await?;
         }
         Ok(())
     }
@@ -1081,7 +1101,8 @@ impl<'a> Run<'a> {
                         run.walked.ended(seq, Instant::now());
                     }
                     if self.engine.cut_short(&index) || self.engine.superseded(&index, ticket) {
-                        self.acknowledge(handle, lane, seq, true, None).await?;
+                        self.acknowledge(handle, lane, seq, None, true, None)
+                            .await?;
                     } else if let Some(landed) = self.seed(index, ticket, handle, lane, seq) {
                         self.landed(landed).await?;
                     }
@@ -1580,8 +1601,15 @@ impl<'a> Run<'a> {
         }
         self.engine.seeded(&seeding.index, seeding.ticket, took);
         let oldest = self.is_oldest(seeding.lane, seeding.seq);
-        self.acknowledge(seeding.handle, seeding.lane, seeding.seq, oldest, None)
-            .await?;
+        self.acknowledge(
+            seeding.handle,
+            seeding.lane,
+            seeding.seq,
+            None,
+            oldest,
+            None,
+        )
+        .await?;
         if let Some(run) = self.lanes.get_mut(seeding.lane) {
             run.barrier = false;
         }
@@ -1662,8 +1690,6 @@ impl<'a> Run<'a> {
         let (failed, landed_parts): (Vec<Part>, Vec<Part>) = std::mem::take(&mut flight.parts)
             .into_iter()
             .partition(|part| held_lane(self.lanes.get(part.lane)));
-        let mut landed_lanes: Vec<usize> = landed_parts.iter().map(|part| part.lane).collect();
-        landed_lanes.dedup();
         self.engine
             .quarantine(&report, |index| !held.contains_key(index));
         let mut parked: Vec<usize> = Vec::new();
@@ -1774,6 +1800,7 @@ impl<'a> Run<'a> {
         }
         let mut acknowledged = Ok(());
         for (part, last) in landed_parts.into_iter().zip(last_of_lane) {
+            let build = part.batch.build;
             // Let go of the batch before acknowledging it, so the lane frees it
             // as the acknowledgement lands.
             drop(part.documents);
@@ -1794,7 +1821,7 @@ impl<'a> Run<'a> {
                 )
             };
             if let Err(error) = self
-                .acknowledge(part.handle, part.lane, part.seq, oldest, wants)
+                .acknowledge(part.handle, part.lane, part.seq, build, oldest, wants)
                 .await
             {
                 acknowledged = Err(error);
@@ -1814,11 +1841,6 @@ impl<'a> Run<'a> {
             substitute.handle.ack().await?;
             if let Some(build) = substitute.build {
                 self.supersede(lane, build, substitute.ids);
-            }
-        }
-        if self.superseding > 0 {
-            for lane in landed_lanes {
-                self.prune_superseded(lane);
             }
         }
         for lane in walked {
@@ -1999,9 +2021,6 @@ impl<'a> Run<'a> {
         if run.health.superseded.is_empty() {
             return batch;
         }
-        if let Some(build) = batch.build {
-            run.newest = Some(run.newest.map_or(build, |newest| newest.max(build)));
-        }
         let superseded = &run.health.superseded;
         let build = batch.build;
         without(batch, |id| {
@@ -2012,19 +2031,32 @@ impl<'a> Run<'a> {
     }
 
     /// `lane`'s substitute numbered `build` landed with the documents `ids`:
-    /// merge them into the lane's map, leave them out of the older items
-    /// already waiting, and note how far the lane's deliveries got.
+    /// merge them into the lane's map and leave them out of the older items
+    /// already waiting. A lane without entries yet starts its account (14.10)
+    /// from every place a received, unacknowledged item of it can be: the
+    /// window, the writes in flight, the items waiting for a caught-up write.
     fn supersede(&mut self, lane: usize, build: u64, ids: Vec<String>) {
-        let mut newest: Option<u64> = None;
+        let mut found: BTreeMap<u64, Option<u64>> = BTreeMap::new();
         for queued in self.window.iter_mut().filter(|queued| queued.lane == lane) {
             if let Queue::Batch { batch, documents } = &mut queued.item {
-                newest = newest.max(batch.build);
+                found.insert(queued.seq, batch.build);
                 if supersedes(build, batch.build)
                     && batch.envelopes.iter().any(|e| ids.contains(&e.id))
                 {
                     *batch = without(std::mem::take(batch), |id| ids.iter().any(|own| own == id));
                     *documents = Documents::new(&batch.envelopes);
                 }
+            }
+        }
+        for part in self.parts_in_flight(lane) {
+            found.insert(part.seq, part.batch.build);
+        }
+        for (_, refreshing) in &self.refreshing {
+            if refreshing.lane == lane
+                && refreshing.handle.is_some()
+                && let Some(seq) = refreshing.seq
+            {
+                found.insert(seq, refreshing.build);
             }
         }
         let Some(run) = self.lanes.get_mut(lane) else {
@@ -2035,57 +2067,56 @@ impl<'a> Run<'a> {
             let entry = run.health.superseded.entry(id).or_insert(build);
             *entry = (*entry).max(build);
         }
-        run.newest = run.newest.max(newest);
+        if run.account.is_none() {
+            run.newest = found.values().copied().max().flatten();
+            run.account = Some(found);
+        }
         if was_empty && !run.health.superseded.is_empty() {
             self.superseding += 1;
         }
         self.engine.store_lane(&run.key, &run.health, false);
     }
 
-    /// Drop the F9 entries of `lane` no item can be written over any more:
-    /// those numbered at most the smallest build number the lane can still
-    /// deliver, the oldest one unacknowledged, or, with none, one past the
-    /// newest received. An item with no number blocks the drop; nothing
-    /// received yet in this run keeps every entry.
+    /// Drop the F9 entries of `lane` no item can be written over any more
+    /// (14.10): those numbered at most the smallest build number in the
+    /// lane's account, or, with the account empty, at most one past the
+    /// newest received in this run. Nothing once the run has failed, nor
+    /// while an item of unknown number is unacknowledged.
     fn prune_superseded(&mut self, lane: usize) {
-        let Some(run) = self.lanes.get(lane) else {
-            return;
-        };
-        if run.health.superseded.is_empty() {
+        if self.failure.is_some() {
             return;
         }
-        let unacknowledged = self
-            .window
-            .iter()
-            .filter(|queued| queued.lane == lane)
-            .filter_map(|queued| match &queued.item {
-                Queue::Batch { batch, .. } => Some(batch.build),
-                Queue::Complete { .. } => None,
-            })
-            .chain(self.parts_in_flight(lane).map(|part| part.batch.build));
-        let mut oldest: Option<Option<u64>> = None;
-        for build in unacknowledged {
-            oldest = Some(match (oldest, build) {
-                (None, build) => build,
-                (Some(None), _) | (_, None) => None,
-                (Some(Some(least)), Some(build)) => Some(least.min(build)),
-            });
-        }
-        let floor = match oldest {
-            Some(Some(least)) => least,
-            Some(None) => return,
-            None => match run.newest {
-                Some(newest) => newest.saturating_add(1),
-                None => return,
-            },
-        };
         let Some(run) = self.lanes.get_mut(lane) else {
             return;
         };
+        let Some(account) = &run.account else {
+            return;
+        };
+        let floor = if account.is_empty() {
+            match run.newest {
+                Some(newest) => newest.saturating_add(1),
+                None => return,
+            }
+        } else {
+            let mut least = u64::MAX;
+            for build in account.values() {
+                match build {
+                    Some(build) => least = least.min(*build),
+                    None => return,
+                }
+            }
+            least
+        };
+        let before = run.health.superseded.len();
         run.health
             .superseded
             .retain(|_, substitute| *substitute > floor);
+        if run.health.superseded.len() == before {
+            return;
+        }
         if run.health.superseded.is_empty() {
+            run.account = None;
+            run.newest = None;
             self.superseding = self.superseding.saturating_sub(1);
         }
         self.engine.store_lane(&run.key, &run.health, false);
@@ -2293,6 +2324,7 @@ impl<'a> Run<'a> {
         handle: Box<dyn AckHandle>,
         lane: usize,
         seq: u64,
+        build: Option<u64>,
         oldest: bool,
         wants: Option<bool>,
     ) -> Result<()> {
@@ -2301,6 +2333,7 @@ impl<'a> Run<'a> {
                 handle: Some(handle),
                 lane,
                 seq: Some(seq),
+                build,
                 oldest,
                 covers_below: 0,
                 again: false,
@@ -2316,7 +2349,7 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        self.acknowledged(handle, lane, oldest).await
+        self.acknowledged(handle, lane, Some(seq), oldest).await
     }
 
     /// The lane's key, if it is quiet (nothing of it waiting, in flight or on
@@ -2351,6 +2384,7 @@ impl<'a> Run<'a> {
                         handle: None,
                         lane,
                         seq: None,
+                        build: None,
                         oldest: false,
                         covers_below: 0,
                         again: false,
@@ -2401,9 +2435,22 @@ impl<'a> Run<'a> {
         &mut self,
         handle: Box<dyn AckHandle>,
         lane: usize,
+        seq: Option<u64>,
         oldest: bool,
     ) -> Result<()> {
         handle.ack().await?;
+        // Acknowledged: the item leaves its lane's F9 account (14.10), the
+        // one place it does.
+        if self.superseding > 0
+            && let Some(seq) = seq
+            && let Some(account) = self
+                .lanes
+                .get_mut(lane)
+                .and_then(|run| run.account.as_mut())
+        {
+            account.remove(&seq);
+            self.prune_superseded(lane);
+        }
         if oldest && self.failure.is_none() && self.lanes.get(lane).is_some_and(|run| run.counts) {
             self.engine.advanced.fetch_add(1, Ordering::Relaxed);
         }
@@ -2472,7 +2519,7 @@ impl<'a> Run<'a> {
                 continue;
             }
             if let Some(handle) = refreshing.handle {
-                self.acknowledged(handle, refreshing.lane, refreshing.oldest)
+                self.acknowledged(handle, refreshing.lane, refreshing.seq, refreshing.oldest)
                     .await?;
             }
         }

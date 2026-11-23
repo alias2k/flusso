@@ -514,8 +514,8 @@ way; the CI gate decides.
 
 | Mutation | Killed by |
 | --- | --- |
-| B1: a substitute replaces the map | `a_second_substitute_*`, `a_backlog_past_the_lookahead_*`, `a_fixed_row_unparks_its_lane`, the open-stream schedules |
-| B2: entries pruned past unacknowledged items | both random schedules, `a_fixed_row_unparks_its_lane` |
+| B1: a substitute replaces the map | `a_second_substitute_*`, `a_backlog_past_the_lookahead_*`, the open-stream schedules (`a_fixed_row_unparks_its_lane` failed under it only through a side effect, corrected in round 2) |
+| B2: entries pruned past unacknowledged items | both random schedules |
 | a refused substitute's landed documents forgotten | the closed-stream schedules |
 | F14: a fresh build asks the budget | `a_rebuild_is_served_with_the_budget_held_full` |
 | 7: a newer request queued beside the older | `a_newer_request_for_a_lane_replaces_the_one_waiting` |
@@ -552,3 +552,49 @@ yet acknowledged: `seq → build number`, on the lane's `LaneRun`.
 - **Memory.** Once every item of the lane received before the substitute is acknowledged, the map empties, the
   account is dropped and the lane's state is released (`LaneState::is_kept`).
 - **Cost.** With no entry anywhere, none: the account exists only while its lane has entries.
+
+**Why no path bypasses it: every place a lane item's handle lives in a run** (`sink_engine/writes.rs`).
+
+| Where | Created, moved, dropped or acknowledged | Covered by |
+| --- | --- | --- |
+| `queue` | a delivery becomes a `Queued` in the window | enters the account here (while the lane keeps one) |
+| `take_from_window` → `grant`/`pick` | moved into a `Part` of a `Flight` | still in the account; seeding reads `parts_in_flight` |
+| `substituted` | the parked item's handle moved into the probe's `Part` | the same |
+| `put_back` | a held part back into the window | the same (it never left) |
+| `landed` → `acknowledge` → `acknowledged` | a landed part | leaves the account only after `ack` returned `Ok` |
+| `acknowledge` → `start_refresh` (`Refreshing.handle`) → `refresh_returned` → `acknowledged` | an item waiting for its lane's caught-up write | stays in the account until then; seeding reads `refreshing` |
+| `skip_backfill` (stop) → `acknowledge` | a snapshot item acknowledged unwritten | through `acknowledged` |
+| `seed`/`seed_returned`/`put_back_complete`, the completion acknowledged in `grant` | a `SnapshotComplete` | no build number: not an item of the account |
+| `landed`'s `Err` arm, `fail`, the run's end | a handle dropped unacknowledged | never leaves the account; nothing is pruned once the run failed; the next run starts again from the redelivery |
+
+**A write mixing a block and refusals for one index.** `held_indexes` lets a block win over refusals of the
+same index, and a blocked part's report names no documents, so a substitute in such a write adds nothing to
+the map. That is right in every case OpenSearch produces: a write block (`index.blocks.*`) and a role without
+write permission refuse every item of the index in the request, so none of its documents landed. The only way
+some could have landed is a block set while the `_bulk` request was being applied; then those documents are
+written again by the parked item's next probe (an older build over a newer one, until the row next changes) —
+the one case the map can't see, because the sink port doesn't say which items a block refused.
+
+**Tests** (round 2): the two reproductions, adopted (`a_sibling_write_landing_after_a_failed_one_keeps_the_map`,
+`an_item_waiting_for_a_caught_up_write_keeps_the_map`); the boundary and memory bound
+(`an_entry_stays_while_an_older_item_is_unacknowledged_and_goes_after`: an item numbered 11 prunes while 9 is in
+flight, the entry 10 stays; once 9 is acknowledged it goes and the lane keeps no state); the seed's caught-up wait
+(`the_parked_item_waiting_for_its_caught_up_write_keeps_the_map`: a lane isn't probed while its own caught-up write
+is out, so the item waiting for one when its substitute lands is the parked item itself, whose acknowledgement
+waits for the quiet lane's caught-up write). The random schedules: the seeds refusing documents write up to four
+items at once and, two in five, report writes searchable within 50 ms; after a substitute the sink's next write
+fails now and then (a part, a sibling's, or a caught-up write); they assert lanes asked again after a substitute
+and writes failed after one.
+
+**Mutations** (round 2; each compiles, none hangs):
+
+| Mutation | Killed by |
+| --- | --- |
+| a received item left out of the account | both random schedules |
+| a caught-up wait left out of the seed | the open-stream schedules |
+| an entry dropped one item too early (`> floor + 1`) | `an_entry_stays_while_an_older_item_is_unacknowledged_and_goes_after` |
+| an entry never dropped | the same |
+| pruning after the run failed | none: redundant. A handle dropped by the failure never leaves the account, so the floor can't pass it either way; the check stays as a second barrier |
+
+Not done: under the routing mutation (a `Rebuild` sent to the backfill inbox) the open-stream schedule still
+runs to nextest's kill; the directed `rebuilds` tests fail at once.
