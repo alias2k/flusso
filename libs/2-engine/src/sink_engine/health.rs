@@ -473,6 +473,22 @@ impl LaneState {
 mod tests {
     use super::*;
 
+    /// #471: a lane a staging left out is staged again with ensure's rules
+    /// only until it opens; once open, a target a write finds missing is
+    /// staged again as gone (`restage`, with its walk reset), never with
+    /// ensure's rules.
+    #[test]
+    fn a_reopened_lane_is_no_longer_left_out() {
+        let now = Instant::now();
+        let mut state = on(10, 100);
+        assert!(state.restage("could not be ensured: refused".to_owned(), now));
+        state.unensured = true;
+        state.reopen(now);
+        assert!(!state.unensured, "reopened: no longer left out");
+        assert!(state.restage("the target is gone".to_owned(), now));
+        assert!(!state.unensured, "a missing target is not a left-out index");
+    }
+
     fn on(initial_ms: u64, max_ms: u64) -> LaneState {
         LaneState::new(
             Backoff::new(

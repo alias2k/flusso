@@ -25,6 +25,15 @@
 //!   bounds.
 //! - **Recording** is every [`RECORD_EVERY`], never ahead of the prefix, one
 //!   record in flight at a time.
+//! - **A mark is recorded only for the backfill it belongs to.** Each item
+//!   keeps the ticket of the request its page answered, and the reached mark
+//!   keeps its item's ticket. Before a record the run asks whether that
+//!   ticket still answers the index's outstanding request
+//!   ([`discard_unless`](Walked::discard_unless)): after a cut, or an ask
+//!   again under a newer ticket, an older walk's mark is dropped, never
+//!   recorded in a target its walk didn't fill (#471, second review). A cut
+//!   never runs while a record of the lane is in flight, so nothing changes
+//!   between that check and the record.
 //!
 //! ```text
 //! received  a1 a2 a3 a4         (lane order)
@@ -34,7 +43,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use stream::WalkMark;
+use stream::{Ticket, WalkMark};
 use tokio::time::Instant;
 
 /// How often a lane records how far its backfill got, at most.
@@ -51,6 +60,8 @@ pub(super) struct Walked {
     boundaries: VecDeque<u64>,
     /// The newest mark of the landed prefix.
     reached: Option<WalkMark>,
+    /// The ticket of the request the reached mark's page answered.
+    reached_ticket: Option<Ticket>,
     /// The mark last recorded, or being recorded.
     recorded: Option<WalkMark>,
     /// When the walk's first item arrived or the last record went out.
@@ -67,12 +78,20 @@ pub(super) struct Walked {
 struct Item {
     seq: u64,
     mark: Option<WalkMark>,
+    ticket: Option<Ticket>,
     landed: bool,
 }
 
 impl Walked {
-    /// A snapshot item of the walk was received, `seq` its lane order.
-    pub(super) fn received(&mut self, seq: u64, mark: Option<WalkMark>, now: Instant) {
+    /// A snapshot item of the walk was received, `seq` its lane order,
+    /// `ticket` the request its page answered.
+    pub(super) fn received(
+        &mut self,
+        seq: u64,
+        mark: Option<WalkMark>,
+        ticket: Option<Ticket>,
+        now: Instant,
+    ) {
         debug_assert!(
             self.last_seq.is_none_or(|last| seq > last),
             "a walk's items reach the tracker in lane order"
@@ -86,6 +105,7 @@ impl Walked {
             self.items.push_back(Item {
                 seq,
                 mark,
+                ticket,
                 landed: false,
             });
         }
@@ -117,6 +137,7 @@ impl Walked {
                 && item.mark.is_some()
             {
                 self.reached = item.mark;
+                self.reached_ticket = item.ticket;
             }
         }
     }
@@ -170,6 +191,16 @@ impl Walked {
         *self = Self::default();
     }
 
+    /// Drop the reached mark unless `answers` says its ticket still answers
+    /// the index's outstanding request: a mark of a walk cut or asked again
+    /// is never recorded.
+    pub(super) fn discard_unless(&mut self, answers: impl FnOnce(Option<Ticket>) -> bool) {
+        if self.reached.is_some() && !answers(self.reached_ticket) {
+            self.reached = None;
+            self.reached_ticket = None;
+        }
+    }
+
     /// The mark to record now, if one is due: the prefix moved past what was
     /// recorded, [`RECORD_EVERY`] has passed, and no record is in flight.
     pub(super) fn due(&mut self, now: Instant) -> Option<WalkMark> {
@@ -217,7 +248,7 @@ mod tests {
         let now = Instant::now();
         let mut walked = Walked::default();
         for (seq, key) in ["a1", "a2", "a3", "a4"].iter().enumerate() {
-            walked.received(seq as u64, mark(key), now);
+            walked.received(seq as u64, mark(key), None, now);
         }
         walked.landed(1);
         walked.landed(3);
@@ -232,12 +263,12 @@ mod tests {
     fn a_released_item_holds_the_mark_back_without_the_run_ending() {
         let now = Instant::now();
         let mut walked = Walked::default();
-        walked.received(0, mark("a1"), now);
-        walked.received(1, mark("a2"), now);
+        walked.received(0, mark("a1"), None, now);
+        walked.received(1, mark("a2"), None, now);
         walked.landed(0);
         assert_eq!(walked.reached(), Some("a1"));
         walked.hold(1);
-        walked.received(2, mark("a3"), now);
+        walked.received(2, mark("a3"), None, now);
         walked.landed(1);
         walked.landed(2);
         assert_eq!(
@@ -251,7 +282,7 @@ mod tests {
     fn a_record_is_due_every_ten_seconds_once_the_prefix_moved() {
         let start = Instant::now();
         let mut walked = Walked::default();
-        walked.received(0, mark("a1"), start);
+        walked.received(0, mark("a1"), None, start);
         walked.landed(0);
         assert_eq!(walked.due(start + Duration::from_secs(9)), None);
         let first = walked.due(start + RECORD_EVERY);
@@ -267,7 +298,7 @@ mod tests {
             None,
             "nothing new landed"
         );
-        walked.received(1, mark("a2"), start);
+        walked.received(1, mark("a2"), None, start);
         walked.landed(1);
         assert_eq!(
             walked.due(start + RECORD_EVERY + Duration::from_secs(5)),
@@ -296,13 +327,13 @@ mod tests {
     fn a_walks_end_forgets_it() {
         let now = Instant::now();
         let mut walked = Walked::default();
-        walked.received(0, mark("a1"), now);
-        walked.received(1, mark("a2"), now);
+        walked.received(0, mark("a1"), None, now);
+        walked.received(1, mark("a2"), None, now);
         walked.landed(0);
         walked.hold(1);
         walked.boundary(2);
         walked.ended(2, now);
-        walked.received(3, mark("b1"), now);
+        walked.received(3, mark("b1"), None, now);
         walked.landed(3);
         assert_eq!(walked.reached(), Some("b1"));
     }
@@ -313,11 +344,11 @@ mod tests {
     fn the_next_walks_items_read_ahead_survive_the_end_of_the_last() {
         let now = Instant::now();
         let mut walked = Walked::default();
-        walked.received(0, mark("a1"), now);
+        walked.received(0, mark("a1"), None, now);
         walked.landed(0);
         walked.boundary(1);
-        walked.received(2, mark("b1"), now);
-        walked.received(3, mark("b2"), now);
+        walked.received(2, mark("b1"), None, now);
+        walked.received(3, mark("b2"), None, now);
         walked.ended(1, now);
         assert_eq!(walked.reached(), None, "a1 is the old walk's");
         walked.landed(3);
@@ -331,9 +362,9 @@ mod tests {
     fn a_release_read_ahead_holds_the_next_walk() {
         let now = Instant::now();
         let mut walked = Walked::default();
-        walked.received(0, mark("a1"), now);
+        walked.received(0, mark("a1"), None, now);
         walked.boundary(1);
-        walked.received(2, mark("b1"), now);
+        walked.received(2, mark("b1"), None, now);
         walked.hold(2);
         walked.landed(0);
         assert_eq!(
@@ -342,7 +373,7 @@ mod tests {
             "the release is the next walk's"
         );
         walked.ended(1, now);
-        walked.received(3, mark("b2"), now);
+        walked.received(3, mark("b2"), None, now);
         walked.landed(2);
         walked.landed(3);
         assert_eq!(walked.reached(), None);
@@ -353,13 +384,13 @@ mod tests {
     fn a_reset_forgets_every_walk() {
         let now = Instant::now();
         let mut walked = Walked::default();
-        walked.received(0, mark("a1"), now);
+        walked.received(0, mark("a1"), None, now);
         walked.landed(0);
-        walked.received(1, mark("a2"), now);
+        walked.received(1, mark("a2"), None, now);
         walked.reset();
         walked.landed(1);
         assert_eq!(walked.reached(), None);
-        walked.received(2, mark("b1"), now);
+        walked.received(2, mark("b1"), None, now);
         walked.landed(2);
         assert_eq!(walked.reached(), Some("b1"));
     }
@@ -371,11 +402,11 @@ mod tests {
     fn a_held_walk_keeps_nothing_it_can_never_count() {
         let now = Instant::now();
         let mut walked = Walked::default();
-        walked.received(0, mark("a0"), now);
-        walked.received(1, mark("a1"), now);
+        walked.received(0, mark("a0"), None, now);
+        walked.received(1, mark("a1"), None, now);
         walked.hold(1);
         for seq in 2..20_000 {
-            walked.received(seq, mark("a"), now);
+            walked.received(seq, mark("a"), None, now);
             walked.landed(seq);
         }
         walked.landed(0);
@@ -390,7 +421,7 @@ mod tests {
         let now = Instant::now();
         let mut walked = Walked::default();
         walked.hold(7);
-        walked.received(8, mark("a1"), now);
+        walked.received(8, mark("a1"), None, now);
         walked.landed(8);
         assert_eq!(walked.reached(), Some("a1"));
     }
@@ -411,7 +442,7 @@ mod tests {
             let count = 1 + (next() % 40) as usize;
             let mut walked = Walked::default();
             for seq in 0..count {
-                walked.received(seq as u64, mark(&format!("{seq:03}")), now);
+                walked.received(seq as u64, mark(&format!("{seq:03}")), None, now);
             }
             let mut order: Vec<usize> = (0..count).collect();
             for i in (1..count).rev() {

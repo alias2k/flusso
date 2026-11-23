@@ -1761,7 +1761,9 @@ is the one concrete piece.
   `a_retry_returning_staged_during_a_stop_leaves_the_lane_owed`). Both reindex paths (inline, retry) end in
   `settle_reindex`. Staging is per index under `Resumed` (#471, the note's §18): an index it can't ensure is left
   `restaging` with why (`LaneState.unensured`) and staged again by its lane's restage path with ensure's rules
-  (`ensure_again`: an intact target keeps its backfill and walk), the rest go on, and `reopen_restaged` skips it;
+  (`ensure_again`: an intact target keeps its backfill and walk), the rest go on, and `reopen_restaged` skips it; a
+  walk checkpoint is recorded only for the backfill it belongs to (`walked.rs` keeps each page's ticket, and
+  `record_walked` drops a reached mark whose ticket no longer `answers`: `Walked::discard_unless`; the note's R5);
   once one index is ensured every index is started (`Spread::OnceAnswered`), while none is up to eight more are
   tried one at a time, and none ensured then is the destination's failure and fails the staging as a whole, as does
   a `Fresh` first staging on any index (its rebuild must be staged before `prepare`); `start_restages` runs at most

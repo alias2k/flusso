@@ -1145,7 +1145,7 @@ impl<'a> Run<'a> {
             } else {
                 None
             };
-            run.walked.received(seq, mark, Instant::now());
+            run.walked.received(seq, mark, batch.ticket, Instant::now());
         }
         if self.holding > 0
             && let Queue::Batch { batch, .. } = &item
@@ -2631,7 +2631,11 @@ impl<'a> Run<'a> {
     /// flight beside the writes, holding no slot. Like a write, it starts now,
     /// and one that completes on its first poll is handed back.
     fn record_walked(&mut self, lane: usize) -> Option<Landed> {
+        let engine = self.engine;
         let run = self.lanes.get_mut(lane)?;
+        // A mark is recorded only for the backfill it belongs to (walked.rs).
+        run.walked
+            .discard_unless(|ticket| engine.answers(&run.key.index, ticket));
         let mark = run.walked.due(Instant::now())?;
         let index = run.key.index.clone();
         let flight = self.next_flight;
