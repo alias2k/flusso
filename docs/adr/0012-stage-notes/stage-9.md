@@ -650,7 +650,8 @@ probing its item (now into the new generation), a restaging lane keeps its stagi
 | parked, refused | keeps probing the refused item (refused again in the new generation) | opens; the parked item is held unwritten until the index is seeded, then acknowledged; items behind it are written into the new generation |
 | parked, blocked | keeps probing until the block lifts on the old generation's name | the same as refused |
 | restaging | keeps its own staging and backfill beside the reindex's | opens; its held items are written into the new generation |
-| backfill outstanding | reindex ignored | the outstanding backfill is cut and asked for again from the first key (as a restage does) |
+| backfill outstanding, lane open | reindex ignored (the backfill is already rebuilding) | unchanged (`gone`'s `a_reindex_while_the_fresh_backfill_runs_stages_nothing`) |
+| backfill outstanding, lane parked, blocked or restaging | reindex ignored: the lane stays stuck | the outstanding backfill is cut and asked for again from the first key, its checkpoint forgotten (as a restage does) |
 
 **Rules.**
 
@@ -661,7 +662,7 @@ probing its item (now into the new generation), a restaging lane keeps its stagi
 | X3 | Items behind it are written into the new generation, in lane order; their positions are applied only after the held one's (fences report in key order), so nothing counts as landed before the new generation holds the documents | the same |
 | X4 | A blocked lane: the same | `a_reindex_opens_a_blocked_lane_the_same_way` |
 | X5 | A restaging lane opens; its held items are written (they were held only for a missing target) | `a_reindex_opens_a_restaging_lane_and_writes_its_items` |
-| X6 | An outstanding backfill is cut and asked for again | `a_reindex_during_a_backfill_cuts_it_and_asks_again` |
+| X6 | With the lane not open, an outstanding backfill is cut and asked for again, its walk checkpoint forgotten; with the lane open, the reindex is ignored as before | `a_reindex_during_a_backfill_cuts_it_and_asks_again`, `a_reindex_while_the_fresh_backfill_runs_stages_nothing` |
 | X7 | A run failing before the seed: the held item comes back and is held again (the lane's state remembers its build number), so it is never written | `a_held_item_redelivered_after_a_failed_run_is_held_again` |
 
 **Why confirmation and fences stay right.** The held item's position is reported applied only at the seed. Until
@@ -707,6 +708,20 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
     inside the pipeline (never serialized; slice 2), `RowKey` moves to the kernel (still re-exported by
     `source`), and `Consumer`'s contract states the redelivery order.
 
-### Slice 2 (this PR)
+### Slice 2: reindex as the way out of a stuck lane (PR #459)
 
-(Filled as Part 1 lands.)
+1. **`flusso reindex <index> --sink <sink>` (`POST /indexes/<name>/reindex?sink=`) now unsticks a lane that is
+   parked (refused or blocked) or restaging.** The lane opens at once; the item it was stuck on is not written
+   again: its documents come from the new generation's backfill, which reads every row after the reindex. Items
+   behind it are written into the new generation as usual.
+2. **Until the new generation is seeded**, the index's fences answer `503 backfilling` (as for any reindex), and
+   the stuck item's change and everything after it on that lane are not counted as landed: the replication slot
+   stays before them. Once the backfill completes, the item is acknowledged and the lane's positions move on.
+3. **A reindex while the index's backfill is still running** is ignored when the lane is open (that backfill is
+   already rebuilding), but on a parked, blocked or restaging lane it restarts the backfill from the first key.
+4. **`/status`:** the lane's health goes from `refused`, `blocked` or `restaging` to `open` at the reindex; no new
+   fields. `flusso_lane_parked` drops to 0 for the lane.
+5. **A stop before the new generation is seeded** leaves the stuck item unacknowledged (the stop's deadline
+   decides, as for a parked lane); the next start requests the backfill again.
+6. **Runbook, a stuck lane:** a reindex of that index on that sink is the general way out for a refusal that
+   fixing the row can't cure, a block that won't be lifted, or a target that can't be staged.

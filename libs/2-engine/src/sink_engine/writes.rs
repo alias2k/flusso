@@ -146,7 +146,7 @@ use tokio::time::Instant;
 use tracing::Instrument;
 
 use super::flights::Flights;
-use super::health::{LaneState, supersedes};
+use super::health::{HeldForSeed, LaneState, supersedes};
 use super::walked::Walked;
 use super::{
     Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, SinkControl, SinkEngine, shown_id,
@@ -193,6 +193,9 @@ struct LaneRun {
     /// The largest build number received in this run, noted while the lane
     /// has F9 entries (`prune_superseded`).
     newest: Option<u64>,
+    /// The item a reindex left the lane holding until its index is seeded
+    /// (stage 9, X2): neither written nor acknowledged meanwhile.
+    held: Option<Queued>,
     /// While the lane has F9 entries: every item of it received in this run
     /// and not acknowledged, by receive order, with its build number (none:
     /// unknown). What decides when an entry may go (the note's 14.10).
@@ -254,6 +257,9 @@ struct Flight {
     /// The fresh build the probe writes in its item's place (F5).
     substitute: Option<Box<Substituted>>,
 }
+
+/// A held item to acknowledge: its handle, lane, receive order and build.
+type HeldAck = (Box<dyn AckHandle>, usize, u64, Option<u64>);
 
 /// A fresh build written in a parked item's place: its delivery, its build
 /// number and its documents' ids (what it supersedes once it lands, F9).
@@ -349,6 +355,12 @@ pub(super) struct Run<'a> {
     /// Lanes whose F9 map has entries: while none has, a received item is
     /// not looked at for them.
     superseding: usize,
+    /// Lanes holding an item for a reindex's seed (X2): while none does, a
+    /// received item is not looked at for it.
+    holding: usize,
+    /// Held items settled (their index seeded), to acknowledge on the run's
+    /// next step: lane, receive order, build number.
+    unacknowledged_held: Vec<HeldAck>,
     /// Lanes not open (parked or restaging): while none is, nothing of the
     /// parking is looked at.
     unhealthy: usize,
@@ -405,6 +417,7 @@ impl<'a> Run<'a> {
                     backfill_waiting: 0,
                     walked: Walked::default(),
                     newest: None,
+                    held: None,
                     account,
                 }
             })
@@ -415,6 +428,10 @@ impl<'a> Run<'a> {
         let superseding = lanes
             .iter()
             .filter(|lane| !lane.health.superseded.is_empty())
+            .count();
+        let holding = lanes
+            .iter()
+            .filter(|lane| lane.health.held_for_seed.is_some())
             .count();
         let substitutes = engine
             .stream
@@ -427,6 +444,8 @@ impl<'a> Run<'a> {
             restaging: Vec::new(),
             substitutes,
             superseding,
+            holding,
+            unacknowledged_held: Vec::new(),
             unhealthy,
             stop_probed: false,
             window: VecDeque::new(),
@@ -610,6 +629,9 @@ impl<'a> Run<'a> {
     /// reindex once nothing is in flight, and start what may start. An error
     /// here is the run's failure: the caller lets the writes in flight finish.
     async fn advance(&mut self) -> Result<()> {
+        if !self.unacknowledged_held.is_empty() {
+            self.acknowledge_held().await?;
+        }
         if self.engine.stop.is_requested() {
             self.skip_backfill().await?;
             self.probe_on_stop();
@@ -621,9 +643,12 @@ impl<'a> Run<'a> {
         };
         if let Some(indexes) = pending {
             let started = Instant::now();
-            if let Err(error) = self.engine.reindex(indexes.clone()).await {
-                self.engine.set_pending_reindex(indexes);
-                return Err(error);
+            match self.engine.reindex(indexes.clone()).await {
+                Ok(staged) => self.reindexed(&staged).await?,
+                Err(error) => {
+                    self.engine.set_pending_reindex(indexes);
+                    return Err(error);
+                }
             }
             self.engine.observer.on_stage(
                 StageTiming::new(Stage::Reindex, started.elapsed()).sink(&self.engine.name),
@@ -1028,6 +1053,30 @@ impl<'a> Run<'a> {
                 None
             };
             run.walked.received(seq, mark, Instant::now());
+        }
+        if self.holding > 0
+            && let Queue::Batch { batch, .. } = &item
+            && let Some(run) = self.lanes.get(lane)
+            && let Some(held) = run.health.held_for_seed
+            && held.key == batch.key
+            && held.build == batch.build
+        {
+            // The item a reindex left the lane holding, redelivered (X7):
+            // held again, or, its index seeded since, acknowledged unwritten.
+            let queued = Queued {
+                item,
+                handle,
+                lane,
+                seq,
+                ready_at: Instant::now(),
+            };
+            if held.seeded {
+                return self.settle_held(lane, queued);
+            }
+            if let Some(run) = self.lanes.get_mut(lane) {
+                run.held = Some(queued);
+            }
+            return Ok(());
         }
         self.count(lane, &item, 1);
         self.window.push_back(Queued {
@@ -1600,6 +1649,9 @@ impl<'a> Run<'a> {
             }
         }
         self.engine.seeded(&seeding.index, seeding.ticket, took);
+        if self.holding > 0 && !self.engine.is_outstanding(&seeding.index) {
+            self.release_held(seeding.lane).await?;
+        }
         let oldest = self.is_oldest(seeding.lane, seeding.seq);
         self.acknowledge(
             seeding.handle,
@@ -1852,6 +1904,119 @@ impl<'a> Run<'a> {
                 Box::pin(self.landed(landed)).await?;
             }
         }
+        Ok(())
+    }
+
+    /// A reindex staged `staged` (stage 9, 15.1): each of their lanes not
+    /// open opens; a parked one holds its front item, unwritten and
+    /// unacknowledged, until the index is seeded (X2), while the items behind
+    /// it go to the new generation; a restaging one writes its items (X5).
+    async fn reindexed(&mut self, staged: &[IndexName]) -> Result<()> {
+        let now = Instant::now();
+        for lane in 0..self.lanes.len() {
+            let Some(run) = self.lanes.get(lane) else {
+                continue;
+            };
+            if !staged.contains(&run.key.index) || run.health.is_open() {
+                continue;
+            }
+            let parked = matches!(run.health.health, LaneHealth::Parked { .. });
+            let front = parked
+                .then(|| {
+                    self.window
+                        .iter()
+                        .position(|queued| queued.lane == lane)
+                        .filter(|at| {
+                            matches!(
+                                self.window.get(*at),
+                                Some(Queued {
+                                    item: Queue::Batch { .. },
+                                    ..
+                                })
+                            )
+                        })
+                })
+                .flatten();
+            let held = front.and_then(|at| self.take_from_window(at));
+            let Some(run) = self.lanes.get_mut(lane) else {
+                continue;
+            };
+            if let Some(down) = run.health.open(now) {
+                self.unhealthy = self.unhealthy.saturating_sub(1);
+                tracing::info!(lane = %run.key, after = ?down, "reindexed: the lane is open; its parked item waits for the new generation's backfill");
+            }
+            if let Some(held) = held {
+                if let Queue::Batch { batch, .. } = &held.item {
+                    run.health.held_for_seed = Some(HeldForSeed {
+                        key: batch.key,
+                        build: batch.build,
+                        seeded: false,
+                    });
+                    self.holding += 1;
+                }
+                run.held = Some(held);
+            }
+            self.engine.store_lane(&run.key, &run.health, true);
+        }
+        Ok(())
+    }
+
+    /// `lane`'s index is seeded: the item a reindex left it holding is
+    /// acknowledged, its position applied (X2). Not received yet in this run,
+    /// it will be acknowledged unwritten when it comes.
+    async fn release_held(&mut self, lane: usize) -> Result<()> {
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return Ok(());
+        };
+        let Some(held) = run.health.held_for_seed.as_mut() else {
+            return Ok(());
+        };
+        held.seeded = true;
+        match run.held.take() {
+            Some(queued) => {
+                self.settle_held(lane, queued)?;
+                self.acknowledge_held().await
+            }
+            None => {
+                self.engine.store_lane(&run.key, &run.health, false);
+                Ok(())
+            }
+        }
+    }
+
+    /// Acknowledge the held items settled since the last step.
+    async fn acknowledge_held(&mut self) -> Result<()> {
+        for (handle, lane, seq, build) in std::mem::take(&mut self.unacknowledged_held) {
+            let oldest = self.is_oldest(lane, seq);
+            self.acknowledge(handle, lane, seq, build, oldest, None)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Acknowledge a held item unwritten, its position applied: its
+    /// documents are in the seeded generation.
+    fn settle_held(&mut self, lane: usize, queued: Queued) -> Result<()> {
+        let Queued {
+            item, handle, seq, ..
+        } = queued;
+        let Queue::Batch { batch, .. } = item else {
+            return Ok(());
+        };
+        if let Some(run) = self.lanes.get_mut(lane) {
+            run.health.held_for_seed = None;
+            self.holding = self.holding.saturating_sub(1);
+            self.engine.store_lane(&run.key, &run.health, false);
+        }
+        if let (Some(key), Some(run)) = (batch.key, self.lanes.get(lane)) {
+            let written = [(run.key.clone(), key)];
+            let returned = self
+                .engine
+                .write_returned(&written, Visibility::Immediate, None);
+            self.next_due = returned.next_due;
+        }
+        self.unacknowledged_held
+            .push((handle, lane, seq, batch.build));
         Ok(())
     }
 

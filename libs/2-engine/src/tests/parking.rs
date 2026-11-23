@@ -77,6 +77,8 @@ struct Gate {
     /// Ids whose upsert is refused, whatever their index answers: a row a
     /// fix makes indexable again (stage 9, fresh builds).
     refused_ids: Mutex<BTreeSet<String>>,
+    /// Indexes whose walk checkpoint was forgotten.
+    forgotten: Mutex<Vec<String>>,
     /// Review r2: a write holding one of these ids takes that long.
     slow_ids: Mutex<BTreeMap<String, Duration>>,
     /// Review r2: a write holding this id fails as a whole.
@@ -230,6 +232,11 @@ impl Sink for Gate {
 
     async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {
         Ok(!self.unseeded.lock().unwrap().contains(index.as_ref()))
+    }
+
+    async fn forget_walked(&self, index: &IndexName) -> sink::Result<()> {
+        self.forgotten.lock().unwrap().push(index.to_string());
+        Ok(())
     }
 
     fn ordered(&self) -> bool {
@@ -2100,4 +2107,259 @@ async fn the_parked_item_is_never_rewritten_whole() {
     );
     task.abort();
     answers.abort();
+}
+
+// Reindex of a lane not open (stage 9, slice 2, the note's 15.1).
+
+fn spawn_controlled(
+    engine: Arc<SinkEngine>,
+) -> (
+    mpsc::Sender<SinkControl>,
+    tokio::task::JoinHandle<crate::Result<()>>,
+) {
+    let (control, mut receiver) = mpsc::channel::<SinkControl>(4);
+    let task = tokio::spawn(async move { engine.run(&mut receiver).await });
+    (control, task)
+}
+
+/// The next `Backfill` request on the request lane, acknowledged.
+async fn next_backfill(rig: &Rig) -> (IndexName, stream::Ticket) {
+    let mut requests = rig.stream.requests().unwrap().consumer;
+    loop {
+        let delivery = tokio::time::timeout(Duration::from_secs(60), requests.recv())
+            .await
+            .expect("a backfill request comes")
+            .unwrap()
+            .unwrap();
+        let (request, handle) = delivery.into_parts();
+        handle.ack().await.unwrap();
+        if let Request::Backfill { index, ticket, .. } = request {
+            return (index, ticket);
+        }
+    }
+}
+
+/// `of`'s snapshot for `ticket` is complete.
+async fn complete(rig: &Rig, of: &IndexName, ticket: stream::Ticket) {
+    rig.stream
+        .lane(&lane(of.clone()))
+        .unwrap()
+        .producer
+        .publish(LaneItem::SnapshotComplete {
+            index: of.clone(),
+            ticket,
+        })
+        .await
+        .unwrap();
+}
+
+/// How many writes held document `id` of `of`.
+fn writes_holding(rig: &Rig, of: &IndexName, id: &str) -> usize {
+    written(rig, of)
+        .iter()
+        .filter(|ids| ids.iter().any(|own| own == id))
+        .count()
+}
+
+fn slow_backoff() -> crate::Backoff {
+    crate::Backoff::new(Duration::from_secs(60), Duration::from_secs(60)).unwrap()
+}
+
+/// X1–X4: a reindex of a parked lane (refused, then blocked) opens it; the
+/// parked item is not written: it is held until the reindexed index is
+/// seeded, then acknowledged and applied; the item behind it is written
+/// into the new generation meanwhile, its position applied only after.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_opens_a_parked_lane_and_holds_its_item_until_seeded() {
+    for answer in [Answer::Refuse, Answer::Block] {
+        let rig = Rig::new(Gate::default());
+        rig.sink.answer(&orders(), Some(answer));
+        rig.live(&orders(), 1..2, 0).await;
+        let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff()));
+        let (control, task) = spawn_controlled(Arc::clone(&engine));
+        eventually("the lane parks", || {
+            !engine.lane_health(&lane(orders())).is_open()
+        })
+        .await;
+        rig.live(&orders(), 2..3, 1).await;
+        rig.sink.answer(&orders(), None);
+        control
+            .send(SinkControl::Reindex {
+                indexes: vec![orders()],
+            })
+            .await
+            .unwrap();
+        eventually("the lane opens", || {
+            engine.lane_health(&lane(orders())).is_open()
+        })
+        .await;
+        eventually("the item behind is written", || {
+            writes_holding(&rig, &orders(), "2") == 1
+        })
+        .await;
+        assert_eq!(
+            rig.applied(&orders()),
+            before(0),
+            "{answer:?}: nothing counts as landed before the new generation is seeded"
+        );
+        let (index, ticket) = next_backfill(&rig).await;
+        assert_eq!(index, orders());
+        complete(&rig, &orders(), ticket).await;
+        eventually("seeded: the held item is acknowledged", || {
+            rig.applied(&orders()) == through(1)
+        })
+        .await;
+        eventually("everything acknowledged", || rig.stream.is_idle()).await;
+        assert_eq!(
+            writes_holding(&rig, &orders(), "1"),
+            1,
+            "{answer:?}: the parked item is never written again"
+        );
+        task.abort();
+    }
+}
+
+/// X5: a reindex of a restaging lane opens it, and its items are written
+/// into the new generation (they were held only for a missing target).
+#[tokio::test(start_paused = true)]
+async fn a_reindex_opens_a_restaging_lane_and_writes_its_items() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::MissingForGood));
+    rig.live(&orders(), 1..2, 0).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff()));
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    eventually("the lane is restaging", || {
+        engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    rig.sink.answer(&orders(), None);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    eventually("the item lands in the new generation", || {
+        rig.applied(&orders()) == through(0)
+    })
+    .await;
+    assert!(engine.lane_health(&lane(orders())).is_open());
+    task.abort();
+}
+
+/// X6, X2: a reindex while the index's backfill is outstanding cuts it and
+/// asks again; the refused page the lane parked on is held until the new
+/// backfill seeds the index.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_during_a_backfill_cuts_it_and_asks_again() {
+    let rig = Rig::new(Gate::default());
+    rig.sink
+        .unseeded
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff()));
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .unwrap();
+    let (index, first) = next_backfill(&rig).await;
+    assert_eq!(index, orders());
+    rig.sink.answer(&orders(), Some(Answer::Refuse));
+    rig.stream
+        .lane(&lane(orders()))
+        .unwrap()
+        .producer
+        .publish(match item(&orders(), 1..2, None) {
+            LaneItem::Batch(batch) => LaneItem::Batch(Batch {
+                ticket: Some(first),
+                ..batch
+            }),
+            other => other,
+        })
+        .await
+        .unwrap();
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    eventually("the lane parks on the page", || {
+        !engine.lane_health(&lane(orders())).is_open()
+    })
+    .await;
+    rig.sink.answer(&orders(), None);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    let (index, again) = next_backfill(&rig).await;
+    assert_eq!(index, orders());
+    assert!(again > first, "a new request: {again} after {first}");
+    assert_eq!(
+        *rig.sink.forgotten.lock().unwrap(),
+        ["orders"],
+        "the cut walk's checkpoint is forgotten: a restart can't resume it"
+    );
+    complete(&rig, &orders(), again).await;
+    eventually("seeded, everything acknowledged", || rig.stream.is_idle()).await;
+    assert_eq!(
+        writes_holding(&rig, &orders(), "1"),
+        1,
+        "the page is not written again"
+    );
+    assert!(engine.lane_health(&lane(orders())).is_open());
+    task.abort();
+}
+
+/// X7: the run fails before the seed: the held item comes back and is held
+/// again, never written; the seed acknowledges it.
+#[tokio::test(start_paused = true)]
+async fn a_held_item_redelivered_after_a_failed_run_is_held_again() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Refuse));
+    rig.live(&orders(), 1..2, 0).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff()));
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    eventually("the lane parks", || {
+        !engine.lane_health(&lane(orders())).is_open()
+    })
+    .await;
+    rig.sink.answer(&orders(), None);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    let (_, ticket) = next_backfill(&rig).await;
+    rig.sink
+        .fail
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.live(&orders(), 2..3, 1).await;
+    let ended = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("the run ends on the failed write");
+    assert!(ended.unwrap().is_err());
+    rig.sink
+        .fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .unwrap();
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    eventually("the item behind lands again", || {
+        writes_holding(&rig, &orders(), "2") >= 2
+    })
+    .await;
+    assert_eq!(rig.applied(&orders()), before(0));
+    complete(&rig, &orders(), ticket).await;
+    eventually("seeded: everything acknowledged", || rig.stream.is_idle()).await;
+    assert_eq!(rig.applied(&orders()), through(1));
+    assert_eq!(
+        writes_holding(&rig, &orders(), "1"),
+        1,
+        "never written again"
+    );
+    drop(control);
+    task.abort();
 }

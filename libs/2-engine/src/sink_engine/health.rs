@@ -227,6 +227,20 @@ pub(crate) struct LaneState {
     /// no item numbered below it can be delivered again (`writes.rs`'s
     /// `prune_superseded`).
     pub(crate) superseded: BTreeMap<String, u64>,
+    /// The item a reindex left the lane holding (stage 9, X2): its key and
+    /// build number, so a redelivery of it is held again, and whether the
+    /// reindexed index was seeded since (then a redelivery of it is
+    /// acknowledged unwritten).
+    pub(crate) held_for_seed: Option<HeldForSeed>,
+}
+
+/// The item a reindex left a lane holding: which item, and whether its index
+/// was seeded since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeldForSeed {
+    pub(crate) key: Option<stream::ItemKey>,
+    pub(crate) build: Option<u64>,
+    pub(crate) seeded: bool,
 }
 
 /// Whether an item numbered `build` was built before the substitute numbered
@@ -249,6 +263,7 @@ impl LaneState {
             unproven: false,
             rebuild: None,
             superseded: BTreeMap::new(),
+            held_for_seed: None,
         }
     }
 
@@ -256,8 +271,10 @@ impl LaneState {
     /// landed substitute supersedes.
     fn reset(&mut self) {
         let superseded = std::mem::take(&mut self.superseded);
+        let held_for_seed = self.held_for_seed.take();
         *self = Self::new(self.schedule);
         self.superseded = superseded;
+        self.held_for_seed = held_for_seed;
     }
 }
 
@@ -344,7 +361,10 @@ impl LaneState {
     /// Whether the engine keeps this state: a lane not open, or one keeping
     /// its backoff.
     pub(crate) fn is_kept(&self) -> bool {
-        !self.is_open() || self.unproven || !self.superseded.is_empty()
+        !self.is_open()
+            || self.unproven
+            || !self.superseded.is_empty()
+            || self.held_for_seed.is_some()
     }
 
     /// Staging failed: try again after the backoff, doubled each time up to

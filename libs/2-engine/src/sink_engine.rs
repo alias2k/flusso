@@ -897,14 +897,17 @@ impl SinkEngine {
         self.skipped.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stage a rebuild of `indexes` and request their snapshot. The current
-    /// generation keeps serving until the snapshot completes and the sink swaps.
-    /// A sink with `backfill = false` has nothing to rebuild; an index whose
-    /// snapshot is still outstanding is left to that snapshot.
-    async fn reindex(&self, indexes: Vec<IndexName>) -> Result<()> {
+    /// Stage a rebuild of `indexes` and request their snapshot; the indexes
+    /// staged. The current generation keeps serving until the snapshot
+    /// completes and the sink swaps. A sink with `backfill = false` has
+    /// nothing to rebuild. An index whose backfill is outstanding is left to
+    /// that backfill while its lane is open; with its lane parked, blocked or
+    /// restaging the reindex is the way out, so the backfill is cut and asked
+    /// for again from the first key (stage 9, X6).
+    async fn reindex(&self, indexes: Vec<IndexName>) -> Result<Vec<IndexName>> {
         if !self.options.backfill {
             tracing::warn!("reindex requested, but backfill is disabled for this sink; ignoring");
-            return Ok(());
+            return Ok(Vec::new());
         }
         let outstanding = self.outstanding();
         let mut chosen = Vec::new();
@@ -913,33 +916,51 @@ impl SinkEngine {
                 tracing::warn!(%index, "reindex requested for an index this sink does not maintain; ignoring");
                 continue;
             };
-            if outstanding.contains(&index) {
-                tracing::warn!(%index, "reindex requested while its snapshot is still outstanding; ignoring");
-                continue;
-            }
             // Two chains for one index at once are what the `Sink` port forbids.
             if chosen.iter().any(|m: &&IndexMapping| m.index == index) {
+                continue;
+            }
+            let open = self
+                .lane_health(&LaneKey::new(index.clone(), self.name.clone()))
+                .is_open();
+            if outstanding.contains(&index) && open {
+                tracing::warn!(%index, "reindex requested while its snapshot is still outstanding; ignoring");
                 continue;
             }
             tracing::info!(%index, "reindex requested; staging a fresh generation");
             chosen.push(mapping);
         }
-        let staged: Vec<(IndexName, Option<WalkMark>, Option<TargetId>)> = self
+        let mut fresh: Vec<(IndexName, Option<WalkMark>, Option<TargetId>)> = Vec::new();
+        let mut cut: Vec<(IndexName, Option<TargetId>)> = Vec::new();
+        for (mapping, staged) in self
             .each_index(chosen, Step::Rebuild { ask_seeded: false })
             .await?
-            .into_iter()
-            .map(|(mapping, staged)| {
-                let target = match staged {
-                    Staged::Unseeded { target, .. } => target,
-                    Staged::Seeded => None,
-                };
-                (mapping.index.clone(), None, target)
-            })
-            .collect();
-        if !staged.is_empty() {
-            self.request_backfill(staged).await?;
+        {
+            let target = match staged {
+                Staged::Unseeded { target, .. } => target,
+                Staged::Seeded => None,
+            };
+            if outstanding.contains(&mapping.index) {
+                tracing::warn!(index = %mapping.index, sink = %self.name, "reindex during a backfill: the backfill is cut and asked for again");
+                cut.push((mapping.index.clone(), target));
+            } else {
+                fresh.push((mapping.index.clone(), None, target));
+            }
         }
-        Ok(())
+        let mut staged: Vec<IndexName> = fresh.iter().map(|(index, _, _)| index.clone()).collect();
+        staged.extend(cut.iter().map(|(index, _)| index.clone()));
+        if !cut.is_empty() {
+            self.ask_again(cut).await?;
+        }
+        if !fresh.is_empty() {
+            self.request_backfill(fresh).await?;
+        }
+        Ok(staged)
+    }
+
+    /// Whether `index`'s backfill is still outstanding (not seeded yet).
+    pub(super) fn is_outstanding(&self, index: &IndexName) -> bool {
+        self.lock_outstanding().contains_key(index)
     }
 }
 

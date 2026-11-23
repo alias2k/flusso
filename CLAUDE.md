@@ -1731,7 +1731,14 @@ is the one concrete piece.
   `tests::parking`'s `a_fixed_row_unparks_its_lane`, `a_deleted_row_unparks_its_lane_with_a_delete`,
   `a_stale_or_unanswered_fresh_build_falls_back_to_the_item`,
   `an_older_build_queued_behind_the_parked_item_is_not_written_over_its_substitute`,
-  `a_stop_probes_a_refused_lane_with_its_own_item`; `ingest::tests::rebuilds`; the random schedules
+  `a_stop_probes_a_refused_lane_with_its_own_item`; `ingest::tests::rebuilds`. **A reindex unsticks a lane**
+  (slice 2, the note's 15.1): `SinkEngine::reindex` returns the indexes it staged; for each, a lane parked or
+  restaging opens (`writes.rs`'s `reindexed`), a parked lane's front item is held (`LaneRun.held`,
+  `LaneState.held_for_seed` by item key and build so a redelivery is held again) unwritten and unacknowledged
+  until the index is seeded, then acknowledged and reported applied (`release_held`), so the slot never passes
+  its change before the new generation holds it; an outstanding backfill of a lane not open is cut and asked again
+  (open lane: ignored, as before). Guards: `tests::parking`'s `a_reindex_*` and
+  `a_held_item_redelivered_after_a_failed_run_is_held_again`; the random schedules
   (refused `orders` stretches), which assert fresh builds were published.
   The run ends only on a sink-wide failure (a write `Err`, a seed, a lane delivery or ack). `/status`
   `sinks.<s>.lanes.<i>.health` (`open`/`refused`/`blocked`/`restaging`, the same words as the
