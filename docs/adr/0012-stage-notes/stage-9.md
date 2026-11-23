@@ -520,3 +520,35 @@ way; the CI gate decides.
 | F14: a fresh build asks the budget | `a_rebuild_is_served_with_the_budget_held_full` |
 | 7: a newer request queued beside the older | `a_newer_request_for_a_lane_replaces_the_one_waiting` |
 | F3: a `Rebuild` routed to the backfill inbox | four `rebuilds` tests (fail at once now) |
+
+### 14.10 Fix round 2 (review of #458 at `8b87df0d`): when an F9 entry may go
+
+The round-1 drop rule read the lane's oldest unacknowledged item from the window and the writes in flight
+only. Two handles were outside it: one dropped unacknowledged by a failed write (its item comes back with the
+next run), and one waiting for its lane's caught-up write (`refreshing`). A sibling write landing afterwards
+dropped the entry, and the redelivered older item was written over the substitute.
+
+**The rule.** While a lane has F9 entries, the run keeps **one account** of the lane's items received and not
+yet acknowledged: `seq → build number`, on the lane's `LaneRun`.
+
+- An item enters it where it is received (`queue`, the one place a delivery becomes an item of the run), and
+  leaves it only where its acknowledgement returned `Ok` (`acknowledged`, the one place a lane item's handle is
+  acknowledged: live and snapshot parts, a stop's skipped snapshot items, completions, and items that waited for
+  a caught-up write all go through it). A handle dropped unacknowledged (a failed write, a failed run, the run's
+  end) never leaves the account, so the floor never passes it.
+- When a lane's map becomes non-empty in the middle of a run (its first substitute lands), the account is seeded
+  from every place a received, unacknowledged item of the lane can be: the window, the parts of writes in
+  flight, and the items waiting for a caught-up write. Those are the only places a lane item's handle is held
+  between `queue` and `acknowledged`; anything else is a handle already dropped, which happens only when the run
+  fails, and **once the run has failed nothing is pruned** for the rest of it.
+- A run starts with an empty account for a lane that has entries (the account is the run's; the map is the
+  engine's). An entry `s` goes when the account's smallest build number reaches `s`, or, with the account
+  empty, when the run has received an item numbered at least `s − 1` (the next one the lane can bring is
+  numbered past it). Proof sketch: a lane delivers in build-number order and redelivers what was left
+  unacknowledged before anything new; so by the time a run has received an item numbered `b`, every
+  unacknowledged item numbered below `b` was received in this run before it, and sits in the account unless it
+  was acknowledged. An item with no build number blocks every drop.
+- **Boundary.** With the oldest unacknowledged item numbered `s − 1` the entry `s` stays; numbered `s`, it goes.
+- **Memory.** Once every item of the lane received before the substitute is acknowledged, the map empties, the
+  account is dropped and the lane's state is released (`LaneState::is_kept`).
+- **Cost.** With no entry anywhere, none: the account exists only while its lane has entries.
