@@ -6,6 +6,7 @@
 
 - **An index that can't be written parks alone**; the sink's other indexes keep writing, and a write block no longer drops documents under `on_error = "skip"` (#404): [One index's failure parks its own lane](#one-indexs-failure-parks-its-own-lane).
 - **`on_error = "stop"` no longer stops the sink**, and `/readyz` stays `200` while an index is parked; alert on the new `FlussoLaneParked` instead: [Alerting on a parked index](#alerting-on-a-parked-index).
+- **A reindex unsticks a stuck lane**: it opens a `refused`, `blocked` or `restaging` lane, and one that can't stage is retried on its own instead of dropped: [A reindex unsticks a lane](#a-reindex-unsticks-a-lane).
 - **The retry wait is configurable**: `[backoff]` sets the first and the longest wait of every restart and probe: [Retry timing is configurable](#retry-timing-is-configurable).
 - **A generation deleted mid-backfill is backfilled again in full**, never seeded with rows missing; a cut-down OpenSearch role needs to read index settings (#428): [A generation deleted mid-backfill](#a-generation-deleted-mid-backfill).
 - **`pinned_by` can name an index alone**, with `sink` null in `/status` and no `sink` label on `flusso_slot_pinned_by`: [An index's backlog can pin the slot](#an-indexs-backlog-can-pin-the-slot).
@@ -62,6 +63,21 @@ A refused or blocked lane is **parked**: it writes its oldest batch again alone 
 - **`FlussoLaneParked`** is new in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`. It fires once `flusso_lane_parked > 0` has held for 5 minutes, naming the index, the sink and `why` (`refused`, `blocked`, `restaging`). With your own rules, copy it or alert on [`flusso_lane_parked`](../reference/metrics.md) directly.
 - `FlussoLaneStalled` still fires after 10 minutes for a parked live change, but never for a refused backfill page, which carries no position: only `FlussoLaneParked` sees that one.
 - `/status` shows each lane's state under [`sinks.<sink>.lanes.<index>.health`](../reference/http.md#lane-health) (`open`, `refused`, `blocked`, `restaging`), with `reason` and `next_probe`.
+
+## A reindex unsticks a lane
+
+**What changed.** A [reindex](reindex.md) of an index whose lane is `refused`, `blocked` or `restaging` opens the lane as soon as it is staged. The item the lane was stuck on comes from the new generation's backfill instead of being written again. A reindex whose new generation can't be created is retried on the [`[backoff]`](#retry-timing-is-configurable) schedule, its lane `restaging` meanwhile, while the sink's other indexes keep writing.
+
+**Who is affected.** Anyone with a lane stuck on something in the index: a write block that won't be lifted, a mapping or settings changed by hand.
+
+**What to do.** Nothing to configure. Reindex the index on that sink: [Unstick a lane with a reindex](stalled-lane.md#unstick-a-lane-with-a-reindex).
+
+**What to know.**
+
+- **Not every lane.** A row the mapping refuses is refused again by the new backfill: fix the row.
+- **The slot waits for the backfill.** Until the new generation is seeded, the lane reads `open` but holds the slot, so `FlussoLaneStalled` can fire on a long backfill.
+- **A waiting reindex lives in memory.** After a restart of flusso, ask again if the lane is still stuck ([what a restart keeps](../reference/http.md#when-the-reindex-cant-stage)).
+- **A stop doesn't wait for such a lane**: [Lanes flusso doesn't write at a stop](../reference/cli.md#lanes-flusso-doesnt-write-at-a-stop).
 
 ## Retry timing is configurable
 

@@ -186,11 +186,11 @@ Each `(index, sink)` lane is written unless something about that one index stops
 | `open` | Written as usual. | (absent) | |
 | `refused` | A document of the lane was refused under [`on_error = "stop"`](index-and-on-error.md#on_error). | `refused: id <ids> (<first reason>)`, a few ids at most | a probe lands |
 | `blocked` | The destination refuses every write to the index for now: a [write block](sink-opensearch.md#write-blocks), a role without write permission on it. | `blocked: <OpenSearch's reason>` | a probe lands |
-| `restaging` | The index's target was deleted while flusso ran: it is staged again and backfilled, alone. | OpenSearch's reason | staging succeeds |
+| `restaging` | The index's target was deleted while flusso ran, or a [reindex couldn't stage](#when-the-reindex-cant-stage) its new generation: it is staged again and backfilled, alone. | OpenSearch's reason; for a reindex, `the reindex could not stage: <error>` or `the reindex could not ask for its backfill: <error>` | staging succeeds |
 
 A `refused` or `blocked` lane is **parked**: flusso holds it and probes it, and the logs say `the lane is parked`. The metric [`flusso.lane.parked`](metrics.md) and the `FlussoLaneParked` alert cover every lane that isn't `open`, `restaging` included; their `why` label is the lane's `health`.
 
-A **probe** writes a parked lane's oldest batch again, alone, on the [`[backoff]`](config-toml.md#backoff) schedule (1 s after it parked, doubling to 60 s, by default). A `refused` lane's probe writes a [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build) of that batch instead; while it waits for one, the lane stays `refused` and `next_probe` is the end of the wait. Another lane landing never shortens the wait; a stop probes at once. A failed staging of a `restaging` lane is retried on the same schedule. A lane flusso doesn't write:
+A **probe** writes a parked lane's oldest batch again, alone, on the [`[backoff]`](config-toml.md#backoff) schedule (1 s after it parked, doubling to 60 s, by default). A `refused` lane's probe writes a [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build) of that batch instead; while it waits for one, the lane stays `refused` and `next_probe` is the end of the wait. Another lane landing never shortens the wait; a stop probes at once. A failed staging of a `restaging` lane is retried on the same schedule. A [reindex](#a-reindex-of-a-lane-flusso-doesnt-write) of the index opens a lane in any of the three states. A lane flusso doesn't write:
 
 ```json
 "users": {
@@ -242,7 +242,7 @@ A `503` for an index being seeded or rebuilt also names the lanes holding it up:
 ```
 
 - **It only waits.** Nothing is flushed or refreshed on a caller's behalf. Under a draining backlog `searchable` trails `applied` by up to the sink's [`refresh_interval`](sink-opensearch.md#refresh).
-- **It vouches only for what reads see.** While a sink seeds an index for the first time, reads see it filling; while it rebuilds one (a [reindex](../operate/reindex.md), or every seeded index after the [slot was lost](../operate/dropped-slot.md)), reads see the old copy and live writes go to the new one. A wait that needs such an index holds, and is answered `200` the moment the index is seeded and covers the position. If the timeout comes first it is `503` with `reason: backfilling` or `rebuilding` instead of `408`. During a reindex the old copy still serves everything written before the reindex began, so a wait for such a position is `200` throughout. A process that starts in the middle of a reindex knows nothing of what the old copy holds, so it vouches for nothing of that index until the swap. Without the slot, the old copy misses changes, so after a lost slot nothing is vouched for until the rebuild is seeded. The reason is `rebuilding` when any lane holding the wait rebuilds, else `backfilling`.
+- **It vouches only for what reads see.** While a sink seeds an index for the first time, reads see it filling; while it rebuilds one (a [reindex](../operate/reindex.md), including one [waiting to stage](#when-the-reindex-cant-stage), or every seeded index after the [slot was lost](../operate/dropped-slot.md)), reads see the old copy and live writes go to the new one. A wait that needs such an index holds, and is answered `200` the moment the index is seeded and covers the position. If the timeout comes first it is `503` with `reason: backfilling` or `rebuilding` instead of `408`. During a reindex the old copy still serves everything written before the reindex began, so a wait for such a position is `200` throughout. A process that starts in the middle of a reindex knows nothing of what the old copy holds, so it vouches for nothing of that index until the swap. Without the slot, the old copy misses changes, so after a lost slot nothing is vouched for until the rebuild is seeded. The reason is `rebuilding` when any lane holding the wait rebuilds, else `backfilling`.
 - **Each index gets there on its own.** One commit that touches two indexes can be written to one well before the other, or one index can be [down](config-toml.md#a-failing-index) while the other is written. A wait naming one index passes once that index has it; a wait naming both, or none, passes once both have it.
 - **A position already passed answers at once**, however old it is.
 - **During a stop it keeps answering.** A wait open when the stop begins, or opened during the drain, is answered `200` if its position lands meanwhile: that is when in-flight commits reach the sinks. While a wait on `searchable` is open the drain also waits out the sink's refresh interval, inside the stop's deadline. Once the drain is over every wait still open is answered `503` with `reason: stopping`, and so is a new one.
@@ -283,5 +283,52 @@ curl -u admin:… -X POST 'http://10.0.0.5:9465/indexes/users/reindex?sink=prima
 | `401` | Credentials missing or wrong. |
 | `404` | `{"error": "unknown index <name>", "indexes": [...]}`: not an enabled index. `{"error": "unknown sink <name>"}`: not a configured sink. |
 | `503` | `{"error": "…"}`: flusso is [stopping](cli.md#stopping), that sink's operation queue is full (retry shortly), or its engine has stopped for good. |
+
+Without `sink`, each sink stages on its own: one that can't stage doesn't hold up the others.
+
+### A reindex of a lane flusso doesn't write
+
+A reindex is also the way out for a [lane](#lane-health) stuck on something that lives in the index. What it does depends on the lane's `health` when it is staged:
+
+| Lane | What the reindex does |
+| --- | --- |
+| `open` | Stages a new generation and backfills it. If the index's backfill is still running, it does nothing: that backfill is already rebuilding. |
+| `refused` or `blocked` | Opens the lane. The item it was stuck on isn't written again: its documents come from the new generation's backfill, which reads every row after the reindex. Items behind it are written into the new generation. |
+| `restaging` | Opens the lane; the items it held are written into the new generation. |
+| not `open`, with the index's backfill still running | Cuts that backfill and starts it again from the first row. |
+
+**Until the new generation is seeded:**
+
+- The stuck item's change and every later change on the lane count as not landed, so the replication slot stays before them, and `pinned_by` can name the lane.
+- The lane reads `open`, yet its `stall_seconds` keeps growing: a long backfill can fire `FlussoLaneStalled` ([A lane is stalled](../operate/stalled-lane.md#unstick-a-lane-with-a-reindex)).
+- A [`/wait`](#get-waitpositionposition) that needs the index holds, and answers `503` with reason `rebuilding` at its timeout.
+
+At the seed the stuck item is acknowledged and the lane's positions move on. The log says `reindexed: the lane is open; its parked item waits for the new generation's backfill` when the lane opens.
+
+**What it cures.** The new generation comes from the same schema and mapping, so a reindex cures what lives in the index: a write block on that index, settings or a mapping changed by hand, an `index_settings` change picked up by a restart. It doesn't cure:
+
+- **A row the mapping refuses.** The new backfill is refused at that row, the lane parks `refused` again, and the reindex completes once the row is fixed ([fresh build](index-and-on-error.md#a-refused-lanes-fresh-build)).
+- **A block on the whole cluster.** The new generation can't be created ([below](#when-the-reindex-cant-stage)).
+
+### When the reindex can't stage
+
+The call has already answered `202`. When the sink can't create the new generation, or can't ask for its backfill, the reindex waits and is tried again on its own:
+
+- **The lane** turns `restaging`, its `reason` `the reindex could not stage: <error>` (or `the reindex could not ask for its backfill: <error>`), and the log says `the reindex could not stage; the lane waits for it and it is tried again`. A lane that was `open` stops being written; a parked lane stays held.
+- **The retry** follows [`[backoff]`](config-toml.md#backoff): the first wait, doubling to the longest. A momentary error heals by itself. The retry that stages is the reindex, as in the table above.
+- **The sink's other indexes** keep being written.
+- **Alerts.** `flusso_lane_parked{why="restaging"}` is `1`, so `FlussoLaneParked` fires after 5 minutes.
+- **Fences.** A `/wait` that needs the index answers `503 rebuilding` at its timeout, until the new generation is seeded.
+- **The slot** stays before the lane's oldest change not written.
+
+**A restart keeps or drops it.** The waiting reindex is kept in memory. A sink engine that fails and restarts keeps it. A restart of flusso keeps only what the sink already recorded:
+
+| When flusso stopped | The next start |
+| --- | --- |
+| The new generation was created; a later step failed | Backfills it. |
+| The index's backfill was still running when the reindex was asked | Resumes that backfill. |
+| Anything else | The reindex is gone. Ask for it again if the lane is still stuck. |
+
+Either way the item the lane was stuck on is written again like any other, so a cause still in place parks the lane again. A stop drops a reindex not staged yet, too ([Stopping](cli.md#lanes-flusso-doesnt-write-at-a-stop)).
 
 The runbook is [Reindex without downtime](../operate/reindex.md); the CLI wrapper is [`flusso reindex`](cli.md#reindex).
