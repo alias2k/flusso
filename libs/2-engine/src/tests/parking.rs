@@ -2006,13 +2006,14 @@ async fn an_entry_stays_while_an_older_item_is_unacknowledged_and_goes_after() {
     answers.abort();
 }
 
-/// 14.10's seed: the parked item's own acknowledgement waits for its lane's
-/// caught-up write when its substitute (1000) lands, so the account starts
-/// with it. A newer item landing meanwhile (1001) doesn't drop the entry; the
-/// caught-up write fails, the run fails, and the parked item, redelivered, is
-/// written without 1.
+/// 14.10's seed (review of #458, S1): when its substitute (1000) lands, the
+/// parked item's own acknowledgement waits for the quiet lane's caught-up
+/// write, so the account starts with it. A newer item landing meanwhile
+/// (1001) doesn't drop the entry; the caught-up write fails, the run fails,
+/// and the redelivered parked item is written without 1: document 1 is
+/// written twice in all, the refused item then its substitute.
 #[tokio::test(start_paused = true)]
-async fn the_parked_item_waiting_for_its_caught_up_write_keeps_the_map() {
+async fn the_parked_item_is_never_rewritten_whole() {
     let rig = Rig::new(Gate::default());
     rig.sink
         .within
@@ -2070,6 +2071,7 @@ async fn the_parked_item_waiting_for_its_caught_up_write_keeps_the_map() {
         rig.applied(&orders()) == through(1)
     })
     .await;
+    eventually("all acknowledged", || rig.stream.is_idle()).await;
     let writes = written(&rig, &orders());
     let substitute = writes
         .iter()
@@ -2086,6 +2088,14 @@ async fn the_parked_item_waiting_for_its_caught_up_write_keeps_the_map() {
             .skip(substitute + 1)
             .all(|ids| !ids.contains(&"1".to_owned())),
         "the parked item's older build of 1 was written over its substitute: {writes:?}"
+    );
+    let ones = writes
+        .iter()
+        .filter(|ids| ids.contains(&"1".to_owned()))
+        .count();
+    assert_eq!(
+        ones, 2,
+        "1 is written twice: the refused item, then its substitute; never the item again: {writes:?}"
     );
     task.abort();
     answers.abort();
