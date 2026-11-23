@@ -85,6 +85,8 @@ struct Gate {
     ensure_fails_for: Mutex<BTreeSet<String>>,
     /// `forget_walked` fails (its write refused by a cluster-wide block).
     forget_fails: std::sync::atomic::AtomicBool,
+    /// Each `ensure_index` takes this long.
+    ensure_delay: Mutex<Option<Duration>>,
     /// Review r2: a write holding one of these ids takes that long.
     slow_ids: Mutex<BTreeMap<String, Duration>>,
     /// Review r2: a write holding this id fails as a whole.
@@ -132,6 +134,10 @@ impl Sink for Gate {
                 "cluster_block_exception: [FORBIDDEN/12/index read-only / allow delete (api)]"
                     .to_owned(),
             ));
+        }
+        let delay = *self.ensure_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
         }
         let name = mapping.index.to_string();
         self.ensured.lock().unwrap().push(name.clone());
@@ -2823,22 +2829,29 @@ async fn a_failed_ask_for_a_backfill_leaves_every_index_of_the_reindex_owed() {
     task.abort();
 }
 
-/// A stream whose request lane refuses to publish while `refuse` is set.
+/// A stream whose request lane refuses to publish while `refuse` is set,
+/// and takes `slow` to publish while that is set.
 #[derive(Debug)]
 struct RefusingRequests {
     inner: Arc<ChannelStream>,
     refuse: Arc<std::sync::atomic::AtomicBool>,
+    slow: Arc<Mutex<Option<Duration>>>,
 }
 
 #[derive(Debug)]
 struct RefusingProducer {
     inner: Box<dyn stream::Producer<Request>>,
     refuse: Arc<std::sync::atomic::AtomicBool>,
+    slow: Arc<Mutex<Option<Duration>>>,
 }
 
 #[async_trait]
 impl stream::Producer<Request> for RefusingProducer {
     async fn publish(&self, item: Request) -> stream::Result<()> {
+        let slow = *self.slow.lock().unwrap();
+        if let Some(slow) = slow {
+            tokio::time::sleep(slow).await;
+        }
         if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(stream::QueueError::Publish("broker unavailable".to_owned()));
         }
@@ -2865,6 +2878,7 @@ impl Stream for RefusingRequests {
             producer: Box::new(RefusingProducer {
                 inner: lane.producer,
                 refuse: Arc::clone(&self.refuse),
+                slow: Arc::clone(&self.slow),
             }),
             consumer: lane.consumer,
         })
@@ -2889,6 +2903,7 @@ async fn a_reindex_whose_backfill_request_fails_is_owed() {
             Arc::new(RefusingRequests {
                 inner: Arc::clone(&rig.stream),
                 refuse: Arc::clone(&refuse),
+                slow: Arc::default(),
             }) as Arc<dyn Stream>,
             vec![mapping(orders()), mapping(users())],
             Arc::clone(&rig.progress),
@@ -3063,6 +3078,296 @@ async fn an_index_never_started_is_announced_rebuilding_once_owed() {
         last_event(&events, &last).as_deref(),
         Some(format!("rebuilding {last}").as_str()),
         "announced: {events:?}"
+    );
+    task.abort();
+}
+
+/// How long, from now, until the stream is idle; `None` past `within`.
+async fn idle_within(rig: &Rig, within: Duration) -> Option<Duration> {
+    let from = Instant::now();
+    while from.elapsed() < within {
+        if rig.stream.is_idle() {
+            return Some(from.elapsed());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+/// Second review of #470, 1: a lane owed its reindex with its index's
+/// `SnapshotComplete` waiting (X6: parked during its backfill, the reindex
+/// failed to stage) drains at once at a stop: the completion is acknowledged
+/// without seeding, as one a stop cut short. For a sink writing several items
+/// at once, one at a time, and an ordered one: releasing takes no write slot.
+#[tokio::test(start_paused = true)]
+async fn a_stop_releases_the_completion_waiting_on_an_owed_lane() {
+    for (ordered, writes) in [(false, 4), (false, 1), (true, 1)] {
+        let rig = Rig::new(Gate {
+            ordered,
+            ..Gate::default()
+        });
+        rig.sink
+            .unseeded
+            .lock()
+            .unwrap()
+            .insert("orders".to_owned());
+        let stop = Stop::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let engine = Arc::new(
+            rig.engine(FailurePolicy::Stop)
+                .with_writes(writes)
+                .with_backoff(slow_backoff())
+                .with_stop(stop.clone())
+                .with_observer(rebuild_events(&events)),
+        );
+        engine
+            .stage(source::cdc::Continuity::Resumed)
+            .await
+            .unwrap();
+        let (_, first) = next_backfill(&rig).await;
+        rig.sink.answer(&orders(), Some(Answer::Refuse));
+        rig.stream
+            .lane(&lane(orders()))
+            .unwrap()
+            .producer
+            .publish(match item(&orders(), 1..2, None) {
+                LaneItem::Batch(batch) => LaneItem::Batch(Batch {
+                    ticket: Some(first),
+                    ..batch
+                }),
+                other => other,
+            })
+            .await
+            .unwrap();
+        let (control, task) = spawn_controlled(Arc::clone(&engine));
+        eventually("the lane parks on the page", || {
+            !engine.lane_health(&lane(orders())).is_open()
+        })
+        .await;
+        rig.sink.answer(&orders(), None);
+        complete(&rig, &orders(), first).await;
+        rig.sink
+            .ensure_fails_for
+            .lock()
+            .unwrap()
+            .insert("orders".to_owned());
+        control
+            .send(SinkControl::Reindex {
+                indexes: vec![orders()],
+            })
+            .await
+            .unwrap();
+        eventually("owed", || {
+            engine.lane_health(&lane(orders())).kind() == "restaging"
+        })
+        .await;
+        rig.sink.ensure_fails_for.lock().unwrap().clear();
+        let before_stop = events.lock().unwrap().len();
+        stop.request();
+        let idle = idle_within(&rig, Duration::from_secs(300)).await;
+        assert!(
+            idle.is_some_and(|after| after < Duration::from_secs(2)),
+            "ordered {ordered}, writes {writes}: drained at once: {idle:?}"
+        );
+        let after: Vec<String> = events.lock().unwrap()[before_stop..].to_vec();
+        assert!(
+            after.is_empty(),
+            "ordered {ordered}, writes {writes}: nothing seeded, staged or asked for: {after:?}"
+        );
+        task.abort();
+    }
+}
+
+/// Second review of #470, the gap of the same kind: a lane whose target
+/// went missing, its staging on its backoff, drains at once at a stop too:
+/// it is not staged again once stopping, its live items and its completion
+/// are acknowledged unapplied, and the next start stages it.
+#[tokio::test(start_paused = true)]
+async fn a_stop_releases_a_lane_restaging_a_missing_target() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::MissingForGood));
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    rig.live(&orders(), 1..2, 0).await;
+    let stop = Stop::new();
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(slow_backoff())
+            .with_stop(stop.clone()),
+    );
+    let task = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        async move {
+            let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+            engine.run(&mut control).await
+        }
+    });
+    eventually("restaging", || {
+        engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    eventually("its staging failed once", || {
+        !rig.sink.ensure_fails_for.lock().unwrap().is_empty()
+            && engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    rig.sink.ensure_fails_for.lock().unwrap().clear();
+    // Several items: a lane not open takes one at a time, and the drain must
+    // not wait a loop wake-up for each.
+    for at in 1..8 {
+        rig.live(&orders(), at + 1..at + 2, at as u64).await;
+    }
+    complete(&rig, &orders(), stream::Ticket::new(99)).await;
+    let ensured = rig.sink.ensured.lock().unwrap().len();
+    stop.request();
+    let idle = idle_within(&rig, Duration::from_secs(300)).await;
+    assert!(
+        idle.is_some_and(|after| after < Duration::from_secs(2)),
+        "drained at once: {idle:?}"
+    );
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert_eq!(
+        rig.sink.ensured.lock().unwrap().len(),
+        ensured,
+        "not staged again once stopping"
+    );
+    assert_eq!(rig.applied(&orders()), before(0), "nothing applied");
+    task.abort();
+}
+
+/// Second review of #470, 2: a stop asked while an owed retry is already
+/// staging (its `ensure_index` slow) lets the retry finish, but only as
+/// state: the lane stays owed, no backfill is asked for, nothing more is
+/// written, and the drain doesn't wait for it.
+#[tokio::test(start_paused = true)]
+async fn a_stop_during_an_owed_retry_records_it_and_writes_nothing_more() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Refuse));
+    rig.live(&orders(), 0..1, 0).await;
+    let stop = Stop::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(slow_backoff())
+            .with_stop(stop.clone())
+            .with_observer(rebuild_events(&events)),
+    );
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    eventually("parked", || !engine.lane_health(&lane(orders())).is_open()).await;
+    rig.sink.answer(&orders(), None);
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    eventually("owed", || {
+        engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    rig.sink.ensure_fails_for.lock().unwrap().clear();
+    *rig.sink.ensure_delay.lock().unwrap() = Some(Duration::from_secs(10));
+    rig.live(&orders(), 1..2, 1).await;
+    let attempts_before = attempts(&events, &orders());
+    eventually("the retry is staging", || {
+        attempts(&events, &orders()) > attempts_before
+    })
+    .await;
+    let before_stop = events.lock().unwrap().len();
+    stop.request();
+    let idle = idle_within(&rig, Duration::from_secs(300)).await;
+    assert!(
+        idle.is_some_and(|after| after < Duration::from_secs(2)),
+        "drained without waiting for the retry: {idle:?}"
+    );
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let after: Vec<String> = events.lock().unwrap()[before_stop..].to_vec();
+    assert!(
+        !after.iter().any(|event| event.starts_with("requested")),
+        "no backfill asked for once stopping: {after:?}"
+    );
+    assert_eq!(
+        engine.lane_health(&lane(orders())).kind(),
+        "restaging",
+        "the lane stays owed"
+    );
+    assert_eq!(
+        writes_holding(&rig, &orders(), "1"),
+        0,
+        "nothing more written"
+    );
+    assert_eq!(rig.applied(&orders()), before(0), "nothing applied");
+    task.abort();
+}
+
+/// Second review of #470, 2, the later moment: the stop comes while an
+/// owed retry's backfill request is being published. The retry returns
+/// staged, but once stopping that is recorded only: the lane stays owed and
+/// opens for nothing, and the next start picks the generation up (X20).
+#[tokio::test(start_paused = true)]
+async fn a_retry_returning_staged_during_a_stop_leaves_the_lane_owed() {
+    let rig = Rig::new(Gate::default());
+    let slow = Arc::new(Mutex::new(None));
+    let stop = Stop::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        SinkEngine::new(
+            sink_name("primary"),
+            Arc::clone(&rig.sink) as Arc<dyn Sink>,
+            Arc::new(RefusingRequests {
+                inner: Arc::clone(&rig.stream),
+                refuse: Arc::default(),
+                slow: Arc::clone(&slow),
+            }) as Arc<dyn Stream>,
+            vec![mapping(orders()), mapping(users())],
+            Arc::clone(&rig.progress),
+        )
+        .with_writes(4)
+        .with_failure_policies(FailurePolicies::new(FailurePolicy::Stop))
+        .with_backoff(slow_backoff())
+        .with_stop(stop.clone())
+        .with_observer(rebuild_events(&events)),
+    );
+    engine.set_blame(Blame::Nobody);
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    eventually("owed", || {
+        engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    rig.sink.ensure_fails_for.lock().unwrap().clear();
+    *slow.lock().unwrap() = Some(Duration::from_secs(10));
+    let attempts_before = attempts(&events, &orders());
+    eventually("the retry is asking for its backfill", || {
+        attempts(&events, &orders()) > attempts_before
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    stop.request();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(
+        engine.lane_health(&lane(orders())).kind(),
+        "restaging",
+        "recorded only: the lane stays owed"
     );
     task.abort();
 }

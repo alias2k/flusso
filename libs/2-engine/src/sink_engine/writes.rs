@@ -640,7 +640,16 @@ impl<'a> Run<'a> {
         }
         if self.engine.stop.is_requested() {
             self.skip_backfill().await?;
-            self.release_owed_on_stop().await?;
+            // A lane not open takes one item at a time: release and read
+            // again until a restaging lane has nothing more ready, so the
+            // drain doesn't wait a loop wake-up per item.
+            loop {
+                self.release_restaging_on_stop().await?;
+                if !(self.unhealthy > 0 && self.wants_more() && self.fill()?) {
+                    break;
+                }
+                self.skip_backfill().await?;
+            }
             self.probe_on_stop();
             if self.holding > 0 {
                 self.release_held_on_stop().await?;
@@ -770,15 +779,17 @@ impl<'a> Run<'a> {
     /// no write slot.
     async fn start_restages(&mut self) -> Result<()> {
         let now = Instant::now();
-        // Once stopping, an owed reindex is not retried: nothing new is
-        // staged or asked for, and its lane's items are released unapplied.
-        let stopping = self.engine.stop.is_requested();
+        // Once stopping, no lane is staged again and no owed reindex retried:
+        // nothing new is staged or asked for, and their items are released
+        // unapplied (`release_restaging_on_stop`).
+        if self.engine.stop.is_requested() {
+            return Ok(());
+        }
         let due: Vec<usize> = (0..self.lanes.len())
             .filter(|lane| {
                 self.lanes.get(*lane).is_some_and(|run| {
                     matches!(run.health.health, LaneHealth::Restaging { .. })
                         && run.health.due <= now
-                        && !(stopping && run.health.reindex.is_some())
                 })
             })
             .filter(|lane| !self.lane_in_flight(*lane))
@@ -824,8 +835,22 @@ impl<'a> Run<'a> {
             return Ok(());
         };
         self.restaging.swap_remove(at);
-        self.reindex_failed(reindexed.failed);
-        self.reindexed(&reindexed.staged).await
+        let Reindexed { staged, mut failed } = reindexed;
+        if self.engine.stop.is_requested() {
+            // Recorded only: the lane stays owed and opens for nothing once
+            // stopping; what it staged is the next start's (X20).
+            failed.extend(staged.into_iter().map(|index| {
+                (
+                    index,
+                    "the reindex was staging as the stop came; the next start picks it up"
+                        .to_owned(),
+                )
+            }));
+            self.reindex_failed(failed);
+            return Ok(());
+        }
+        self.reindex_failed(failed);
+        self.reindexed(&staged).await
     }
 
     /// Each of `failed` could not stage its reindex (X15): its lane is owed
@@ -864,6 +889,9 @@ impl<'a> Run<'a> {
         };
         run.walked.reset();
         match result {
+            // Once stopping the lane stays restaging, its items released
+            // unapplied: the next start stages it (X19).
+            Ok(()) if self.engine.stop.is_requested() => {}
             Ok(()) => {
                 if let Some(down) = run.health.reopen(now) {
                     self.unhealthy = self.unhealthy.saturating_sub(1);
@@ -911,7 +939,10 @@ impl<'a> Run<'a> {
             return false;
         }
         if run.barrier || !run.health.is_open() || self.ordered() {
-            return run.waiting() == 0 && !self.lane_in_flight(lane);
+            // Once stopping, a restaging lane is released as it is read, even
+            // while its staging is still out (X19).
+            let released = self.engine.stop.is_requested() && self.lane_restaging(lane);
+            return run.waiting() == 0 && (released || !self.lane_in_flight(lane));
         }
         // With several lanes, a lane with nothing waiting always takes one
         // item, so a quiet index's next change is seen by live-first and the
@@ -2079,34 +2110,28 @@ impl<'a> Run<'a> {
         self.acknowledge_held().await
     }
 
-    /// Once stopping, the live items of a lane owed its reindex are
-    /// acknowledged unwritten and unapplied, as held items are (X10): the
-    /// reindex is not retried, so the drain doesn't wait for it, the lane's
-    /// applied mark (so the slot) stays before their changes, and the next
-    /// start replays them (§15.3).
-    async fn release_owed_on_stop(&mut self) -> Result<()> {
+    /// Once stopping, the live items and the completion of a `restaging`
+    /// lane (its target gone, or owed its reindex) are acknowledged unwritten
+    /// and unapplied, as held items are (X10): it is not staged again, so the
+    /// drain doesn't wait for it, its applied mark (so the slot) stays before
+    /// their changes, its index stays unseeded, and the next start stages it
+    /// and replays them (§15.3, X19). Its backfill pages are `skip_backfill`'s.
+    async fn release_restaging_on_stop(&mut self) -> Result<()> {
         let mut index = 0;
         while index < self.window.len() {
-            let owed = match self.window.get(index) {
-                Some(Queued {
-                    item: Queue::Batch { batch, .. },
-                    lane,
-                    ..
-                }) => {
-                    batch.position.is_some()
-                        && self
-                            .lanes
-                            .get(*lane)
-                            .is_some_and(|run| run.health.reindex.is_some())
-                }
-                _ => false,
-            };
-            if !owed {
+            let release = self.window.get(index).is_some_and(|queued| {
+                let positioned = match &queued.item {
+                    Queue::Batch { batch, .. } => batch.position.is_some(),
+                    Queue::Complete { .. } => true,
+                };
+                positioned && self.lane_restaging(queued.lane)
+            });
+            if !release {
                 index += 1;
                 continue;
             }
             let Some(Queued {
-                item: Queue::Batch { batch, .. },
+                item,
                 handle,
                 lane,
                 seq,
@@ -2115,8 +2140,18 @@ impl<'a> Run<'a> {
             else {
                 continue;
             };
+            let build = match item {
+                Queue::Batch { batch, .. } => batch.build,
+                Queue::Complete { index, .. } => {
+                    tracing::info!(%index, sink = %self.engine.name, "stopping: the lane is restaging, so its backfill's completion seeds nothing; the next start stages and backfills it");
+                    if let Some(run) = self.lanes.get_mut(lane) {
+                        run.walked.ended(seq, Instant::now());
+                    }
+                    None
+                }
+            };
             let oldest = self.is_oldest(lane, seq);
-            self.acknowledge(handle, lane, seq, batch.build, oldest, None)
+            self.acknowledge(handle, lane, seq, build, oldest, None)
                 .await?;
         }
         Ok(())

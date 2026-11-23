@@ -340,6 +340,10 @@ impl SinkEngine {
             tracing::warn!(%index, sink = %self.name, "staged again with no backfill (backfill off for this sink, or skip_backfill): it holds only what is written from now on");
             return Ok(());
         }
+        if self.stop.is_requested() {
+            tracing::info!(%index, sink = %self.name, "stopping: staged again, its backfill is asked for at the next start");
+            return Ok(());
+        }
         if self.outstanding().contains(index) {
             return self.ask_again(vec![(index.clone(), target)]).await;
         }
@@ -995,6 +999,14 @@ impl SinkEngine {
             }));
         for (mapping, staged) in tried.done {
             let index = mapping.index.clone();
+            if self.stop.is_requested() {
+                reindexed.failed.push((
+                    index,
+                    "the reindex was staging as the stop came; the next start picks it up"
+                        .to_owned(),
+                ));
+                continue;
+            }
             let target = match staged {
                 Staged::Unseeded { target, .. } => target,
                 Staged::Seeded => None,
