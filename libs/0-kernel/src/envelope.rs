@@ -149,7 +149,9 @@ pub struct Envelope<D = GenericValue> {
     /// The document's root key, inside the pipeline only: what a sink engine
     /// hands back to have the document built again (a lane parked on a
     /// refusal). Never written: moved here as the envelope is built, so it
-    /// costs no allocation of its own.
+    /// costs no allocation of its own. It takes part in equality: an envelope
+    /// read back from its serialized form (no key) differs from the
+    /// pipeline's copy (with one).
     #[serde(skip)]
     pub key: Option<crate::RowKey>,
 }

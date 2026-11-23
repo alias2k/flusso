@@ -231,7 +231,11 @@ pub(crate) struct LaneState {
     /// build number, so a redelivery of it is held again, and whether the
     /// reindexed index was seeded since (then a redelivery of it is
     /// acknowledged unwritten).
-    pub(crate) held_for_seed: Option<HeldForSeed>,
+    pub(crate) held_for_seed: Vec<HeldForSeed>,
+    /// The parked item's identity (its key and build number), recorded when
+    /// the lane parks: what a reindex holds when the item is not in the
+    /// window (X12).
+    pub(crate) parked_item: Option<(Option<stream::ItemKey>, Option<u64>)>,
 }
 
 /// The item a reindex left a lane holding: which item, and whether its index
@@ -263,7 +267,8 @@ impl LaneState {
             unproven: false,
             rebuild: None,
             superseded: BTreeMap::new(),
-            held_for_seed: None,
+            held_for_seed: Vec::new(),
+            parked_item: None,
         }
     }
 
@@ -271,7 +276,7 @@ impl LaneState {
     /// landed substitute supersedes.
     fn reset(&mut self) {
         let superseded = std::mem::take(&mut self.superseded);
-        let held_for_seed = self.held_for_seed.take();
+        let held_for_seed = std::mem::take(&mut self.held_for_seed);
         *self = Self::new(self.schedule);
         self.superseded = superseded;
         self.held_for_seed = held_for_seed;
@@ -364,7 +369,7 @@ impl LaneState {
         !self.is_open()
             || self.unproven
             || !self.superseded.is_empty()
-            || self.held_for_seed.is_some()
+            || !self.held_for_seed.is_empty()
     }
 
     /// Staging failed: try again after the backoff, doubled each time up to
