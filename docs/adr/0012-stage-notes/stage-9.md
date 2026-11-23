@@ -636,3 +636,39 @@ once with the rest when the envelope vector becomes the shared `Arc<[Envelope]>`
 envelopes when the last lane acknowledges the item, where `main` dropped them at build. Keys do not survive a
 serializing stream (none exists; the in-process channel moves items): an item read back from bytes carries none,
 and its lane's probe writes the item itself (F2).
+
+## User-visible, second half
+
+What the documentation agent writes the manual from, per slice. Nothing else in this note is meant for it.
+
+### Slice 1: fresh builds (PR #458)
+
+1. **A row fixed in the database unparks its lane.** A lane parked because the destination refused a document
+   (`on_error = "stop"`) asks, at each probe, for that item's documents to be built again from the database and
+   writes them in its place. A fixed row lands and the lane opens with no restart; a deleted row is written as a
+   delete, which lands.
+2. **The probe schedule is unchanged:** the first wait, doubling to the longest (`[backoff]`).
+3. **The fresh build is waited for at most the backoff, and never more than 5 s.** Past that the probe writes
+   the item as it was, and the next probe asks again.
+4. **Documents never go back to an older version.** Once a fresh build lands, older copies of its documents
+   still on that lane are skipped, including any a failed run sends again. Documents of a fresh build that
+   landed while others were refused again count too: the parked item is written without them, and the next
+   fresh build covers only what is left.
+5. **Only refused lanes rebuild.** A blocked lane (write block, missing permission) still writes the same item
+   until the block is lifted.
+6. **At shutdown** a parked lane's last probe writes the item as it was; no fresh build is made once stopping.
+7. **A fresh build failing on the database side counts as the index's failure.** `/status` shows
+   `ingest.indexes.<name>.state: down`, with `last_error.live` and `restarts.live`. With one index that fails
+   the whole run on every probe.
+8. **No new `/status` fields or metrics.** A lane waiting for its fresh build shows health `refused`, with
+   `next_probe` at the end of the wait; `flusso_lane_probes{outcome}` counts each probe once.
+9. **Runbook, refused lane:** "fixing the row doesn't unpark the lane" is no longer true. Fix the row and the
+   next probe lands; switching to `on_error = "skip"` or changing the schema is no longer the only way out.
+10. **Nothing to configure.** For users of the stream port as a library: `Request` gains `Rebuild`, `Stream`
+    gains `substitutes` (with a default), `Batch` gains `build`, an `Envelope` carries its document's `key`
+    inside the pipeline (never serialized; slice 2), `RowKey` moves to the kernel (still re-exported by
+    `source`), and `Consumer`'s contract states the redelivery order.
+
+### Slice 2 (this PR)
+
+(Filled as Part 1 lands.)
