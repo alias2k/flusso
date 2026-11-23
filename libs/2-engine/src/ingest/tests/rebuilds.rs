@@ -194,3 +194,47 @@ async fn a_failing_rebuild_restarts_its_index_and_is_served_after() {
     assert_eq!(sent.len(), 1, "served after the restart: {sent:?}");
     assert_eq!(ids(&sent[0]), ["5"]);
 }
+
+/// F14: with the budget held full by the index's own live bytes, a
+/// rebuild is still built and sent, and the budget counts none of it.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_is_served_with_the_budget_held_full() {
+    let db = Database::new(10, Vec::new());
+    let builder = Builder::two(&db, Behaviour::default());
+    let mut deployment =
+        Deployment::new(Feed::new(&db), Arc::clone(&builder), Recorder::seeded(true))
+            .with_budget_shared_at(1_000, 0.5);
+    let budget = Arc::clone(deployment.budget.as_ref().unwrap());
+    let full = budget
+        .reserve(crate::Work::Live, &[(orders(), 1_000)])
+        .expect("an index holding nothing gets one batch");
+    let before = budget.held();
+    assert!(
+        budget.reserve(crate::Work::Live, &[(orders(), 1)]).is_err(),
+        "the budget refuses the index any more live bytes"
+    );
+    let requests = deployment.stream.requests().unwrap();
+    requests.producer.publish(rebuild(&[5], 9)).await.unwrap();
+    // Held full until the substitute is out, then let go so the run's own
+    // end-of-run check finds the budget empty.
+    let lane = deployment.stream.substitutes(&sink_name()).unwrap();
+    let watched = Arc::clone(&budget);
+    let holder = tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + LIMIT;
+        while lane.consumer.is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "no substitute");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let at_publish = watched.held();
+        drop(full);
+        at_publish
+    });
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the rebuild is served though the budget is full");
+    let at_publish = holder.await.unwrap();
+    assert_eq!(at_publish, before, "the fresh build was never counted");
+    let sent = substitutes(&deployment.stream).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(ids(&sent[0]), ["5"]);
+}
