@@ -149,8 +149,8 @@ use super::flights::Flights;
 use super::health::{HeldForSeed, LaneState, supersedes};
 use super::walked::Walked;
 use super::{
-    Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, SinkControl, SinkEngine, shown_id,
-    until,
+    Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, Reindexed, SinkControl, SinkEngine,
+    shown_id, until,
 };
 use crate::error::{EngineError, Result};
 use crate::observer::{CommitStats, Stage, StageTiming, Work};
@@ -308,6 +308,8 @@ enum Outcome {
     Refresh(sink::Result<WriteReport>),
     /// A lane's index staged again after its target went missing.
     Restage(Result<()>),
+    /// The retry of a reindex a lane is owed (X15).
+    Reindex(Result<Reindexed>),
 }
 
 /// A lane waiting for its empty caught-up write: the item whose
@@ -650,21 +652,16 @@ impl<'a> Run<'a> {
         };
         if let Some(indexes) = pending {
             let started = Instant::now();
-            match self.engine.reindex(indexes.clone()).await {
-                Ok(staged) => self.reindexed(&staged).await?,
-                // A reindex that cannot stage its new generation fails alone
-                // (X11): the lanes stay as they were, the sink goes on.
-                Err(error) => {
-                    tracing::error!(?indexes, sink = %self.engine.name, %error, "the reindex could not stage its new generation; it is dropped and every lane is left as it was");
-                }
-            }
+            let reindexed = self.engine.reindex(indexes).await?;
+            self.reindex_failed(reindexed.failed);
+            self.reindexed(&reindexed.staged).await?;
             self.engine.observer.on_stage(
                 StageTiming::new(Stage::Reindex, started.elapsed()).sink(&self.engine.name),
             );
         }
         if !self.engine.reindex_pending() {
             if self.unhealthy > 0 {
-                self.start_restages();
+                self.start_restages().await?;
                 self.ask_rebuilds().await?;
             }
             // An ordered sink first takes every lane's front, so the pick by
@@ -687,7 +684,7 @@ impl<'a> Run<'a> {
             // have found its target missing: stage it now, not at the next
             // wake-up.
             if self.unhealthy > 0 {
-                self.start_restages();
+                self.start_restages().await?;
             }
         }
         Ok(())
@@ -765,9 +762,10 @@ impl<'a> Run<'a> {
         }
     }
 
-    /// Stage again each lane whose target went missing, once nothing of it
-    /// is in flight, as a flight holding no write slot.
-    fn start_restages(&mut self) {
+    /// Stage again each lane whose target went missing, or retry the reindex
+    /// it is owed (X15), once nothing of it is in flight, as a flight holding
+    /// no write slot.
+    async fn start_restages(&mut self) -> Result<()> {
         let now = Instant::now();
         let due: Vec<usize> = (0..self.lanes.len())
             .filter(|lane| {
@@ -779,32 +777,64 @@ impl<'a> Run<'a> {
             .filter(|lane| !self.lane_in_flight(*lane))
             .collect();
         for lane in due {
-            let Some(index) = self.lanes.get(lane).map(|run| run.key.index.clone()) else {
+            let Some((index, owed)) = self
+                .lanes
+                .get(lane)
+                .map(|run| (run.key.index.clone(), run.health.reindex.is_some()))
+            else {
                 continue;
             };
-            tracing::info!(%index, sink = %self.engine.name, "staging the index again: its target is gone");
             let flight = self.next_flight;
             self.next_flight += 1;
             self.restaging.push((flight, lane));
             let engine = self.engine;
             let restage = async move {
                 let started = Instant::now();
-                let result = engine.restage(&index).await;
+                let outcome = if owed {
+                    Outcome::Reindex(engine.reindex_again(&index).await)
+                } else {
+                    tracing::info!(%index, sink = %engine.name, "staging the index again: its target is gone");
+                    Outcome::Restage(engine.restage(&index).await)
+                };
                 Landed {
                     flight,
-                    outcome: Outcome::Restage(result),
+                    outcome,
                     took: started.elapsed(),
                 }
             };
             if let Some(landed) = self.flights.start(restage.boxed()) {
-                self.restage_returned(
-                    landed.flight,
-                    match landed.outcome {
-                        Outcome::Restage(result) => result,
-                        _ => Ok(()),
-                    },
-                );
+                Box::pin(self.landed(landed)).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// The retry of an owed reindex returned (X15, X16): staged, it is the
+    /// reindex, and the lane is handled as one (`reindexed`); failed again, it
+    /// is tried again after its backoff, with the new reason.
+    async fn reindex_returned(&mut self, flight: u64, result: Result<Reindexed>) -> Result<()> {
+        let Some(at) = self.restaging.iter().position(|(id, _)| *id == flight) else {
+            return Ok(());
+        };
+        self.restaging.swap_remove(at);
+        let reindexed = result?;
+        self.reindex_failed(reindexed.failed);
+        self.reindexed(&reindexed.staged).await
+    }
+
+    /// Each of `failed` could not stage its reindex (X15): its lane is owed
+    /// it, `restaging` with the reason, retried after its backoff.
+    fn reindex_failed(&mut self, failed: Vec<(IndexName, String)>) {
+        let now = Instant::now();
+        for (index, reason) in failed {
+            let Some(run) = self.lanes.iter_mut().find(|run| run.key.index == index) else {
+                continue;
+            };
+            if run.health.reindex_failed(reason.clone(), now) {
+                self.unhealthy += 1;
+            }
+            tracing::warn!(lane = %run.key, %reason, retry_in = ?run.health.due.saturating_duration_since(now), "the reindex could not stage; the lane waits for it and it is tried again");
+            self.engine.store_lane(&run.key, &run.health, true);
         }
     }
 
@@ -1703,6 +1733,9 @@ impl<'a> Run<'a> {
                 self.restage_returned(landed.flight, result);
                 return Ok(());
             }
+            Outcome::Reindex(result) => {
+                return self.reindex_returned(landed.flight, result).await;
+            }
         };
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
             return Ok(());
@@ -1939,7 +1972,8 @@ impl<'a> Run<'a> {
             if !staged.contains(&run.key.index) || run.health.is_open() {
                 continue;
             }
-            let parked = matches!(run.health.health, LaneHealth::Parked { .. });
+            let parked = matches!(run.health.health, LaneHealth::Parked { .. })
+                || run.health.reindex.is_some_and(|owed| owed.parked);
             let identity = run.health.parked_item;
             let front = parked
                 .then(|| {

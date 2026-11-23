@@ -730,7 +730,7 @@ neither the window nor the flights, and stays in the account until its acknowled
 | X8 (B1) | A held item's identity stays on the lane's state (seeded) until its acknowledgement returned `Ok` (`acknowledged`), so an item redelivered after a failure between the seed and that acknowledgement is acknowledged unwritten, never written | `a_failure_between_the_seed_and_the_held_items_ack_never_writes_it` |
 | X9 (S1) | A lane holds a list: a second reindex while items are held adds to it; the next seed releases every held item; a redelivery matches any entry | `a_second_reindex_keeps_the_first_held_item_unwritten` |
 | X10 (S2) | Once stopping, held items are acknowledged without their positions applied: confirmation follows the applied marks (`Progress::landed`), never the acknowledgements, so the slot stays before their changes, the drain ends, and the next start replays them into whatever generation is then backfilled | `a_stop_acknowledges_a_held_item_without_applying_it` |
-| X11 (S4) | A reindex that cannot stage its new generation (a cluster-wide block, any staging error) fails that reindex only: logged with its error, the lane left as it was, the sink's run going on; it is not retried | `a_reindex_that_cannot_stage_leaves_the_lane_and_the_sink_as_they_were` |
+| X11 (S4) | *Replaced by X14–X18 (§15.3).* A reindex that cannot stage its new generation failed that reindex only, logged, the sink's run going on; it was not retried, and the lane was not left as it was: the fence had been told the index was rebuilding | — |
 | X12 | A parked lane records its parked item's identity when it parks, so a reindex staged while that item is not in the window (the first pass of a run after a failure) still holds it when it is redelivered | `a_reindex_staged_before_the_parked_item_is_redelivered_still_holds_it` |
 | X13 | A held item counts in `is_oldest` (items behind it are not the supervisor's progress) and in the F9 account's seed | — (stated) |
 
@@ -744,11 +744,42 @@ acknowledgement only empties the channel's ledger, which is what lets `stream.is
 in the generation: a write block on that index, settings or a mapping changed by hand, `index_settings` changed and
 the process restarted. It does not cure a row the mapping refuses (the new backfill's page is refused, the lane
 parks on it, the index is never seeded, and the held item waits until the row is fixed), nor a cluster-wide block
-(X11: the reindex fails and the lane stays as it was).
+(X15: the lane is `restaging`, the reindex retried until the block lifts).
 
 **The held state in `/status`.** A lane holding an item reads `open`; it pins the slot until the seed
 (`pinned_by` names it) and its stall age grows, so `FlussoLaneStalled` can fire during a long reindex backfill. Not
 changed here: a `held` health value (excluded from the alert) is the follow-up.
+
+### 15.3 Review of `main` at `9b70cd6e`: a reindex whose staging fails is retried
+
+#459's commits reached `main` by a mistaken push; it was reviewed there and kept. Its fixes, on
+`fix/lane-failure-followup`:
+
+**Keys (review 1, 3).** `keys_of` looks an envelope up by rendered id **and index**; two different keys of its
+index under one rendering (composite parts holding `:`) give no keys, so the probe writes the item itself (F2).
+Each index has its own builder (`ingest.rs`, `Builds::of_index`), so one build's ids hold one index: the index
+check is a guard, not a fix of something a run could reach (`each_index_sharing_a_rendered_id_gets_its_own_fresh_build`
+passes with the old code too). Alike renderings within one index are reachable:
+`an_item_whose_keys_render_alike_probes_itself` (end to end), `two_keys_rendering_alike_in_one_index_give_no_keys`.
+
+**Reindex staging (review 2).** X11 dropped a reindex that could not stage, after `on_index_rebuilding` had told
+the fence the index was rebuilding: nothing moved the fence back, so every later fence on the index timed out until
+a restart. A momentary error cancelled a reindex the caller got `202` for, and one index failing dropped the
+backfill of another that had staged. X11 is replaced:
+
+| # | Rule | Test |
+| --- | --- | --- |
+| X14 | A reindex keeps an outcome per index. Every index that staged gets its backfill requested (cut and asked again when outstanding, X6), and its lane is handled as X1–X5 say | `a_reindex_of_two_indexes_stages_one_while_the_other_is_retried` |
+| X15 | An index whose staging failed, or was not started after another failed, is **owed** its reindex: its lane becomes `restaging`, reason `the reindex could not stage: <error>`, and the reindex is retried on the lane's restage backoff (the first wait, doubling to the longest), as a missing target's staging is (§4). Other lanes and the sink's run go on | `a_reindex_whose_staging_fails_is_retried_until_it_stages` |
+| X16 | A retry that stages is the reindex: the lane is handled as X1–X5 say, a parked lane's item held until the seed (the lane remembers it was parked). The fence's `Rebuilding`, announced before each attempt, stays true until that seed | the same |
+| X17 | The owed reindex lives on the lane's state, so a failed run keeps it: staging at the next run's start leaves the lane `restaging` for the retry instead of reopening it | `an_owed_reindex_outlives_a_failed_run` |
+| X18 | Asking for the backfill (`request_backfill`, `ask_again`) failing is the run's failure, as before X11: the restart stages the unseeded generation and asks again | — (as before X11) |
+
+A lasting failure (a cluster-wide block) shows as the lane `restaging` with its reason in `/status` and
+`FlussoLaneParked` covers it, while the other lanes run (S4's goal).
+
+**X13, stated:** a held item acknowledged at a stop still counts in `is_oldest` until that acknowledgement
+returned; items behind it are not the supervisor's progress.
 
 ## User-visible, second half
 

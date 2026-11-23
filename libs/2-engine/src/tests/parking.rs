@@ -81,6 +81,8 @@ struct Gate {
     forgotten: Mutex<Vec<String>>,
     /// `ensure_index` fails (a cluster-wide block).
     ensure_fails: std::sync::atomic::AtomicBool,
+    /// `ensure_index` fails for these indexes only.
+    ensure_fails_for: Mutex<BTreeSet<String>>,
     /// Review r2: a write holding one of these ids takes that long.
     slow_ids: Mutex<BTreeMap<String, Duration>>,
     /// Review r2: a write holding this id fails as a whole.
@@ -117,7 +119,13 @@ impl Gate {
 #[async_trait]
 impl Sink for Gate {
     async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
-        if self.ensure_fails.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.ensure_fails.load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .ensure_fails_for
+                .lock()
+                .unwrap()
+                .contains(mapping.index.as_ref())
+        {
             return Err(SinkError::Write(
                 "cluster_block_exception: [FORBIDDEN/12/index read-only / allow delete (api)]"
                     .to_owned(),
@@ -2570,15 +2578,49 @@ async fn a_stop_acknowledges_a_held_item_without_applying_it() {
     task.abort();
 }
 
-/// X11: a reindex that cannot stage its new generation (a cluster-wide
-/// block) fails alone: the parked lane stays parked, the sink's run goes on,
-/// and the other lane keeps writing.
+/// Every rebuilding, backfill-requested and seeded event, in order.
+fn rebuild_events(events: &Arc<Mutex<Vec<String>>>) -> Arc<dyn Observer> {
+    Arc::new(super::RebuildEvents(Arc::clone(events))) as Arc<dyn Observer>
+}
+
+fn attempts(events: &Arc<Mutex<Vec<String>>>, of: &IndexName) -> usize {
+    let rebuilding = format!("rebuilding {of}");
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| **event == rebuilding)
+        .count()
+}
+
+fn last_event(events: &Arc<Mutex<Vec<String>>>, of: &IndexName) -> Option<String> {
+    let suffix = format!(" {of}");
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|event| event.ends_with(&suffix))
+        .cloned()
+}
+
+/// X15, X16 (review of `main` at `9b70cd6e`, 2): a reindex that cannot stage
+/// (a cluster-wide block) is owed: the lane is `restaging` with the error as
+/// its reason, the reindex is retried on its backoff, and the sink's run and
+/// the other lane go on. Once staging works the retry is the reindex: the
+/// parked item is held until the seed, and the fence's `rebuilding` ends
+/// there.
 #[tokio::test(start_paused = true)]
-async fn a_reindex_that_cannot_stage_leaves_the_lane_and_the_sink_as_they_were() {
+async fn a_reindex_whose_staging_fails_is_retried_until_it_stages() {
     let rig = Rig::new(Gate::default());
     rig.sink.answer(&orders(), Some(Answer::Block));
     rig.live(&orders(), 1..2, 0).await;
-    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff()));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(slow_backoff())
+            .with_observer(rebuild_events(&events)),
+    );
     let (control, task) = spawn_controlled(Arc::clone(&engine));
     eventually("the lane parks", || {
         !engine.lane_health(&lane(orders())).is_open()
@@ -2587,20 +2629,144 @@ async fn a_reindex_that_cannot_stage_leaves_the_lane_and_the_sink_as_they_were()
     rig.sink
         .ensure_fails
         .store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.sink.answer(&orders(), None);
     control
         .send(SinkControl::Reindex {
             indexes: vec![orders()],
         })
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(200)).await;
+    let health = engine.lane_health(&lane(orders()));
+    assert!(
+        matches!(&health, LaneHealth::Restaging { reason, .. } if reason.contains("cluster_block_exception")),
+        "owed, with its reason: {health:?}"
+    );
+    assert!(attempts(&events, &orders()) >= 3, "retried: {events:?}");
     assert!(!task.is_finished(), "the sink's run goes on");
-    assert_eq!(engine.lane_health(&lane(orders())).kind(), "blocked");
     rig.live(&users(), 5..6, 1).await;
     eventually("the other lane keeps writing", || {
         rig.applied(&users()) == through(1)
     })
     .await;
+    assert_eq!(
+        writes_holding(&rig, &orders(), "1"),
+        1,
+        "not written while owed"
+    );
+    rig.sink
+        .ensure_fails
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (index, ticket) = next_backfill(&rig).await;
+    assert_eq!(
+        index,
+        orders(),
+        "the retry staged and asks for its backfill"
+    );
+    assert!(engine.lane_health(&lane(orders())).is_open());
+    assert_eq!(rig.applied(&orders()), before(0), "held until the seed");
+    complete(&rig, &orders(), ticket).await;
+    eventually("seeded: the held item is acknowledged", || {
+        rig.applied(&orders()) == through(0)
+    })
+    .await;
+    assert_eq!(
+        writes_holding(&rig, &orders(), "1"),
+        1,
+        "the parked item is never written again"
+    );
+    assert_eq!(
+        last_event(&events, &orders()).as_deref(),
+        Some("seeded orders"),
+        "the fence's rebuilding ends at the seed: {events:?}"
+    );
+    task.abort();
+}
+
+/// X14 (review 2): a reindex of two indexes, one of which cannot stage,
+/// stages the other and asks for its backfill; the failing one is owed and
+/// staged once it can be.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_of_two_indexes_stages_one_while_the_other_is_retried() {
+    let rig = Rig::new(Gate::default());
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("users".to_owned());
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff()));
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders(), users()],
+        })
+        .await
+        .unwrap();
+    let (index, orders_ticket) = next_backfill(&rig).await;
+    assert_eq!(index, orders(), "the index that staged is backfilled");
+    assert!(engine.lane_health(&lane(orders())).is_open());
+    assert_eq!(engine.lane_health(&lane(users())).kind(), "restaging");
+    rig.sink.ensure_fails_for.lock().unwrap().clear();
+    // The retry is due one backoff (60 s) after the failure.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let (index, users_ticket) = next_backfill(&rig).await;
+    assert_eq!(index, users(), "the owed one, once it stages");
+    complete(&rig, &orders(), orders_ticket).await;
+    complete(&rig, &users(), users_ticket).await;
+    eventually("both lanes open", || {
+        engine.lane_health(&lane(orders())).is_open()
+            && engine.lane_health(&lane(users())).is_open()
+    })
+    .await;
+    assert!(!task.is_finished());
+    task.abort();
+}
+
+/// X17 (review 2): the owed reindex is on the lane's state, so a run that
+/// fails meanwhile keeps it: staging at the next start leaves the lane
+/// `restaging`, and the next run's retry stages the reindex.
+#[tokio::test(start_paused = true)]
+async fn an_owed_reindex_outlives_a_failed_run() {
+    let rig = Rig::new(Gate::default());
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff()));
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    eventually("owed", || {
+        engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    *rig.sink.fail_id.lock().unwrap() = Some("9".to_owned());
+    rig.live(&users(), 9..10, 0).await;
+    let ended = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("the run ends on the failed write");
+    assert!(ended.unwrap().is_err());
+    *rig.sink.fail_id.lock().unwrap() = None;
+    rig.sink.ensure_fails_for.lock().unwrap().clear();
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.lane_health(&lane(orders())).kind(),
+        "restaging",
+        "staging the run leaves the owed reindex to its retry"
+    );
+    let (_control, task) = spawn_controlled(Arc::clone(&engine));
+    let (index, ticket) = next_backfill(&rig).await;
+    assert_eq!(index, orders(), "the retry stages the reindex");
+    complete(&rig, &orders(), ticket).await;
+    eventually("open", || engine.lane_health(&lane(orders())).is_open()).await;
     task.abort();
 }
 

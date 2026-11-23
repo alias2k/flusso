@@ -1699,7 +1699,7 @@ is the one concrete piece.
   The health (`LaneHealth`, public; `on_lane_health`/`on_lane_probe` events) lives on the
   `SinkEngine` and outlives a run; a parked lane stays parked across a failed run, on its schedule.
   **A refused lane's probe is a fresh build** (stage 9 second half, slice 1; the note's §14.1): when its
-  probe is due and its front item's keys are found (`Batch.ids`: the build's own `Arc<Vec<DocumentId>>`, shared by refcount with every lane, never serialized; `writes.rs`'s `keys_of` matches each envelope by rendered id and index, and an unmatched one means no keys, so the item itself is probed; the vector is lent, and `Builds::spare` takes it back from `lent` once only the pool holds it, so no allocation per build; `DocumentId`/`RowKey` live in the kernel; the note's §15.0 has the per-batch cost), the sink engine offers
+  probe is due and its front item's keys are found (`Batch.ids`: the build's own `Arc<Vec<DocumentId>>`, shared by refcount with every lane, never serialized; `writes.rs`'s `keys_of` matches each envelope by rendered id and index, and an unmatched one, or two keys of its index rendering alike, means no keys, so the item itself is probed; the vector is lent, and `Builds::spare` takes it back from `lent` once only the pool holds it, so no allocation per build; `DocumentId`/`RowKey` live in the kernel; the note's §15.0 has the per-batch cost), the sink engine offers
   `Request::Rebuild { index, sink, keys, ticket }` (`now_or_never`: a request lane nobody reads never
   stalls the sink) and waits for the answer on its sink's **substitute lane** (`Stream::substitutes`,
   a default that answers `Unsupported` and leaves the old same-item probe; the channel adapter has one per
@@ -1732,8 +1732,13 @@ is the one concrete piece.
   `a_stale_or_unanswered_fresh_build_falls_back_to_the_item`,
   `an_older_build_queued_behind_the_parked_item_is_not_written_over_its_substitute`,
   `a_stop_probes_a_refused_lane_with_its_own_item`; `ingest::tests::rebuilds`. **A reindex unsticks a lane**
-  (slice 2, the note's 15.1): `SinkEngine::reindex` returns the indexes it staged; for each, a lane parked or
-  restaging opens (`writes.rs`'s `reindexed`), a parked lane's front item is held (`LaneRun.held`,
+  (slice 2, the note's 15.1): `SinkEngine::reindex` returns the indexes it staged and those it could not
+  (`Reindexed`, per index: one failing never drops another's backfill). One that could not is **owed**
+  (`LaneState.reindex`, kept across runs, so staging at a start leaves it): its lane is `restaging` with the
+  error as reason and `start_restages` retries the reindex (`reindex_again`) on the restage backoff, so the
+  fence's `rebuilding` stays true until a seed (§15.3; guards `a_reindex_whose_staging_fails_is_retried_until_it_stages`,
+  `a_reindex_of_two_indexes_stages_one_while_the_other_is_retried`, `an_owed_reindex_outlives_a_failed_run`);
+  asking for the backfill failing fails the run. For each index staged, a lane parked or restaging opens (`writes.rs`'s `reindexed`), a parked lane's front item is held (`LaneRun.held`,
   `LaneState.held_for_seed` by item key and build so a redelivery is held again) unwritten and unacknowledged
   until the index is seeded, then acknowledged and reported applied (`release_held`), so the slot never passes
   its change before the new generation holds it; an outstanding backfill of a lane not open is cut and asked again
