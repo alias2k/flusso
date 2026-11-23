@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795473831373,
+  "lastUpdate": 1795474935517,
   "repoUrl": "https://github.com/alias2k/flusso",
   "entries": {
     "flusso (smaller is better)": [
@@ -41753,6 +41753,372 @@ window.BENCHMARK_DATA = {
             "value": 425.576923076923,
             "unit": "ms",
             "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 46.629, \"disk_write_ms\": 336.462, \"memory_copy_ms\": 191.075}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V74 80-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "89390131+JakubWasilczyk-Alias2k@users.noreply.github.com",
+            "name": "Jakub Wasilczyk",
+            "username": "JakubWasilczyk-Alias2k"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7d2b7cf39ef42b5994d995a180679dd7b550968d",
+          "message": "Merge pull request #475 from alias2k/feat/lane-failure-5\n\ndocs(engine): stage 9 slice 4, the impostor index is already covered by #428",
+          "timestamp": "2026-11-23T23:32:00+01:00",
+          "tree_id": "60df80041fcc1d1090a386cef77a505a8e0cbbf2",
+          "url": "https://github.com/alias2k/flusso/commit/7d2b7cf39ef42b5994d995a180679dd7b550968d"
+        },
+        "date": 1795474934454,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inprocess/decode/fixture",
+            "value": 1996873.68,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/documents/double_array",
+            "value": 60170.5937801641,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/documents/doubles",
+            "value": 17029.84229929663,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/documents/keywords",
+            "value": 19120.882237600923,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/documents/untyped",
+            "value": 43002.69125664441,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks1/1",
+            "value": 79121599.83333334,
+            "unit": "ns",
+            "extra": "{\"images\": {\"engine\": \"spawned\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks1/256",
+            "value": 44990452.17410714,
+            "unit": "ns",
+            "extra": "{\"images\": {\"engine\": \"spawned\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks1/64",
+            "value": 79348451.91666666,
+            "unit": "ns",
+            "extra": "{\"images\": {\"engine\": \"spawned\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks2/1",
+            "value": 102783891.69444445,
+            "unit": "ns",
+            "extra": "{\"images\": {\"engine\": \"spawned\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks2/256",
+            "value": 83816613.375,
+            "unit": "ns",
+            "extra": "{\"images\": {\"engine\": \"spawned\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks2/64",
+            "value": 77888064.11607143,
+            "unit": "ns",
+            "extra": "{\"images\": {\"engine\": \"spawned\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/render/delete",
+            "value": 102609.09485294117,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/render/mid",
+            "value": 3170381.5,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/render/wide",
+            "value": 40610255.25,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/root_table",
+            "value": 208.5898696008138,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/unread_update",
+            "value": 756.311004784689,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/unrelated_table",
+            "value": 214.65930522170186,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/walked_from_the_key",
+            "value": 611.3662336290663,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/scripted/dates_unused",
+            "value": 4525704.15,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/scripted/dates_used",
+            "value": 2963236.25,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/scripted/flat",
+            "value": 3814120.846153846,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/scripted/nested",
+            "value": 14932258.333333332,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/snapshot/rows",
+            "value": 43879543.75833333,
+            "unit": "ns",
+            "extra": "{\"images\": {\"engine\": \"spawned\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/baseline/os_flush_1",
+            "value": 8008451.833333334,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/baseline/pg_select_1",
+            "value": 139775.4425143401,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/baseline/resolve_unrelated",
+            "value": 292.350545342083,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/baseline/select_1",
+            "value": 135293.10933333333,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/batch_size/100",
+            "value": 659792512.5,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/batch_size/1000",
+            "value": 194958654.5,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/batch_size/500",
+            "value": 240204773.1666667,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/batch_size/5000",
+            "value": 124191351.25,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/build/0",
+            "value": 197911.57284359058,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/build/1",
+            "value": 187506.03457236843,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/build/10",
+            "value": 208490.28635041113,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/build/100",
+            "value": 406945.16728698136,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/bulk_index/1",
+            "value": 8244808.035714285,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/bulk_index/100",
+            "value": 12051405.120833334,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/bulk_index/1000",
+            "value": 31548502.380718954,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/bulk_index/5000",
+            "value": 167387085.5,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/change/item_update",
+            "value": 11392811.727272727,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/change_burst/1",
+            "value": 320421240.3333334,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/change_burst/16",
+            "value": 158748749.44642857,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/change_burst/256",
+            "value": 115990383.69444445,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/resolve/related_table",
+            "value": 156485.31225978507,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "components/resolve/root_table",
+            "value": 344.4314854236558,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}}"
+          },
+          {
+            "name": "complex/ci/visible_latency_p50_ms",
+            "value": 11.492566,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\", \"probe\": \"midpoint-5ms\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/visible_latency_p99_ms",
+            "value": 213.522137,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\", \"probe\": \"midpoint-5ms\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/peak_rss_mib",
+            "value": 80.33203125,
+            "unit": "MiB",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/cpu_seconds",
+            "value": 2,
+            "unit": "s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/flush_p50_ms",
+            "value": 9.732587064676617,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/flush_p99_ms",
+            "value": 288.6111111111107,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/visible_latency_p50_ms",
+            "value": 13.173163,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\", \"probe\": \"midpoint-5ms\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/visible_latency_p99_ms",
+            "value": 74.32958400000001,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\", \"probe\": \"midpoint-5ms\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/peak_rss_mib",
+            "value": 219.24609375,
+            "unit": "MiB",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/cpu_seconds",
+            "value": 4,
+            "unit": "s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/flush_p50_ms",
+            "value": 23.333333333333336,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/flush_p99_ms",
+            "value": 243.90909090909076,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.251, \"disk_write_ms\": 328.84, \"memory_copy_ms\": 171.994}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
           }
         ]
       }
