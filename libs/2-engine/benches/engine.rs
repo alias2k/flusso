@@ -25,8 +25,8 @@
 //!   the old `live_drain` measured that coin flip.
 //!
 //!   What it still catches: allocation volume, and the ingest engine's work
-//!   per batch. What it can't: sink-side cost smaller than that work, and
-//!   gains from larger batches (`/1`, `/64` and `/256` sit within about 15%).
+//!   per batch, so larger batches read faster. What it can't: sink-side cost
+//!   smaller than that work.
 //! - `snapshot`: a backfill of `ROWS` rows through the same path.
 //!
 //! Each engine runs as a task spawned onto the runtime's workers, as the

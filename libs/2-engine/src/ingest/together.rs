@@ -18,7 +18,7 @@
 //! `block_on`, a spent cooperative budget ends a poll by itself: tokio wakes a
 //! future it refused for want of budget only once the task's poll has
 //! returned, so no flag is raised for it meanwhile. Under a multi-thread
-//! runtime's `block_on` (the in-process `engine` bench) tokio wakes it at
+//! runtime's `block_on`, which sets no scheduler context, tokio wakes it at
 //! once, the flag is raised and the refused future is polled again until the
 //! cap ends the poll: bounded, and never a lost wake.
 //!
