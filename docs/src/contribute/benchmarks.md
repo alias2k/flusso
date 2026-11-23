@@ -58,6 +58,20 @@ Medians, with the spread (max over min) in brackets. That session ran beside oth
 
 The rename restarted the history's `inprocess/live_drain/*` series as `inprocess/live_drain_held/*`: the old points measured the race, and the new ones would have read as a step up.
 
+### Why the engine bench spawns its engines
+
+Each engine in `benches/engine.rs` is a task spawned onto the runtime's workers, as the daemon's supervisor spawns it. Criterion's async iteration only stages the sinks, awaits the ingest engine's task and waits for the lanes to drain: the supervisor's part.
+
+Until issue #447 the ingest engine ran inside that iteration, i.e. inside `Runtime::block_on` of a multi-thread runtime. That differs from a worker in one way that matters:
+
+- when a task's cooperative budget is spent, tokio defers the refused future's wake-up until the poll returns, but only where a scheduler context is set (a worker, or a current-thread `block_on`);
+- under a multi-thread `block_on` the future wakes at once, so the poller in `ingest/together.rs`, which drives the reader and the builders as futures of one task, re-polls it up to its 32-pass cap each time the budget runs out;
+- the binary never pays that, so the old bench overstated the per-batch cost, most at `/1`.
+
+The runtime is multi-threaded like the binary's (`apps/cli/src/main.rs`) and pins 4 workers: the binary's default on CI's 4-core runner, and the same shape on a larger machine.
+
+The change stepped the `inprocess/live_drain_held/*` and `inprocess/snapshot/rows` series. Their points from then on carry `extra.images.engine` (stamped in `bench.yml`), which restarts the regression window instead of reading as a regression. The first PR comparison after it measured the harness change, not the engines.
+
 The scenarios and the Docker-backed component benches start the same Postgres image as the e2e suites; see [Which Postgres](testing.md#which-postgres).
 
 ## Headline metrics

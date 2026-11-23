@@ -182,8 +182,17 @@ jobs:
 
       - name: In-process benches
         run: |
+          set -euo pipefail
           .github/scripts/bench-in-process.sh main
           python3 .github/scripts/bench-criterion-to-json.py target/criterion main inprocess bench-out/inprocess.json
+          # The engine bench spawns the ingest engine since issue #447 (it ran
+          # under criterion's block_on before), so its series step once:
+          # `extra.images.engine` restarts their regression window.
+          extra=$(jq -cn '{images: {engine: "spawned"}} | tojson')
+          jq --argjson extra "$extra" \
+            'map(if (.name | test("^inprocess/(live_drain_held|snapshot)/")) then . + {extra: $extra} else . end)' \
+            bench-out/inprocess.json > bench-out/inprocess.stamped.json
+          mv bench-out/inprocess.stamped.json bench-out/inprocess.json
 
       - name: Component benches (Docker)
         run: |

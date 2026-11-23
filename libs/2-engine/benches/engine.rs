@@ -29,6 +29,16 @@
 //!   gains from larger batches (`/1`, `/64` and `/256` sit within about 15%).
 //! - `snapshot`: a backfill of `ROWS` rows through the same path.
 //!
+//! Each engine runs as a task spawned onto the runtime's workers, as the
+//! daemon runs it; the iteration (criterion's `block_on`) only stages, awaits
+//! and drains, as the supervisor does. This matters for the ingest engine:
+//! when a task's cooperative budget is spent, tokio defers the refused
+//! future's wake-up only on a worker. Under a multi-thread `block_on` it
+//! wakes at once, so the poller in `ingest/together.rs` re-polls up to its
+//! cap, a cost the binary never pays (issue #447). The runtime is
+//! multi-threaded like the binary's; it pins 4 workers, the binary's default
+//! on CI's 4-core runner, so a local run measures the same shape.
+//!
 //! Run with:
 //!
 //! ```text
@@ -319,6 +329,8 @@ impl Sink for CountingSink {
 
 /// One deployment the way the daemon runs it: stage every sink engine, run them
 /// beside the ingest engine until the live stream ends and the lanes drain.
+/// Every engine is a spawned task, as in `supervise`, never the future
+/// criterion's `block_on` polls (see the module doc).
 async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) {
     let names: Vec<SinkName> = (0..sinks)
         .map(|i| SinkName::try_new(format!("sink{i}")).unwrap())
@@ -359,17 +371,18 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
         tasks.push(tokio::spawn(async move { engine.run(&mut rx).await }));
     }
 
-    IngestEngine::new(
+    let ingest = IngestEngine::new(
         Arc::new(capture),
         documents,
         Arc::clone(&stream) as Arc<dyn Stream>,
         names,
         progress,
     )
-    .with_batch(batch)
-    .run()
-    .await
-    .unwrap();
+    .with_batch(batch);
+    tokio::spawn(async move { ingest.run().await })
+        .await
+        .unwrap()
+        .unwrap();
     pace.ingest_ended();
 
     while !stream.is_idle() {

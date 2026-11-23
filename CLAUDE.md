@@ -136,7 +136,8 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   Append), and `no plan` for a case with no logged plan on a side; a log with no plan for a whole side and
   `plan_cache_mode` exits 2. A mode exits 0/1
   (flagged)/2 (setup). Tests: `test_review_modes.py`. (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
-  over the channel stream with mocks; `live_drain_held` holds each sink write until the ingest engine
+  over the channel stream with mocks, each a spawned task as the daemon runs it, never under criterion's
+  `block_on`, where a spent coop budget wakes at once: issue #447, its points carry `extra.images.engine`; `live_drain_held` holds each sink write until the ingest engine
   has begun its next build, so the sink always frees the batch, overlapping that build: the contended
   upper bound, not production's ratio; with an instant sink who freed it was a microsecond race worth
   about 2.4× locally, about 3× on CI's runner. It catches allocation volume and ingest work per batch,
