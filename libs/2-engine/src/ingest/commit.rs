@@ -616,7 +616,7 @@ impl IngestEngine {
             changes,
             steps,
         } = granted;
-        let (envelopes, by_index) = self.envelopes(built.documents?, Some(position))?;
+        let (envelopes, keys, by_index) = self.envelopes(built.documents?, Some(position))?;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Live));
         // From here a lane that hasn't taken its index's item answers for it.
@@ -639,7 +639,7 @@ impl IngestEngine {
         let mut by_lane: Vec<Item<'_>> = Vec::new();
         let mut skipped: Vec<(&LaneKey, Step)> = Vec::new();
         let mut keyed: Option<(&IndexName, ItemKey)> = None;
-        let groups = group_by_index(envelopes);
+        let groups = group_by_index(envelopes, keys);
         let holds = self.holds(&groups, charges);
         for (lane, producer) in lanes {
             let Some(step) = steps.get(&lane.index).copied() else {
@@ -719,11 +719,11 @@ impl IngestEngine {
         lanes: &Lanes,
         build: Option<u64>,
     ) -> Result<()> {
-        let (envelopes, by_index) = self.envelopes(built.documents?, None)?;
+        let (envelopes, keys, by_index) = self.envelopes(built.documents?, None)?;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Backfill));
         let started = Instant::now();
-        let groups = group_by_index(envelopes);
+        let groups = group_by_index(envelopes, keys);
         let backfill_holds = self.holds(&groups, charges);
         let documents: usize = groups.values().map(|group| group.envelopes.len()).sum();
         let mut publishes = Vec::new();
@@ -775,10 +775,9 @@ impl IngestEngine {
         rebuild: super::builds::Rebuild,
         build: Option<u64>,
     ) -> Result<()> {
-        let (envelopes, _) = self.envelopes(built.documents?, None)?;
+        let (envelopes, keys, _) = self.envelopes(built.documents?, None)?;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Live));
-        let (envelopes, keys): (Vec<Envelope>, Vec<RowKey>) = envelopes.into_iter().unzip();
         let super::builds::Rebuild {
             lane,
             ticket,
@@ -900,9 +899,10 @@ impl IngestEngine {
         &self,
         documents: Vec<Document>,
         position: Option<Position>,
-    ) -> Result<(Vec<Keyed>, BTreeMap<IndexName, usize>)> {
+    ) -> Result<Envelopes> {
         let mut by_index: BTreeMap<IndexName, usize> = BTreeMap::new();
         let mut envelopes = Vec::with_capacity(documents.len());
+        let mut keys = Vec::with_capacity(documents.len());
         let ts = Utc::now();
         for document in documents {
             // The key is moved beside its envelope, not cloned: a lane item
@@ -922,9 +922,10 @@ impl IngestEngine {
                 }
             };
             *by_index.entry(envelope.index.clone()).or_insert(0) += 1;
-            envelopes.push((envelope, key));
+            envelopes.push(envelope);
+            keys.push(key);
         }
-        Ok((envelopes, by_index))
+        Ok((envelopes, keys, by_index))
     }
 
     /// Report a document that could not be built, then apply its policy: `stop`
@@ -985,9 +986,25 @@ type Item<'a> = (
 
 /// The envelopes of each index, in build order, each group shared by every
 /// lane of its index.
-fn group_by_index(envelopes: Vec<Keyed>) -> BTreeMap<IndexName, Group> {
+fn group_by_index(envelopes: Vec<Envelope>, keys: Vec<RowKey>) -> BTreeMap<IndexName, Group> {
+    // One index, as every build of a builder since 8a: the vectors are the
+    // group as they are, nothing moved or cloned per envelope.
+    if let Some(first) = envelopes.first()
+        && envelopes
+            .iter()
+            .all(|envelope| envelope.index == first.index)
+    {
+        let index = first.index.clone();
+        return BTreeMap::from([(
+            index,
+            Group {
+                envelopes: envelopes.into(),
+                keys: keys.into(),
+            },
+        )]);
+    }
     let mut groups: BTreeMap<IndexName, (Vec<Envelope>, Vec<RowKey>)> = BTreeMap::new();
-    for (envelope, key) in envelopes {
+    for (envelope, key) in envelopes.into_iter().zip(keys) {
         let group = groups.entry(envelope.index.clone()).or_default();
         group.0.push(envelope);
         group.1.push(key);
@@ -1006,8 +1023,9 @@ fn group_by_index(envelopes: Vec<Keyed>) -> BTreeMap<IndexName, Group> {
         .collect()
 }
 
-/// An envelope with its document's root key.
-type Keyed = (Envelope, RowKey);
+/// A build's envelopes, each one's root key beside it (same order), and
+/// how many of each index.
+type Envelopes = (Vec<Envelope>, Vec<RowKey>, BTreeMap<IndexName, usize>);
 
 /// One index's envelopes of a build, with each one's root key.
 struct Group {
