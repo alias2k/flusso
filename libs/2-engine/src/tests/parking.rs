@@ -3563,6 +3563,52 @@ async fn staging_after_a_run_failed_during_the_stop_only_ensures() {
     }
 }
 
+/// Third review of #470, 4: a restage out (its target gone, `ensure_index`
+/// slow) when the stop comes finishes as state only: it asks for no
+/// backfill, the lane stays restaging, nothing after the stop is written,
+/// and the drain doesn't wait for it.
+#[tokio::test(start_paused = true)]
+async fn a_restage_out_as_the_stop_comes_asks_for_nothing_and_opens_nothing() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Missing));
+    *rig.sink.ensure_delay.lock().unwrap() = Some(Duration::from_secs(10));
+    let stop = Stop::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(slow_backoff())
+            .with_stop(stop.clone())
+            .with_observer(rebuild_events(&events)),
+    );
+    rig.live(&orders(), 0..1, 0).await;
+    let task = spawn(Arc::clone(&engine));
+    eventually("restaging", || {
+        engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    rig.live(&orders(), 1..2, 1).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let before_stop = events.lock().unwrap().len();
+    let writes_before = rig.sink.writes().len();
+    stop.request();
+    let idle = idle_within(&rig, Duration::from_secs(60)).await;
+    assert!(
+        idle.is_some_and(|after| after < Duration::from_secs(2)),
+        "drained without waiting for the restage: {idle:?}"
+    );
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let after: Vec<String> = events.lock().unwrap()[before_stop..].to_vec();
+    assert!(after.is_empty(), "nothing asked for: {after:?}");
+    assert_eq!(
+        engine.lane_health(&lane(orders())).kind(),
+        "restaging",
+        "not opened once stopping"
+    );
+    assert_eq!(rig.sink.writes().len(), writes_before, "nothing written");
+    assert_eq!(rig.applied(&orders()), before(0), "nothing applied");
+    task.abort();
+}
+
 /// X17 (review 2): the owed reindex is on the lane's state, so a run that
 /// fails meanwhile keeps it: staging at the next start leaves the lane
 /// `restaging`, and the next run's retry stages the reindex.
