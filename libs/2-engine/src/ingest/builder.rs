@@ -412,9 +412,12 @@ impl IngestEngine {
                     };
                     self.waited(mark, None, snapshot, quiet, clock);
                     signals.received();
-                    queue_rebuild(&mut builds, delivery);
+                    let mut left_out: Vec<_> = queue_rebuild(&mut builds, delivery).into_iter().collect();
                     while let Ok(more) = rebuilds.try_recv() {
-                        queue_rebuild(&mut builds, more);
+                        left_out.extend(queue_rebuild(&mut builds, more));
+                    }
+                    for stale in left_out {
+                        stale.ack().await?;
                     }
                     self.grant(runs, snapshot, &mut builds, lanes).await?;
                     mark = Instant::now();
@@ -586,7 +589,10 @@ pub(super) fn enter_fold(runs: &mut Runs, builds: &mut Builds) {
 
 /// Queue a parked lane's request for a fresh build of its item's documents
 /// (stage 9, F3); a request of another kind is left for its lane.
-fn queue_rebuild(builds: &mut Builds, delivery: Delivery<Request>) {
+fn queue_rebuild(
+    builds: &mut Builds,
+    delivery: Delivery<Request>,
+) -> Option<Box<dyn stream::AckHandle>> {
     let (request, handle) = delivery.into_parts();
     let Request::Rebuild {
         index,
@@ -595,7 +601,7 @@ fn queue_rebuild(builds: &mut Builds, delivery: Delivery<Request>) {
         ticket,
     } = request
     else {
-        return;
+        return Some(handle);
     };
     let ids = keys
         .into_iter()
@@ -604,14 +610,16 @@ fn queue_rebuild(builds: &mut Builds, delivery: Delivery<Request>) {
             key,
         })
         .collect();
-    builds.ask_rebuild(
-        ids,
-        super::builds::Rebuild {
-            lane: stream::LaneKey::new(index, sink),
-            ticket,
-            handle,
-        },
-    );
+    builds
+        .ask_rebuild(
+            ids,
+            super::builds::Rebuild {
+                lane: stream::LaneKey::new(index, sink),
+                ticket,
+                handle,
+            },
+        )
+        .map(|left_out| left_out.handle)
 }
 
 /// Whether every sink with a lane asked (`main`'s rule: requests come one per

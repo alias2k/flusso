@@ -1672,3 +1672,70 @@ async fn a_backlog_past_the_lookahead_keeps_what_the_first_substitute_supersedes
     task.abort();
     answers.abort();
 }
+
+/// A stream with no substitute lanes.
+#[derive(Debug)]
+struct NoSubstitutes(Arc<ChannelStream>);
+
+impl Stream for NoSubstitutes {
+    fn lane(&self, key: &LaneKey) -> stream::Result<stream::Lane> {
+        self.0.lane(key)
+    }
+
+    fn lanes(&self, sink: &kernel::SinkName) -> Vec<LaneKey> {
+        self.0.lanes(sink)
+    }
+
+    fn requests(&self) -> stream::Result<stream::RequestLane> {
+        self.0.requests()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.0.is_idle()
+    }
+}
+
+/// F2: over a stream with no substitute lanes, a refused lane whose item
+/// carries its keys probes the item itself, asking for nothing.
+#[tokio::test(start_paused = true)]
+async fn a_lane_without_substitutes_probes_the_same_item() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+    let start = Instant::now();
+    rig.stream
+        .lane(&lane(orders()))
+        .unwrap()
+        .producer
+        .publish(keyed(&orders(), &[1], None, 1))
+        .await
+        .unwrap();
+    let builder = Arc::new(Builder::default());
+    let answers = answering(&rig, Arc::clone(&builder), 10);
+    let engine = Arc::new(
+        SinkEngine::new(
+            sink_name("primary"),
+            Arc::clone(&rig.sink) as Arc<dyn Sink>,
+            Arc::new(NoSubstitutes(Arc::clone(&rig.stream))) as Arc<dyn Stream>,
+            vec![mapping(orders()), mapping(users())],
+            Arc::clone(&rig.progress),
+        )
+        .with_writes(4)
+        .with_failure_policies(FailurePolicies::new(FailurePolicy::Stop)),
+    );
+    engine.set_blame(Blame::Nobody);
+    let task = spawn(Arc::clone(&engine));
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    let probes: Vec<u128> = rig
+        .sink
+        .writes_of(&orders(), start)
+        .iter()
+        .map(Duration::as_millis)
+        .collect();
+    assert_eq!(probes, [0, 1_000, 3_000], "the item, probed at 1 and 3 s");
+    assert!(
+        builder.asked().is_empty(),
+        "nothing asked: no substitute lane"
+    );
+    task.abort();
+    answers.abort();
+}

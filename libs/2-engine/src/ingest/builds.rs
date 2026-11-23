@@ -386,9 +386,35 @@ impl Builds {
         }
     }
 
-    /// Queue a parked lane's request for a fresh build of `ids`.
-    pub(super) fn ask_rebuild(&mut self, ids: Vec<DocumentId>, rebuild: Rebuild) {
-        self.rebuilds.push_back((ids, rebuild));
+    /// Queue a parked lane's request for a fresh build of `ids`: at most one
+    /// per lane, the newest ticket's (a lane asks again only once it stopped
+    /// waiting for the last answer). The request it leaves out, to be
+    /// acknowledged unanswered.
+    pub(super) fn ask_rebuild(
+        &mut self,
+        ids: Vec<DocumentId>,
+        rebuild: Rebuild,
+    ) -> Option<Rebuild> {
+        match self
+            .rebuilds
+            .iter_mut()
+            .find(|(_, queued)| queued.lane == rebuild.lane)
+        {
+            Some(queued) if queued.1.ticket < rebuild.ticket => {
+                Some(std::mem::replace(queued, (ids, rebuild)).1)
+            }
+            Some(_) => Some(rebuild),
+            None => {
+                self.rebuilds.push_back((ids, rebuild));
+                None
+            }
+        }
+    }
+
+    /// Forget every fresh build not granted yet: a stop serves none (F13);
+    /// their requests, unacknowledged, are served on the next start.
+    pub(super) fn drop_rebuilds(&mut self) {
+        self.rebuilds.clear();
     }
 
     /// Whether a fresh build waits to be granted.

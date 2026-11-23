@@ -96,7 +96,9 @@ impl IngestEngine {
                 ticket,
             } = request.clone()
             else {
-                drop(handle);
+                // Acknowledged with the snapshot's requests: dropped, it would
+                // come straight back.
+                handles.push((request, handle));
                 continue;
             };
             if scopes.contains(&index) {

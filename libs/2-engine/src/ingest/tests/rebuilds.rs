@@ -238,3 +238,29 @@ async fn a_rebuild_is_served_with_the_budget_held_full() {
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(ids(&sent[0]), ["5"]);
 }
+
+/// Review of #458, 7: at most one fresh build waits per lane. Two requests
+/// for one lane, the second a newer ticket, are built once, for the newer;
+/// both are acknowledged.
+#[tokio::test(start_paused = true)]
+async fn a_newer_request_for_a_lane_replaces_the_one_waiting() {
+    let db = Database::new(10, Vec::new());
+    let builder = Builder::two(&db, Behaviour::default());
+    let mut deployment =
+        Deployment::new(Feed::new(&db), Arc::clone(&builder), Recorder::seeded(true));
+    let requests = deployment.stream.requests().unwrap();
+    requests.producer.publish(rebuild(&[5], 1)).await.unwrap();
+    requests
+        .producer
+        .publish(rebuild(&[5, 7], 2))
+        .await
+        .unwrap();
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    assert!(requests.consumer.is_empty(), "both requests acknowledged");
+    let sent = substitutes(&deployment.stream).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].ticket, Ticket::new(2));
+    assert_eq!(ids(&sent[0]), ["5", "7"]);
+}

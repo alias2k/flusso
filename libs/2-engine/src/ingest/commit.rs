@@ -82,6 +82,9 @@ impl IngestEngine {
                 .as_ref()
                 .filter(|active| active.batch.count > 0 && (active.batch.is_full() || active.done))
                 .map(|active| active.batch.ids.as_slice());
+            if self.stop.is_requested() {
+                builds.drop_rebuilds();
+            }
             match builds.choose(live, backfill) {
                 Some(Grant::Live(candidate, admitted)) => {
                     self.start_live(runs, builds, candidate, &admitted).await;
@@ -895,11 +898,7 @@ impl IngestEngine {
 
     /// The built documents as envelopes tagged with `position`, counted per
     /// index. A failed document is decided by its index's `on_error`.
-    fn envelopes(
-        &self,
-        documents: Vec<Document>,
-        position: Option<Position>,
-    ) -> Result<Envelopes> {
+    fn envelopes(&self, documents: Vec<Document>, position: Option<Position>) -> Result<Envelopes> {
         let mut by_index: BTreeMap<IndexName, usize> = BTreeMap::new();
         let mut envelopes = Vec::with_capacity(documents.len());
         let mut keys = Vec::with_capacity(documents.len());

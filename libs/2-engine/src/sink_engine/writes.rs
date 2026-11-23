@@ -1132,10 +1132,12 @@ impl<'a> Run<'a> {
             if let Some(lane) = probe
                 && let Some(run) = self.lanes.get_mut(lane)
             {
-                run.health.probes += 1;
                 // The item itself is the probe: a fresh build still awaited
-                // is no longer (it would come too late, F15).
-                run.health.rebuild = None;
+                // is no longer (it would come too late, F15), and the ask
+                // already counted this probe.
+                if run.health.rebuild.take().is_none() {
+                    run.health.probes += 1;
+                }
                 if run.health.probes > 1 {
                     tracing::info!(lane = %run.key, probe = run.health.probes, "probing the parked lane again: its front item, alone");
                 }
