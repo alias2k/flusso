@@ -1001,3 +1001,26 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
 10. **A parked lane's fresh build** (slice 1) works for every index; an item whose documents' keys can't be told
     apart from their ids (composite keys whose parts hold `:`, rendering alike) is probed as written instead of
     rebuilt. Nothing to configure.
+
+### Slice 3: a closed index is `blocked` (PR #473)
+
+1. **A closed index parks its lane as `blocked`, not as a refusal.** A write to an index closed with
+   `POST /<index>/_close` used to count as a rejected document: under `on_error = "skip"` the documents were
+   quarantined (lost), under `stop` the lane parked as `refused` and asked for fresh builds that were refused the
+   same way. Now the lane parks `blocked`, whatever `on_error` says, and nothing is quarantined.
+2. **Opening the index unsticks it.** The lane writes the same item again on its backoff (`[backoff]`); once the
+   index is opened (`POST /<index>/_open`) the next probe lands, the lane opens and catches up, with no restart.
+   No fresh build is asked for: nothing is wrong with the documents.
+3. **Meanwhile:** the other indexes of the sink keep writing; the closed index's lane holds the replication slot
+   (`pinned_by` names it) and its fences wait, as for a write block.
+4. **`/status` and metrics:** the lane's `health` is `blocked`, its `reason` `index [<generation>] is closed`;
+   `flusso_lane_parked{why="blocked"}` is 1, so `FlussoLaneParked` fires once it lasts.
+5. **A closed index no longer stops the sink from starting.** Starting flusso (or restarting a sink's run) with
+   one of its indexes closed used to fail that sink's staging, so none of its indexes was written. Now the sink
+   starts, and only the closed index's lane parks, at its first write.
+6. **A reindex is another way out:** `flusso reindex <index> --sink <sink>` builds a new generation, opens the
+   lane, and once backfilled moves the index's aliases off the closed generation and drops it.
+7. **At a stop** a closed index's lane is probed once and, still closed, holds the stop until its deadline (exit
+   1), as for any blocked lane.
+8. **Runbook, a lane `blocked` with `index [...] is closed`:** open the index, or reindex it. Nothing to configure.
+
