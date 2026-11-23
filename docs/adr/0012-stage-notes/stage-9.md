@@ -775,6 +775,14 @@ backfill of another that had staged. X11 is replaced:
 | X17 | The owed reindex lives on the lane's state, so a failed run keeps it: staging at the next run's start leaves the lane `restaging` for the retry instead of reopening it | `an_owed_reindex_outlives_a_failed_run` |
 | X18 | *Revised (review of #470, 1).* Asking for an index's backfill (`request_backfill`, or `ask_again`'s `forget_walked`, a sink write the same block refuses) failing makes **that index** owed, with the error as its reason; it never fails the run. Every index of the call is recorded staged or owed before anything returns, so no ordering of failures drops one. A run failing for another reason keeps them (X17) | `a_failed_ask_for_a_backfill_leaves_every_index_of_the_reindex_owed`, `a_reindex_whose_backfill_request_fails_is_owed` |
 
+| X19 | *Review of #470, 2.* Once the stop is asked, an owed reindex is not retried, and a reindex still waiting to be staged is dropped (logged): nothing new is staged or asked for. A lane owed its reindex has its live items acknowledged unwritten and unapplied, as held items are at a stop (X10), so the drain ends at once | `a_stop_while_a_reindex_is_owed_drains_at_once_and_stages_nothing`, `a_reindex_pending_at_a_stop_is_not_staged` |
+| X20 | *Owner's decision (review of #470, 3).* The owed reindex lives in memory: it outlives a failed run of the sink engine (X17), not the process. What the next start does depends on how far it got. If the sink recorded the new generation (OpenSearch: `reindex` wrote the meta doc naming it, unseeded) and only a later step failed, staging finds the index unseeded, announces it `rebuilding` and backfills it; the lane's stuck item is not held (X2 needs the reindex), so it is replayed into the new generation and written like any item. If the sink recorded nothing, the index is seeded as before and the reindex is gone: the operator asks again | — (stated) |
+
+**Why X19 keeps confirmation and fences right.** The released items are acknowledged through `acknowledge(…, None)`,
+the path X10 and a skipped backfill page take: no position reaches `Progress::applied`, so the lane's applied
+mark, `Progress::landed` and the confirmed slot stay before their changes, and the next start replays them. A
+fence on the lane never sees them applied; once stopping, `/wait` answers `503 stopping` anyway.
+
 A lasting failure (a cluster-wide block) shows as the lane `restaging` with its reason in `/status` and
 `FlussoLaneParked` covers it, while the other lanes run (S4's goal).
 

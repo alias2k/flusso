@@ -2926,6 +2926,95 @@ async fn a_reindex_whose_backfill_request_fails_is_owed() {
     task.abort();
 }
 
+/// Review of #470, 2: a stop while a lane is owed its reindex doesn't wait
+/// for the retry and stages nothing: the lane's items are acknowledged
+/// unapplied, as held items are at a stop (X10), so the drain ends at once
+/// and the slot stays before their changes; the next start replays them.
+#[tokio::test(start_paused = true)]
+async fn a_stop_while_a_reindex_is_owed_drains_at_once_and_stages_nothing() {
+    let rig = Rig::new(Gate::default());
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let stop = Stop::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(slow_backoff())
+            .with_stop(stop.clone())
+            .with_observer(rebuild_events(&events)),
+    );
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    eventually("owed", || {
+        engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    rig.sink.ensure_fails_for.lock().unwrap().clear();
+    rig.live(&orders(), 1..2, 0).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let before_stop = events.lock().unwrap().len();
+    stop.request();
+    let stopped = Instant::now();
+    eventually("the stop drains the lane", || rig.stream.is_idle()).await;
+    assert!(
+        stopped.elapsed() < Duration::from_secs(2),
+        "drained at once, not after the retry's backoff: {:?}",
+        stopped.elapsed()
+    );
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let after: Vec<String> = events.lock().unwrap()[before_stop..].to_vec();
+    assert!(
+        after.is_empty(),
+        "nothing staged or asked for once stopping: {after:?}"
+    );
+    assert_eq!(
+        rig.applied(&orders()),
+        before(0),
+        "the change is not applied: the slot stays before it"
+    );
+    assert_eq!(writes_holding(&rig, &orders(), "1"), 0, "never written");
+    task.abort();
+}
+
+/// Review of #470, 2: a reindex still waiting to be staged when the stop
+/// is asked is not staged: nothing new is staged or asked for once stopping.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_pending_at_a_stop_is_not_staged() {
+    let rig = Rig::new(Gate::default());
+    let stop = Stop::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(slow_backoff())
+            .with_stop(stop.clone())
+            .with_observer(rebuild_events(&events)),
+    );
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    stop.request();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "nothing staged: {:?}",
+        events.lock().unwrap()
+    );
+    task.abort();
+}
+
 /// X17 (review 2): the owed reindex is on the lane's state, so a run that
 /// fails meanwhile keeps it: staging at the next start leaves the lane
 /// `restaging`, and the next run's retry stages the reindex.

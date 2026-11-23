@@ -640,6 +640,7 @@ impl<'a> Run<'a> {
         }
         if self.engine.stop.is_requested() {
             self.skip_backfill().await?;
+            self.release_owed_on_stop().await?;
             self.probe_on_stop();
             if self.holding > 0 {
                 self.release_held_on_stop().await?;
@@ -650,7 +651,9 @@ impl<'a> Run<'a> {
         } else {
             None
         };
-        if let Some(indexes) = pending {
+        if let Some(indexes) = pending.as_ref().filter(|_| self.engine.stop.is_requested()) {
+            tracing::info!(?indexes, sink = %self.engine.name, "stopping: the reindex is not staged; ask again after the restart");
+        } else if let Some(indexes) = pending {
             let started = Instant::now();
             let reindexed = self.engine.reindex(indexes).await;
             self.reindex_failed(reindexed.failed);
@@ -767,11 +770,15 @@ impl<'a> Run<'a> {
     /// no write slot.
     async fn start_restages(&mut self) -> Result<()> {
         let now = Instant::now();
+        // Once stopping, an owed reindex is not retried: nothing new is
+        // staged or asked for, and its lane's items are released unapplied.
+        let stopping = self.engine.stop.is_requested();
         let due: Vec<usize> = (0..self.lanes.len())
             .filter(|lane| {
                 self.lanes.get(*lane).is_some_and(|run| {
                     matches!(run.health.health, LaneHealth::Restaging { .. })
                         && run.health.due <= now
+                        && !(stopping && run.health.reindex.is_some())
                 })
             })
             .filter(|lane| !self.lane_in_flight(*lane))
@@ -2065,6 +2072,49 @@ impl<'a> Run<'a> {
             }
         }
         self.acknowledge_held().await
+    }
+
+    /// Once stopping, the live items of a lane owed its reindex are
+    /// acknowledged unwritten and unapplied, as held items are (X10): the
+    /// reindex is not retried, so the drain doesn't wait for it, the lane's
+    /// applied mark (so the slot) stays before their changes, and the next
+    /// start replays them (§15.3).
+    async fn release_owed_on_stop(&mut self) -> Result<()> {
+        let mut index = 0;
+        while index < self.window.len() {
+            let owed = match self.window.get(index) {
+                Some(Queued {
+                    item: Queue::Batch { batch, .. },
+                    lane,
+                    ..
+                }) => {
+                    batch.position.is_some()
+                        && self
+                            .lanes
+                            .get(*lane)
+                            .is_some_and(|run| run.health.reindex.is_some())
+                }
+                _ => false,
+            };
+            if !owed {
+                index += 1;
+                continue;
+            }
+            let Some(Queued {
+                item: Queue::Batch { batch, .. },
+                handle,
+                lane,
+                seq,
+                ..
+            }) = self.take_from_window(index)
+            else {
+                continue;
+            };
+            let oldest = self.is_oldest(lane, seq);
+            self.acknowledge(handle, lane, seq, batch.build, oldest, None)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Acknowledge the held items settled since the last step.
