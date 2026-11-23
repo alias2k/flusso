@@ -3659,6 +3659,58 @@ async fn an_open_lane_not_ensured_under_the_stop_is_released() {
     assert_eq!(rig.applied(&orders()), before(0), "nothing applied");
 }
 
+/// Fourth review of #470, 3: a stop landing while a restarted run's
+/// staging is already ensuring still makes it ensure only: no backfill is
+/// asked for and a lane restaging after its target went missing is not
+/// reopened, so it is released, not written into the recreated target.
+#[tokio::test(start_paused = true)]
+async fn a_stop_during_a_staging_makes_it_ensure_only() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::MissingForGood));
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let stop = Stop::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(slow_backoff())
+            .with_stop(stop.clone())
+            .with_observer(rebuild_events(&events)),
+    );
+    rig.live(&orders(), 0..1, 0).await;
+    let task = spawn(Arc::clone(&engine));
+    eventually("restaging", || {
+        engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    task.abort();
+    rig.sink.ensure_fails_for.lock().unwrap().clear();
+    rig.sink.answer(&orders(), Some(Answer::Missing));
+    *rig.sink.ensure_delay.lock().unwrap() = Some(Duration::from_secs(10));
+    let before = events.lock().unwrap().len();
+    let staging = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        async move { engine.stage(source::cdc::Continuity::Resumed).await }
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(30), staging)
+        .await
+        .expect("the staging ends")
+        .unwrap()
+        .unwrap();
+    let after: Vec<String> = events.lock().unwrap()[before..].to_vec();
+    assert!(after.is_empty(), "nothing asked for: {after:?}");
+    assert_eq!(
+        engine.lane_health(&lane(orders())).kind(),
+        "restaging",
+        "not reopened: the stop releases it"
+    );
+}
+
 /// X17 (review 2): the owed reindex is on the lane's state, so a run that
 /// fails meanwhile keeps it: staging at the next start leaves the lane
 /// `restaging`, and the next run's retry stages the reindex.

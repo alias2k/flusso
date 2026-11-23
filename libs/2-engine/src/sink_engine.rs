@@ -503,6 +503,12 @@ impl SinkEngine {
             .await?;
         self.observer
             .on_indexes_ensured(&self.name, self.mappings.len());
+        // A stop that came while ensuring makes this staging ensure only too
+        // (X21): nothing asked for, no restaging lane reopened.
+        if self.stop.is_requested() {
+            self.staged(started);
+            return Ok(());
+        }
 
         if !backfill {
             tracing::info!("backfill disabled for this sink; live changes only");
