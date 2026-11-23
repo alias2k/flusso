@@ -1748,7 +1748,9 @@ is the one concrete piece.
   `a_stop_while_a_reindex_is_owed_drains_at_once_and_stages_nothing`, `a_reindex_pending_at_a_stop_is_not_staged`,
   `a_stop_releases_the_completion_waiting_on_an_owed_lane`, `a_stop_releases_a_lane_restaging_a_missing_target`,
   `a_stop_during_an_owed_retry_records_it_and_writes_nothing_more`,
-  `a_retry_returning_staged_during_a_stop_leaves_the_lane_owed`). The owed reindex is in memory: a process restart forgets it
+  `a_retry_returning_staged_during_a_stop_leaves_the_lane_owed`). Both reindex paths (inline, retry) end in
+  `settle_reindex`. A run restarted during the stop stages with `stage_while_stopping`: ensure only, an index that
+  can't be ensured left restaging (guard `staging_after_a_run_failed_during_the_stop_only_ensures`). The owed reindex is in memory: a process restart forgets it
   (the note's X20). For each index staged, a lane parked or restaging opens (`writes.rs`'s `reindexed`), a parked lane's front item is held (`LaneRun.held`,
   `LaneState.held_for_seed` by item key and build so a redelivery is held again) unwritten and unacknowledged
   until the index is seeded, then acknowledged and reported applied (`release_held`), so the slot never passes

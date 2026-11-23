@@ -488,6 +488,10 @@ impl SinkEngine {
     #[tracing::instrument(name = "sink.stage", skip_all, fields(sink = %self.name, ?continuity))]
     pub async fn stage(&self, continuity: Continuity) -> Result<()> {
         let started = Instant::now();
+        if self.stop.is_requested() {
+            self.stage_while_stopping(started).await;
+            return Ok(());
+        }
         let backfill = self.options.backfill;
         let mut seeded = self
             .each_index(
@@ -554,6 +558,46 @@ impl SinkEngine {
         self.reopen_restaged();
         self.staged(started);
         Ok(())
+    }
+
+    /// Staging for a run restarted during the stop (X21): every index is
+    /// ensured and nothing more. No backfill is asked for and no restaging
+    /// lane reopens; an index that can't be ensured, or wasn't tried after
+    /// another failed, is left restaging with why, for the stop to release
+    /// like any other, rather than failing the staging and holding the stop
+    /// until its deadline.
+    async fn stage_while_stopping(&self, started: Instant) {
+        tracing::info!(sink = %self.name, "staging during the stop: the indexes are ensured only");
+        let tried = self
+            .try_each_index(self.mappings.iter(), Step::Ensure { ask_seeded: false })
+            .await;
+        self.observer
+            .on_indexes_ensured(&self.name, self.mappings.len());
+        let unstaged = tried
+            .failed
+            .into_iter()
+            .map(|(index, error)| {
+                (
+                    index,
+                    format!("could not be ensured during the stop: {error}"),
+                )
+            })
+            .chain(tried.not_started.into_iter().map(|index| {
+                (
+                    index,
+                    "not ensured during the stop: another index failed first".to_owned(),
+                )
+            }));
+        let now = Instant::now();
+        for (index, reason) in unstaged {
+            let lane = LaneKey::new(index, self.name.clone());
+            let mut state = self.lane_state(&lane);
+            if state.restage(reason, now) {
+                tracing::warn!(%lane, "could not be ensured during the stop; its items are released unapplied");
+            }
+            self.store_lane(&lane, &state, true);
+        }
+        self.staged(started);
     }
 
     /// Every index was just ensured: a lane waiting to be staged again after

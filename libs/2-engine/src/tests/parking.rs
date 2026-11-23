@@ -3439,6 +3439,116 @@ async fn a_first_reindex_staging_as_the_stop_comes_opens_nothing() {
     task.abort();
 }
 
+/// A lane that wrote a position just before its target went missing
+/// (visible within 1 s, so a caught-up write is still owed), now restaging
+/// with its staging failing: at the stop its released item starts that
+/// caught-up write, which fails, and the run fails during the stop.
+async fn failing_during_the_stop() -> (Rig, Arc<SinkEngine>, Arc<Mutex<Vec<String>>>) {
+    let rig = Rig::new(Gate::default());
+    rig.sink
+        .within
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.sink
+        .slow_ids
+        .lock()
+        .unwrap()
+        .insert("1".to_owned(), Duration::from_millis(500));
+    let stop = Stop::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_write_documents(1)
+            .with_writes(1)
+            .with_merge_wait(Duration::ZERO)
+            .with_backoff(slow_backoff())
+            .with_stop(stop.clone())
+            .with_observer(rebuild_events(&events)),
+    );
+    for at in 0..3 {
+        rig.live(&orders(), at..at + 1, at as u64).await;
+    }
+    let task = spawn(Arc::clone(&engine));
+    eventually("0 applied", || rig.applied(&orders()) == before(1)).await;
+    rig.sink.answer(&orders(), Some(Answer::MissingForGood));
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    eventually("restaging", || {
+        engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    rig.sink
+        .refresh_fails
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    stop.request();
+    let ended = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("the run fails during the stop");
+    assert!(
+        ended.unwrap().is_err(),
+        "the caught-up write failed the run"
+    );
+    rig.sink
+        .refresh_fails
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    (rig, engine, events)
+}
+
+/// Third review of #470, 2: a sink run failing during the stop is
+/// restarted, and staging under the stop only ensures. (a) The index still
+/// cannot be ensured: staging doesn't fail on it, its lane stays restaging,
+/// and the restarted run drains at once. (b) The destination is fine again:
+/// staging asks for no backfill and reopens nothing. Neither asks, seeds or
+/// applies anything.
+#[tokio::test(start_paused = true)]
+async fn staging_after_a_run_failed_during_the_stop_only_ensures() {
+    for healthy in [false, true] {
+        let (rig, engine, events) = failing_during_the_stop().await;
+        let before_restart = events.lock().unwrap().len();
+        if healthy {
+            rig.sink.ensure_fails_for.lock().unwrap().clear();
+            rig.sink.answer(&orders(), Some(Answer::Missing));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            engine.stage(source::cdc::Continuity::Resumed),
+        )
+        .await
+        .expect("staging under the stop returns at once")
+        .unwrap();
+        assert_eq!(
+            engine.lane_health(&lane(orders())).kind(),
+            "restaging",
+            "healthy {healthy}: left restaging for the stop to release"
+        );
+        let writes = rig.sink.writes().len();
+        let task = spawn(Arc::clone(&engine));
+        let idle = idle_within(&rig, Duration::from_secs(60)).await;
+        assert!(
+            idle.is_some_and(|after| after < Duration::from_secs(2)),
+            "healthy {healthy}: the restarted run drains at once: {idle:?}"
+        );
+        let after: Vec<String> = events.lock().unwrap()[before_restart..].to_vec();
+        assert!(
+            after.is_empty(),
+            "healthy {healthy}: nothing asked for or seeded: {after:?}"
+        );
+        assert_eq!(
+            rig.sink.writes().len(),
+            writes,
+            "healthy {healthy}: nothing written"
+        );
+        assert_eq!(
+            rig.applied(&orders()),
+            before(1),
+            "healthy {healthy}: nothing applied"
+        );
+        task.abort();
+    }
+}
+
 /// X17 (review 2): the owed reindex is on the lane's state, so a run that
 /// fails meanwhile keeps it: staging at the next start leaves the lane
 /// `restaging`, and the next run's retry stages the reindex.
