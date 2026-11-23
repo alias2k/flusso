@@ -392,6 +392,16 @@ impl OpensearchSink {
         Ok(())
     }
 
+    /// Refresh `index` unless it can't be reached (closed): a closed index is
+    /// skipped, not an error (`ignore_unavailable`).
+    pub(crate) async fn refresh_index_if_open(&self, index: &str) -> Result<()> {
+        let url = format!("{}/{index}/_refresh?ignore_unavailable=true", self.base_url);
+        self.send_ok(self.client.post(&url), "refresh failed")
+            .await?;
+        debug!(index, "refreshed index, if open");
+        Ok(())
+    }
+
     /// The number of primary shards `index` has, if the cluster says.
     pub(crate) async fn primary_shards(&self, index: &str) -> Result<Option<u32>> {
         let url = format!("{}/{index}/_settings/index.number_of_shards", self.base_url);
@@ -453,10 +463,11 @@ impl OpensearchSink {
 
     /// Concrete index names matching `pattern` (a `_cat/indices` glob, e.g.
     /// `users_ab12_*`). An alias in the pattern resolves to the indexes behind
-    /// it; a no-match (404) is an empty list, not an error.
+    /// it; a no-match (404) is an empty list, not an error. Closed indexes are
+    /// listed too, so a new generation never takes a closed one's name.
     pub(crate) async fn list_indices(&self, pattern: &str) -> Result<Vec<String>> {
         let url = format!(
-            "{}/_cat/indices/{pattern}?h=index&format=json",
+            "{}/_cat/indices/{pattern}?h=index&format=json&expand_wildcards=all",
             self.base_url
         );
         let resp = self
