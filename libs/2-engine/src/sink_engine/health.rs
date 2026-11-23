@@ -23,7 +23,7 @@
 //! doubles. So a row fixed meanwhile unparks its lane. A landed substitute
 //! is newer than any build of its documents queued behind it, so those
 //! older builds are left out of the items that carry them
-//! ([`Superseded`]).
+//! ([`LaneState::superseded`]).
 //!
 //! The state outlives a run of the sink engine: a run that fails for another
 //! reason leaves a parked lane parked, with its schedule.
