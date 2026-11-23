@@ -1,6 +1,6 @@
 # Stage 9 design: one lane fails, the sink goes on
 
-**Status: §12 steps 1, 2, 3 and 6 built (PR #427, §13 "As built"). The second half (fresh builds, reindex per lane, a closed index, an auto-created impostor) is designed against `main` after 8a in §14; slice 1 (fresh builds) is built on `feat/lane-failure-2`.**
+**Status: §12 steps 1, 2, 3 and 6 built (PR #427, §13 "As built"). The second half (fresh builds, reindex per lane, a closed index, an auto-created impostor) is designed against `main` after 8a in §14; all four slices are settled: 1 (fresh builds, #458), 2 (reindex per lane, #459 and #470), 3 (a closed index, #473), 4 (the impostor: already covered by #428, nothing built, §17).**
 
 **ADR 0012 §6:** "per-lane failure: parking with fresh builds; re-staging on `index_not_found`". Plus the budget's fifth rule ("a parked lane's item is released once its fresh build is requested") and §5's "a stalled lane pins the slot and alerts" (stage 8c). Dropping and rebuilding a stalled index stays with #394.
 
@@ -397,7 +397,7 @@ awaits a substitute.
 | O2 | Older builds of a substitute's ids queued behind it | dropped (F9): one unpark, no document going back | written in order: each refused again parks again | `sink_engine::substitute::supersedes` |
 | O3 | A stop's last probe of a refused lane | the item as it is | a fresh build (needs builders serving rebuilds while stopping) | — (F13) |
 | O4 | A reindex of a parked lane (slice 2) | acknowledges the parked item unwritten | writes it into the new generation | slice 2 |
-| O5 | An impostor (slice 4) | left alone, named, lane restaging | deleted and replaced | slice 4 |
+| O5 | An impostor (slice 4) | left alone, named, lane restaging | deleted and replaced | slice 4. **Withdrawn (§17):** `main` already deletes and replaces it (#428), and the owner kept that |
 | O6 | Rule 5 | F14 (never refused, not counted) | the ADR's `Charge::forget` | — |
 
 ### 14.8 Slice 1 as built (`feat/lane-failure-2`)
@@ -916,6 +916,64 @@ all of this: a closed `flusso_meta` still fails staging.
 | C3 | A closed index parks its lane `blocked` under `stop` and `skip` alike, quarantines nothing, keeps the other lanes current, pins the slot, and lands once opened, no restart | the same |
 | C4 | A reindex of a closed index moves it to a new generation | `lane_parking`'s `a_reindex_moves_a_closed_index_to_a_new_generation` (live) |
 
+## 17. Slice 4 (`feat/lane-failure-5`): an auto-created impostor, re-derived against `main` (`359efa85`)
+
+**Status: decided, nothing to build (owner, 2026-11-23: D1 keep `main`, D2 don't build).** §14.4 was written
+before #428 landed. `main` already detects and handles the impostor, the opposite way to O5, and that stays.
+This closes stage 9's second half.
+
+### 17.1 What happens on `main`, established
+
+Pinned by the `reindex` live binary (`libs/2-adapters/sink-opensearch/tests/reindex.rs`), which runs in CI's
+OpenSearch e2e jobs and passed on `main` (`989c27ca`, run 45267683622). No new probe was needed.
+
+- **The cluster auto-creates.** The test cluster runs OpenSearch 2 with the default `action.auto_create_index`
+  (allowed). `an_auto_created_generation_is_never_seeded_and_is_replaced_by_a_strict_one`: an unseeded generation
+  deleted mid-backfill is recreated by the next write, dynamically mapped (`dynamic` is not `strict`), and the
+  flush reports nothing missing. Under `action.auto_create_index` forbidding `<logical>_*`, the same write reports
+  the target missing and the lane restages
+  (`a_generation_deleted_mid_backfill_is_staged_as_created_without_its_checkpoint`).
+- **flusso goes on writing into it** until the seed: an unseeded generation is written by its concrete name
+  without `require_alias`, and every write lands.
+- **It is never seeded.** The marker is the generation's `index.uuid`, recorded in the meta doc when flusso
+  creates it (`record_uuid`, #428). `mark_seeded` compares it with the live one and refuses another with
+  `SinkError::TargetChanged`. The sink engine then holds the lane `restaging` (`seed_returned`, `Held::Missing`)
+  and the `SnapshotComplete` waits, seeding nothing.
+- **It is deleted, not adopted.** The restage's `ensure_index` finds the live uuid differing from the recorded one
+  on an unseeded generation, deletes the index, and creates a strict, empty generation under the same name with no
+  checkpoint; the fresh backfill seeds it. A seeded generation with another uuid is a restore and is kept
+  (seeded writes go through the hash alias with `require_alias`, so nothing auto-creates it).
+- **An older flusso's generation** (a meta doc with no uuid, before #428) is adopted: its uuid is recorded at the
+  next staging. It is never called an impostor, so an upgrade mid-backfill is safe on `main`.
+
+So the defect §14.4 feared (an impostor seeded and served behind the alias) does not exist on `main`. What is left
+is O5's question, which #428 already answered the other way.
+
+### 17.2 The proposals against `main`
+
+- **I2 (a marker in the mapping `_meta`).** Not needed. The recorded `index.uuid` is a stronger marker (OpenSearch
+  assigns it, nothing copies it with a name), it already exists, and it already separates an older flusso's
+  generation (no uuid recorded: adopted) from an impostor (another uuid: refused). A mapping `_meta` marker would
+  call every generation created before it an impostor, which needs its own migration.
+- **I3 / O5 (left alone and named).** Changes #428's shipped behaviour: see D1.
+- **I1 (every write through an alias with `require_alias`, an unseeded generation getting its own write alias).**
+  Stops the auto-create at the source: the write after a deletion answers `index_not_found` (the alias went with
+  the index), which is already `missing` → restage, so no impostor is ever made. But it changes the physical
+  layout: a new alias per unseeded generation, created with it (atomic with the create, no race), removed or
+  swapped at the seed, and a start-time step creating it for every unseeded generation that exists without one (a
+  deployment upgraded mid-backfill). See D2.
+
+### 17.3 Decisions (both decided as recommended)
+
+| # | Question | `main` today | O5 as recommended | Recommendation now |
+| --- | --- | --- | --- | --- |
+| D1 | An unseeded generation whose `index.uuid` is not the recorded one (an impostor) | deleted by the next staging and recreated strict; the lane self-heals with no operator | left alone, named in the log and `/status`; the lane stays `restaging` until an operator deletes it | **keep `main`** (#428): the only way to get that uuid on an unseeded generation is a write after a deletion (flusso's own, under auto-create) or an operator's restore of an unseeded generation; deleting it loses nothing the next backfill doesn't rewrite, and O5 turns a self-healing case into an operator page. If O5 stands, only `ensure_index`'s delete branch changes (to a refusal: `restaging` with the reason `index <name> is not the generation flusso created (index.uuid …); delete it to rebuild`), plus the live test reversed |
+| D2 | I1: prevent the auto-create with a write alias per unseeded generation | not built: the impostor is caught at the seed, and the writes into it are thrown away | — (§14.4's proposal) | **don't build**: it adds a layout change and a start-time alias migration to save writes that #428 already discards safely |
+
+**Decided (owner, 2026-11-23): D1 keep `main`, D2 don't build.** O5 is withdrawn: an unseeded generation with a
+uuid flusso did not record is deleted by the next staging and recreated strict, as #428 built it. Slice 4 is this
+section and a `CLAUDE.md` line: no code, nothing new for users.
+
 ## User-visible, second half
 
 What the documentation agent writes the manual from, per slice. Nothing else in this note is meant for it.
@@ -1027,3 +1085,9 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
    1), as for any blocked lane.
 8. **Runbook, a lane `blocked` with `index [...] is closed`:** open the index, or reindex it. Nothing to configure.
 
+### Slice 4: an auto-created impostor (nothing built)
+
+Nothing changes for users. An unseeded generation deleted mid-backfill and auto-created by the next write is
+never seeded: the seed refuses an index whose uuid flusso did not record, the next staging deletes it and creates
+a clean generation under the same name, and a fresh backfill seeds it, with no operator (issue #428). A
+generation created before uuids were recorded is adopted as it is.
