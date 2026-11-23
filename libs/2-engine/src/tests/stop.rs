@@ -31,7 +31,7 @@ struct ClosableSource {
     closing: Arc<Notify>,
     closed: Arc<AtomicBool>,
     log: Arc<Mutex<Vec<String>>>,
-    prepared: AtomicBool,
+    prepared: AtomicUsize,
 }
 
 impl std::fmt::Debug for ClosableSource {
@@ -50,7 +50,7 @@ impl ClosableSource {
                 closing: Arc::default(),
                 closed: Arc::default(),
                 log: Arc::default(),
-                prepared: AtomicBool::new(false),
+                prepared: AtomicUsize::new(0),
             },
             tx,
         )
@@ -74,12 +74,15 @@ impl ChangeCapture for ClosableSource {
     }
 
     async fn prepare(&self) -> source::Result<()> {
-        self.prepared.store(true, Ordering::SeqCst);
+        self.prepared.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
     async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
-        let feed = self.feed.lock().unwrap().take().unwrap();
+        // A later run (a restart) gets a stream with nothing more to read.
+        let Some(feed) = self.feed.lock().unwrap().take() else {
+            return Ok(Box::pin(futures::stream::empty()));
+        };
         let pulled = Arc::clone(&self.pulled);
         let closing = Arc::clone(&self.closing);
         let closed = Arc::clone(&self.closed);
@@ -643,6 +646,48 @@ async fn a_stalled_sink_does_not_keep_the_other_from_landing_its_lane_and_holds_
     }
 }
 
+/// Fifth review of #470, 2: the check before `prepare` is for a source this
+/// engine never prepared. A restarted run, the stop already asked, prepares
+/// and opens its stream as before, so the stop's drain and `close_live` hand
+/// the final position over; it never ends without a stream to close.
+#[tokio::test]
+async fn a_restarted_run_with_the_stop_asked_still_opens_and_closes_its_stream() {
+    let (source, feed) = ClosableSource::new();
+    let source = Arc::new(source);
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
+    let stop = Stop::new();
+    let engine = ingest(
+        &source,
+        Arc::new(MockDocuments::default()),
+        &stream,
+        &progress,
+        &["primary"],
+        &stop,
+    );
+    drop(feed);
+    tokio::time::timeout(Duration::from_secs(5), engine.run())
+        .await
+        .expect("the first run ends with its stream")
+        .unwrap();
+    assert_eq!(source.prepared.load(Ordering::SeqCst), 1);
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(5), engine.run())
+        .await
+        .expect("the restarted run ends on the stop")
+        .unwrap();
+    assert_eq!(
+        source.prepared.load(Ordering::SeqCst),
+        2,
+        "the restarted run prepared"
+    );
+    assert_eq!(
+        *source.log.lock().unwrap(),
+        vec!["close".to_owned()],
+        "it opened its stream and closed it, handing the position over"
+    );
+}
+
 /// A stop requested before the run prepares nothing (fourth review of #470,
 /// 1): the resume point is created only once every rebuild is staged (#120),
 /// and a stop may come before that staging did.
@@ -669,7 +714,7 @@ async fn a_stop_requested_before_the_run_prepares_and_reads_nothing() {
         .unwrap()
         .unwrap();
 
-    assert!(!source.prepared.load(Ordering::SeqCst), "not prepared");
+    assert_eq!(source.prepared.load(Ordering::SeqCst), 0, "not prepared");
     assert_eq!(source.pulled.load(Ordering::SeqCst), 0);
     assert!(
         source.log.lock().unwrap().is_empty(),

@@ -17,6 +17,9 @@
 //! Nothing here bounds the wait: a stalled sink holds step 3. The caller
 //! that asked for the stop owns the deadline.
 //!
+//! A stop requested before the engine ever prepared the source skips all
+//! four: the run ends with `Ok`, nothing prepared and no stream opened.
+//!
 //! ```
 //! use engine::Stop;
 //!
@@ -49,7 +52,9 @@ const DRAIN_POLL: Duration = Duration::from_millis(10);
 /// batch it was building, waits with [`drain_lanes`] until every lane is
 /// acknowledged, then asks the source to close its stream
 /// ([`ChangeCapture::close_live`]) and returns `Ok`. Nothing bounds the wait:
-/// the caller that asked for the stop owns the deadline.
+/// the caller that asked for the stop owns the deadline. Requested before the
+/// engine ever prepared the source, it ends the run with nothing prepared and
+/// no stream opened.
 #[derive(Debug, Clone)]
 pub struct Stop(Arc<Requested>);
 
