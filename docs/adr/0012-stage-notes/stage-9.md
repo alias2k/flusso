@@ -974,6 +974,59 @@ is O5's question, which #428 already answered the other way.
 uuid flusso did not record is deleted by the next staging and recreated strict, as #428 built it. Slice 4 is this
 section and a `CLAUDE.md` line: no code, nothing new for users.
 
+||||||| parent of 83eaccdf0 (docs(engine): a sink's staging per index, the design for #471)
+## 18. A sink's staging per index (#471)
+
+The limit §15.3 named: outside a stop `SinkEngine::stage` fails as a whole when one `ensure_index` fails, and the
+daemon's `stage_until_ok` retries the whole staging. So any failure of a sink's run stops every index of the sink
+while one index's cause lasts, though while the run is up that index only holds its own lane.
+
+**Where the line falls (R1).** `ensure_index` answers a plain `SinkError` for an index refused and for a
+destination that is down alike, so the line is drawn from what the staging saw, the way §1 draws it on the write
+path (an index refused while the destination answers is the lane's; the destination not answering is the sink's):
+
+- **at least one index was ensured:** the destination answers, so each index that failed, or was not started
+  after a failure, is the lane's: it is left `restaging` with `could not be ensured: <error>` and the staging goes
+  on with the rest;
+- **none was:** the destination's failure (transport down, auth refused, a closed or starting `flusso_meta`,
+  #474's 503, which every index reads): the staging fails as a whole and the daemon backs off and retries, as
+  today. A sink with one index keeps today's behaviour, there being nothing to isolate.
+
+**Resumed: per index (R2).** Every restart of a run stages with `Continuity::Resumed`, and so does a first staging
+whose source kept its resume point. Nothing needs a stale-seed rebuild then, so an index that couldn't be ensured
+holds back nothing but its own lane. `stage()` returns `Ok`, `stage_until_ok` stops retrying, and the run starts:
+its restage path (§4) stages that index again on the lane's restage backoff, asking for its backfill if unseeded,
+and opens the lane. Meanwhile the lane is `restaging` with the reason in `/status`,
+`flusso_lane_parked{why="restaging"}` is 1 (`FlussoLaneParked`), its items stay unacknowledged so it pins the slot
+(`pinned_by`) and its fences, and the sink's other lanes write. `stage()`'s last step reopens restaging lanes whose
+index it just ensured, never one it couldn't (R3).
+
+**Fresh: wait, as today (R4).** With a `Fresh` source every seeded index must have its rebuild staged before the
+source is prepared (#120, X22). An index that couldn't be ensured can't be told seeded or not, so whether it needs
+a rebuild is unknown: the first staging fails as a whole and is retried until it succeeds, nothing captured
+meanwhile. The options were (a) wait, as built: safe, and an operator sees the start retry with the index's error;
+(b) go on and rebuild the index later: it would let `prepare` create the resume point before a rebuild that may be
+needed, the #120 data loss; (c) go on only when the meta doc says the index is unseeded: that read is part of what
+failed. (a) is the only sound one.
+
+**Interactions.**
+
+- *An owed reindex (X17):* an owed index that can't be ensured stays owed and `restaging` (`restage` changes nothing
+  on a lane already restaging, so its reason stays); its retry is `reindex_again`, as before. X17 no longer assumes
+  the restart's `ensure` succeeds.
+- *A reindex control for that index:* stages a new generation (§15); failing, the index becomes owed (X15).
+- *A stop:* `stage_while_stopping` (X21) already did this; unchanged.
+- *`backfill = false`, `--skip-backfill`:* the restage path ensures and opens the lane without asking, as before.
+
+**Rules and tests.**
+
+| # | Rule | Test |
+| --- | --- | --- |
+| R1 | none ensured: the staging fails as a whole; some ensured: the rest go on | `a_staging_none_of_whose_indexes_is_ensured_fails_as_a_whole` |
+| R2 | a restarted run's staging leaves an index it can't ensure restaging, the others write, and it recovers on the restage path | `a_restart_goes_on_without_the_index_it_cannot_ensure` (the issue's own) |
+| R3 | `stage()` never reopens a lane whose index it couldn't ensure | the same |
+| R4 | a `Fresh` first staging still fails as a whole on one index | `a_fresh_staging_waits_for_every_index` |
+
 ## User-visible, second half
 
 What the documentation agent writes the manual from, per slice. Nothing else in this note is meant for it.
