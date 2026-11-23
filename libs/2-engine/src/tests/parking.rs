@@ -3310,9 +3310,11 @@ async fn a_stop_during_an_owed_retry_records_it_and_writes_nothing_more() {
 }
 
 /// Second review of #470, 2, the later moment: the stop comes while an
-/// owed retry's backfill request is being published. The retry returns
-/// staged, but once stopping that is recorded only: the lane stays owed and
-/// opens for nothing, and the next start picks the generation up (X20).
+/// owed retry's backfill request is being published. That ask completes
+/// (it is never served), but the retry's outcome is recorded only: the lane
+/// stays owed and opens for nothing, its item is released unwritten and
+/// unapplied, the drain doesn't wait, and the next start picks the
+/// generation up (X20).
 #[tokio::test(start_paused = true)]
 async fn a_retry_returning_staged_during_a_stop_leaves_the_lane_owed() {
     let rig = Rig::new(Gate::default());
@@ -3356,6 +3358,7 @@ async fn a_retry_returning_staged_during_a_stop_leaves_the_lane_owed() {
     .await;
     rig.sink.ensure_fails_for.lock().unwrap().clear();
     *slow.lock().unwrap() = Some(Duration::from_secs(10));
+    rig.live(&orders(), 1..2, 0).await;
     let attempts_before = attempts(&events, &orders());
     eventually("the retry is asking for its backfill", || {
         attempts(&events, &orders()) > attempts_before
@@ -3363,12 +3366,23 @@ async fn a_retry_returning_staged_during_a_stop_leaves_the_lane_owed() {
     .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     stop.request();
+    let idle = idle_within(&rig, Duration::from_secs(60)).await;
+    assert!(
+        idle.is_some_and(|after| after < Duration::from_secs(2)),
+        "drained without waiting for the ask: {idle:?}"
+    );
     tokio::time::sleep(Duration::from_secs(30)).await;
     assert_eq!(
         engine.lane_health(&lane(orders())).kind(),
         "restaging",
         "recorded only: the lane stays owed"
     );
+    assert!(
+        engine.is_outstanding(&orders()),
+        "the ask in progress completed: outstanding, never served"
+    );
+    assert_eq!(writes_holding(&rig, &orders(), "1"), 0, "nothing written");
+    assert_eq!(rig.applied(&orders()), before(0), "nothing applied");
     task.abort();
 }
 
