@@ -1709,8 +1709,9 @@ is the one concrete piece.
   a channel of its own (`dispatcher::Route.rebuilds`: a running walk doesn't hold it back); `Builds::choose`
   offers it to the gate in the same pass as the live and snapshot batches, asked as live with no budget
   part (never refused, not counted: one per parked lane), admitted only when no running build holds one
-  of its documents; `Job::Rebuild` publishes it as a `stream::Substitute` to that sink only and acks the
-  request; nothing is registered (the parked item stays the one its position waits on); a failing fresh
+  of its documents, at most one waiting per lane (a newer ticket replaces it, `Builds::ask_rebuild`) and
+  none granted once stopping (`drop_rebuilds`); `Job::Rebuild` publishes it as a `stream::Substitute` to that
+  sink only and acks the request; nothing is registered (the parked item stays the one its position waits on); a failing fresh
   build halts as a live one (the index restarts alone). The substitute is written alone as the lane's
   probe in the item's place (`Part.substitute`): landed, the item is acknowledged as if it had (key,
   walk mark) and the lane opens; refused, it is dropped and the backoff doubles; a ticket the lane
