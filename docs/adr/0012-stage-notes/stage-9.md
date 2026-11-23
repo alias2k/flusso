@@ -636,12 +636,12 @@ the F9 checks) walked the wider stride. With two sinks that is paid twice: the g
 **As built: the item carries its build's own id vector.**
 
 - **What an item carries.** `Batch.ids: Option<Arc<Vec<DocumentId>>>` (`#[serde(skip)]`): the vector of ids the
-  build was handed, the one the builder already made, shared by refcount with every lane of the build (the
-  envelopes are split per index; the vector is not). `Envelope` is `90073906`'s again, byte for byte.
+  build was handed, the one the builder already made, shared by refcount with every lane of the build (one
+  lane per sink: each index has its own builder, so a build's ids are one index's). `Envelope` is `90073906`'s again, byte for byte.
 - **Matching.** `writes.rs`'s `keys_of` renders each id (`DocumentId::rendered`, the same text as the envelope's
-  `id`) and looks each envelope up by its id and index, in envelope order. The vector is a superset: documents
-  left out as failed under `skip` (#198), other indexes' documents, and documents an F9 strip (`without`) took
-  out are in it and unmatched; `without` keeps the same `Arc`, no copy. An envelope with no match, or an item
+  `id`) and looks each envelope up by its id and index (the index a guard: §15.3), in envelope order. The vector
+  is a superset: documents left out as failed under `skip` (#198), and documents an F9 strip (`without`) took
+  out, are in it and unmatched; `without` keeps the same `Arc`, no copy. An envelope with no match, or an item
   with no ids, gives no keys: the probe writes the item itself (F2), never with a wrong key. Only a parked
   item's probe pays for the matching (one map of the build's ids).
 - **Deletes and backfill pages** carry ids like live upserts: a delete is built from its id like any document.
@@ -786,6 +786,12 @@ fence on the lane never sees them applied; once stopping, `/wait` answers `503 s
 A lasting failure (a cluster-wide block) shows as the lane `restaging` with its reason in `/status` and
 `FlussoLaneParked` covers it, while the other lanes run (S4's goal).
 
+**A wasted backfill after a failed run (review of #470, 6; kept).** When the new generation was recorded and a
+later step failed, a failed run's restart stages it and asks for its backfill, then the owed retry finds that
+backfill outstanding and cuts it and asks again from the first key: one backfill read for nothing. It is correct
+(the second covers the same generation from the first key, and the first's pages land in that generation too) and
+rare; telling the restart's request apart from an older one needs more state than it saves.
+
 **X13, stated:** a held item acknowledged at a stop still counts in `is_oldest` until that acknowledgement
 returned; items behind it are not the supervisor's progress.
 
@@ -836,12 +842,16 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
    (`the reindex could not stage: …`), and the reindex is tried again on the lane's backoff (`[backoff]`: the
    first wait, doubling to the longest). A momentary error heals by itself; a lasting one (a cluster-wide block)
    shows as that lane restaging, with `flusso_lane_parked{why="restaging"}` at 1 so `FlussoLaneParked` fires,
-   while the sink's other lanes keep writing. Once the destination accepts it, the reindex goes on as in 1. A
-   restart while it waits keeps waiting (the next run retries it).
+   while the sink's other lanes keep writing. Once the destination accepts it, the reindex goes on as in 1. The
+   wait is kept in memory: a failed run of the sink keeps it, but **a restart of flusso forgets a reindex that
+   never managed to create its new generation**, so ask for it again after the restart. One whose new generation
+   was created (only a later step failed) is picked up by the next start, which backfills that generation; the
+   item the lane was stuck on is then replayed and written like any other, not held.
 3. **A reindex of several indexes** goes ahead for each index that can be staged, even when another cannot; each
    that cannot waits and is retried as in 2.
 4. **Until the new generation is seeded**, the index's fences answer `503` with reason `rebuilding` (as for any
-   reindex, including while a retry waits), and the stuck item's change and everything after it on that lane are
+   reindex, including while a retry waits, and for an index whose staging never started because another failed
+   first), and the stuck item's change and everything after it on that lane are
    not counted as landed: the replication slot stays before them. Once the backfill completes, the item is
    acknowledged and the lane's positions move on.
 5. **A reindex while the index's backfill is still running** is ignored when the lane is open (that backfill is
@@ -849,7 +859,10 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
 6. **`/status`:** the lane's health goes from `refused`, `blocked` or `restaging` to `open` once the reindex is
    staged (at once, or at the retry that succeeds); no new fields. `flusso_lane_parked` drops to 0 for the lane.
 7. **A stop before the new generation is seeded** drains normally (exit 0): the stuck item's change is not
-   confirmed, so the next start replays it and requests the backfill again.
+   confirmed, so the next start replays it and requests the backfill again. **A stop while a reindex waits for its
+   retry** (2) also drains at once: the retry is not made, a reindex not yet staged is dropped, nothing new is
+   created or backfilled, and the lane's waiting changes are left unconfirmed, so the next start replays them
+   (what it does about the reindex: 2).
 8. **Runbook, a stuck lane:** a reindex of that index on that sink is the way out for a write block on that index
    that won't be lifted, a target that can't be staged, or a mapping or settings change made by hand; for a row
    the mapping refuses, fix the row (or switch the index to `on_error = "skip"`). A lane `restaging` with

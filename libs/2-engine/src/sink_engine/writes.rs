@@ -3120,7 +3120,8 @@ fn run_rejected(report: &WriteReport, lane: usize, lanes: &[LaneRun]) -> Vec<Str
 
 /// The root keys of `batch`'s documents, in envelope order, matched by index
 /// and rendered id against the build's ids the item carries (a superset:
-/// several indexes, documents left out as failed or by F9's `without`);
+/// documents left out as failed or by F9's `without`; one index's, since each
+/// index has its own builder, with the index checked as a guard);
 /// `None` when the item carries none, an envelope has no match, or two keys
 /// of its index render as its id, and then the probe writes the item itself
 /// (F2): never a wrong key.
@@ -3291,9 +3292,10 @@ mod tests {
         );
     }
 
-    /// Review of `main` at `9b70cd6e`, 1: one build's ids cover several
-    /// indexes, whose ids may render alike (`orders` 1 and `users` 1, two
-    /// indexes over one table). Each index finds its own key.
+    /// Review of `main` at `9b70cd6e`, 1: the guard. A build's ids hold one
+    /// index (each index has its own builder); should a list ever hold two
+    /// whose ids render alike (`orders` 1 and `users` 1), each index still
+    /// finds its own key.
     #[test]
     fn a_rendered_id_shared_by_two_indexes_still_finds_its_key() {
         let ids = Arc::new(vec![id("orders", 1), id("users", 1)]);
