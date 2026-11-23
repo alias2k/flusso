@@ -447,8 +447,17 @@ async fn a_failing_index_anywhere_among_many_leaves_only_itself_out() {
             SlowSink::seeded((0..INDEXES).map(name)).failing([name(failing)]),
             INDEXES,
         );
+        let started = tokio::time::Instant::now();
         staged.engine.stage(Continuity::Resumed).await.unwrap();
         assert_eq!(restaging(&staged), [name(failing)], "failing {failing}");
+        // Two calls per index but the failing one's single ensure, eight at a
+        // time: the rest are not tried one by one.
+        let rounds = (INDEXES * 2).div_ceil(STAGE_CONCURRENCY) + 1;
+        assert!(
+            started.elapsed() <= CALL * u32::try_from(rounds).unwrap(),
+            "failing {failing}: staged concurrently, took {:?}",
+            started.elapsed()
+        );
         for i in 0..INDEXES {
             assert!(
                 staged

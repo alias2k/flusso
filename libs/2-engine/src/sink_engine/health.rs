@@ -239,6 +239,10 @@ pub(crate) struct LaneState {
     /// A reindex the lane is owed: its staging failed, and it is retried on
     /// the restage backoff (§15.3, X15). Cleared when the lane opens.
     pub(crate) reindex: Option<OwedReindex>,
+    /// A staging left the lane out: its index couldn't be ensured, its target
+    /// not known to be gone. It is staged again with ensure's rules, keeping
+    /// an intact target's backfill (#471). Cleared when the lane opens.
+    pub(crate) unensured: bool,
 }
 
 /// A reindex whose staging failed, waiting for its retry.
@@ -281,6 +285,7 @@ impl LaneState {
             held_for_seed: Vec::new(),
             parked_item: None,
             reindex: None,
+            unensured: false,
         }
     }
 
@@ -362,6 +367,7 @@ impl LaneState {
         self.health = LaneHealth::Open;
         self.probes = 0;
         self.unproven = true;
+        self.unensured = false;
         Some(now.saturating_duration_since(since))
     }
 
