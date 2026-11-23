@@ -1415,8 +1415,9 @@ is the one concrete piece.
   the drain (confirmation follows the slowest lane); the caller's deadline bounds it. After it the supervisor
   waits on `Fence::settled` only while a `/wait` on `searchable` is open, so a stop nobody waits on
   doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`: the daemon's first
-  staging looks at the stop first and again after (`biased`), and the ingest engine checks it before `prepare`
-  (the note's X22); an ingest engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (a stop raised mid-burst
+  staging looks at the stop first and again after (`biased`), and the ingest engine checks it before the source's first
+  `prepare` (`has_prepared`: a run restarted after going live still prepares and opens, its stream being how the final
+  position is handed over; the note's X22); an ingest engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (a stop raised mid-burst
   ends the batch there, `drain_ready`'s check; mid-build batch
   published and flushed by every sink, final confirm before close; nothing read after the stop; an
   abandoned snapshot re-served; queued snapshot batches skipped, their index left unseeded; a stalled
@@ -1754,7 +1755,7 @@ is the one concrete piece.
   can't be ensured left restaging; a stop landing while a staging ensures is looked at again before any ask or
   reopen (guards `staging_after_a_run_failed_during_the_stop_only_ensures`,
   `an_open_lane_not_ensured_under_the_stop_is_released`, `a_stop_during_a_staging_makes_it_ensure_only`). The
-  first staging never stages under a stop (the note's X22). The owed reindex is in memory: a process restart forgets it
+  engines are never started, and the source never prepared for the first time, once a stop is requested (the note's X22). The owed reindex is in memory: a process restart forgets it
   (the note's X20). For each index staged, a lane parked or restaging opens (`writes.rs`'s `reindexed`), a parked lane's front item is held (`LaneRun.held`,
   `LaneState.held_for_seed` by item key and build so a redelivery is held again) unwritten and unacknowledged
   until the index is seeded, then acknowledged and reported applied (`release_held`), so the slot never passes
