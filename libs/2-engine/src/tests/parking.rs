@@ -3614,6 +3614,51 @@ async fn a_restage_out_as_the_stop_comes_asks_for_nothing_and_opens_nothing() {
     task.abort();
 }
 
+/// Fourth review of #470, 2 (X21's own case): an open lane whose index
+/// can't be ensured by staging under the stop (its run failed on a transport
+/// error, the cluster still down) is left restaging, so the restarted run
+/// releases its items instead of writing, failing and restarting until the
+/// deadline.
+#[tokio::test(start_paused = true)]
+async fn an_open_lane_not_ensured_under_the_stop_is_released() {
+    let rig = Rig::new(Gate::default());
+    let stop = Stop::new();
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(slow_backoff())
+            .with_stop(stop.clone()),
+    );
+    rig.live(&orders(), 0..1, 0).await;
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    assert!(engine.lane_health(&lane(orders())).is_open());
+    stop.request();
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            engine.lane_health(&lane(orders())),
+            LaneHealth::Restaging { reason, .. } if reason.contains("could not be ensured during the stop")
+        ),
+        "left restaging with why: {:?}",
+        engine.lane_health(&lane(orders()))
+    );
+    let task = spawn(Arc::clone(&engine));
+    let idle = idle_within(&rig, Duration::from_secs(60)).await;
+    task.abort();
+    assert!(
+        idle.is_some_and(|after| after < Duration::from_secs(2)),
+        "drained at once: {idle:?}"
+    );
+    assert_eq!(writes_holding(&rig, &orders(), "0"), 0, "nothing written");
+    assert_eq!(rig.applied(&orders()), before(0), "nothing applied");
+}
+
 /// X17 (review 2): the owed reindex is on the lane's state, so a run that
 /// fails meanwhile keeps it: staging at the next start leaves the lane
 /// `restaging`, and the next run's retry stages the reindex.
