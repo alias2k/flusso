@@ -1359,7 +1359,9 @@ is the one concrete piece.
   even if empty; before creating a generation the meta doc is written unseeded naming no uuid, and the
   uuid recorded only after the create, so a failure in between never leaves "seeded" or an old uuid
   beside the new, empty generation (the next staging adopts it unseeded); `mark_seeded`
-  answers `TargetChanged` for a generation missing or with another uuid. The fence stays
+  answers `TargetChanged` for a generation missing or with another uuid. An unseeded generation with
+  another uuid (auto-created by a write after a deletion) is deleted by the next staging and recreated strict: that
+  is the decided handling of an impostor, with no write alias per unseeded generation (stage 9 note §17). The fence stays
   `Backfilling` (or `Rebuilding`) until the fresh seed; a reindex control is still ignored while
   outstanding; a stop after the cut skips as before; other lanes of the snapshot answer their own
   tickets. Guards: `tests::gone` (both engines over a sink keeping generations: deleted mid-backfill,

@@ -1,6 +1,6 @@
 # Stage 9 design: one lane fails, the sink goes on
 
-**Status: §12 steps 1, 2, 3 and 6 built (PR #427, §13 "As built"). The second half (fresh builds, reindex per lane, a closed index, an auto-created impostor) is designed against `main` after 8a in §14; slice 1 (fresh builds) is built on `feat/lane-failure-2`.**
+**Status: §12 steps 1, 2, 3 and 6 built (PR #427, §13 "As built"). The second half (fresh builds, reindex per lane, a closed index, an auto-created impostor) is designed against `main` after 8a in §14; all four slices are settled: 1 (fresh builds, #458), 2 (reindex per lane, #459 and #470), 3 (a closed index, #473), 4 (the impostor: already covered by #428, nothing built, §17).**
 
 **ADR 0012 §6:** "per-lane failure: parking with fresh builds; re-staging on `index_not_found`". Plus the budget's fifth rule ("a parked lane's item is released once its fresh build is requested") and §5's "a stalled lane pins the slot and alerts" (stage 8c). Dropping and rebuilding a stalled index stays with #394.
 
@@ -397,7 +397,7 @@ awaits a substitute.
 | O2 | Older builds of a substitute's ids queued behind it | dropped (F9): one unpark, no document going back | written in order: each refused again parks again | `sink_engine::substitute::supersedes` |
 | O3 | A stop's last probe of a refused lane | the item as it is | a fresh build (needs builders serving rebuilds while stopping) | — (F13) |
 | O4 | A reindex of a parked lane (slice 2) | acknowledges the parked item unwritten | writes it into the new generation | slice 2 |
-| O5 | An impostor (slice 4) | left alone, named, lane restaging | deleted and replaced | slice 4 |
+| O5 | An impostor (slice 4) | left alone, named, lane restaging | deleted and replaced | slice 4. **Withdrawn (§17):** `main` already deletes and replaces it (#428), and the owner kept that |
 | O6 | Rule 5 | F14 (never refused, not counted) | the ADR's `Charge::forget` | — |
 
 ### 14.8 Slice 1 as built (`feat/lane-failure-2`)
@@ -918,8 +918,9 @@ all of this: a closed `flusso_meta` still fails staging.
 
 ## 17. Slice 4 (`feat/lane-failure-5`): an auto-created impostor, re-derived against `main` (`359efa85`)
 
-**Status: design stopped for owner decisions (D1, D2 below).** §14.4 was written before #428 landed. `main`
-already detects and handles the impostor, the opposite way to O5.
+**Status: decided, nothing to build (owner, 2026-11-23: D1 keep `main`, D2 don't build).** §14.4 was written
+before #428 landed. `main` already detects and handles the impostor, the opposite way to O5, and that stays.
+This closes stage 9's second half.
 
 ### 17.1 What happens on `main`, established
 
@@ -962,19 +963,16 @@ is O5's question, which #428 already answered the other way.
   swapped at the seed, and a start-time step creating it for every unseeded generation that exists without one (a
   deployment upgraded mid-backfill). See D2.
 
-### 17.3 Decisions needed
+### 17.3 Decisions (both decided as recommended)
 
 | # | Question | `main` today | O5 as recommended | Recommendation now |
 | --- | --- | --- | --- | --- |
 | D1 | An unseeded generation whose `index.uuid` is not the recorded one (an impostor) | deleted by the next staging and recreated strict; the lane self-heals with no operator | left alone, named in the log and `/status`; the lane stays `restaging` until an operator deletes it | **keep `main`** (#428): the only way to get that uuid on an unseeded generation is a write after a deletion (flusso's own, under auto-create) or an operator's restore of an unseeded generation; deleting it loses nothing the next backfill doesn't rewrite, and O5 turns a self-healing case into an operator page. If O5 stands, only `ensure_index`'s delete branch changes (to a refusal: `restaging` with the reason `index <name> is not the generation flusso created (index.uuid …); delete it to rebuild`), plus the live test reversed |
 | D2 | I1: prevent the auto-create with a write alias per unseeded generation | not built: the impostor is caught at the seed, and the writes into it are thrown away | — (§14.4's proposal) | **don't build**: it adds a layout change and a start-time alias migration to save writes that #428 already discards safely |
 
-If D1 is "keep `main`" and D2 "don't build", slice 4 is this section plus a `CLAUDE.md` line: no code. If D1 is
-O5, the change is small (the delete branch becomes a refusal with a reason; the restage loop retries on the lane's
-backoff, so the lane shows `restaging` with that reason, `flusso_lane_parked{why="restaging"}` and
-`FlussoLaneParked`); I'll design its interaction with a reindex (a new generation takes the next name past the
-impostor's, so a reindex is the other way out), an owed reindex, the stop table (a restaging lane is released at a
-stop), fences and the slot before building.
+**Decided (owner, 2026-11-23): D1 keep `main`, D2 don't build.** O5 is withdrawn: an unseeded generation with a
+uuid flusso did not record is deleted by the next staging and recreated strict, as #428 built it. Slice 4 is this
+section and a `CLAUDE.md` line: no code, nothing new for users.
 
 ## User-visible, second half
 
@@ -1087,3 +1085,9 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
    1), as for any blocked lane.
 8. **Runbook, a lane `blocked` with `index [...] is closed`:** open the index, or reindex it. Nothing to configure.
 
+### Slice 4: an auto-created impostor (nothing built)
+
+Nothing changes for users. An unseeded generation deleted mid-backfill and auto-created by the next write is
+never seeded: the seed refuses an index whose uuid flusso did not record, the next staging deletes it and creates
+a clean generation under the same name, and a fresh backfill seeds it, with no operator (issue #428). A
+generation created before uuids were recorded is adopted as it is.
