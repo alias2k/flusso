@@ -280,7 +280,7 @@ jobs:
       - name: Restore the boundary test's results
         if: matrix.part.id == 'boundary'
         id: boundary-cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: target/tests/flusso-boundary/cache
           key: ${{ env.BOUNDARY_CACHE }}-${{ hashFiles('sdk/query-derive/src/**', 'sdk/query-derive/Cargo.toml', 'sdk/query-derive/tests/fixtures/**', 'sdk/query-derive/tests/boundary.rs', 'sdk/query/src/**', 'sdk/query/Cargo.toml', 'libs/0-kernel/src/**', 'libs/0-kernel/Cargo.toml', 'libs/0-kernel/derive/src/**', 'libs/0-kernel/derive/Cargo.toml', 'libs/1-config/src/**', 'libs/1-config/Cargo.toml', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}
@@ -307,7 +307,7 @@ jobs:
 
       - name: Save the boundary test's results
         if: matrix.part.id == 'boundary' && github.ref == 'refs/heads/main' && steps.boundary-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: target/tests/flusso-boundary/cache
           key: ${{ steps.boundary-cache.outputs.cache-primary-key }}
