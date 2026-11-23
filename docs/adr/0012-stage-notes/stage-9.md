@@ -637,6 +637,44 @@ envelopes when the last lane acknowledges the item, where `main` dropped them at
 serializing stream (none exists; the in-process channel moves items): an item read back from bytes carries none,
 and its lane's probe writes the item itself (F2).
 
+### 15.1 Part 1: reindex a parked, blocked or restaging lane (O4 as recommended)
+
+**Today** (`main` at `6aa85913`): `SinkControl::Reindex` waits for every write of the sink to return, then for
+each index: an index whose backfill is outstanding is **ignored** (warned about), the rest are staged
+(`reindex` + `ensure_index`) and a backfill requested. The lane's health is untouched: a parked lane keeps
+probing its item (now into the new generation), a restaging lane keeps its staging.
+
+| Lane state | Today | Now |
+| --- | --- | --- |
+| open | new generation, backfill | unchanged |
+| parked, refused | keeps probing the refused item (refused again in the new generation) | opens; the parked item is held unwritten until the index is seeded, then acknowledged; items behind it are written into the new generation |
+| parked, blocked | keeps probing until the block lifts on the old generation's name | the same as refused |
+| restaging | keeps its own staging and backfill beside the reindex's | opens; its held items are written into the new generation |
+| backfill outstanding | reindex ignored | the outstanding backfill is cut and asked for again from the first key (as a restage does) |
+
+**Rules.**
+
+| # | Rule | Test |
+| --- | --- | --- |
+| X1 | A reindex of a lane not open opens it, its backoff forgotten | `a_reindex_opens_a_parked_lane_and_holds_its_item_until_seeded` |
+| X2 | The parked item is not written: held, unacknowledged, until the reindexed index is seeded (its `SnapshotComplete` for the new request), then acknowledged and reported applied | the same |
+| X3 | Items behind it are written into the new generation, in lane order; their positions are applied only after the held one's (fences report in key order), so nothing counts as landed before the new generation holds the documents | the same |
+| X4 | A blocked lane: the same | `a_reindex_opens_a_blocked_lane_the_same_way` |
+| X5 | A restaging lane opens; its held items are written (they were held only for a missing target) | `a_reindex_opens_a_restaging_lane_and_writes_its_items` |
+| X6 | An outstanding backfill is cut and asked for again | `a_reindex_during_a_backfill_cuts_it_and_asks_again` |
+| X7 | A run failing before the seed: the held item comes back and is held again (the lane's state remembers its build number), so it is never written | `a_held_item_redelivered_after_a_failed_run_is_held_again` |
+
+**Why confirmation and fences stay right.** The held item's position is reported applied only at the seed. Until
+then the lane's applied mark stays before it, so the watermark, and so the slot, stays before its change, and
+#379 already answers `503 backfilling` for the index. At the seed the new generation holds every row as read after
+the reindex, its change included. A crash before the seed: the slot is before the change, the generation is
+unseeded, and the next start requests its backfill; the change is replayed and rebuilt. An engine run failing
+before the seed: the item comes back and is held again.
+
+**F9 across a reindex.** A reindex's backfill pages and later live items are built after the reindex, so they are
+numbered past every entry the lane's map holds; the map and the account are left as they are (the held item is in
+neither the window nor the flights, and stays in the account until its acknowledgement at the seed).
+
 ## User-visible, second half
 
 What the documentation agent writes the manual from, per slice. Nothing else in this note is meant for it.
