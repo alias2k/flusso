@@ -809,32 +809,46 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
 9. **Runbook, refused lane:** "fixing the row doesn't unpark the lane" is no longer true. Fix the row and the
    next probe lands; switching to `on_error = "skip"` or changing the schema is no longer the only way out.
 10. **Nothing to configure.** For users of the stream port as a library: `Request` gains `Rebuild`, `Stream`
-    gains `substitutes` (with a default), `Batch` gains `build`, an `Envelope` carries its document's `key`
-    inside the pipeline (never serialized; slice 2), `RowKey` moves to the kernel (still re-exported by
-    `source`), and `Consumer`'s contract states the redelivery order.
+    gains `substitutes` (with a default), `Batch` gains `build` and `ids` (the build's document ids, shared
+    by every lane, never serialized; slice 2 replaced slice 1's `keys`), `RowKey` and `DocumentId` move to the
+    kernel (still re-exported by `source`), and `Consumer`'s contract states the redelivery order. Nothing
+    else about how keys travel is user-visible.
 
-### Slice 2: reindex as the way out of a stuck lane (PR #459)
+### Slice 2: reindex as the way out of a stuck lane (PR #459, follow-up PR #470)
 
 1. **`flusso reindex <index> --sink <sink>` (`POST /indexes/<name>/reindex?sink=`) now unsticks a lane that is
    parked (refused or blocked) or restaging.** The lane opens at once; the item it was stuck on is not written
    again: its documents come from the new generation's backfill, which reads every row after the reindex. Items
-   behind it are written into the new generation as usual. **Two caveats.** A reindex recreates the index from
-   the same schema: it cures what lives in the index (a write block on that index, settings or a mapping changed
-   by hand), not a row the mapping refuses (the new backfill is refused at that row, the lane parks again, and
-   it unparks once the row is fixed). And a reindex that cannot create its new generation (a cluster-wide block)
-   fails on its own: logged, the lane left as it was, the sink running; the HTTP call has already answered
-   `202`, so the failure shows in the log and in the lane's unchanged `/status` health.
-2. **Until the new generation is seeded**, the index's fences answer `503 backfilling` (as for any reindex), and
-   the stuck item's change and everything after it on that lane are not counted as landed: the replication slot
-   stays before them. Once the backfill completes, the item is acknowledged and the lane's positions move on.
-3. **A reindex while the index's backfill is still running** is ignored when the lane is open (that backfill is
+   behind it are written into the new generation as usual. **Caveat:** a reindex recreates the index from the
+   same schema. It cures what lives in the index (a write block on that index, settings or a mapping changed by
+   hand), not a row the mapping refuses (the new backfill is refused at that row, the lane parks again, and it
+   unparks once the row is fixed).
+2. **A reindex that cannot create its new generation is retried until it can** (#470). The HTTP call has already
+   answered `202`. The lane's `/status` health becomes `restaging`, with the destination's error as its reason
+   (`the reindex could not stage: …`), and the reindex is tried again on the lane's backoff (`[backoff]`: the
+   first wait, doubling to the longest). A momentary error heals by itself; a lasting one (a cluster-wide block)
+   shows as that lane restaging, with `flusso_lane_parked{why="restaging"}` at 1 so `FlussoLaneParked` fires,
+   while the sink's other lanes keep writing. Once the destination accepts it, the reindex goes on as in 1. A
+   restart while it waits keeps waiting (the next run retries it).
+3. **A reindex of several indexes** goes ahead for each index that can be staged, even when another cannot; each
+   that cannot waits and is retried as in 2.
+4. **Until the new generation is seeded**, the index's fences answer `503` with reason `rebuilding` (as for any
+   reindex, including while a retry waits), and the stuck item's change and everything after it on that lane are
+   not counted as landed: the replication slot stays before them. Once the backfill completes, the item is
+   acknowledged and the lane's positions move on.
+5. **A reindex while the index's backfill is still running** is ignored when the lane is open (that backfill is
    already rebuilding), but on a parked, blocked or restaging lane it restarts the backfill from the first key.
-4. **`/status`:** the lane's health goes from `refused`, `blocked` or `restaging` to `open` at the reindex; no new
-   fields. `flusso_lane_parked` drops to 0 for the lane.
-5. **A stop before the new generation is seeded** drains normally (exit 0): the stuck item's change is not
+6. **`/status`:** the lane's health goes from `refused`, `blocked` or `restaging` to `open` once the reindex is
+   staged (at once, or at the retry that succeeds); no new fields. `flusso_lane_parked` drops to 0 for the lane.
+7. **A stop before the new generation is seeded** drains normally (exit 0): the stuck item's change is not
    confirmed, so the next start replays it and requests the backfill again.
-6. **Runbook, a stuck lane:** a reindex of that index on that sink is the way out for a write block on that index
+8. **Runbook, a stuck lane:** a reindex of that index on that sink is the way out for a write block on that index
    that won't be lifted, a target that can't be staged, or a mapping or settings change made by hand; for a row
-   the mapping refuses, fix the row (or switch the index to `on_error = "skip"`).
-7. **During a reindex backfill** the lane reads `open` but holds the replication slot until the backfill
+   the mapping refuses, fix the row (or switch the index to `on_error = "skip"`). A lane `restaging` with
+   `the reindex could not stage: …` is waiting for the destination: lift what the reason names (often a
+   cluster-wide block) and the next retry completes the reindex.
+9. **During a reindex backfill** the lane reads `open` but holds the replication slot until the backfill
    completes (`pinned_by` names it), so `FlussoLaneStalled` can fire for a long backfill.
+10. **A parked lane's fresh build** (slice 1) works for every index; an item whose documents' keys can't be told
+    apart from their ids (composite keys whose parts hold `:`, rendering alike) is probed as written instead of
+    rebuilt. Nothing to configure.
