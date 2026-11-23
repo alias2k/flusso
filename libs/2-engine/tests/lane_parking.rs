@@ -84,6 +84,7 @@ struct Os {
 /// progress kept to read its lanes.
 struct Deployment {
     task: tokio::task::JoinHandle<engine::Result<()>>,
+    control: tokio::sync::mpsc::Sender<SinkControl>,
     sink: Arc<SinkEngine>,
     progress: Arc<Progress>,
     quarantined: Arc<Quarantined>,
@@ -386,6 +387,85 @@ async fn a_row_opensearch_refuses_unparks_its_lane_once_fixed_or_deleted() {
     live.task.abort();
 }
 
+/// The write block on one index's generation, cured by a reindex of that
+/// index on that sink instead of lifting it (stage 9, slice 2): the lane opens
+/// at once, the new generation (no block) is backfilled and seeded, the rows
+/// read back from it, and the sibling stays current throughout. No restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_reindex_unsticks_a_write_blocked_index() {
+    let pg = start_postgres("reindex").await;
+    let os = start_opensearch("reindex").await;
+    let live = deploy(
+        &pg,
+        &os,
+        &["held_stop", "steady"],
+        FailurePolicies::new(FailurePolicy::Stop),
+    )
+    .await;
+    live.seeded(2).await;
+    live.settings(
+        "held_stop",
+        serde_json::json!({ "index.blocks.write": true }),
+    )
+    .await;
+    for index in ["held_stop", "steady"] {
+        exec(
+            &pg.pool,
+            &format!("INSERT INTO {index} (id, name) VALUES ('1', 'one'), ('2', 'two')"),
+        )
+        .await;
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while live.health("held_stop").kind() != "blocked" {
+        live.still_running();
+        assert!(
+            Instant::now() < deadline,
+            "held_stop never parked as blocked"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    live.control
+        .send(SinkControl::Reindex {
+            indexes: vec![IndexName::try_new("held_stop").unwrap()],
+        })
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !live.health("held_stop").is_open() {
+        live.still_running();
+        assert!(
+            Instant::now() < deadline,
+            "the reindex opens the lane (the block on the old generation never lifts)"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for (id, name) in [("1", "one"), ("2", "two")] {
+        assert!(
+            live.sees("held_stop", id, name, Duration::from_secs(90))
+                .await,
+            "held_stop/{id} is read from the new generation once seeded"
+        );
+    }
+    assert!(
+        live.sees("steady", "2", "two", Duration::from_secs(30))
+            .await,
+        "the sibling stays current"
+    );
+    exec(
+        &pg.pool,
+        "INSERT INTO held_stop (id, name) VALUES ('3', 'three')",
+    )
+    .await;
+    assert!(
+        live.sees("held_stop", "3", "three", Duration::from_secs(30))
+            .await,
+        "the lane writes as usual into the new generation"
+    );
+    live.still_running();
+    live.task.abort();
+}
+
 /// The generation behind `lost` is deleted while the deployment runs: its
 /// lane is staged again into a fresh generation and backfilled, while
 /// `steady` stays current. No restart.
@@ -540,8 +620,8 @@ async fn deploy(pg: &Pg, os: &Os, indexes: &[&str], policies: FailurePolicies) -
     .with_builds(common::e2e_builds())
     .with_budget(common::e2e_budget());
     let running = Arc::clone(&sink_engine);
+    let (sender, mut control) = tokio::sync::mpsc::channel::<SinkControl>(4);
     let task = tokio::spawn(async move {
-        let (_control, mut control) = tokio::sync::mpsc::channel::<SinkControl>(1);
         tokio::select! {
             result = ingest.run() => result,
             result = running.run(&mut control) => result,
@@ -549,6 +629,7 @@ async fn deploy(pg: &Pg, os: &Os, indexes: &[&str], policies: FailurePolicies) -
     });
     Deployment {
         task,
+        control: sender,
         sink: sink_engine,
         progress,
         quarantined,
