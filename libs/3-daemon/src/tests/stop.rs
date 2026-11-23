@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -17,6 +18,7 @@ use tokio::sync::{Notify, oneshot};
 use super::{ScriptedSource, backendless_config, backends, primary, row_event, users, wait_until};
 use crate::status::Phase;
 use crate::{ControlError, Daemon, FenceLevel, FenceOutcome, FenceRequest};
+use engine::{EngineId, Observer, Stop};
 
 /// A sink whose flushes wait for `release` while `held`, then report
 /// `visibility`. Counts flushes.
@@ -73,6 +75,39 @@ impl Sink for UnstageableSink {
 
     async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         Ok(WriteReport::clean())
+    }
+}
+
+/// A sink whose staging asks for the stop: the staging then ends inside the
+/// poll that already looked at the stop.
+#[derive(Debug, Default)]
+struct StoppingSink {
+    stop: OnceLock<Stop>,
+}
+
+#[async_trait]
+impl Sink for StoppingSink {
+    async fn ensure_index(&self, _: &IndexMapping) -> sink::Result<sink::Ensured> {
+        if let Some(stop) = self.stop.get() {
+            stop.request();
+        }
+        Ok(sink::Ensured::default())
+    }
+
+    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        Ok(WriteReport::clean())
+    }
+}
+
+/// Records whether the ingest engine ran to its end.
+#[derive(Debug, Default)]
+struct IngestRan(AtomicBool);
+
+impl Observer for IngestRan {
+    fn on_engine_stopped(&self, engine: &EngineId) {
+        if matches!(engine, EngineId::Ingest) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 }
 
@@ -300,5 +335,113 @@ async fn a_stop_nobody_waits_on_does_not_sit_out_the_refresh_interval() {
         started.elapsed() < refresh,
         "nobody waits on searchable: {:?}",
         started.elapsed()
+    );
+}
+
+/// Fourth review of #470, 1: a stop requested before the first staging never
+/// lets the source prepare: the supervisor doesn't go on to the engines, so
+/// a `Fresh` source's rebuild can't be skipped and then prepared over (#120).
+/// Here the stop is the daemon's own, requested before the run starts, with
+/// a sink whose staging is ready at once.
+#[tokio::test]
+async fn a_stop_before_the_first_staging_never_prepares() {
+    for _ in 0..20 {
+        let source = ScriptedSource::new(Vec::new()).with_continuity(Continuity::Fresh);
+        let events = Arc::clone(&source.events);
+        let sink = Arc::new(super::RecordingSink::seeded().with_events(&events));
+        let ensured = Arc::clone(&sink.ensured);
+        let backends = backends(
+            source,
+            vec![(primary(), sink as Arc<dyn Sink>, SinkOptions::default())],
+        );
+        let running = Daemon::new(backendless_config(), backends)
+            .start()
+            .await
+            .unwrap();
+        running.stop.request();
+        tokio::time::timeout(Duration::from_secs(5), running.run(std::future::pending()))
+            .await
+            .expect("the run ends on the stop")
+            .unwrap();
+        let events = events.lock().unwrap().clone();
+        assert!(
+            !events.contains(&"prepare".to_owned()),
+            "never prepared: {events:?}"
+        );
+        assert_eq!(
+            ensured.load(Ordering::SeqCst),
+            0,
+            "the supervisor saw the stop first: nothing staged"
+        );
+    }
+}
+
+/// Fourth review of #470, 1, as the reviewer reproduced it: a shutdown that
+/// is ready at once races the first staging; whichever wins, the source is
+/// never prepared without the `Fresh` rebuild staged first.
+#[tokio::test]
+async fn a_shutdown_racing_the_first_staging_never_prepares_without_the_rebuild() {
+    for _ in 0..60 {
+        let source = ScriptedSource::new(Vec::new()).with_continuity(Continuity::Fresh);
+        let events = Arc::clone(&source.events);
+        let sink = Arc::new(super::RecordingSink::seeded().with_events(&events));
+        let backends = backends(
+            source,
+            vec![(primary(), sink as Arc<dyn Sink>, SinkOptions::default())],
+        );
+        let running = Daemon::new(backendless_config(), backends)
+            .start()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), running.run(std::future::ready(())))
+            .await
+            .expect("the run ends on the stop")
+            .unwrap();
+        let events = events.lock().unwrap().clone();
+        if events.contains(&"prepare".to_owned()) {
+            assert!(
+                events.contains(&"reindex users".to_owned()),
+                "prepared without the rebuild: {events:?}"
+            );
+        }
+    }
+}
+
+/// Fifth review of #470, 1: a stop requested from inside the first staging
+/// ends that staging in the poll that already passed the stop. The check
+/// after staging is then the only thing keeping the engines from starting
+/// behind a staging that only ensured.
+#[tokio::test]
+async fn a_stop_requested_inside_the_first_staging_starts_no_engine() {
+    let source = ScriptedSource::new(Vec::new()).with_continuity(Continuity::Fresh);
+    let events = Arc::clone(&source.events);
+    let sink = Arc::new(StoppingSink::default());
+    let ingest_ran = Arc::new(IngestRan::default());
+    let backends = backends(
+        source,
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let running = Daemon::new(backendless_config(), backends)
+        .with_observer(Arc::clone(&ingest_ran) as Arc<dyn Observer>)
+        .start()
+        .await
+        .unwrap();
+    sink.stop.set(running.stop.clone()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), running.run(std::future::pending()))
+        .await
+        .expect("the run ends on the stop")
+        .unwrap();
+    let events = events.lock().unwrap().clone();
+    assert!(
+        !events.contains(&"prepare".to_owned()),
+        "never prepared: {events:?}"
+    );
+    assert!(
+        !ingest_ran.0.load(Ordering::SeqCst),
+        "the ingest engine never ran"
     );
 }

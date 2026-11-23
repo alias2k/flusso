@@ -236,6 +236,17 @@ pub(crate) struct LaneState {
     /// the lane parks: what a reindex holds when the item is not in the
     /// window (X12).
     pub(crate) parked_item: Option<(Option<stream::ItemKey>, Option<u64>)>,
+    /// A reindex the lane is owed: its staging failed, and it is retried on
+    /// the restage backoff (§15.3, X15). Cleared when the lane opens.
+    pub(crate) reindex: Option<OwedReindex>,
+}
+
+/// A reindex whose staging failed, waiting for its retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwedReindex {
+    /// The lane was parked when it was asked: once staged, its parked item
+    /// is held until the seed, as a reindex of a parked lane does (X2).
+    pub(crate) parked: bool,
 }
 
 /// The item a reindex left a lane holding: which item, and whether its index
@@ -269,6 +280,7 @@ impl LaneState {
             superseded: BTreeMap::new(),
             held_for_seed: Vec::new(),
             parked_item: None,
+            reindex: None,
         }
     }
 
@@ -370,6 +382,26 @@ impl LaneState {
             || self.unproven
             || !self.superseded.is_empty()
             || !self.held_for_seed.is_empty()
+    }
+
+    /// A reindex could not stage (X15): the lane is owed it, `restaging` with
+    /// `reason`, and the reindex is tried again after the restage backoff,
+    /// doubled each time up to the schedule's longest. A lane already not
+    /// open keeps when it stopped being. Whether the lane was open.
+    pub(crate) fn reindex_failed(&mut self, reason: String, now: Instant) -> bool {
+        let parked = matches!(self.health, LaneHealth::Parked { .. })
+            || self.reindex.is_some_and(|owed| owed.parked);
+        let (was_open, since) = match &self.health {
+            LaneHealth::Open => (true, now),
+            LaneHealth::Parked { since, .. } | LaneHealth::Restaging { since, .. } => {
+                (false, *since)
+            }
+        };
+        self.reindex = Some(OwedReindex { parked });
+        self.rebuild = None;
+        self.health = LaneHealth::Restaging { since, reason };
+        self.restage_failed(now);
+        was_open
     }
 
     /// Staging failed: try again after the backoff, doubled each time up to

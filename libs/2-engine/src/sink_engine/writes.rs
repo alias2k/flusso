@@ -128,7 +128,7 @@
 
 use std::cmp::Ordering as Order;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -149,8 +149,8 @@ use super::flights::Flights;
 use super::health::{HeldForSeed, LaneState, supersedes};
 use super::walked::Walked;
 use super::{
-    Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, SinkControl, SinkEngine, shown_id,
-    until,
+    Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, Reindexed, STAGING_AT_THE_STOP,
+    SinkControl, SinkEngine, shown_id, until,
 };
 use crate::error::{EngineError, Result};
 use crate::observer::{CommitStats, Stage, StageTiming, Work};
@@ -308,6 +308,8 @@ enum Outcome {
     Refresh(sink::Result<WriteReport>),
     /// A lane's index staged again after its target went missing.
     Restage(Result<()>),
+    /// The retry of a reindex a lane is owed (X15).
+    Reindex(Reindexed),
 }
 
 /// A lane waiting for its empty caught-up write: the item whose
@@ -638,6 +640,16 @@ impl<'a> Run<'a> {
         }
         if self.engine.stop.is_requested() {
             self.skip_backfill().await?;
+            // A lane not open takes one item at a time: release and read
+            // again until a restaging lane has nothing more ready, so the
+            // drain doesn't wait a loop wake-up per item.
+            loop {
+                self.release_restaging_on_stop().await?;
+                if !(self.unhealthy > 0 && self.wants_more() && self.fill()?) {
+                    break;
+                }
+                self.skip_backfill().await?;
+            }
             self.probe_on_stop();
             if self.holding > 0 {
                 self.release_held_on_stop().await?;
@@ -648,23 +660,19 @@ impl<'a> Run<'a> {
         } else {
             None
         };
-        if let Some(indexes) = pending {
+        if let Some(indexes) = pending.as_ref().filter(|_| self.engine.stop.is_requested()) {
+            tracing::info!(?indexes, sink = %self.engine.name, "stopping: the reindex is not staged; ask again after the restart");
+        } else if let Some(indexes) = pending {
             let started = Instant::now();
-            match self.engine.reindex(indexes.clone()).await {
-                Ok(staged) => self.reindexed(&staged).await?,
-                // A reindex that cannot stage its new generation fails alone
-                // (X11): the lanes stay as they were, the sink goes on.
-                Err(error) => {
-                    tracing::error!(?indexes, sink = %self.engine.name, %error, "the reindex could not stage its new generation; it is dropped and every lane is left as it was");
-                }
-            }
+            let reindexed = self.engine.reindex(indexes).await;
+            self.settle_reindex(reindexed).await?;
             self.engine.observer.on_stage(
                 StageTiming::new(Stage::Reindex, started.elapsed()).sink(&self.engine.name),
             );
         }
         if !self.engine.reindex_pending() {
             if self.unhealthy > 0 {
-                self.start_restages();
+                self.start_restages().await?;
                 self.ask_rebuilds().await?;
             }
             // An ordered sink first takes every lane's front, so the pick by
@@ -687,7 +695,7 @@ impl<'a> Run<'a> {
             // have found its target missing: stage it now, not at the next
             // wake-up.
             if self.unhealthy > 0 {
-                self.start_restages();
+                self.start_restages().await?;
             }
         }
         Ok(())
@@ -765,10 +773,17 @@ impl<'a> Run<'a> {
         }
     }
 
-    /// Stage again each lane whose target went missing, once nothing of it
-    /// is in flight, as a flight holding no write slot.
-    fn start_restages(&mut self) {
+    /// Stage again each lane whose target went missing, or retry the reindex
+    /// it is owed (X15), once nothing of it is in flight, as a flight holding
+    /// no write slot.
+    async fn start_restages(&mut self) -> Result<()> {
         let now = Instant::now();
+        // Once stopping, no lane is staged again and no owed reindex retried:
+        // nothing new is staged or asked for, and their items are released
+        // unapplied (`release_restaging_on_stop`).
+        if self.engine.stop.is_requested() {
+            return Ok(());
+        }
         let due: Vec<usize> = (0..self.lanes.len())
             .filter(|lane| {
                 self.lanes.get(*lane).is_some_and(|run| {
@@ -779,32 +794,87 @@ impl<'a> Run<'a> {
             .filter(|lane| !self.lane_in_flight(*lane))
             .collect();
         for lane in due {
-            let Some(index) = self.lanes.get(lane).map(|run| run.key.index.clone()) else {
+            let Some((index, owed)) = self
+                .lanes
+                .get(lane)
+                .map(|run| (run.key.index.clone(), run.health.reindex.is_some()))
+            else {
                 continue;
             };
-            tracing::info!(%index, sink = %self.engine.name, "staging the index again: its target is gone");
             let flight = self.next_flight;
             self.next_flight += 1;
             self.restaging.push((flight, lane));
             let engine = self.engine;
             let restage = async move {
                 let started = Instant::now();
-                let result = engine.restage(&index).await;
+                let outcome = if owed {
+                    Outcome::Reindex(engine.reindex_again(&index).await)
+                } else {
+                    tracing::info!(%index, sink = %engine.name, "staging the index again: its target is gone");
+                    Outcome::Restage(engine.restage(&index).await)
+                };
                 Landed {
                     flight,
-                    outcome: Outcome::Restage(result),
+                    outcome,
                     took: started.elapsed(),
                 }
             };
             if let Some(landed) = self.flights.start(restage.boxed()) {
-                self.restage_returned(
-                    landed.flight,
-                    match landed.outcome {
-                        Outcome::Restage(result) => result,
-                        _ => Ok(()),
-                    },
-                );
+                Box::pin(self.landed(landed)).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// The retry of an owed reindex returned (X15, X16): staged, it is the
+    /// reindex, and the lane is handled as one (`reindexed`); failed again, it
+    /// is tried again after its backoff, with the new reason.
+    async fn reindex_returned(&mut self, flight: u64, reindexed: Reindexed) -> Result<()> {
+        let Some(at) = self.restaging.iter().position(|(id, _)| *id == flight) else {
+            return Ok(());
+        };
+        self.restaging.swap_remove(at);
+        self.settle_reindex(reindexed).await
+    }
+
+    /// What a reindex staged and could not, from the control (staged inline)
+    /// or an owed retry alike: each failure owed (X15), each staged index
+    /// handled as a reindex (`reindexed`). Once stopping it is recorded only:
+    /// the staged indexes are owed too and no lane opens; what they staged is
+    /// the next start's (X19, X20).
+    async fn settle_reindex(&mut self, reindexed: Reindexed) -> Result<()> {
+        let Reindexed { staged, mut failed } = reindexed;
+        if self.engine.stop.is_requested() {
+            failed.extend(
+                staged
+                    .into_iter()
+                    .map(|index| (index, STAGING_AT_THE_STOP.to_owned())),
+            );
+            self.reindex_failed(failed);
+            return Ok(());
+        }
+        self.reindex_failed(failed);
+        self.reindexed(&staged).await
+    }
+
+    /// Each of `failed` could not stage its reindex (X15): its lane is owed
+    /// it, `restaging` with the reason, retried after its backoff. An owed
+    /// index is rebuilding for whoever asked, so its fences say so, also when
+    /// its staging never started (review of #470, 5).
+    fn reindex_failed(&mut self, failed: Vec<(IndexName, String)>) {
+        let now = Instant::now();
+        for (index, reason) in failed {
+            self.engine
+                .observer
+                .on_index_rebuilding(&self.engine.name, &index);
+            let Some(run) = self.lanes.iter_mut().find(|run| run.key.index == index) else {
+                continue;
+            };
+            if run.health.reindex_failed(reason.clone(), now) {
+                self.unhealthy += 1;
+            }
+            tracing::warn!(lane = %run.key, %reason, retry_in = ?run.health.due.saturating_duration_since(now), "the reindex could not stage; the lane waits for it and it is tried again");
+            self.engine.store_lane(&run.key, &run.health, true);
         }
     }
 
@@ -823,6 +893,9 @@ impl<'a> Run<'a> {
         };
         run.walked.reset();
         match result {
+            // Once stopping the lane stays restaging, its items released
+            // unapplied: the next start stages it (X19).
+            Ok(()) if self.engine.stop.is_requested() => {}
             Ok(()) => {
                 if let Some(down) = run.health.reopen(now) {
                     self.unhealthy = self.unhealthy.saturating_sub(1);
@@ -870,7 +943,10 @@ impl<'a> Run<'a> {
             return false;
         }
         if run.barrier || !run.health.is_open() || self.ordered() {
-            return run.waiting() == 0 && !self.lane_in_flight(lane);
+            // Once stopping, a restaging lane is released as it is read, even
+            // while its staging is still out (X19).
+            let released = self.engine.stop.is_requested() && self.lane_restaging(lane);
+            return run.waiting() == 0 && (released || !self.lane_in_flight(lane));
         }
         // With several lanes, a lane with nothing waiting always takes one
         // item, so a quiet index's next change is seen by live-first and the
@@ -1703,6 +1779,9 @@ impl<'a> Run<'a> {
                 self.restage_returned(landed.flight, result);
                 return Ok(());
             }
+            Outcome::Reindex(reindexed) => {
+                return self.reindex_returned(landed.flight, reindexed).await;
+            }
         };
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
             return Ok(());
@@ -1939,7 +2018,8 @@ impl<'a> Run<'a> {
             if !staged.contains(&run.key.index) || run.health.is_open() {
                 continue;
             }
-            let parked = matches!(run.health.health, LaneHealth::Parked { .. });
+            let parked = matches!(run.health.health, LaneHealth::Parked { .. })
+                || run.health.reindex.is_some_and(|owed| owed.parked);
             let identity = run.health.parked_item;
             let front = parked
                 .then(|| {
@@ -2032,6 +2112,53 @@ impl<'a> Run<'a> {
             }
         }
         self.acknowledge_held().await
+    }
+
+    /// Once stopping, the live items and the completion of a `restaging`
+    /// lane (its target gone, or owed its reindex) are acknowledged unwritten
+    /// and unapplied, as held items are (X10): it is not staged again, so the
+    /// drain doesn't wait for it, its applied mark (so the slot) stays before
+    /// their changes, its index stays unseeded, and the next start stages it
+    /// and replays them (§15.3, X19). Its backfill pages are `skip_backfill`'s.
+    async fn release_restaging_on_stop(&mut self) -> Result<()> {
+        let mut index = 0;
+        while index < self.window.len() {
+            let release = self.window.get(index).is_some_and(|queued| {
+                let positioned = match &queued.item {
+                    Queue::Batch { batch, .. } => batch.position.is_some(),
+                    Queue::Complete { .. } => true,
+                };
+                positioned && self.lane_restaging(queued.lane)
+            });
+            if !release {
+                index += 1;
+                continue;
+            }
+            let Some(Queued {
+                item,
+                handle,
+                lane,
+                seq,
+                ..
+            }) = self.take_from_window(index)
+            else {
+                continue;
+            };
+            let build = match item {
+                Queue::Batch { batch, .. } => batch.build,
+                Queue::Complete { index, .. } => {
+                    tracing::info!(%index, sink = %self.engine.name, "stopping: the lane is restaging, so its backfill's completion seeds nothing; the next start stages and backfills it");
+                    if let Some(run) = self.lanes.get_mut(lane) {
+                        run.walked.ended(seq, Instant::now());
+                    }
+                    None
+                }
+            };
+            let oldest = self.is_oldest(lane, seq);
+            self.acknowledge(handle, lane, seq, build, oldest, None)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Acknowledge the held items settled since the last step.
@@ -3030,26 +3157,34 @@ fn run_rejected(report: &WriteReport, lane: usize, lanes: &[LaneRun]) -> Vec<Str
         .collect()
 }
 
-/// The root keys of `batch`'s documents, in envelope order, matched by
-/// rendered id against the build's ids the item carries (a build's ids are
-/// a superset: documents left out as failed, or by F9's `without`, have no
-/// envelope); `None` when the item carries none or an envelope has no match,
-/// and then the probe writes the item itself (F2): never a wrong key.
+/// The root keys of `batch`'s documents, in envelope order, matched by index
+/// and rendered id against the build's ids the item carries (a superset:
+/// documents left out as failed or by F9's `without`; one index's, since each
+/// index has its own builder, with the index checked as a guard);
+/// `None` when the item carries none, an envelope has no match, or two keys
+/// of its index render as its id, and then the probe writes the item itself
+/// (F2): never a wrong key.
 fn keys_of(batch: &Batch) -> Option<Vec<kernel::RowKey>> {
     let ids = batch.ids.as_ref()?;
     if batch.envelopes.is_empty() {
         return None;
     }
-    let by_id: std::collections::HashMap<String, &kernel::DocumentId> =
-        ids.iter().map(|id| (id.rendered(), id)).collect();
+    let mut by_id: HashMap<String, Vec<&kernel::DocumentId>> = HashMap::new();
+    for id in ids.iter() {
+        by_id.entry(id.rendered()).or_default().push(id);
+    }
     batch
         .envelopes
         .iter()
         .map(|envelope| {
-            by_id
-                .get(&envelope.id)
-                .filter(|id| id.index == envelope.index)
-                .map(|id| id.key.clone())
+            let mut own = by_id
+                .get(&envelope.id)?
+                .iter()
+                .filter(|id| id.index == envelope.index);
+            let key = &own.next()?.key;
+            // Two keys of one index rendering alike: the envelope can't say
+            // which it is, so no keys at all rather than a wrong one.
+            own.all(|other| other.key == *key).then(|| key.clone())
         })
         .collect()
 }
@@ -3193,6 +3328,77 @@ mod tests {
             keys_of(&batch(vec![envelope("orders", 1)], None)),
             None,
             "no ids"
+        );
+    }
+
+    /// Review of `main` at `9b70cd6e`, 1: the guard. A build's ids hold one
+    /// index (each index has its own builder); should a list ever hold two
+    /// whose ids render alike (`orders` 1 and `users` 1), each index still
+    /// finds its own key.
+    #[test]
+    fn a_rendered_id_shared_by_two_indexes_still_finds_its_key() {
+        // Keyed by different columns, so the two keys differ though both
+        // render `1`: only the index tells them apart.
+        let users = kernel::DocumentId {
+            index: IndexName::try_new("users").unwrap(),
+            key: kernel::RowKey(vec![(
+                kernel::ColumnName::try_new("uid").unwrap(),
+                kernel::GenericValue::BigInt(1),
+            )]),
+        };
+        let ids = Arc::new(vec![id("orders", 1), users.clone()]);
+        for (index, key) in [
+            ("orders", id("orders", 1).key),
+            ("users", users.key.clone()),
+        ] {
+            let batch = Batch {
+                envelopes: vec![envelope(index, 1)].into(),
+                ids: Some(Arc::clone(&ids)),
+                ..Batch::default()
+            };
+            assert_eq!(keys_of(&batch), Some(vec![key]), "{index}");
+        }
+    }
+
+    /// Review of `main` at `9b70cd6e`, 3: two keys of one index that render
+    /// alike (`a:b`+`c` and `a`+`b:c`) cannot be told apart by the envelope:
+    /// no keys, and the probe writes the item itself (F2).
+    #[test]
+    fn two_keys_rendering_alike_in_one_index_give_no_keys() {
+        let composite = |a: &str, b: &str| kernel::DocumentId {
+            index: IndexName::try_new("orders").unwrap(),
+            key: kernel::RowKey(vec![
+                (
+                    kernel::ColumnName::try_new("x").unwrap(),
+                    kernel::GenericValue::String(a.to_owned()),
+                ),
+                (
+                    kernel::ColumnName::try_new("y").unwrap(),
+                    kernel::GenericValue::String(b.to_owned()),
+                ),
+            ]),
+        };
+        let first = composite("a:b", "c");
+        let second = composite("a", "b:c");
+        assert_eq!(first.rendered(), second.rendered());
+        let delete = |id: &kernel::DocumentId| {
+            Envelope::delete(id.index.clone(), id.rendered(), None, chrono::Utc::now())
+        };
+        let batch = Batch {
+            envelopes: vec![delete(&first)].into(),
+            ids: Some(Arc::new(vec![first.clone(), second.clone()])),
+            ..Batch::default()
+        };
+        assert_eq!(keys_of(&batch), None, "ambiguous: probe the item itself");
+        let repeated = Batch {
+            envelopes: vec![delete(&first)].into(),
+            ids: Some(Arc::new(vec![first.clone(), first.clone()])),
+            ..Batch::default()
+        };
+        assert_eq!(
+            keys_of(&repeated),
+            Some(vec![first.key.clone()]),
+            "one key listed twice is not ambiguous"
         );
     }
 

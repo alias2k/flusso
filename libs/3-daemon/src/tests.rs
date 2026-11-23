@@ -666,6 +666,8 @@ struct RecordingSink {
     reindexed: Arc<Mutex<Vec<String>>>,
     events: Arc<Mutex<Vec<String>>>,
     failing_flushes: AtomicU64,
+    /// How often an index was ensured: a staging ran.
+    ensured: Arc<AtomicU64>,
 }
 
 impl RecordingSink {
@@ -683,6 +685,11 @@ impl RecordingSink {
 
 #[async_trait]
 impl Sink for RecordingSink {
+    async fn ensure_index(&self, _mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
+        self.ensured.fetch_add(1, Ordering::SeqCst);
+        Ok(sink::Ensured::default())
+    }
+
     async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         for envelope in envelopes {
             self.ops.lock().unwrap().push(format!(

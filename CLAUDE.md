@@ -1414,8 +1414,10 @@ is the one concrete piece.
   `a_stop_whose_final_position_never_reaches_the_source_fails_the_run`). A stalled sink holds
   the drain (confirmation follows the slowest lane); the caller's deadline bounds it. After it the supervisor
   waits on `Fence::settled` only while a `/wait` on `searchable` is open, so a stop nobody waits on
-  doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`; an ingest
-  engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (a stop raised mid-burst
+  doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`: the daemon's first
+  staging looks at the stop first and again after (`biased`), and the ingest engine checks it before the source's first
+  `prepare` (`has_prepared`: a run restarted after going live still prepares and opens, its stream being how the final
+  position is handed over; the note's X22); an ingest engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (a stop raised mid-burst
   ends the batch there, `drain_ready`'s check; mid-build batch
   published and flushed by every sink, final confirm before close; nothing read after the stop; an
   abandoned snapshot re-served; queued snapshot batches skipped, their index left unseeded; a stalled
@@ -1699,7 +1701,7 @@ is the one concrete piece.
   The health (`LaneHealth`, public; `on_lane_health`/`on_lane_probe` events) lives on the
   `SinkEngine` and outlives a run; a parked lane stays parked across a failed run, on its schedule.
   **A refused lane's probe is a fresh build** (stage 9 second half, slice 1; the note's §14.1): when its
-  probe is due and its front item's keys are found (`Batch.ids`: the build's own `Arc<Vec<DocumentId>>`, shared by refcount with every lane, never serialized; `writes.rs`'s `keys_of` matches each envelope by rendered id and index, and an unmatched one means no keys, so the item itself is probed; the vector is lent, and `Builds::spare` takes it back from `lent` once only the pool holds it, so no allocation per build; `DocumentId`/`RowKey` live in the kernel; the note's §15.0 has the per-batch cost), the sink engine offers
+  probe is due and its front item's keys are found (`Batch.ids`: the build's own `Arc<Vec<DocumentId>>`, shared by refcount with every lane, never serialized; `writes.rs`'s `keys_of` matches each envelope by rendered id and index, and an unmatched one, or two keys of its index rendering alike, means no keys, so the item itself is probed; the vector is lent, and `Builds::spare` takes it back from `lent` once only the pool holds it, so no allocation per build; `DocumentId`/`RowKey` live in the kernel; the note's §15.0 has the per-batch cost), the sink engine offers
   `Request::Rebuild { index, sink, keys, ticket }` (`now_or_never`: a request lane nobody reads never
   stalls the sink) and waits for the answer on its sink's **substitute lane** (`Stream::substitutes`,
   a default that answers `Unsupported` and leaves the old same-item probe; the channel adapter has one per
@@ -1732,8 +1734,29 @@ is the one concrete piece.
   `a_stale_or_unanswered_fresh_build_falls_back_to_the_item`,
   `an_older_build_queued_behind_the_parked_item_is_not_written_over_its_substitute`,
   `a_stop_probes_a_refused_lane_with_its_own_item`; `ingest::tests::rebuilds`. **A reindex unsticks a lane**
-  (slice 2, the note's 15.1): `SinkEngine::reindex` returns the indexes it staged; for each, a lane parked or
-  restaging opens (`writes.rs`'s `reindexed`), a parked lane's front item is held (`LaneRun.held`,
+  (slice 2, the note's 15.1): `SinkEngine::reindex` returns the indexes it staged and those it could not
+  (`Reindexed`, per index: one failing never drops another's backfill). One that could not is **owed**
+  (`LaneState.reindex`, kept across runs, so staging at a start leaves it): its lane is `restaging` with the
+  error as reason and `start_restages` retries the reindex (`reindex_again`) on the restage backoff, so the
+  fence's `rebuilding` stays true until a seed (§15.3; guards `a_reindex_whose_staging_fails_is_retried_until_it_stages`,
+  `a_reindex_of_two_indexes_stages_one_while_the_other_is_retried`, `an_owed_reindex_outlives_a_failed_run`);
+  asking for an index's backfill failing makes that index owed too, never fails the run (`stage_reindex`
+  records every index staged or owed before returning; guards `a_failed_ask_for_a_backfill_leaves_every_index_of_the_reindex_owed`,
+  `a_reindex_whose_backfill_request_fails_is_owed`). Once stopping, nothing is staged and no new backfill is
+  asked for: no restaging lane (target gone or owed) is staged again, a pending reindex is dropped, a staging already
+  out ends as state only (no lane opened; an ask already in progress completes, never served), and a restaging lane's live items and completion are acknowledged
+  unapplied as held items are, read and released until none is ready (`release_restaging_on_stop`; the note's
+  X19 table says what releases every item in every lane state; guards
+  `a_stop_while_a_reindex_is_owed_drains_at_once_and_stages_nothing`, `a_reindex_pending_at_a_stop_is_not_staged`,
+  `a_stop_releases_the_completion_waiting_on_an_owed_lane`, `a_stop_releases_a_lane_restaging_a_missing_target`,
+  `a_stop_during_an_owed_retry_records_it_and_writes_nothing_more`,
+  `a_retry_returning_staged_during_a_stop_leaves_the_lane_owed`). Both reindex paths (inline, retry) end in
+  `settle_reindex`. A run restarted during the stop stages with `stage_while_stopping`: ensure only, an index that
+  can't be ensured left restaging; a stop landing while a staging ensures is looked at again before any ask or
+  reopen (guards `staging_after_a_run_failed_during_the_stop_only_ensures`,
+  `an_open_lane_not_ensured_under_the_stop_is_released`, `a_stop_during_a_staging_makes_it_ensure_only`). The
+  engines are never started, and the source never prepared for the first time, once a stop is requested (the note's X22). The owed reindex is in memory: a process restart forgets it
+  (the note's X20). For each index staged, a lane parked or restaging opens (`writes.rs`'s `reindexed`), a parked lane's front item is held (`LaneRun.held`,
   `LaneState.held_for_seed` by item key and build so a redelivery is held again) unwritten and unacknowledged
   until the index is seeded, then acknowledged and reported applied (`release_held`), so the slot never passes
   its change before the new generation holds it; an outstanding backfill of a lane not open is cut and asked again

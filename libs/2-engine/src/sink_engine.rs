@@ -97,6 +97,10 @@ use crate::stop::Stop;
 /// flooding it, or the client's connection pool, at start.
 pub(crate) const STAGE_CONCURRENCY: usize = 8;
 
+/// Why a reindex staged as the stop came is left owed (X19).
+const STAGING_AT_THE_STOP: &str =
+    "the reindex was staging as the stop came; the next start picks it up";
+
 /// The longest an idle window stays open before it is reported, so a quiet
 /// sink reads as idle in every scrape, not as one spike when work resumes.
 const IDLE_TICK: Duration = Duration::from_secs(1);
@@ -340,6 +344,10 @@ impl SinkEngine {
             tracing::warn!(%index, sink = %self.name, "staged again with no backfill (backfill off for this sink, or skip_backfill): it holds only what is written from now on");
             return Ok(());
         }
+        if self.stop.is_requested() {
+            tracing::info!(%index, sink = %self.name, "stopping: staged again, its backfill is asked for at the next start");
+            return Ok(());
+        }
         if self.outstanding().contains(index) {
             return self.ask_again(vec![(index.clone(), target)]).await;
         }
@@ -480,6 +488,10 @@ impl SinkEngine {
     #[tracing::instrument(name = "sink.stage", skip_all, fields(sink = %self.name, ?continuity))]
     pub async fn stage(&self, continuity: Continuity) -> Result<()> {
         let started = Instant::now();
+        if self.stop.is_requested() {
+            self.stage_while_stopping(started).await;
+            return Ok(());
+        }
         let backfill = self.options.backfill;
         let mut seeded = self
             .each_index(
@@ -491,6 +503,12 @@ impl SinkEngine {
             .await?;
         self.observer
             .on_indexes_ensured(&self.name, self.mappings.len());
+        // A stop that came while ensuring makes this staging ensure only too
+        // (X21): nothing asked for, no restaging lane reopened.
+        if self.stop.is_requested() {
+            self.staged(started);
+            return Ok(());
+        }
 
         if !backfill {
             tracing::info!("backfill disabled for this sink; live changes only");
@@ -548,13 +566,56 @@ impl SinkEngine {
         Ok(())
     }
 
+    /// Staging for a run restarted during the stop (X21): every index is
+    /// ensured and nothing more. No backfill is asked for and no restaging
+    /// lane reopens; an index that can't be ensured, or wasn't tried after
+    /// another failed, is left restaging with why, for the stop to release
+    /// like any other, rather than failing the staging and holding the stop
+    /// until its deadline.
+    async fn stage_while_stopping(&self, started: Instant) {
+        tracing::info!(sink = %self.name, "staging during the stop: the indexes are ensured only");
+        let tried = self
+            .try_each_index(self.mappings.iter(), Step::Ensure { ask_seeded: false })
+            .await;
+        self.observer
+            .on_indexes_ensured(&self.name, self.mappings.len());
+        let unstaged = tried
+            .failed
+            .into_iter()
+            .map(|(index, error)| {
+                (
+                    index,
+                    format!("could not be ensured during the stop: {error}"),
+                )
+            })
+            .chain(tried.not_started.into_iter().map(|index| {
+                (
+                    index,
+                    "not ensured during the stop: another index failed first".to_owned(),
+                )
+            }));
+        let now = Instant::now();
+        for (index, reason) in unstaged {
+            let lane = LaneKey::new(index, self.name.clone());
+            let mut state = self.lane_state(&lane);
+            if state.restage(reason, now) {
+                tracing::warn!(%lane, "could not be ensured during the stop; its items are released unapplied");
+            }
+            self.store_lane(&lane, &state, true);
+        }
+        self.staged(started);
+    }
+
     /// Every index was just ensured: a lane waiting to be staged again after
-    /// its target went missing is staged.
+    /// its target went missing is staged. A lane owed a reindex is not: its
+    /// retry stages the reindex (X17).
     fn reopen_restaged(&self) {
         let restaged: Vec<LaneKey> = self
             .lock_health()
             .iter()
-            .filter(|(_, state)| matches!(state.health, LaneHealth::Restaging { .. }))
+            .filter(|(_, state)| {
+                matches!(state.health, LaneHealth::Restaging { .. }) && state.reindex.is_none()
+            })
             .map(|(lane, _)| lane.clone())
             .collect();
         for lane in restaged {
@@ -650,6 +711,21 @@ impl SinkEngine {
         mappings: impl IntoIterator<Item = &'a IndexMapping>,
         step: Step,
     ) -> Result<Vec<(&'a IndexMapping, Staged)>> {
+        let tried = self.try_each_index(mappings, step).await;
+        if tried.failed.is_empty() {
+            Ok(tried.done)
+        } else {
+            Err(EngineError::Staging(StagingFailures(tried.failed)))
+        }
+    }
+
+    /// [`each_index`](Self::each_index), every outcome kept: what staged,
+    /// what failed, and what was not started after a failure.
+    async fn try_each_index<'a>(
+        &self,
+        mappings: impl IntoIterator<Item = &'a IndexMapping>,
+        step: Step,
+    ) -> Tried<'a> {
         let mut waiting = mappings.into_iter().enumerate();
         let mut running = FuturesUnordered::new();
         let mut outcomes = Vec::new();
@@ -668,19 +744,18 @@ impl SinkEngine {
             outcomes.push(outcome);
         }
         outcomes.sort_unstable_by_key(|(order, _, _)| *order);
-        let mut done = Vec::with_capacity(outcomes.len());
-        let mut failed = Vec::new();
+        let mut tried = Tried {
+            done: Vec::with_capacity(outcomes.len()),
+            failed: Vec::new(),
+            not_started: waiting.map(|(_, mapping)| mapping.index.clone()).collect(),
+        };
         for (_, mapping, outcome) in outcomes {
             match outcome {
-                Ok(seeded) => done.push((mapping, seeded)),
-                Err(error) => failed.push((mapping.index.clone(), error)),
+                Ok(seeded) => tried.done.push((mapping, seeded)),
+                Err(error) => tried.failed.push((mapping.index.clone(), error)),
             }
         }
-        if failed.is_empty() {
-            Ok(done)
-        } else {
-            Err(EngineError::Staging(StagingFailures(failed)))
-        }
+        tried
     }
 
     /// One index's staging steps, in order. Whether an outstanding backfill
@@ -897,17 +972,19 @@ impl SinkEngine {
         self.skipped.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stage a rebuild of `indexes` and request their snapshot; the indexes
-    /// staged. The current generation keeps serving until the snapshot
-    /// completes and the sink swaps. A sink with `backfill = false` has
-    /// nothing to rebuild. An index whose backfill is outstanding is left to
-    /// that backfill while its lane is open; with its lane parked, blocked or
-    /// restaging the reindex is the way out, so the backfill is cut and asked
-    /// for again from the first key (stage 9, X6).
-    async fn reindex(&self, indexes: Vec<IndexName>) -> Result<Vec<IndexName>> {
+    /// Stage a rebuild of `indexes` and request their snapshot: the indexes
+    /// staged, and each that could not be with why (§15.3, X14, X15). The
+    /// current generation keeps serving until the snapshot completes and the
+    /// sink swaps. A sink with `backfill = false` has nothing to rebuild. An
+    /// index whose backfill is outstanding is left to that backfill while its
+    /// lane is open; with its lane parked, blocked or restaging the reindex is
+    /// the way out, so the backfill is cut and asked for again from the first
+    /// key (stage 9, X6). Nothing is lost on a failure: see
+    /// [`stage_reindex`](Self::stage_reindex).
+    async fn reindex(&self, indexes: Vec<IndexName>) -> Reindexed {
         if !self.options.backfill {
             tracing::warn!("reindex requested, but backfill is disabled for this sink; ignoring");
-            return Ok(Vec::new());
+            return Reindexed::default();
         }
         let outstanding = self.outstanding();
         let mut chosen = Vec::new();
@@ -930,38 +1007,99 @@ impl SinkEngine {
             tracing::info!(%index, "reindex requested; staging a fresh generation");
             chosen.push(mapping);
         }
-        let mut fresh: Vec<(IndexName, Option<WalkMark>, Option<TargetId>)> = Vec::new();
-        let mut cut: Vec<(IndexName, Option<TargetId>)> = Vec::new();
-        for (mapping, staged) in self
-            .each_index(chosen, Step::Rebuild { ask_seeded: false })
-            .await?
-        {
+        self.stage_reindex(chosen, &outstanding).await
+    }
+
+    /// Retry the reindex `index` is owed (X15): staged, its backfill is
+    /// asked for as the reindex would have.
+    pub(super) async fn reindex_again(&self, index: &IndexName) -> Reindexed {
+        let Some(mapping) = self.mappings.iter().find(|m| &m.index == index) else {
+            return Reindexed::default();
+        };
+        tracing::info!(%index, sink = %self.name, "retrying the reindex its staging failed");
+        let outstanding = self.outstanding();
+        self.stage_reindex(vec![mapping], &outstanding).await
+    }
+
+    /// Stage `chosen` for a reindex and ask for each one's backfill. Every
+    /// index ends in `staged` or in `failed`, whatever fails and in whatever
+    /// order: a failed staging, an index not started after another failed,
+    /// and an index whose ask for its backfill failed (a sink write to forget
+    /// its walk, or the request lane) are each owed, never dropped (§15.3).
+    async fn stage_reindex(
+        &self,
+        chosen: Vec<&IndexMapping>,
+        outstanding: &BTreeSet<IndexName>,
+    ) -> Reindexed {
+        let tried = self
+            .try_each_index(chosen, Step::Rebuild { ask_seeded: false })
+            .await;
+        let mut reindexed = Reindexed {
+            staged: Vec::new(),
+            failed: tried
+                .failed
+                .into_iter()
+                .map(|(index, error)| (index, format!("the reindex could not stage: {error}")))
+                .collect(),
+        };
+        reindexed
+            .failed
+            .extend(tried.not_started.into_iter().map(|index| {
+                (
+                    index,
+                    "the reindex could not stage: not started after another index failed"
+                        .to_owned(),
+                )
+            }));
+        for (mapping, staged) in tried.done {
+            let index = mapping.index.clone();
+            if self.stop.is_requested() {
+                reindexed
+                    .failed
+                    .push((index, STAGING_AT_THE_STOP.to_owned()));
+                continue;
+            }
             let target = match staged {
                 Staged::Unseeded { target, .. } => target,
                 Staged::Seeded => None,
             };
-            if outstanding.contains(&mapping.index) {
-                tracing::warn!(index = %mapping.index, sink = %self.name, "reindex during a backfill: the backfill is cut and asked for again");
-                cut.push((mapping.index.clone(), target));
+            let asked = if outstanding.contains(&index) {
+                tracing::warn!(%index, sink = %self.name, "reindex during a backfill: the backfill is cut and asked for again");
+                self.ask_again(vec![(index.clone(), target)]).await
             } else {
-                fresh.push((mapping.index.clone(), None, target));
+                self.request_backfill(vec![(index.clone(), None, target)])
+                    .await
+            };
+            match asked {
+                Ok(()) => reindexed.staged.push(index),
+                Err(error) => reindexed.failed.push((
+                    index,
+                    format!("the reindex could not ask for its backfill: {error}"),
+                )),
             }
         }
-        let mut staged: Vec<IndexName> = fresh.iter().map(|(index, _, _)| index.clone()).collect();
-        staged.extend(cut.iter().map(|(index, _)| index.clone()));
-        if !cut.is_empty() {
-            self.ask_again(cut).await?;
-        }
-        if !fresh.is_empty() {
-            self.request_backfill(fresh).await?;
-        }
-        Ok(staged)
+        reindexed
     }
 
     /// Whether `index`'s backfill is still outstanding (not seeded yet).
     pub(super) fn is_outstanding(&self, index: &IndexName) -> bool {
         self.lock_outstanding().contains_key(index)
     }
+}
+
+/// Every index a staging tried: what it learned of each that staged, each
+/// that failed with its error, and each not started after a failure.
+struct Tried<'a> {
+    done: Vec<(&'a IndexMapping, Staged)>,
+    failed: Vec<(IndexName, sink::SinkError)>,
+    not_started: Vec<IndexName>,
+}
+
+/// What a reindex staged, and each index it could not stage with why.
+#[derive(Debug, Default)]
+pub(super) struct Reindexed {
+    pub(super) staged: Vec<IndexName>,
+    pub(super) failed: Vec<(IndexName, String)>,
 }
 
 /// What staging learned of an index.

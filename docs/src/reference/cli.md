@@ -113,9 +113,28 @@ The drain, in order:
 
 | Exit | Means |
 | --- | --- |
-| `0` | Every step of the drain completed: what was read is indexed and its final position confirmed to Postgres. The one exception is `--shutdown-timeout-secs 0`, which doesn't drain and logs `stopped without draining, as asked`. An HTTP connection left open or telemetry that didn't flush in its 5 s is logged, not counted: neither is the data path. |
+| `0` | Every step of the drain completed: what was read is indexed and its final position confirmed to Postgres, except the changes a [lane flusso doesn't write](#lanes-flusso-doesnt-write-at-a-stop) leaves for the next start. The one exception is `--shutdown-timeout-secs 0`, which doesn't drain and logs `stopped without draining, as asked`. An HTTP connection left open or telemetry that didn't flush in its 5 s is logged, not counted: neither is the data path. |
 | `1` | The deadline passed during the drain, the final position couldn't be confirmed to Postgres (`the final position was not confirmed to the source`), or the pipeline failed. |
 | `128 + n` | The drain was forced (the rule above). |
+
+#### Lanes flusso doesn't write at a stop
+
+A [lane](http.md#lane-health) that isn't being written, or is waiting on a reindex, doesn't hold the drain, with one exception: a parked lane that still can't land.
+
+| The lane at the stop | What the stop does | Exit |
+| --- | --- | --- |
+| `refused` or `blocked` | Writes its oldest item once more, at once and as it was (no [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build)). If it lands, the lane opens and drains. If it is refused or blocked again, it holds the drain until the deadline. | `1` at the deadline, naming the lane |
+| `restaging`: its target gone, or a reindex [waiting to stage](http.md#when-the-reindex-cant-stage) | Stages nothing, retries nothing, asks for no backfill. Its changes are let go unwritten and unconfirmed. | `0` |
+| `open`, its stuck item waiting for a [reindex's](http.md#a-reindex-of-a-lane-flusso-doesnt-write) backfill | Lets the stuck item go, unconfirmed; the items behind it are written as usual. The backfill is abandoned like any other. | `0` |
+
+A change let go was never confirmed to the slot, so the next start reads it again: it stages a `restaging` index, backfills an index left unseeded, and writes the change like any other. What it does about a reindex that was waiting: [A restart keeps or drops it](http.md#when-the-reindex-cant-stage).
+
+**A reindex at the stop.** A new one is refused with `503`. One queued and not staged yet is dropped, and the log says `stopping: the reindex is not staged; ask again after the restart`. A staging already under way finishes but opens no lane: the lane is left `restaging`, with the reason `the reindex was staging as the stop came; the next start picks it up`.
+
+**Two waits remain**, beside the parked lane:
+
+- **A reindex being staged when the stop came.** The drain waits for the destination to answer that one staging.
+- **A sink that fails during the stop.** It is restarted after its [`[backoff]`](config-toml.md#backoff) wait, then only makes sure its indexes exist: no backfill is asked for and no lane reopens. That wait doubles each time the sink fails again without progress, up to `max_ms` (60 s by default), past the default 30 s deadline, so such a stop can end at the deadline with exit `1`.
 
 Until the pipeline is started (through [validation at start](#validation-at-start)), a signal ends the process the default way, at once; a parent that exits meanwhile is noticed as soon as it is.
 

@@ -12,6 +12,7 @@ A **lane** is one index flowing into one sink. Open this page when any of these 
 - The log says `the lane is parked`, `the index's target is gone`, or `a lane has landed nothing for …s`.
 - The log says `index held at max_waiting_per_index: exempt, …`, `exempt index frozen: …` or `reading stopped for every index: …`: an index is stuck and its changes are piling up. See [When one index is stuck beside others](#when-one-index-is-stuck-beside-others).
 - [`/status`](../reference/http.md#get-status) shows a lane whose `health` isn't `open`, or whose `stall_seconds` keeps climbing.
+- A lane reads `restaging` with a `reason` starting `the reindex could not stage`. See [A reindex that can't stage](#a-reindex-that-cant-stage).
 - `pinned_by` names an index with `"sink": null` and keeps naming it: no lane is stuck, the index's backlog is. See [When an index's backlog holds the slot](#when-an-indexs-backlog-holds-the-slot).
 - The log says `the index's builder failed` or `the index's backfill failed`, or `/status` shows an index `"state": "down"` or its `backfill` `retrying`: one index's own work failed and restarts alone. See [When an index is down or its backfill keeps failing](#when-an-index-is-down-or-its-backfill-keeps-failing).
 
@@ -23,7 +24,7 @@ A lane that keeps writing is not stalled, however long its backlog. For a whole 
 - **Memory.** The other indexes keep being written, but documents queued behind the stuck lane hold part of the [memory budget](../reference/config-toml.md#concurrency). With two or more indexes, the stuck index's live documents fill only its share (`index_budget_share`, half by default) and the others keep building. Its later changes wait as documents to build, about 270 B each, up to a bound ([below](#when-one-index-is-stuck-beside-others)). Meanwhile a healthy index builds one batch per acknowledgement round, since it gets room only while it holds no live documents ([memory budget](../reference/config-toml.md#concurrency)), so its throughput drops though it keeps moving. A stuck index's backfill can hold backfill's half of the budget; another index's backfill (a reindex, a new sink) still goes on beside it, one batch at a time.
 - **Fences on that index.** A [`/wait`](../reference/http.md#get-waitpositionposition) covering the stuck lane times out (`408`); a wait that names only other indexes (`index=…`) still answers.
 
-Dropping and rebuilding just the stuck index is not available yet ([#394](https://github.com/alias2k/flusso/issues/394)).
+A [reindex](#unstick-a-lane-with-a-reindex) rebuilds the stuck index alone, on one sink, but the lane keeps holding the slot until that backfill is seeded. Dropping a stalled index so it stops holding the slot is not available yet ([#394](https://github.com/alias2k/flusso/issues/394)).
 
 ## Steps
 
@@ -61,7 +62,7 @@ WARN the lane is parked: its item is written again alone after the backoff; the 
 | --- | --- | --- | --- |
 | `blocked` | OpenSearch refuses every write to the index for now: a write block, or a role without write permission on it. | Holds the lane, writes its oldest batch again alone at `next_probe`. Quarantines nothing, whatever `on_error` says. | [Lift the block](#a-write-block) or [grant the permission](#a-role-without-write-permission) |
 | `refused` | A document was refused under `on_error = "stop"`; `reason` names the ids. | Holds the lane, writes a [fresh build](../reference/index-and-on-error.md#a-refused-lanes-fresh-build) of the batch at `next_probe`. | [Fix the row](#a-document-refused-under-stop) |
-| `restaging` | The index's target was deleted while flusso ran. | Stages that index again and backfills it, alone. | [Nothing, usually](#a-deleted-index) |
+| `restaging` | The index's target was deleted while flusso ran, or a reindex couldn't create its new generation. | Stages that index again and backfills it, alone, retrying on its own. | [Nothing, usually](#a-deleted-index), or [lift what blocks the reindex](#a-reindex-that-cant-stage) |
 | `open` | flusso writes the lane; something else stops it landing. | Restarts the sink with backoff. | [The sink itself](#the-sink-itself-health-open) |
 
 A `refused` or `blocked` lane is **parked**. While it is, the sink's other indexes keep being written. Each retry of the held lane is a **probe**, on the [`[backoff]`](../reference/config-toml.md#backoff) schedule: 1 s after it parked, then doubling to 60 s, by default. Another index landing never shortens the wait. `flusso_lane_probes_total{outcome}` counts the probes.
@@ -102,13 +103,45 @@ The flood-stage block is not a `blocked` lane. OpenSearch answers it with `429`,
 2. **Delete the row.** The next probe writes the delete, which lands.
 3. **Set `on_error = "skip"`** on that index and restart. The refused document is quarantined; the row's next change indexes it. See [Handle rejected documents](rejected-documents.md).
 4. **Change the schema** when the mapping can't take the value (a wider type, a `custom` type, a `default`), and restart. A schema change builds a new index.
-5. **Reindex**, for `Limit of total fields … exceeded`: raise the limit with [`index_settings`](../reference/sink-opensearch.md#index-settings), restart, and [reindex](reindex.md).
+5. **Reindex**, for `Limit of total fields … exceeded`: raise the limit with [`index_settings`](../reference/sink-opensearch.md#index-settings), restart, and [reindex](#unstick-a-lane-with-a-reindex).
 
 #### A deleted index
 
 A `restaging` lane fixes itself: flusso creates a fresh generation for that index, backfills it, and opens the lane, while the other indexes keep writing. Reads through the alias return 404 until the generation exists, and `/wait` answers `503 backfilling` for the index until its backfill completes. A lane that stays `restaging` is one whose staging keeps failing; the log says `could not stage the index again; trying again later` with the cause, retried with the same backoff.
 
 An index deleted **mid-backfill** is backfilled again from the first row, and stays `backfilling` until that fresh backfill lands. Where `action.auto_create_index` lets a write recreate the generation, the lane never goes `restaging`: the writes land in a dynamically mapped index until the seed or the next start replaces it. If that mapping refuses a document under `on_error = "stop"`, the lane parks `refused` and stays parked; restart flusso to replace the index. See [Why forbid auto-create](../reference/sink-opensearch.md#why-forbid-auto-create).
+
+#### Unstick a lane with a reindex
+
+A [reindex](reindex.md) of the stuck index on that sink opens a `refused`, `blocked` or `restaging` lane as soon as it is staged:
+
+```sh
+flusso reindex users --sink primary --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
+```
+
+The item the lane was stuck on comes from the new generation's backfill instead of being written again ([details](../reference/http.md#a-reindex-of-a-lane-flusso-doesnt-write)).
+
+| The lane is stuck on | Reindex? |
+| --- | --- |
+| A write block on that index you can't or won't lift | Yes |
+| A mapping or settings changed by hand on the index | Yes |
+| A `restaging` lane whose staging keeps failing | Yes, unless the cause is the whole cluster |
+| A `refused` row the mapping can't take | No: the new backfill is refused at the same row. [Fix the row](#a-document-refused-under-stop), or set `on_error = "skip"` |
+| A block on the whole cluster | No: the reindex can't stage. Lift the block |
+
+- **Until the backfill is seeded** the lane reads `open` but still holds the slot, and its `stall_seconds` keeps growing: `FlussoLaneStalled` can fire on a long backfill. `pinned_by` can name the lane meanwhile.
+- **If it can't stage**, the lane turns `restaging`: [A reindex that can't stage](#a-reindex-that-cant-stage).
+- **After a restart of flusso**, check the lane: a reindex still waiting may be gone. Ask again if it's still stuck.
+
+#### A reindex that can't stage
+
+`reason` reads `the reindex could not stage: …` (or `the reindex could not ask for its backfill: …`) followed by the error, and the log says `the reindex could not stage; the lane waits for it and it is tried again`.
+
+- **What it means.** A [reindex](#unstick-a-lane-with-a-reindex) of this index was accepted (`202`), but its new generation couldn't be created, or its backfill couldn't be asked for. flusso retries it on its own, on the [`[backoff]`](../reference/config-toml.md#backoff) schedule; a momentary error heals by itself.
+- **Meanwhile.** The sink's other indexes keep being written. This lane writes nothing and holds the slot before its oldest change. A `/wait` on the index answers `503 rebuilding` at its timeout. `FlussoLaneParked` fires after 5 minutes (`why="restaging"`).
+- **What to do.** Lift what `reason` names: often a block on the whole cluster, or a role that can't create indexes. The next retry completes the reindex.
+- **How to tell it worked.** The lane turns `open` and the log says `reindexed: the lane is open; …`. The index goes `backfilling`, then `seeded`.
+- **After a restart of flusso** the retry may be gone: ask for the reindex again if the lane is still stuck ([what a restart keeps](../reference/http.md#when-the-reindex-cant-stage)).
 
 #### The sink itself (health `open`)
 
@@ -120,7 +153,7 @@ The lane is written but nothing lands. The log has OpenSearch's reason and `sink
 
 ### 4. Watch it recover
 
-- The log says `the parked lane's probe landed; the lane is open` (or `the index is staged again; the lane is open`), then `a stalled lane is landing again`.
+- The log says `the parked lane's probe landed; the lane is open` (or `the index is staged again; the lane is open`, or `reindexed: the lane is open; …`), then `a stalled lane is landing again`.
 - `health` is back to `open`, `stall_seconds` drops to 0, the `flusso_lane_parked` series disappears.
 - `pinned_by` moves on and the slot releases the WAL it kept.
 - If the index was exempt, the log says `index no longer exempt: it paces the reading again at max_waiting_per_index` once fewer than `max_waiting_per_index` of its documents wait. While it drains, it may say `exempt index frozen: …` first.
@@ -265,7 +298,7 @@ curl -s localhost:9464/indexes/orders/status | jq '{state, down_since, last_erro
 - **`/readyz` stays ready.** A parked lane doesn't make flusso unready: the other indexes are written and served, and a restart wouldn't help. Alert on the lane, not on readiness.
 - **A slow lane isn't stalled.** A lane that lands, just slowly, fires neither alert; `flusso:backlog_drain_eta_seconds` shows how long it will take. flusso logs a warning once a lane passes 10 minutes without landing, and every 10 minutes after.
 - **A backfill that stops making progress** shows as the index staying `backfilling` in `/status` while `flusso.documents.built` stops moving. A live change queued behind it on the same lane does age, and alerts.
-- **A stop with a parked lane.** A stop probes every parked lane once more at once. If one still can't land, the drain waits for `--shutdown-timeout-secs`, then flusso exits `1` naming the lane: `primary: 3 changes in flight, lane users blocked since 2026-11-19T12:03:11Z (blocked: …)`. Documents it read for that index and couldn't build are named too: `users: 1200 documents read and not built`. The next start writes those batches again first and reads the rest again. See [Stopping](../reference/cli.md#stopping).
+- **A stop with a lane not open.** A parked lane is probed once more at once; one that still can't land holds the drain until `--shutdown-timeout-secs`, then flusso exits `1` naming it: `primary: 3 changes in flight, lane users blocked since 2026-11-19T12:03:11Z (blocked: …)`. A `restaging` lane, or one waiting on a reindex's backfill, doesn't hold the stop: its changes are left for the next start. Each case is in [Lanes flusso doesn't write at a stop](../reference/cli.md#lanes-flusso-doesnt-write-at-a-stop).
 - **A process restart resets the stall age.** The age is kept in memory, so a process that crash-loops never ages a lane into `FlussoLaneStalled`. Alert on the process too: `up{job="<flusso's scrape job>"} == 0` for a few minutes, or under Kubernetes `increase(kube_pod_container_status_restarts_total{container="flusso"}[15m]) > 2`.
 
 ## Related

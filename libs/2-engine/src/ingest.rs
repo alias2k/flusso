@@ -59,7 +59,7 @@ mod tests;
 mod together;
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
@@ -167,6 +167,9 @@ pub struct IngestEngine {
     /// runs and builder restarts (stage 9, fresh builds).
     build_numbers: AtomicU64,
     stop: Stop,
+    /// The source was prepared by a run of this engine: a stop before a later
+    /// run still opens its stream, so the stop hands the position over.
+    has_prepared: AtomicBool,
     /// How many times this engine moved the source forward (see
     /// [`advances`](Self::advances)), across restarts of its run.
     advances: AtomicU64,
@@ -231,6 +234,7 @@ impl IngestEngine {
                 .collect(),
             build_numbers: AtomicU64::new(1),
             stop: Stop::new(),
+            has_prepared: AtomicBool::new(false),
             advances: AtomicU64::new(0),
             furthest: Mutex::new(Furthest::default()),
             progress,
@@ -359,6 +363,11 @@ impl IngestEngine {
     /// The daemon calls this only after every sink engine has staged, so
     /// [`ChangeCapture::prepare`] runs after any stale-seed rebuild was staged
     /// and before any snapshot (the #120 ordering).
+    ///
+    /// A [`Stop`] requested before this engine ever prepared the source ends
+    /// the run at once with `Ok`: nothing is prepared and no stream is opened.
+    /// A later run of an engine that has prepared goes on as usual, so its
+    /// stream can hand the final position over.
     #[tracing::instrument(name = "ingest.run", skip_all, fields(max_changes = self.batch.max_changes))]
     pub async fn run(&self) -> Result<()> {
         // Whatever ends the run (its end, a stop, an error, a drop), nothing
@@ -384,8 +393,17 @@ impl IngestEngine {
     }
 
     async fn run_inner(&self) -> Result<Ended> {
+        // The resume point is made only once every rebuild was staged (#120);
+        // a stop before the first preparation may have cut that staging short.
+        // A restarted run prepares and opens as usual: its stream is how the
+        // stop's final position reaches the source.
+        if self.stop.is_requested() && !self.has_prepared.load(Ordering::Acquire) {
+            tracing::info!("stop requested before the source was prepared; nothing is captured");
+            return Ok(Ended::Stopped);
+        }
         let started = Instant::now();
         self.source.prepare().await?;
+        self.has_prepared.store(true, Ordering::Release);
         self.observer
             .on_startup_step(StartupStep::Prepare, None, started.elapsed());
         let lanes: Lanes = self
