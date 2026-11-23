@@ -114,7 +114,7 @@ OpenSearch checks ids before it runs a bulk request, and one bad id refuses the 
 A rejected id is an item-level rejection like any other, so the index's [`on_error`](index-and-on-error.md#on_error) decides it and nothing retries it:
 
 - **`skip`**: the document is quarantined and the batch is acked. The log carries `document rejected by sink; quarantining and continuing` with the `index`, `id`, and `reason` (a log line and `last_error` show the first 64 characters of a longer id, then its length); [`/status`](http.md#get-status) counts it in `documents_quarantined`, and the [`flusso.documents.quarantined`](metrics.md) counter goes up. The row stays out of the index until its key changes.
-- **`stop`**: the rest of the batch is written, and the index's lane **parks** with the batch unconfirmed, while the sink's other indexes keep being written. [`/status`](http.md#lane-health) shows the lane `refused` with the reason `refused: id kkkk… (600 bytes) (document id is 600 bytes; …)`. Each probe writes the same batch and is refused again, until the key is shortened, or the policy is `skip` and flusso restarted. See [A lane is stalled](../operate/stalled-lane.md).
+- **`stop`**: the rest of the batch is written, and the index's lane **parks** with the batch unconfirmed, while the sink's other indexes keep being written. [`/status`](http.md#lane-health) shows the lane `refused` with the reason `refused: id kkkk… (600 bytes) (document id is 600 bytes; …)`. Each probe writes a [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build) of the document and is refused again, until the row's key is shortened or the row deleted, or the policy is `skip` and flusso restarted. See [A lane is stalled](../operate/stalled-lane.md).
 
 ## Index settings
 

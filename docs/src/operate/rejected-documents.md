@@ -14,7 +14,7 @@ Three refusals look similar and are **not** rejections. `on_error` never sees th
 
 ## Steps
 
-1. **Know your policy.** The default, `stop`, drops nothing: the first rejection **parks** the index's lane on that sink. The batch stays unconfirmed and is written again alone on the [`[backoff]`](../reference/config-toml.md#backoff) schedule (1 s, doubling to 60 s, by default) until it lands. The index's later changes wait behind it; the other indexes, and the other sinks, keep going. `skip` quarantines the document and moves on. Dropping data is opt-in.
+1. **Know your policy.** The default, `stop`, drops nothing: the first rejection **parks** the index's lane on that sink. The batch stays unconfirmed. On the [`[backoff]`](../reference/config-toml.md#backoff) schedule (1 s, doubling to 60 s, by default) its documents are built again from the database and written alone (a [fresh build](../reference/index-and-on-error.md#a-refused-lanes-fresh-build)), until they land. The index's later changes wait behind it; the other indexes, and the other sinks, keep going. `skip` quarantines the document and moves on. Dropping data is opt-in.
 
 2. **Under `stop`, read the error.** The log names the index, the sink, the refused ids and OpenSearch's reason:
 
@@ -24,12 +24,12 @@ Three refusals look similar and are **not** rejections. `on_error` never sees th
 
    [`/status`](../reference/http.md#lane-health) shows the lane `refused` under `sinks.<sink>.lanes.<index>`, with the same `reason` and the next try in `next_probe`; `flusso_lane_parked{why="refused"}` is 1.
 
-3. **Fix the cause.** Each probe writes the **same** batch, so fixing the row in Postgres doesn't unpark the lane on its own. Pick the fix that matches the reason:
+3. **Fix the cause.** Each probe builds the refused documents again from the database, so a fixed row lands at the next probe, with no restart. Pick the fix that matches the reason:
 
    | Cause | Fix |
    | --- | --- |
-   | The schema doesn't fit the data (a wider type, a `custom` type, a `default`) | Change the schema and restart. A schema change builds a new index. |
-   | The row is wrong | Set `on_error = "skip"` on the index (step 4) and restart, then fix the row: its next change indexes it. |
+   | The row is wrong | Fix the row, or delete it. The next probe lands and the lane opens. |
+   | The schema doesn't fit the data (a wider type, a `custom` type, a `default`) | Change the schema and restart. A schema change builds a new index. Or set `on_error = "skip"` on the index (step 4) and restart. |
    | `Limit of total fields … exceeded` | Raise the limit with [`index_settings`](../reference/sink-opensearch.md#index-settings), restart, and [reindex](reindex.md). |
 
 4. **Opt into skipping where it's the right trade.** For an index where one bad row shouldn't hold up the rest, set the policy per index. Changing it never triggers a reindex.

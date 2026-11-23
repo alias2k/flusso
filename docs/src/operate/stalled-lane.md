@@ -60,7 +60,7 @@ WARN the lane is parked: its item is written again alone after the backoff; the 
 | `health` | What happened | What flusso does | Fix |
 | --- | --- | --- | --- |
 | `blocked` | OpenSearch refuses every write to the index for now: a write block, or a role without write permission on it. | Holds the lane, writes its oldest batch again alone at `next_probe`. Quarantines nothing, whatever `on_error` says. | [Lift the block](#a-write-block) or [grant the permission](#a-role-without-write-permission) |
-| `refused` | A document was refused under `on_error = "stop"`; `reason` names the ids. | Holds the lane, writes the same batch again at `next_probe`. | [Fix the schema or switch to `skip`](#a-document-refused-under-stop) |
+| `refused` | A document was refused under `on_error = "stop"`; `reason` names the ids. | Holds the lane, writes a [fresh build](../reference/index-and-on-error.md#a-refused-lanes-fresh-build) of the batch at `next_probe`. | [Fix the row](#a-document-refused-under-stop) |
 | `restaging` | The index's target was deleted while flusso ran. | Stages that index again and backfills it, alone. | [Nothing, usually](#a-deleted-index) |
 | `open` | flusso writes the lane; something else stops it landing. | Restarts the sink with backoff. | [The sink itself](#the-sink-itself-health-open) |
 
@@ -96,11 +96,13 @@ The flood-stage block is not a `blocked` lane. OpenSearch answers it with `429`,
 
 #### A document refused under `stop`
 
-`reason` reads `refused: id 42 (…)` with OpenSearch's words. The probe writes the **same** batch every time, so fixing the row in Postgres doesn't unpark the lane yet. Pick one:
+`reason` reads `refused: id 42 (…)` with OpenSearch's words. Each probe builds the refused documents again from Postgres (a [fresh build](../reference/index-and-on-error.md#a-refused-lanes-fresh-build)), so a fix in the database lands at the next probe, with no restart. The ways out, in order:
 
-- **The schema is wrong** (a value the mapping can't take: a wider type, a `custom` type, a `default`): fix the schema and restart. A schema change builds a new index.
-- **The row is wrong**: set `on_error = "skip"` on that index and restart, then fix the row. The refused document is quarantined; the row's next change indexes it. See [Handle rejected documents](rejected-documents.md).
-- **`Limit of total fields … exceeded`**: raise the limit with [`index_settings`](../reference/sink-opensearch.md#index-settings), restart, and [reindex](reindex.md).
+1. **Fix the row.** The next probe lands and the lane opens.
+2. **Delete the row.** The next probe writes the delete, which lands.
+3. **Set `on_error = "skip"`** on that index and restart. The refused document is quarantined; the row's next change indexes it. See [Handle rejected documents](rejected-documents.md).
+4. **Change the schema** when the mapping can't take the value (a wider type, a `custom` type, a `default`), and restart. A schema change builds a new index.
+5. **Reindex**, for `Limit of total fields … exceeded`: raise the limit with [`index_settings`](../reference/sink-opensearch.md#index-settings), restart, and [reindex](reindex.md).
 
 #### A deleted index
 

@@ -190,7 +190,7 @@ Each `(index, sink)` lane is written unless something about that one index stops
 
 A `refused` or `blocked` lane is **parked**: flusso holds it and probes it, and the logs say `the lane is parked`. The metric [`flusso.lane.parked`](metrics.md) and the `FlussoLaneParked` alert cover every lane that isn't `open`, `restaging` included; their `why` label is the lane's `health`.
 
-A **probe** writes a parked lane's oldest batch again, alone, on the [`[backoff]`](config-toml.md#backoff) schedule (1 s after it parked, doubling to 60 s, by default). Another lane landing never shortens the wait; a stop probes at once. A failed staging of a `restaging` lane is retried on the same schedule. A lane flusso doesn't write:
+A **probe** writes a parked lane's oldest batch again, alone, on the [`[backoff]`](config-toml.md#backoff) schedule (1 s after it parked, doubling to 60 s, by default). A `refused` lane's probe writes a [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build) of that batch instead; while it waits for one, the lane stays `refused` and `next_probe` is the end of the wait. Another lane landing never shortens the wait; a stop probes at once. A failed staging of a `restaging` lane is retried on the same schedule. A lane flusso doesn't write:
 
 ```json
 "users": {
