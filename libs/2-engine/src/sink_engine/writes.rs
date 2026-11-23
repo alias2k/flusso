@@ -149,8 +149,8 @@ use super::flights::Flights;
 use super::health::{HeldForSeed, LaneState, supersedes};
 use super::walked::Walked;
 use super::{
-    Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, Reindexed, SinkControl, SinkEngine,
-    shown_id, until,
+    Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, Reindexed, STAGING_AT_THE_STOP,
+    SinkControl, SinkEngine, shown_id, until,
 };
 use crate::error::{EngineError, Result};
 use crate::observer::{CommitStats, Stage, StageTiming, Work};
@@ -665,8 +665,7 @@ impl<'a> Run<'a> {
         } else if let Some(indexes) = pending {
             let started = Instant::now();
             let reindexed = self.engine.reindex(indexes).await;
-            self.reindex_failed(reindexed.failed);
-            self.reindexed(&reindexed.staged).await?;
+            self.settle_reindex(reindexed).await?;
             self.engine.observer.on_stage(
                 StageTiming::new(Stage::Reindex, started.elapsed()).sink(&self.engine.name),
             );
@@ -835,17 +834,22 @@ impl<'a> Run<'a> {
             return Ok(());
         };
         self.restaging.swap_remove(at);
+        self.settle_reindex(reindexed).await
+    }
+
+    /// What a reindex staged and could not, from the control (staged inline)
+    /// or an owed retry alike: each failure owed (X15), each staged index
+    /// handled as a reindex (`reindexed`). Once stopping it is recorded only:
+    /// the staged indexes are owed too and no lane opens; what they staged is
+    /// the next start's (X19, X20).
+    async fn settle_reindex(&mut self, reindexed: Reindexed) -> Result<()> {
         let Reindexed { staged, mut failed } = reindexed;
         if self.engine.stop.is_requested() {
-            // Recorded only: the lane stays owed and opens for nothing once
-            // stopping; what it staged is the next start's (X20).
-            failed.extend(staged.into_iter().map(|index| {
-                (
-                    index,
-                    "the reindex was staging as the stop came; the next start picks it up"
-                        .to_owned(),
-                )
-            }));
+            failed.extend(
+                staged
+                    .into_iter()
+                    .map(|index| (index, STAGING_AT_THE_STOP.to_owned())),
+            );
             self.reindex_failed(failed);
             return Ok(());
         }

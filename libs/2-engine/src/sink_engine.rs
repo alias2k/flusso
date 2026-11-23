@@ -97,6 +97,10 @@ use crate::stop::Stop;
 /// flooding it, or the client's connection pool, at start.
 pub(crate) const STAGE_CONCURRENCY: usize = 8;
 
+/// Why a reindex staged as the stop came is left owed (X19).
+const STAGING_AT_THE_STOP: &str =
+    "the reindex was staging as the stop came; the next start picks it up";
+
 /// The longest an idle window stays open before it is reported, so a quiet
 /// sink reads as idle in every scrape, not as one spike when work resumes.
 const IDLE_TICK: Duration = Duration::from_secs(1);
@@ -1000,11 +1004,9 @@ impl SinkEngine {
         for (mapping, staged) in tried.done {
             let index = mapping.index.clone();
             if self.stop.is_requested() {
-                reindexed.failed.push((
-                    index,
-                    "the reindex was staging as the stop came; the next start picks it up"
-                        .to_owned(),
-                ));
+                reindexed
+                    .failed
+                    .push((index, STAGING_AT_THE_STOP.to_owned()));
                 continue;
             }
             let target = match staged {

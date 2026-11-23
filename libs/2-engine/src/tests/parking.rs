@@ -3372,6 +3372,73 @@ async fn a_retry_returning_staged_during_a_stop_leaves_the_lane_owed() {
     task.abort();
 }
 
+/// Third review of #470, 1: a first reindex, staged inline, whose ask for
+/// its backfill is in progress when the stop comes. The ask completes
+/// (unserved), but once stopping the staged index is owed, not reindexed:
+/// the lane doesn't open, nothing after the stop is written, nothing is
+/// applied, and the drain waits only for that round trip.
+#[tokio::test(start_paused = true)]
+async fn a_first_reindex_staging_as_the_stop_comes_opens_nothing() {
+    let rig = Rig::new(Gate::default());
+    let slow = Arc::new(Mutex::new(None));
+    let stop = Stop::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        SinkEngine::new(
+            sink_name("primary"),
+            Arc::clone(&rig.sink) as Arc<dyn Sink>,
+            Arc::new(RefusingRequests {
+                inner: Arc::clone(&rig.stream),
+                refuse: Arc::default(),
+                slow: Arc::clone(&slow),
+            }) as Arc<dyn Stream>,
+            vec![mapping(orders()), mapping(users())],
+            Arc::clone(&rig.progress),
+        )
+        .with_writes(4)
+        .with_failure_policies(FailurePolicies::new(FailurePolicy::Stop))
+        .with_backoff(slow_backoff())
+        .with_stop(stop.clone())
+        .with_observer(rebuild_events(&events)),
+    );
+    engine.set_blame(Blame::Nobody);
+    rig.sink.answer(&orders(), Some(Answer::Refuse));
+    rig.live(&orders(), 0..1, 0).await;
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    eventually("parked", || !engine.lane_health(&lane(orders())).is_open()).await;
+    rig.sink.answer(&orders(), None);
+    *slow.lock().unwrap() = Some(Duration::from_secs(10));
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    eventually("staging", || attempts(&events, &orders()) > 0).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    stop.request();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    rig.live(&orders(), 1..2, 1).await;
+    let idle = idle_within(&rig, Duration::from_secs(60)).await;
+    assert!(
+        idle.is_some_and(|after| after < Duration::from_secs(9)),
+        "drained once the staging round trip returned: {idle:?}"
+    );
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(
+        engine.lane_health(&lane(orders())).kind(),
+        "restaging",
+        "owed, not opened"
+    );
+    assert_eq!(
+        writes_holding(&rig, &orders(), "1"),
+        0,
+        "nothing written after the stop"
+    );
+    assert_eq!(rig.applied(&orders()), before(0), "nothing applied");
+    task.abort();
+}
+
 /// X17 (review 2): the owed reindex is on the lane's state, so a run that
 /// fails meanwhile keeps it: staging at the next start leaves the lane
 /// `restaging`, and the next run's retry stages the reindex.
