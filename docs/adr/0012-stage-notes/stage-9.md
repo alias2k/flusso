@@ -618,3 +618,21 @@ runs to nextest's kill; the directed `rebuilds` tests fail at once.
   `acknowledged` each test `superseding > 0` first, the account lives on the per-run lane state, and
   `ff8b7b43` removed a per-landing `Vec` `8b87df0d` allocated. A throwaway pinned local A/B of `live_drain_held`
   against `origin/main` was within its noise (the machine's own load moved the base by 2× between rounds).
+
+## 15. Slice 2 (`feat/lane-failure-3`)
+
+### 15.0 Part 0: the per-batch cost slice 1 left
+
+The in-process gate read slice 1's one-change batches (`live_drain_held/sinks1/1`) 8 to 13% over `main` on two
+of three runs. What slice 1 added per published batch: a `Vec<RowKey>` of the documents' keys and its copy into an
+`Arc<[RowKey]>` (two allocations and a copy of 24 bytes per document), one refcount pair per lane for that `Arc`,
+one relaxed atomic add for the build number, and a `Batch` 32 bytes larger.
+
+**Now** the key is a field of the envelope (`Envelope.key: Option<RowKey>`, `#[serde(skip)]`): the builder moves
+each document's key into the envelope it already builds, so the keys cost no allocation and no copy of their
+own, and `Batch.keys` is gone. What a published batch pays over `main`, for one index or several: one relaxed
+`fetch_add` (the build number), a `Batch` 16 bytes larger (`build`), and an `Envelope` 24 bytes larger (copied
+once with the rest when the envelope vector becomes the shared `Arc<[Envelope]>`). The keys are dropped with the
+envelopes when the last lane acknowledges the item, where `main` dropped them at build. Keys do not survive a
+serializing stream (none exists; the in-process channel moves items): an item read back from bytes carries none,
+and its lane's probe writes the item itself (F2).

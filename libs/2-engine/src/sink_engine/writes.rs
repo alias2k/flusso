@@ -1887,11 +1887,12 @@ impl<'a> Run<'a> {
                 .iter()
                 .find(|queued| queued.lane == lane)
                 .and_then(|queued| match &queued.item {
-                    Queue::Batch { batch, .. }
-                        if !batch.keys.is_empty() && batch.keys.len() == batch.envelopes.len() =>
-                    {
-                        Some(batch.keys.to_vec())
-                    }
+                    // Every document's key, or none can be built again.
+                    Queue::Batch { batch, .. } if !batch.envelopes.is_empty() => batch
+                        .envelopes
+                        .iter()
+                        .map(|envelope| envelope.key.clone())
+                        .collect::<Option<Vec<_>>>(),
                     _ => None,
                 });
             let (Some(keys), Some(run)) = (keys, self.lanes.get_mut(lane)) else {
@@ -2753,8 +2754,8 @@ struct Returned {
     wanting: Vec<LaneKey>,
 }
 
-/// `batch` without the documents `ids` names (and their keys); the batch
-/// itself when it holds none of them.
+/// `batch` without the documents `left_out` names; the batch itself when it
+/// holds none of them.
 fn without(batch: Batch, left_out: impl Fn(&str) -> bool) -> Batch {
     if !batch
         .envelopes
@@ -2763,21 +2764,14 @@ fn without(batch: Batch, left_out: impl Fn(&str) -> bool) -> Batch {
     {
         return batch;
     }
-    let keyed = batch.keys.len() == batch.envelopes.len();
-    let mut envelopes = Vec::with_capacity(batch.envelopes.len());
-    let mut keys = Vec::new();
-    for (at, envelope) in batch.envelopes.iter().enumerate() {
-        if left_out(&envelope.id) {
-            continue;
-        }
-        envelopes.push(envelope.clone());
-        if keyed && let Some(key) = batch.keys.get(at) {
-            keys.push(key.clone());
-        }
-    }
+    let envelopes: Vec<Envelope> = batch
+        .envelopes
+        .iter()
+        .filter(|envelope| !left_out(&envelope.id))
+        .cloned()
+        .collect();
     Batch {
         envelopes: envelopes.into(),
-        keys: keys.into(),
         ..batch
     }
 }

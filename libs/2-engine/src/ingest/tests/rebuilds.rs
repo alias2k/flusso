@@ -107,7 +107,15 @@ async fn a_rebuild_is_built_once_and_sent_to_its_sink_only() {
         [kernel::Op::Upsert, kernel::Op::Delete],
         "row 25 is gone: a delete"
     );
-    assert_eq!(substitute.batch.keys.to_vec(), [key(5), key(25)]);
+    assert_eq!(
+        substitute
+            .batch
+            .envelopes
+            .iter()
+            .map(|envelope| envelope.key.clone())
+            .collect::<Vec<_>>(),
+        [Some(key(5)), Some(key(25))]
+    );
     assert!(substitute.batch.build.is_some());
     assert_eq!(
         (substitute.batch.key, substitute.batch.position),

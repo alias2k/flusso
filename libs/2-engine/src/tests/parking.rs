@@ -1063,10 +1063,10 @@ fn keyed(of: &IndexName, ids: &[i64], position: Option<u64>, build: u64) -> Lane
                     position.map(Position::new),
                     chrono::Utc::now(),
                 )
+                .with_key(key(*id))
             })
             .collect::<Vec<_>>()
             .into(),
-        keys: ids.iter().map(|id| key(*id)).collect::<Vec<_>>().into(),
         build: Some(build),
         ..Default::default()
     })
@@ -1135,6 +1135,7 @@ fn answering(rig: &Rig, builder: Arc<Builder>, first_build: u64) -> tokio::task:
                 .map(|id| {
                     if deleted.contains(id) {
                         Envelope::delete(index.clone(), id.to_string(), None, chrono::Utc::now())
+                            .with_key(key(*id))
                     } else {
                         Envelope::upsert(
                             index.clone(),
@@ -1143,6 +1144,7 @@ fn answering(rig: &Rig, builder: Arc<Builder>, first_build: u64) -> tokio::task:
                             None,
                             chrono::Utc::now(),
                         )
+                        .with_key(key(*id))
                     }
                 })
                 .collect();
@@ -1152,7 +1154,6 @@ fn answering(rig: &Rig, builder: Arc<Builder>, first_build: u64) -> tokio::task:
                     ticket,
                     batch: Batch {
                         envelopes: envelopes.into(),
-                        keys: keys.into(),
                         build: Some(build),
                         ..Default::default()
                     },

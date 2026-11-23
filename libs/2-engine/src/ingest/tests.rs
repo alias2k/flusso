@@ -1029,7 +1029,11 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
         let position = item.position();
         if let stream::LaneItem::Batch(batch) = &item {
             self.items.lock().unwrap().push((
-                batch.keys.iter().map(id_of).collect(),
+                batch
+                    .envelopes
+                    .iter()
+                    .map(|envelope| envelope.key.as_ref().map_or(-1, id_of))
+                    .collect(),
                 batch
                     .envelopes
                     .iter()

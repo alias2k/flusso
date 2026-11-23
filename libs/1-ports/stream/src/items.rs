@@ -94,11 +94,6 @@ pub struct Batch {
     /// [`LaneItem::SnapshotComplete`] names it). `None` on a live batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<Ticket>,
-    /// The root key of each envelope's document, in envelope order: what a
-    /// sink engine hands back in a [`Request::Rebuild`] to have the documents
-    /// built again. Empty when unknown, and then nothing can be rebuilt.
-    #[serde(default, skip_serializing_if = "<[RowKey]>::is_empty")]
-    pub keys: Arc<[RowKey]>,
     /// Its build's number on its index: one counter per index, taken as the
     /// item is published, shared by live, snapshot and fresh builds. Two
     /// builds of one document never overlap, so for one document a larger

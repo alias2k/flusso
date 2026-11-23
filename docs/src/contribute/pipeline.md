@@ -128,7 +128,7 @@ When its backoff is due, its front item is written alone: a **probe**. The wait 
 - **Refused or blocked again:** the backoff doubles.
 - **A stop:** every parked lane is probed once more at once.
 
-**A refused lane probes a fresh build.** When the front item carries its documents' keys (`Batch.keys`), the probe asks the index's builder to build them again (`Request::Rebuild`) instead of writing the item. The builder builds them now, as one live-kind build the budget never refuses, and sends them back on the sink's substitute lane (`Stream::substitutes`), apart from the lane the item heads. The substitute is written in the item's place; landed, the item is acknowledged and the lane opens. So a row fixed meanwhile unparks its lane, and a deleted one comes back as a delete.
+**A refused lane probes a fresh build.** When the front item's envelopes carry their documents' keys (`Envelope.key`, moved in as each envelope is built and never serialized), the probe asks the index's builder to build them again (`Request::Rebuild`) instead of writing the item. The builder builds them now, as one live-kind build the budget never refuses, and sends them back on the sink's substitute lane (`Stream::substitutes`), apart from the lane the item heads. The substitute is written in the item's place; landed, the item is acknowledged and the lane opens. So a row fixed meanwhile unparks its lane, and a deleted one comes back as a delete.
 
 - Items behind the parked one built before the substitute (a smaller `Batch.build`) are written without its documents: no document goes back to an older build.
 - No answer within the backoff (at most 5 s), or a request lane that can't take the request at once: the item itself is the probe, and the next probe asks again.
