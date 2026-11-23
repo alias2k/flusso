@@ -8,7 +8,7 @@ OpenSearch accepted a bulk request but refused one document in it: a value that 
 
 Three refusals look similar and are **not** rejections. `on_error` never sees them, and this page doesn't apply:
 
-- **The index refuses writes** (a [write block](../reference/sink-opensearch.md#write-blocks), a missing permission): the lane parks as `blocked` until the block is lifted. See [A lane is stalled](stalled-lane.md).
+- **The index refuses writes** (a [write block](../reference/sink-opensearch.md#write-blocks), a closed index, a missing permission): the lane parks as `blocked` until the block is lifted or the index opened. See [A lane is stalled](stalled-lane.md).
 - **The cluster is busy** (HTTP 429 or 503): the documents are [resent](../reference/sink-opensearch.md#retries).
 - **The whole write fails** (cluster down, the request refused): the sink restarts with backoff until it recovers.
 

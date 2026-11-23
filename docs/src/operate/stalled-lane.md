@@ -60,7 +60,7 @@ WARN the lane is parked: its item is written again alone after the backoff; the 
 
 | `health` | What happened | What flusso does | Fix |
 | --- | --- | --- | --- |
-| `blocked` | OpenSearch refuses every write to the index for now: a write block, or a role without write permission on it. | Holds the lane, writes its oldest batch again alone at `next_probe`. Quarantines nothing, whatever `on_error` says. | [Lift the block](#a-write-block) or [grant the permission](#a-role-without-write-permission) |
+| `blocked` | OpenSearch refuses every write to the index for now: a write block, a closed index, or a role without write permission on it. | Holds the lane, writes its oldest batch again alone at `next_probe`. Quarantines nothing, whatever `on_error` says. | [Lift the block](#a-write-block), [open the index](#a-closed-index) or [grant the permission](#a-role-without-write-permission) |
 | `refused` | A document was refused under `on_error = "stop"`; `reason` names the ids. | Holds the lane, writes a [fresh build](../reference/index-and-on-error.md#a-refused-lanes-fresh-build) of the batch at `next_probe`. | [Fix the row](#a-document-refused-under-stop) |
 | `restaging` | The index's target was deleted while flusso ran, or a reindex couldn't create its new generation. | Stages that index again and backfills it, alone, retrying on its own. | [Nothing, usually](#a-deleted-index), or [lift what blocks the reindex](#a-reindex-that-cant-stage) |
 | `open` | flusso writes the lane; something else stops it landing. | Restarts the sink with backoff. | [The sink itself](#the-sink-itself-health-open) |
@@ -86,6 +86,23 @@ curl -s -X PUT localhost:9200/users_1a2b3c4d_1/_settings \
 ```
 
 The next probe lands and the lane catches up, at most one [`max_ms`](../reference/config-toml.md#backoff) later (60 s by default). No restart, and nothing was lost meanwhile.
+
+#### A closed index
+
+`reason` reads `blocked: index [users_1a2b3c4d_1] is closed`: someone closed that generation (`POST /<index>/_close`).
+
+- **What it means.** A closed index takes no writes and serves no reads. flusso holds the lane and probes it like any `blocked` lane; nothing is quarantined, whatever `on_error` says.
+- **Meanwhile.** The sink's other indexes keep writing. This lane holds the slot, and a [`/wait`](../reference/http.md#get-waitpositionposition) that needs the index times out. A search or get on the index fails with `index_closed_exception`, so a fenced read gets an error, never stale data.
+- **What to do.** Open the generation `reason` names:
+
+  ```sh
+  curl -s -X POST localhost:9200/users_1a2b3c4d_1/_open
+  ```
+
+  Opening through the index's alias (`users`) opens the same generation. Or [reindex](#unstick-a-lane-with-a-reindex) the index on that sink: once the new generation is seeded, the closed one is dropped.
+- **How to tell it worked.** `curl -s 'localhost:9200/_cat/indices/users_*?h=index,status'` shows the generation `open`. The next probe lands, at most one [`max_ms`](../reference/config-toml.md#backoff) later, and the lane catches up with no restart. Everything the index held is searchable again.
+
+A closed index doesn't stop flusso from starting: the sink starts and only that lane parks, at its first write. flusso's own `flusso_meta` index is the exception: closed, it fails the sink's start until it's opened ([details](../reference/sink-opensearch.md#write-blocks)).
 
 #### A disk watermark
 
@@ -124,6 +141,7 @@ The item the lane was stuck on comes from the new generation's backfill instead 
 | The lane is stuck on | Reindex? |
 | --- | --- |
 | A write block on that index you can't or won't lift | Yes |
+| A closed index you won't open | Yes: the closed generation is dropped at the seed |
 | A mapping or settings changed by hand on the index | Yes |
 | A `restaging` lane whose staging keeps failing | Yes, unless the cause is the whole cluster |
 | A `refused` row the mapping can't take | No: the new backfill is refused at the same row. [Fix the row](#a-document-refused-under-stop), or set `on_error = "skip"` |

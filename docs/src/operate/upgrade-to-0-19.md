@@ -4,7 +4,8 @@
 
 **Running flusso**
 
-- **An index that can't be written parks alone**; the sink's other indexes keep writing, and a write block no longer drops documents under `on_error = "skip"` (#404): [One index's failure parks its own lane](#one-indexs-failure-parks-its-own-lane).
+- **An index that can't be written parks alone**; the sink's other indexes keep writing, and a write block or a closed index no longer drops documents under `on_error = "skip"` (#404): [One index's failure parks its own lane](#one-indexs-failure-parks-its-own-lane).
+- **A closed index no longer stops its sink from starting**; only its lane parks, and opening it resumes the lane: [A closed index parks its lane](#a-closed-index-parks-its-lane).
 - **`on_error = "stop"` no longer stops the sink**, and `/readyz` stays `200` while an index is parked; alert on the new `FlussoLaneParked` instead: [Alerting on a parked index](#alerting-on-a-parked-index).
 - **A reindex unsticks a stuck lane**: it opens a `refused`, `blocked` or `restaging` lane, and one that can't stage is retried on its own instead of dropped: [A reindex unsticks a lane](#a-reindex-unsticks-a-lane).
 - **The retry wait is configurable**: `[backoff]` sets the first and the longest wait of every restart and probe: [Retry timing is configurable](#retry-timing-is-configurable).
@@ -33,17 +34,18 @@
 | A document refused under `on_error = "stop"` | the sink stops and restarts with backoff | the lane is **refused** |
 | A write block (`index.blocks.write`, `read_only`, `read_only_allow_delete`: 403 `cluster_block_exception`) | an item-level rejection: **quarantined under `skip`** (documents lost), the sink stops under `stop` | the lane is **blocked**, whatever `on_error` says; nothing is quarantined |
 | An item-level 403 `security_exception` (the role can't write that index) | an item-level rejection | the lane is **blocked** |
+| A closed index (`POST /<index>/_close`: 400 `index_closed_exception`) | an item-level rejection: **quarantined under `skip`**, the sink stops under `stop` | the lane is **blocked**, whatever `on_error` says; nothing is quarantined ([details](#a-closed-index-parks-its-lane)) |
 | The index's generation deleted while running (`index_not_found_exception`) | the sink stops; its restart recreates the generation | that index alone is **staged again** and backfilled |
 | The whole `_bulk` refused, credentials refused, the cluster unreachable, busy past `max_retries` | the sink stops and restarts | unchanged |
 
 A refused or blocked lane is **parked**: it writes its oldest batch again alone (a **probe**) after 1 s, then with the wait doubling up to 60 s ([configurable](#retry-timing-is-configurable)). A refused lane's probe writes a [fresh build](../reference/index-and-on-error.md#a-refused-lanes-fresh-build) of that batch, built again from the database, so fixing or deleting the row lets it land. When a probe lands, the lane opens and the rest follows, with no restart. Meanwhile the lane holds the replication slot, as a stalled lane always has.
 
-**Who is affected.** Every deployment that writes more than one index to a sink: one bad document or one blocked index no longer holds up the others. Deployments on `on_error = "skip"` whose indexes ever got a write block: those documents used to be quarantined, and are now written once the block is lifted.
+**Who is affected.** Every deployment that writes more than one index to a sink: one bad document or one blocked index no longer holds up the others. Deployments on `on_error = "skip"` whose indexes ever got a write block or were closed: those documents used to be quarantined, and are now written once the block is lifted or the index opened.
 
 **What to do.**
 
 1. **Upgrade flusso.** Nothing to rebuild: no content hash moves.
-2. **Lift write blocks to resume.** A blocked index is written by the next probe once the block is lifted, at most one `[backoff] max_ms` later (60 s by default). No restart. The runbook is [A lane is stalled](stalled-lane.md).
+2. **Lift write blocks, or open closed indexes, to resume.** A blocked index is written by the next probe once the block is lifted or the index opened, at most one `[backoff] max_ms` later (60 s by default). No restart. The runbook is [A lane is stalled](stalled-lane.md).
 3. **Fix a refused document in the database.** The next probe builds it again from the row and lands, with no restart. Deleting the row works too, as do switching the index to `skip` and changing the schema ([A lane is stalled](stalled-lane.md#a-document-refused-under-stop)).
 
 **What to know.**
@@ -78,6 +80,28 @@ A refused or blocked lane is **parked**: it writes its oldest batch again alone 
 - **The slot waits for the backfill.** Until the new generation is seeded, the lane reads `open` but holds the slot, so `FlussoLaneStalled` can fire on a long backfill.
 - **A waiting reindex lives in memory.** After a restart of flusso, ask again if the lane is still stuck ([what a restart keeps](../reference/http.md#when-the-reindex-cant-stage)).
 - **A stop doesn't wait for such a lane**: [Lanes flusso doesn't write at a stop](../reference/cli.md#lanes-flusso-doesnt-write-at-a-stop).
+
+## A closed index parks its lane
+
+**What changed.** An index closed with `POST /<index>/_close` is a `blocked` lane, like a write block:
+
+| | 0.18 | 0.19 |
+| --- | --- | --- |
+| Writes to the closed index | rejected item by item: quarantined under `skip` (documents lost), the sink stops under `stop` | the lane parks `blocked`, whatever `on_error` says; nothing is quarantined |
+| Starting with the index closed | the sink's start fails, so none of its indexes is written | the sink starts; only the closed index's lane parks, at its first write |
+| Opening the index | under `stop`, the sink's next restart writes again; under `skip`, later writes land and the quarantined ones stay lost | the next probe lands, with no restart, and nothing was lost |
+
+`/status` shows the lane's `reason` as `blocked: index [<generation>] is closed`, and `flusso_lane_parked{why="blocked"}` is `1`.
+
+**Who is affected.** Anyone who closes an index flusso writes.
+
+**What to do.** Nothing to configure. To resume, open the generation the reason names, or reindex the index on that sink: [A closed index](stalled-lane.md#a-closed-index).
+
+**What to know.**
+
+- **The closed lane holds the slot** and its fences, as any parked lane does; the sink's other indexes keep writing.
+- **A stop doesn't wait it out.** The stop probes the lane once; still closed, it holds the drain until `--shutdown-timeout-secs` and flusso exits `1`.
+- **`flusso_meta` is not covered.** A closed `{prefix}flusso_meta` still fails the sink's start: open it.
 
 ## Retry timing is configurable
 

@@ -185,7 +185,7 @@ Each `(index, sink)` lane is written unless something about that one index stops
 | --- | --- | --- | --- |
 | `open` | Written as usual. | (absent) | |
 | `refused` | A document of the lane was refused under [`on_error = "stop"`](index-and-on-error.md#on_error). | `refused: id <ids> (<first reason>)`, a few ids at most | a probe lands |
-| `blocked` | The destination refuses every write to the index for now: a [write block](sink-opensearch.md#write-blocks), a role without write permission on it. | `blocked: <OpenSearch's reason>` | a probe lands |
+| `blocked` | The destination refuses every write to the index for now: a [write block](sink-opensearch.md#write-blocks), a closed index, a role without write permission on it. | `blocked: <OpenSearch's reason>`; for a closed index, `blocked: index [<generation>] is closed` | a probe lands |
 | `restaging` | The index's target was deleted while flusso ran, or a [reindex couldn't stage](#when-the-reindex-cant-stage) its new generation: it is staged again and backfilled, alone. | OpenSearch's reason; for a reindex, `the reindex could not stage: <error>` or `the reindex could not ask for its backfill: <error>` | staging succeeds |
 
 A `refused` or `blocked` lane is **parked**: flusso holds it and probes it, and the logs say `the lane is parked`. The metric [`flusso.lane.parked`](metrics.md) and the `FlussoLaneParked` alert cover every lane that isn't `open`, `restaging` included; their `why` label is the lane's `health`.
@@ -305,7 +305,7 @@ A reindex is also the way out for a [lane](#lane-health) stuck on something that
 
 At the seed the stuck item is acknowledged and the lane's positions move on. The log says `reindexed: the lane is open; its parked item waits for the new generation's backfill` when the lane opens.
 
-**What it cures.** The new generation comes from the same schema and mapping, so a reindex cures what lives in the index: a write block on that index, settings or a mapping changed by hand, an `index_settings` change picked up by a restart. It doesn't cure:
+**What it cures.** The new generation comes from the same schema and mapping, so a reindex cures what lives in the index: a write block on that index, a closed index (the seed drops the closed generation), settings or a mapping changed by hand, an `index_settings` change picked up by a restart. It doesn't cure:
 
 - **A row the mapping refuses.** The new backfill is refused at that row, the lane parks `refused` again, and the reindex completes once the row is fixed ([fresh build](index-and-on-error.md#a-refused-lanes-fresh-build)).
 - **A block on the whole cluster.** The new generation can't be created ([below](#when-the-reindex-cant-stage)).

@@ -47,7 +47,7 @@ Failures that aren't the document's fault are handled the same way under either 
 
 | Failure | Example | What happens |
 | --- | --- | --- |
-| The index refuses writes for now | a [write block](sink-opensearch.md#write-blocks), a role without write permission on that index | The lane parks as `blocked` and is probed with the same backoff; it resumes once the refusal is lifted. |
+| The index refuses writes for now | a [write block](sink-opensearch.md#write-blocks), a closed index, a role without write permission on that index | The lane parks as `blocked` and is probed with the same backoff; it resumes once the refusal is lifted. |
 | The index's target is gone | its generation [deleted while flusso runs](sink-opensearch.md#seeding) | That index alone is staged again and backfilled; the other indexes keep being written. |
 | The destination is busy | HTTP 429 or 503, including the flood-stage disk block | [Resent](sink-opensearch.md#retries); a write that runs out of retries fails like the row below. |
 | The destination fails the whole write | unreachable, credentials refused, the whole request refused | The sink's run stops and restarts with backoff; the batch is redelivered. Every index on that sink waits. |
