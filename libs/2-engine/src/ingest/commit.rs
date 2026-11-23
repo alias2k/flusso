@@ -57,16 +57,6 @@ impl IngestEngine {
                     builds.complete(finished);
                 }
             }
-            // A parked lane's fresh build goes first: one item, which its
-            // lane waits on (stage 9, F3).
-            if let Some((ids, rebuild)) = builds.choose_rebuild() {
-                builds
-                    .start(&self.documents, ids, Job::Rebuild(rebuild), &|built| {
-                        self.halts(built)
-                    })
-                    .await;
-                continue;
-            }
             // The live batch is every index's documents waiting through the
             // candidate's last change, offered only once none of them is in
             // a running build: `main`'s admission, checked before a permit is
@@ -100,6 +90,15 @@ impl IngestEngine {
                     if let Some(active) = snapshot.as_mut() {
                         self.start_backfill(active, builds).await;
                     }
+                }
+                // A parked lane's fresh build: one item, which its lane waits
+                // on (stage 9, F3).
+                Some(Grant::Rebuild(ids, rebuild)) => {
+                    builds
+                        .start(&self.documents, ids, Job::Rebuild(rebuild), &|built| {
+                            self.halts(built)
+                        })
+                        .await;
                 }
                 None => {
                     let published = self.publish_ready(builds, lanes, Some(&mut *runs)).await?;

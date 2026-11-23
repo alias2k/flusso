@@ -16,8 +16,9 @@ use crate::{ColumnName, GenericValue};
 ///
 /// A `Vec` rather than a single value so composite keys are represented
 /// naturally; values reuse [`GenericValue`] from the schema model. Shared
-/// vocabulary: [`cdc`](crate::cdc) names the changed row with it, and
-/// [`document`](crate::document) uses it as a document's root key.
+/// vocabulary: the source port's change capture names the changed row with it,
+/// its document builder uses it as a document's root key, and a lane item
+/// carries the keys of its documents.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RowKey(pub Vec<(ColumnName, GenericValue)>);
 

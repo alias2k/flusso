@@ -179,7 +179,7 @@ pub struct SinkEngine {
     /// serving.
     outstanding: Mutex<BTreeMap<IndexName, Asked>>,
     /// The last ticket a request of this engine carried.
-    tickets: AtomicU64,
+    pub(super) tickets: AtomicU64,
     /// The fence levels over the live items received, per lane in key order.
     /// Survives a restart of this engine's run, so a redelivered item keeps
     /// its place and an item written before a failure is still reported once

@@ -100,6 +100,7 @@ pub(super) enum Job {
 /// (stage 9, F3): which lane, the request's ticket, and its delivery's
 /// handle, acknowledged once the substitute is published. Dropped
 /// unacknowledged (a restart, a stop), the request is delivered again.
+#[derive(Debug)]
 pub(super) struct Rebuild {
     pub(super) lane: stream::LaneKey,
     pub(super) ticket: stream::Ticket,
@@ -223,11 +224,13 @@ pub(super) struct LiveCandidate<L> {
 
 /// Which kind of batch a free slot goes to; a live grant carries back what
 /// the live candidate was offered with and the indexes it may take.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum Grant<L> {
     /// What the live candidate was offered with, and the indexes taken.
     Live(L, Vec<IndexName>),
     Backfill,
+    /// A parked lane's fresh build: its documents and its request.
+    Rebuild(Vec<DocumentId>, Rebuild),
 }
 
 /// The granted, unpublished slots and the builds running for them.
@@ -393,17 +396,12 @@ impl Builds {
         !self.rebuilds.is_empty()
     }
 
-    /// The oldest fresh build, when it may start now: the queue has room, no
-    /// running build holds one of its documents, and the gate gives a permit
-    /// (asked as live, with no budget part: the budget never refuses it,
-    /// F14).
-    pub(super) fn choose_rebuild(&mut self) -> Option<(Vec<DocumentId>, Rebuild)> {
-        let (ids, _) = self.rebuilds.front()?;
-        if !self.has_room() || self.holds_any(ids) {
-            return None;
-        }
-        self.ask(Some(Vec::new()), None)?;
-        self.rebuilds.pop_front()
+    /// Whether the oldest fresh build may take the next live permit: no
+    /// running build holds one of its documents (F3).
+    fn rebuild_ready(&self) -> bool {
+        self.rebuilds
+            .front()
+            .is_some_and(|(ids, _)| !self.holds_any(ids))
     }
 
     /// Ask the gate beside other builders (G9′): see `several`.
@@ -727,13 +725,25 @@ impl Builds {
                 && (self.several || self.affordable(Work::Backfill, &documents).is_some()))
             .then_some(documents)
         });
-        let live_parts = live
-            .as_ref()
-            .map(|(_, taken)| self.reserving(Work::Live, taken));
+        // A parked lane's fresh build goes first among live work, asked with
+        // no budget part: the budget never refuses it (F14). One ask a pass,
+        // or the builder's place in the live line would come and go, and every
+        // change of the lines wakes it to ask again.
+        let rebuild = self.rebuild_ready();
+        let live_parts = if rebuild {
+            Some(Vec::new())
+        } else {
+            live.as_ref()
+                .map(|(_, taken)| self.reserving(Work::Live, taken))
+        };
         let backfill_parts = backfill
             .as_ref()
             .map(|documents| self.reserving(Work::Backfill, documents));
         match (self.ask(live_parts, backfill_parts)?, live) {
+            (Work::Live, _) if rebuild => self
+                .rebuilds
+                .pop_front()
+                .map(|(ids, rebuild)| Grant::Rebuild(ids, rebuild)),
             (Work::Live, Some((live, taken))) => Some(Grant::Live(
                 live,
                 taken.into_iter().map(|(index, _)| index).collect(),

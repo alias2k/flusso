@@ -74,6 +74,9 @@ struct Gate {
     ensured_at: Mutex<Vec<Instant>>,
     /// A write holding this id takes 5 s.
     slow_id: Mutex<Option<String>>,
+    /// Ids whose upsert is refused, whatever their index answers: a row a
+    /// fix makes indexable again (stage 9, fresh builds).
+    refused_ids: Mutex<BTreeSet<String>>,
 }
 
 impl Gate {
@@ -148,6 +151,16 @@ impl Sink for Gate {
                 first.index.to_string(),
                 part.iter().map(|e| e.id.clone()).collect(),
             ));
+            let refused = self.refused_ids.lock().unwrap().clone();
+            report = report.rejecting(
+                part.iter()
+                    .filter(|e| e.op == kernel::Op::Upsert && refused.contains(&e.id))
+                    .map(|e| RejectedDocument {
+                        index: e.index.to_string(),
+                        id: e.id.clone(),
+                        reason: "mapper_parsing_exception".to_owned(),
+                    }),
+            );
             match answers.get(first.index.as_ref()) {
                 Some(Answer::Refuse) => {
                     report = report.rejecting(part.iter().map(|e| RejectedDocument {
@@ -996,4 +1009,415 @@ async fn a_lane_parked_on_the_longest_schedule_neither_panics_nor_spins() {
     assert!(!engine.lane_health(&lane(orders())).is_open());
     assert!(!task.is_finished(), "the run goes on");
     task.abort();
+}
+
+// Fresh builds (ADR 0012 stage 9, second half, §14.1 of the note): a lane
+// parked on a refusal asks its index's builder for a fresh build of its item's
+// documents, and writes it in the item's place. `Builder` stands in for the
+// ingest engine's builders: it answers each `Rebuild` on the substitute lane.
+
+/// An item of `of` whose envelopes carry their keys, numbered `build`.
+fn keyed(of: &IndexName, ids: &[i64], position: Option<u64>, build: u64) -> LaneItem {
+    LaneItem::Batch(Batch {
+        key: position.map(stream::ItemKey::new),
+        position: position.map(Position::new),
+        envelopes: ids
+            .iter()
+            .map(|id| {
+                Envelope::upsert(
+                    of.clone(),
+                    id.to_string(),
+                    GenericValue::Map(BTreeMap::new()),
+                    position.map(Position::new),
+                    chrono::Utc::now(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        keys: ids.iter().map(|id| key(*id)).collect::<Vec<_>>().into(),
+        build: Some(build),
+        ..Default::default()
+    })
+}
+
+fn key(id: i64) -> kernel::RowKey {
+    kernel::RowKey(vec![(
+        kernel::ColumnName::try_new("id").unwrap(),
+        GenericValue::BigInt(id),
+    )])
+}
+
+fn id_of(key: &kernel::RowKey) -> i64 {
+    match key.0.first() {
+        Some((_, GenericValue::BigInt(id))) => *id,
+        _ => -1,
+    }
+}
+
+/// Answers each `Rebuild` with a substitute numbered from `build`: a delete
+/// for a row in `deleted`, else an upsert. Records when each was asked.
+#[derive(Debug, Default)]
+struct Builder {
+    asked: Mutex<Vec<(Instant, stream::Ticket, Vec<i64>)>>,
+    deleted: Mutex<BTreeSet<i64>>,
+    /// Hold every answer back.
+    silent: std::sync::atomic::AtomicBool,
+}
+
+impl Builder {
+    fn asked(&self) -> Vec<(Instant, stream::Ticket, Vec<i64>)> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+fn answering(rig: &Rig, builder: Arc<Builder>, first_build: u64) -> tokio::task::JoinHandle<()> {
+    let stream = Arc::clone(&rig.stream);
+    tokio::spawn(async move {
+        let mut requests = stream.requests().unwrap().consumer;
+        let substitutes = stream.substitutes(&sink_name("primary")).unwrap().producer;
+        let mut build = first_build;
+        while let Ok(Some(delivery)) = requests.recv().await {
+            let (request, handle) = delivery.into_parts();
+            handle.ack().await.unwrap();
+            let Request::Rebuild {
+                index,
+                sink,
+                keys,
+                ticket,
+            } = request
+            else {
+                continue;
+            };
+            let ids: Vec<i64> = keys.iter().map(id_of).collect();
+            builder
+                .asked
+                .lock()
+                .unwrap()
+                .push((Instant::now(), ticket, ids.clone()));
+            if builder.silent.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+            let deleted = builder.deleted.lock().unwrap().clone();
+            let envelopes: Vec<Envelope> = ids
+                .iter()
+                .map(|id| {
+                    if deleted.contains(id) {
+                        Envelope::delete(index.clone(), id.to_string(), None, chrono::Utc::now())
+                    } else {
+                        Envelope::upsert(
+                            index.clone(),
+                            id.to_string(),
+                            GenericValue::Map(BTreeMap::new()),
+                            None,
+                            chrono::Utc::now(),
+                        )
+                    }
+                })
+                .collect();
+            substitutes
+                .publish(stream::Substitute {
+                    lane: LaneKey::new(index, sink),
+                    ticket,
+                    batch: Batch {
+                        envelopes: envelopes.into(),
+                        keys: keys.into(),
+                        build: Some(build),
+                        ..Default::default()
+                    },
+                })
+                .await
+                .unwrap();
+            build += 1;
+        }
+    })
+}
+
+/// The ids of each write holding `of`, from `start`.
+fn written(rig: &Rig, of: &IndexName) -> Vec<Vec<String>> {
+    rig.sink
+        .writes()
+        .iter()
+        .flat_map(|(_, parts)| parts.iter().filter(|(at, _)| at == of.as_ref()))
+        .map(|(_, ids)| ids.clone())
+        .collect()
+}
+
+/// F1, F5, F6, F12: a refused lane's due probe asks for a fresh build instead
+/// of writing its item; the substitute is written in the item's place. Still
+/// refused, the backoff doubles and the next probe asks again; once the row
+/// is fixed, the substitute lands, the parked item is acknowledged (its
+/// position applied, for a live item) and the lane opens. The same for a
+/// refused backfill page.
+#[tokio::test(start_paused = true)]
+async fn a_fixed_row_unparks_its_lane() {
+    for position in [Some(0), None] {
+        let rig = Rig::new(Gate::default());
+        rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+        let start = Instant::now();
+        if position.is_some() {
+            rig.progress.published(
+                &lane(orders()),
+                stream::ItemKey::new(0),
+                Position::new(0),
+                Position::new(0),
+            );
+        }
+        rig.stream
+            .lane(&lane(orders()))
+            .unwrap()
+            .producer
+            .publish(keyed(&orders(), &[0, 1], position, 1))
+            .await
+            .unwrap();
+        let builder = Arc::new(Builder::default());
+        let answers = answering(&rig, Arc::clone(&builder), 10);
+        let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+        let task = spawn(Arc::clone(&engine));
+        eventually("a second fresh build is asked", || {
+            builder.asked().len() >= 2
+        })
+        .await;
+        let asked: Vec<u128> = builder
+            .asked()
+            .iter()
+            .map(|(at, _, _)| (*at - start).as_millis())
+            .collect();
+        assert_eq!(
+            asked,
+            [1_000, 3_000],
+            "{position:?}: at 1 s, then 2 s later"
+        );
+        assert!(builder.asked().iter().all(|(_, _, ids)| ids == &[0, 1]));
+        assert_eq!(engine.lane_health(&lane(orders())).kind(), "refused");
+        rig.sink.refused_ids.lock().unwrap().clear();
+        eventually("the fixed row unparks the lane", || {
+            engine.lane_health(&lane(orders())).is_open()
+        })
+        .await;
+        if position.is_some() {
+            assert_eq!(rig.applied(&orders()), through(0));
+        }
+        eventually("the item and its substitutes are acknowledged", || {
+            rig.stream.is_idle()
+        })
+        .await;
+        assert_eq!(
+            written(&rig, &orders()).len(),
+            4,
+            "{position:?}: the item, then one substitute per probe (1, 3 and 7 s)"
+        );
+        assert_eq!(
+            rig.observer.probes(&lane(orders())),
+            [
+                ProbeOutcome::Refused,
+                ProbeOutcome::Refused,
+                ProbeOutcome::Landed
+            ]
+        );
+        task.abort();
+        answers.abort();
+    }
+}
+
+/// F7: a row deleted meanwhile is fresh-built as a delete, which lands.
+#[tokio::test(start_paused = true)]
+async fn a_deleted_row_unparks_its_lane_with_a_delete() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+    rig.progress.published(
+        &lane(orders()),
+        stream::ItemKey::new(0),
+        Position::new(0),
+        Position::new(0),
+    );
+    rig.stream
+        .lane(&lane(orders()))
+        .unwrap()
+        .producer
+        .publish(keyed(&orders(), &[1], Some(0), 1))
+        .await
+        .unwrap();
+    let builder = Arc::new(Builder::default());
+    builder.deleted.lock().unwrap().insert(1);
+    let answers = answering(&rig, Arc::clone(&builder), 10);
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    eventually("a fresh build is asked", || builder.asked().len() == 1).await;
+    eventually("the delete unparks the lane", || {
+        engine.lane_health(&lane(orders())).is_open()
+    })
+    .await;
+    assert_eq!(rig.applied(&orders()), through(0));
+    assert_eq!(builder.asked().len(), 1);
+    task.abort();
+    answers.abort();
+}
+
+/// F8, F15: a substitute naming a ticket the lane doesn't wait for is
+/// acknowledged and dropped, never written; a fresh build nobody answers is
+/// waited for one backoff (at most `SUBSTITUTE_WAIT`), then the item itself
+/// is the probe, and the next probe asks again.
+#[tokio::test(start_paused = true)]
+async fn a_stale_or_unanswered_fresh_build_falls_back_to_the_item() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+    let start = Instant::now();
+    rig.stream
+        .lane(&lane(orders()))
+        .unwrap()
+        .producer
+        .publish(keyed(&orders(), &[1], None, 1))
+        .await
+        .unwrap();
+    let builder = Arc::new(Builder::default());
+    builder
+        .silent
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let answers = answering(&rig, Arc::clone(&builder), 10);
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    eventually("a fresh build is asked", || builder.asked().len() == 1).await;
+    rig.stream
+        .substitutes(&sink_name("primary"))
+        .unwrap()
+        .producer
+        .publish(stream::Substitute {
+            lane: lane(orders()),
+            ticket: stream::Ticket::new(999),
+            batch: Batch {
+                envelopes: vec![Envelope::upsert(
+                    orders(),
+                    "99".to_owned(),
+                    GenericValue::Map(BTreeMap::new()),
+                    None,
+                    chrono::Utc::now(),
+                )]
+                .into(),
+                ..Batch::default()
+            },
+        })
+        .await
+        .unwrap();
+    eventually("a second fresh build is asked", || {
+        builder.asked().len() == 2
+    })
+    .await;
+    let probes: Vec<u128> = rig
+        .sink
+        .writes_of(&orders(), start)
+        .iter()
+        .map(Duration::as_millis)
+        .collect();
+    assert_eq!(
+        probes,
+        [0, 2_000],
+        "the item, then itself after the unanswered fresh build's 1 s"
+    );
+    assert!(
+        written(&rig, &orders()).iter().all(|ids| ids == &["1"]),
+        "the stale substitute is never written"
+    );
+    let asked: Vec<u128> = builder
+        .asked()
+        .iter()
+        .map(|(at, _, _)| (*at - start).as_millis())
+        .collect();
+    assert_eq!(
+        asked,
+        [1_000, 4_000],
+        "asked again after the doubled backoff"
+    );
+    assert_eq!(engine.lane_health(&lane(orders())).kind(), "refused");
+    task.abort();
+    answers.abort();
+}
+
+/// F9: once a substitute numbered 10 lands, an item behind the parked one
+/// built before it (number 2) is written without the substitute's
+/// documents, and one built after it (number 11) whole.
+#[tokio::test(start_paused = true)]
+async fn an_older_build_queued_behind_the_parked_item_is_not_written_over_its_substitute() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+    for (ids, position, build) in [(&[1][..], 0, 1), (&[1, 2][..], 1, 2), (&[1, 3][..], 2, 11)] {
+        rig.progress.published(
+            &lane(orders()),
+            stream::ItemKey::new(position),
+            Position::new(position),
+            Position::new(position),
+        );
+        rig.stream
+            .lane(&lane(orders()))
+            .unwrap()
+            .producer
+            .publish(keyed(&orders(), ids, Some(position), build))
+            .await
+            .unwrap();
+    }
+    let builder = Arc::new(Builder::default());
+    let answers = answering(&rig, Arc::clone(&builder), 10);
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    eventually("a fresh build is asked", || builder.asked().len() == 1).await;
+    rig.sink.refused_ids.lock().unwrap().clear();
+    eventually("every item lands", || rig.applied(&orders()) == through(2)).await;
+    let writes = written(&rig, &orders());
+    let strings = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+    assert!(
+        writes.contains(&strings(&["2"])),
+        "the older build of 1 is left out: {writes:?}"
+    );
+    assert!(
+        !writes.contains(&strings(&["1", "2"])),
+        "never written whole: {writes:?}"
+    );
+    assert!(
+        writes.contains(&strings(&["1", "3"])),
+        "the newer build is written whole: {writes:?}"
+    );
+    task.abort();
+    answers.abort();
+}
+
+/// F13: a stop doesn't wait for a fresh build it asked for: the refused
+/// lane's last probe writes its item as it is, at once.
+#[tokio::test(start_paused = true)]
+async fn a_stop_probes_a_refused_lane_with_its_own_item() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+    rig.progress.published(
+        &lane(orders()),
+        stream::ItemKey::new(0),
+        Position::new(0),
+        Position::new(0),
+    );
+    rig.stream
+        .lane(&lane(orders()))
+        .unwrap()
+        .producer
+        .publish(keyed(&orders(), &[1], Some(0), 1))
+        .await
+        .unwrap();
+    let builder = Arc::new(Builder::default());
+    builder
+        .silent
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let answers = answering(&rig, Arc::clone(&builder), 10);
+    let stop = Stop::new();
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_stop(stop.clone()));
+    let task = spawn(Arc::clone(&engine));
+    eventually("a fresh build is asked", || builder.asked().len() == 1).await;
+    rig.sink.refused_ids.lock().unwrap().clear();
+    stop.request();
+    eventually("the item itself lands on the stop", || {
+        rig.applied(&orders()) == through(0)
+    })
+    .await;
+    assert_eq!(
+        builder.asked().len(),
+        1,
+        "no fresh build asked once stopping"
+    );
+    task.abort();
+    answers.abort();
 }

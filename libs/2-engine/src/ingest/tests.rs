@@ -961,6 +961,24 @@ struct Spy {
     published: Published,
     failing: FailingLanes,
     items: ItemLog,
+    /// Fresh builds published (stage 9).
+    substituted: Arc<AtomicUsize>,
+}
+
+/// A substitute lane's producer counting what it publishes.
+#[derive(Debug)]
+struct CountsSubstitutes {
+    inner: Box<dyn stream::Producer<stream::Substitute>>,
+    count: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl stream::Producer<stream::Substitute> for CountsSubstitutes {
+    async fn publish(&self, item: stream::Substitute) -> stream::Result<()> {
+        self.inner.publish(item).await?;
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 /// Every batch published, in publication order: its documents' keys (as
@@ -1039,7 +1057,14 @@ impl Stream for Spy {
     }
 
     fn substitutes(&self, sink: &SinkName) -> stream::Result<stream::SubstituteLane> {
-        self.inner.substitutes(sink)
+        let lane = self.inner.substitutes(sink)?;
+        Ok(stream::SubstituteLane {
+            producer: Box::new(CountsSubstitutes {
+                inner: lane.producer,
+                count: Arc::clone(&self.substituted),
+            }),
+            consumer: lane.consumer,
+        })
     }
 
     fn lanes(&self, sink: &SinkName) -> Vec<stream::LaneKey> {
@@ -1064,6 +1089,8 @@ struct Deployment {
     failing: FailingLanes,
     /// Every batch published, in order.
     items: ItemLog,
+    /// Fresh builds published.
+    substituted: Arc<AtomicUsize>,
     feed: Arc<Feed>,
     recorder: Arc<Recorder>,
     ingest: IngestEngine,
@@ -1099,11 +1126,13 @@ impl Deployment {
         let published: Published = Arc::default();
         let failing: FailingLanes = Arc::default();
         let items: ItemLog = Arc::default();
+        let substituted: Arc<AtomicUsize> = Arc::default();
         let spy = Arc::new(Spy {
             inner: Arc::clone(&stream),
             published: Arc::clone(&published),
             failing: Arc::clone(&failing),
             items: Arc::clone(&items),
+            substituted: Arc::clone(&substituted),
         });
         let ingest = IngestEngine::new(
             Arc::clone(&feed) as Arc<dyn ChangeCapture>,
@@ -1126,6 +1155,7 @@ impl Deployment {
             stream,
             published,
             items,
+            substituted,
             failing,
             feed,
             recorder,
@@ -1370,7 +1400,7 @@ impl crate::Observer for IndexRestarts {
 /// may hold documents it gave back. Panics on the first broken guarantee.
 /// Returns how many indexes' builders restarted alone, how many walks were
 /// retried alone, and how many runs failed.
-async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize) {
+async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize, usize) {
     let mut random = Rng::new(seed);
     let ids = 2 + random.below(7) as i64;
     let rows = if random.below(2) == 0 {
@@ -1492,6 +1522,7 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize)
         "the documents differ from the rows ({context})"
     );
     (
+        deployment.substituted.load(Ordering::SeqCst),
         restarts.live.load(Ordering::SeqCst),
         restarts.walks.load(Ordering::SeqCst),
         failed,
@@ -1511,13 +1542,16 @@ fn seeds(count: u64) -> Vec<u64> {
 /// alone, whole runs.
 #[derive(Debug, Default)]
 struct Restarted {
+    /// Fresh builds of parked lanes' items published (stage 9).
+    substituted: usize,
     indexes: usize,
     walks: usize,
     runs: usize,
 }
 
 impl Restarted {
-    fn add(&mut self, (indexes, walks, runs): (usize, usize, usize)) {
+    fn add(&mut self, (substituted, indexes, walks, runs): (usize, usize, usize, usize)) {
+        self.substituted += substituted;
         self.indexes += indexes;
         self.walks += walks;
         self.runs += runs;
@@ -1533,6 +1567,10 @@ impl Restarted {
         assert!(self.indexes > 0, "no schedule restarted an index alone");
         assert!(self.walks > 0, "no schedule retried a walk alone");
         assert!(self.runs > 0, "no schedule restarted a whole run");
+        assert!(
+            self.substituted > 0,
+            "no schedule built a parked lane's item again"
+        );
     }
 }
 
