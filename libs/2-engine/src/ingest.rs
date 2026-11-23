@@ -384,6 +384,12 @@ impl IngestEngine {
     }
 
     async fn run_inner(&self) -> Result<Ended> {
+        // The resume point is made only once every rebuild was staged (#120);
+        // a stop before then may have cut that staging short.
+        if self.stop.is_requested() {
+            tracing::info!("stop requested before the source was prepared; nothing is captured");
+            return Ok(Ended::Stopped);
+        }
         let started = Instant::now();
         self.source.prepare().await?;
         self.observer

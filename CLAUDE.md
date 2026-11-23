@@ -1414,8 +1414,9 @@ is the one concrete piece.
   `a_stop_whose_final_position_never_reaches_the_source_fails_the_run`). A stalled sink holds
   the drain (confirmation follows the slowest lane); the caller's deadline bounds it. After it the supervisor
   waits on `Fence::settled` only while a `/wait` on `searchable` is open, so a stop nobody waits on
-  doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`; an ingest
-  engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (a stop raised mid-burst
+  doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`: the daemon's first
+  staging looks at the stop first and again after (`biased`), and the ingest engine checks it before `prepare`
+  (the note's X22); an ingest engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (a stop raised mid-burst
   ends the batch there, `drain_ready`'s check; mid-build batch
   published and flushed by every sink, final confirm before close; nothing read after the stop; an
   abandoned snapshot re-served; queued snapshot batches skipped, their index left unseeded; a stalled

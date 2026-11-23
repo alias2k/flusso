@@ -31,6 +31,7 @@ struct ClosableSource {
     closing: Arc<Notify>,
     closed: Arc<AtomicBool>,
     log: Arc<Mutex<Vec<String>>>,
+    prepared: AtomicBool,
 }
 
 impl std::fmt::Debug for ClosableSource {
@@ -49,6 +50,7 @@ impl ClosableSource {
                 closing: Arc::default(),
                 closed: Arc::default(),
                 log: Arc::default(),
+                prepared: AtomicBool::new(false),
             },
             tx,
         )
@@ -72,6 +74,7 @@ impl ChangeCapture for ClosableSource {
     }
 
     async fn prepare(&self) -> source::Result<()> {
+        self.prepared.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -640,8 +643,11 @@ async fn a_stalled_sink_does_not_keep_the_other_from_landing_its_lane_and_holds_
     }
 }
 
+/// A stop requested before the run prepares nothing (fourth review of #470,
+/// 1): the resume point is created only once every rebuild is staged (#120),
+/// and a stop may come before that staging did.
 #[tokio::test]
-async fn a_stop_requested_before_the_run_reads_nothing() {
+async fn a_stop_requested_before_the_run_prepares_and_reads_nothing() {
     let (source, feed) = ClosableSource::new();
     let source = Arc::new(source);
     let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
@@ -663,8 +669,13 @@ async fn a_stop_requested_before_the_run_reads_nothing() {
         .unwrap()
         .unwrap();
 
+    assert!(!source.prepared.load(Ordering::SeqCst), "not prepared");
     assert_eq!(source.pulled.load(Ordering::SeqCst), 0);
-    assert_eq!(*source.log.lock().unwrap(), vec!["close".to_owned()]);
+    assert!(
+        source.log.lock().unwrap().is_empty(),
+        "no live stream opened, so none to close: {:?}",
+        source.log.lock().unwrap()
+    );
 }
 
 #[tokio::test]

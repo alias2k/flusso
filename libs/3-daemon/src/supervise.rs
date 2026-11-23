@@ -165,18 +165,26 @@ pub(crate) async fn run_all(
 
     // First staging, every sink, retried until it succeeds: the ingest engine
     // must not create the resume point before every rebuild is staged. A stop
-    // meanwhile ends the run: nothing has been captured yet.
+    // meanwhile ends the run: nothing has been captured yet. The stop is looked
+    // at first and again once staging returned: a staging that began after the
+    // stop only ensures (`SinkEngine::stage`), skipping a `Fresh` rebuild, so
+    // the engines must never start behind it (#120).
     let staged = future::join_all(
         sink_engines
             .iter()
             .map(|engine| stage_until_ok(engine, continuity, schedule).map(|()| ())),
     );
     tokio::select! {
-        _ = staged => {}
+        biased;
         () = stop.requested() => {
             tracing::info!("stop requested while staging; nothing was captured");
             return Ok(());
         }
+        _ = staged => {}
+    }
+    if stop.is_requested() {
+        tracing::info!("stop requested as staging ended; nothing was captured");
+        return Ok(());
     }
 
     let mut tasks = JoinSet::new();

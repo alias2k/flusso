@@ -302,3 +302,70 @@ async fn a_stop_nobody_waits_on_does_not_sit_out_the_refresh_interval() {
         started.elapsed()
     );
 }
+
+/// Fourth review of #470, 1: a stop requested before the first staging never
+/// lets the source prepare: the supervisor doesn't go on to the engines, so
+/// a `Fresh` source's rebuild can't be skipped and then prepared over (#120).
+/// Here the stop is the daemon's own, requested before the run starts, with
+/// a sink whose staging is ready at once.
+#[tokio::test]
+async fn a_stop_before_the_first_staging_never_prepares() {
+    for _ in 0..20 {
+        let source = ScriptedSource::new(Vec::new()).with_continuity(Continuity::Fresh);
+        let events = Arc::clone(&source.events);
+        let sink = Arc::new(super::RecordingSink::seeded().with_events(&events));
+        let ensured = Arc::clone(&sink.ensured);
+        let backends = backends(
+            source,
+            vec![(primary(), sink as Arc<dyn Sink>, SinkOptions::default())],
+        );
+        let running = Daemon::new(backendless_config(), backends)
+            .start()
+            .await
+            .unwrap();
+        running.stop.request();
+        tokio::time::timeout(Duration::from_secs(5), running.run(std::future::pending()))
+            .await
+            .expect("the run ends on the stop")
+            .unwrap();
+        let events = events.lock().unwrap().clone();
+        assert!(
+            !events.contains(&"prepare".to_owned()),
+            "never prepared: {events:?}"
+        );
+        assert_eq!(
+            ensured.load(Ordering::SeqCst),
+            0,
+            "the supervisor saw the stop first: nothing staged"
+        );
+    }
+}
+
+/// Fourth review of #470, 1, as the reviewer reproduced it: a shutdown that
+/// is ready at once races the first staging; whichever wins, the source is
+/// never prepared without the `Fresh` rebuild staged first.
+#[tokio::test]
+async fn a_shutdown_racing_the_first_staging_never_prepares_without_the_rebuild() {
+    for _ in 0..60 {
+        let source = ScriptedSource::new(Vec::new()).with_continuity(Continuity::Fresh);
+        let events = Arc::clone(&source.events);
+        let sink = Arc::new(super::RecordingSink::seeded().with_events(&events));
+        let backends = backends(
+            source,
+            vec![(primary(), sink as Arc<dyn Sink>, SinkOptions::default())],
+        );
+        let running = Daemon::new(backendless_config(), backends)
+            .start()
+            .await
+            .unwrap();
+        let _ =
+            tokio::time::timeout(Duration::from_secs(5), running.run(std::future::ready(()))).await;
+        let events = events.lock().unwrap().clone();
+        if events.contains(&"prepare".to_owned()) {
+            assert!(
+                events.contains(&"reindex users".to_owned()),
+                "prepared without the rebuild: {events:?}"
+            );
+        }
+    }
+}
