@@ -13,6 +13,13 @@ pub trait Producer<T: Send>: std::fmt::Debug + Send + Sync {
 /// Pulls items from a lane for processing. Exactly one consumer is active per
 /// lane at a time; a restarted engine obtains a fresh one over the same lane
 /// and is redelivered whatever the previous one left unacknowledged.
+///
+/// **Order.** Items are delivered in the order they were published. A
+/// delivery returned (nacked, or dropped unacknowledged) is delivered again
+/// in that same order among the others returned, and before any item not yet
+/// delivered. The sink engine relies on it: an item it has not seen comes
+/// after every item it has seen and not acknowledged (stage 9's F9, which
+/// drops a document's older builds only once none can come back).
 #[async_trait]
 pub trait Consumer<T: Send>: std::fmt::Debug + Send {
     /// The next delivery, or `None` once the lane is closed and drained.

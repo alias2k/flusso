@@ -475,3 +475,34 @@ async fn a_nack_or_a_drop_wakes_a_recv_already_waiting_in_lane_order() {
     second.ack().await.unwrap();
     assert!(stream.is_idle());
 }
+
+/// The port's order (stage 9's F9 depends on it): a delivery returned
+/// unacknowledged comes back before any item not yet delivered.
+#[tokio::test]
+async fn a_returned_delivery_comes_back_before_anything_not_yet_delivered() {
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
+    for position in 1..=4 {
+        lane.producer.publish(batch(position)).await.unwrap();
+    }
+    let mut consumer = lane.consumer;
+    let (_, first) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, second) = consumer.recv().await.unwrap().unwrap().into_parts();
+    drop(second);
+    drop(first);
+    let positions: Vec<_> = {
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let (item, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
+            handle.ack().await.unwrap();
+            seen.push(item.position());
+        }
+        seen
+    };
+    assert_eq!(
+        positions,
+        [1, 2, 3, 4].map(|position| Some(Position::new(position))),
+        "the returned ones first, in lane order, then the rest"
+    );
+    assert!(stream.is_idle());
+}
