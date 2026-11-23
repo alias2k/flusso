@@ -888,8 +888,11 @@ the sink stops, not one (the known limit of §15.3). C2: that refresh skips an i
 (`?ignore_unavailable=true`, as the caught-up write's refresh already does). A closed index then stages, its lane
 opens, its first write parks it `blocked`, and opening the index lets it land. The rest of `ensure_index` reads
 settings and aliases, which a closed index answers. The seed's own refresh (`mark_seeded`) stays strict: a closed
-generation is never marked seeded (its backfill parks before it would be). `list_indices` asks
-`expand_wildcards=all`, so a reindex never picks a closed generation's name for its new one.
+generation is never marked seeded (its backfill parks before it would be; one closed between its backfill's last
+write and its seed fails that strict refresh, which fails the sink's run once, and the restart settles the lane
+`blocked`). `list_indices` needs no change: `_cat/indices` lists closed indexes by default (tried against
+OpenSearch 2.19), so a reindex never picks a closed generation's name for its new one. The meta index is outside
+all of this: a closed `flusso_meta` still fails staging.
 
 **Meeting what came since.**
 

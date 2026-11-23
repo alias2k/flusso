@@ -464,10 +464,11 @@ impl OpensearchSink {
     /// Concrete index names matching `pattern` (a `_cat/indices` glob, e.g.
     /// `users_ab12_*`). An alias in the pattern resolves to the indexes behind
     /// it; a no-match (404) is an empty list, not an error. Closed indexes are
-    /// listed too, so a new generation never takes a closed one's name.
+    /// listed too (`_cat/indices` does by default), so a new generation never
+    /// takes a closed one's name.
     pub(crate) async fn list_indices(&self, pattern: &str) -> Result<Vec<String>> {
         let url = format!(
-            "{}/_cat/indices/{pattern}?h=index&format=json&expand_wildcards=all",
+            "{}/_cat/indices/{pattern}?h=index&format=json",
             self.base_url
         );
         let resp = self

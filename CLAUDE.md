@@ -1084,7 +1084,8 @@ is the one concrete piece.
   before the bulk was sent (`refresh.rs`'s `Unrefreshed`, marks with sequence numbers; guards
   `a_caught_up_write_over_the_one_index_left_unrefreshed_sends_no_extra_refresh`, `refresh::tests`); its
   `ensure_index` refreshes a seeded generation once per start, because what an earlier run left
-  unrefreshed is remembered nowhere (fences are unavailable until staging is done). (3) The fence reads both levels off `Progress` per sink whenever a waiter checks
+  unrefreshed is remembered nowhere (fences are unavailable until staging is done); a closed generation is skipped
+  there, which keeps fences honest: every read of a closed index errors, and opening it makes all it held searchable. (3) The fence reads both levels off `Progress` per sink whenever a waiter checks
   (searchable never above applied), and keeps each level monotonic across a reopened source stream.
   (4) **It vouches only for what reads see (#379, `fence-rebuilding.md`).** Each lane's `Serving`
   (beside its `Furthest`, same mutex) is set by the sink engine's events through `FenceObserver`:
@@ -1654,7 +1655,7 @@ is the one concrete piece.
   reason naming the index: `bulk::is_blocked`, stage 9 slice 3) and `WriteReport::missing`
   (`index_not_found_exception`: `bulk::is_missing`), mapped to the logical index from the write's
   own envelopes; `ensure_index`'s once-per-start refresh skips a closed generation
-  (`refresh_index_if_open`), so one closed index never fails its sink's staging, while the seed's refresh stays
+  (`refresh_index_if_open`), so one closed generation never fails its sink's staging (a closed `flusso_meta` still does), while the seed's refresh stays
   strict (guards `bulk::tests::a_closed_index_is_blocked_never_rejected`, `lane_parking`'s
   `a_closed_index_blocks_its_lane_until_opened` and `a_reindex_moves_a_closed_index_to_a_new_generation`); a refusal naming an index no part holds fails the write. An item refused as **busy**
   (429 or 503: a full write queue, a circuit breaker, an unavailable shard; issue #395) is neither:
