@@ -1741,9 +1741,9 @@ is the one concrete piece.
   `a_reindex_of_two_indexes_stages_one_while_the_other_is_retried`, `an_owed_reindex_outlives_a_failed_run`);
   asking for an index's backfill failing makes that index owed too, never fails the run (`stage_reindex`
   records every index staged or owed before returning; guards `a_failed_ask_for_a_backfill_leaves_every_index_of_the_reindex_owed`,
-  `a_reindex_whose_backfill_request_fails_is_owed`). Once stopping, nothing is staged or asked for: no
-  restaging lane (target gone or owed) is staged again, a pending reindex is dropped, a staging already out ends as
-  state only (no request, no lane opened), and a restaging lane's live items and completion are acknowledged
+  `a_reindex_whose_backfill_request_fails_is_owed`). Once stopping, nothing is staged and no new backfill is
+  asked for: no restaging lane (target gone or owed) is staged again, a pending reindex is dropped, a staging already
+  out ends as state only (no lane opened; an ask already in progress completes, never served), and a restaging lane's live items and completion are acknowledged
   unapplied as held items are, read and released until none is ready (`release_restaging_on_stop`; the note's
   X19 table says what releases every item in every lane state; guards
   `a_stop_while_a_reindex_is_owed_drains_at_once_and_stages_nothing`, `a_reindex_pending_at_a_stop_is_not_staged`,
@@ -1751,7 +1751,10 @@ is the one concrete piece.
   `a_stop_during_an_owed_retry_records_it_and_writes_nothing_more`,
   `a_retry_returning_staged_during_a_stop_leaves_the_lane_owed`). Both reindex paths (inline, retry) end in
   `settle_reindex`. A run restarted during the stop stages with `stage_while_stopping`: ensure only, an index that
-  can't be ensured left restaging (guard `staging_after_a_run_failed_during_the_stop_only_ensures`). The owed reindex is in memory: a process restart forgets it
+  can't be ensured left restaging; a stop landing while a staging ensures is looked at again before any ask or
+  reopen (guards `staging_after_a_run_failed_during_the_stop_only_ensures`,
+  `an_open_lane_not_ensured_under_the_stop_is_released`, `a_stop_during_a_staging_makes_it_ensure_only`). The
+  first staging never stages under a stop (the note's X22). The owed reindex is in memory: a process restart forgets it
   (the note's X20). For each index staged, a lane parked or restaging opens (`writes.rs`'s `reindexed`), a parked lane's front item is held (`LaneRun.held`,
   `LaneState.held_for_seed` by item key and build so a redelivery is held again) unwritten and unacknowledged
   until the index is seeded, then acknowledged and reported applied (`release_held`), so the slot never passes

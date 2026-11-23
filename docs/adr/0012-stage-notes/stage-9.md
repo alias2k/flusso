@@ -803,6 +803,14 @@ and the confirmed slot stay before its change, and the next start replays it. It
 so nothing behind it on the lane can raise `applied` past it either. A fence on the lane never sees it applied;
 once stopping, `/wait` answers `503 stopping` anyway.
 
+**One backfill request per index, as before.** `stage_reindex` asks for each index's backfill on its own
+(`request_backfill`/`ask_again` per index) so a failed ask owes only its index. That changes no request: a
+`Request::Backfill` names one index, and `request_backfill` has always published one per index, so the ingest
+engine sees the same requests and coalesces them as before (per index, into its builder's snapshot), and
+`outstanding` holds the same entry per index. `forget_walked` was already one write per cut index. Only the
+observer's `on_backfill_requested` now comes once per index instead of once for the set; the fence takes it per
+index anyway.
+
 **What releases each item at a stop.** Every `Queue` variant in the run's window, every lane state; "released" is
 acknowledged unwritten and unapplied. Items elsewhere are in the list after the table.
 
@@ -915,11 +923,16 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
    staged (at once, or at the retry that succeeds); no new fields. `flusso_lane_parked` drops to 0 for the lane.
 7. **A stop before the new generation is seeded** drains normally (exit 0): the stuck item's change is not
    confirmed, so the next start replays it and requests the backfill again. **A stop while a lane is `restaging`**
-   (a reindex waiting for its retry, as in 2, or an index whose target went missing) also drains at once: nothing
-   is staged, retried or asked for once stopping (a staging already under way finishes but opens nothing; an ask
-   for a backfill already in progress completes and is never served), a reindex not yet staged is dropped, a sink
-   run that fails during the stop is restarted to ensure its indexes only, and the lane's waiting changes are left unconfirmed, so
-   the next start stages the index and replays them (what it does about the reindex: 2). A lane parked on a
+   (a reindex waiting for its retry, as in 2, or an index whose target went missing) also drains without waiting
+   for the lane: nothing is staged, retried or asked for once stopping (a staging already under way finishes but
+   opens nothing; an ask for a backfill already in progress completes and is never served), a reindex not yet
+   staged is dropped, a sink run that fails during the stop is restarted to ensure its indexes only, and the lane's
+   waiting changes are left unconfirmed, so the next start stages the index and replays them (what it does about
+   the reindex: 2). **Two waits remain:** a reindex asked for just before the stop and still creating its new
+   generation holds the stop until that one round trip with the destination returns; and a sink run that failed
+   during the stop is restarted only after the daemon's restart backoff, which doubles while the sink keeps failing
+   without progress, up to `max_restart_backoff` (60 s by default), past the default 30 s `--shutdown-timeout-secs`,
+   so such a stop can end at its deadline (exit 1). A lane parked on a
    refused or blocked item still writes it once at the stop and, refused again, holds the stop until its deadline,
    as before.
 8. **Runbook, a stuck lane:** a reindex of that index on that sink is the way out for a write block on that index

@@ -3337,14 +3337,26 @@ mod tests {
     /// finds its own key.
     #[test]
     fn a_rendered_id_shared_by_two_indexes_still_finds_its_key() {
-        let ids = Arc::new(vec![id("orders", 1), id("users", 1)]);
-        for index in ["orders", "users"] {
+        // Keyed by different columns, so the two keys differ though both
+        // render `1`: only the index tells them apart.
+        let users = kernel::DocumentId {
+            index: IndexName::try_new("users").unwrap(),
+            key: kernel::RowKey(vec![(
+                kernel::ColumnName::try_new("uid").unwrap(),
+                kernel::GenericValue::BigInt(1),
+            )]),
+        };
+        let ids = Arc::new(vec![id("orders", 1), users.clone()]);
+        for (index, key) in [
+            ("orders", id("orders", 1).key),
+            ("users", users.key.clone()),
+        ] {
             let batch = Batch {
                 envelopes: vec![envelope(index, 1)].into(),
                 ids: Some(Arc::clone(&ids)),
                 ..Batch::default()
             };
-            assert_eq!(keys_of(&batch), Some(vec![id(index, 1).key]), "{index}");
+            assert_eq!(keys_of(&batch), Some(vec![key]), "{index}");
         }
     }
 
