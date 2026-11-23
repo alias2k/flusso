@@ -775,13 +775,35 @@ backfill of another that had staged. X11 is replaced:
 | X17 | The owed reindex lives on the lane's state, so a failed run keeps it: staging at the next run's start leaves the lane `restaging` for the retry instead of reopening it | `an_owed_reindex_outlives_a_failed_run` |
 | X18 | *Revised (review of #470, 1).* Asking for an index's backfill (`request_backfill`, or `ask_again`'s `forget_walked`, a sink write the same block refuses) failing makes **that index** owed, with the error as its reason; it never fails the run. Every index of the call is recorded staged or owed before anything returns, so no ordering of failures drops one. A run failing for another reason keeps them (X17) | `a_failed_ask_for_a_backfill_leaves_every_index_of_the_reindex_owed`, `a_reindex_whose_backfill_request_fails_is_owed` |
 
-| X19 | *Review of #470, 2.* Once the stop is asked, an owed reindex is not retried, and a reindex still waiting to be staged is dropped (logged): nothing new is staged or asked for. A lane owed its reindex has its live items acknowledged unwritten and unapplied, as held items are at a stop (X10), so the drain ends at once | `a_stop_while_a_reindex_is_owed_drains_at_once_and_stages_nothing`, `a_reindex_pending_at_a_stop_is_not_staged` |
-| X20 | *Owner's decision (review of #470, 3).* The owed reindex lives in memory: it outlives a failed run of the sink engine (X17), not the process. What the next start does depends on how far it got. If the sink recorded the new generation (OpenSearch: `reindex` wrote the meta doc naming it, unseeded) and only a later step failed, staging finds the index unseeded, announces it `rebuilding` and backfills it; the lane's stuck item is not held (X2 needs the reindex), so it is replayed into the new generation and written like any item. If the sink recorded nothing, the index is seeded as before and the reindex is gone: the operator asks again | — (stated) |
+| X19 | *Reviews of #470, 2 and second review 1, 2.* Once the stop is asked, nothing is staged or asked for: no `restaging` lane is staged again (its target gone, or owed its reindex), a reindex still waiting to be staged is dropped (logged), and a staging already out when the stop came (a restage, an owed retry) finishes as **state only**: it asks for no backfill, opens no lane, and its lane stays `restaging` (owed). A `restaging` lane's live items and `SnapshotComplete` are acknowledged unwritten and unapplied (`release_restaging_on_stop`), its index left unseeded, read and released until nothing more is ready (a lane not open takes one item at a time), also while its staging is out, so the drain ends at once | `a_stop_while_a_reindex_is_owed_drains_at_once_and_stages_nothing`, `a_reindex_pending_at_a_stop_is_not_staged`, `a_stop_releases_the_completion_waiting_on_an_owed_lane`, `a_stop_releases_a_lane_restaging_a_missing_target`, `a_stop_during_an_owed_retry_records_it_and_writes_nothing_more`, `a_retry_returning_staged_during_a_stop_leaves_the_lane_owed` |
+| X20 | *Owner's decision (review of #470, 3; corrected by the second review, 3).* The owed reindex lives in memory: it outlives a failed run of the sink engine (X17), not the process. What the next start finds depends on how far it got. (a) The sink recorded a new generation (OpenSearch: `reindex` wrote the meta doc naming it, unseeded) and only a later step failed: staging finds the index unseeded, announces it `rebuilding` and backfills it. (b) The index was already unseeded (X6: its backfill outstanding; OpenSearch's `reindex` is a no-op then): staging finds it unseeded and resumes that backfill from its walk checkpoint, which the failed `forget_walked` may have left. (c) The sink recorded nothing on a seeded index: it is seeded as before and the reindex is gone; the operator asks again. In (a) and (b) the lane's stuck item is not held (X2 needs the reindex): it is replayed and written like any item | — (stated) |
 
-**Why X19 keeps confirmation and fences right.** The released items are acknowledged through `acknowledge(…, None)`,
-the path X10 and a skipped backfill page take: no position reaches `Progress::applied`, so the lane's applied
-mark, `Progress::landed` and the confirmed slot stay before their changes, and the next start replays them. A
-fence on the lane never sees them applied; once stopping, `/wait` answers `503 stopping` anyway.
+**Why X19 keeps confirmation and fences right.** A lane's applied mark moves only through
+`Progress::applied`, which only a write that returned (`write_returned`) or a held item settled at its seed calls.
+A released item is never written: it is acknowledged (`acknowledge`, whose last argument is the caught-up-write
+hint, not a position), which settles it in the channel's ledger and the run's own accounts and moves no
+applied mark. So the lane's applied mark, `Progress::landed`
+and the confirmed slot stay before its change, and the next start replays it. Its `Fences` entry stays `Writing`,
+so nothing behind it on the lane can raise `applied` past it either. A fence on the lane never sees it applied;
+once stopping, `/wait` answers `503 stopping` anyway.
+
+**What releases each item at a stop.** Every `Queue` variant, every lane state; "released" is acknowledged
+unwritten and unapplied.
+
+| Item \ lane | open | parked (refused, blocked) | restaging (target gone) | owed (restaging, a reindex owed) | holding (X2) |
+| --- | --- | --- | --- | --- | --- |
+| live `Batch` | written as usual, applied when it lands | the front item is probed once (`probe_on_stop`; a fresh build asked is not waited for, F13): landed, the lane opens and the rest is written; refused or blocked again, it stays and holds the drain until the deadline (exit 1), as before this PR: under `on_error = "stop"` it neither lands nor is dropped | released (`release_restaging_on_stop`) | released | the held item: released (`release_held_on_stop`, X10); items behind it: written as usual |
+| backfill page (`Batch`, no position) | released by `skip_backfill`, its index marked cut short (left unseeded) | the same | the same | the same | the same |
+| `SnapshotComplete` | run once nothing of the lane is in front: seeds nothing if a page was cut short (`cut_short`) or the request was superseded, else seeds | the same, once the probe cleared the front | released, seeds nothing | released, seeds nothing | the same as open |
+| item read after the stop | as above | as above | read and released until nothing more is ready, also while a staging is out | the same | as above |
+| a staging out (restage, owed retry) | — | — | finishes as state only: no backfill asked, lane stays restaging | the same, lane stays owed | — |
+
+For every sink shape: releasing and skipping run in `advance`, before any grant, and take no write slot, so an
+ordered sink or `writes = 1` drains the same (`a_stop_releases_the_completion_waiting_on_an_owed_lane` runs both).
+A release may make its lane quiet: `acknowledge` then starts one empty caught-up write (`owed_refresh`) only when
+the lane has a written position not searchable yet (written before it stopped being open), as any quiet lane gets
+at a stop; the item is acknowledged when it returns, and its failure is the run's, as for any lane. The parked row is
+the one place a stop can still wait for the deadline, and it was so before this PR (slice 1, item 6).
 
 A lasting failure (a cluster-wide block) shows as the lane `restaging` with its reason in `/status` and
 `FlussoLaneParked` covers it, while the other lanes run (S4's goal).
@@ -843,10 +865,11 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
    first wait, doubling to the longest). A momentary error heals by itself; a lasting one (a cluster-wide block)
    shows as that lane restaging, with `flusso_lane_parked{why="restaging"}` at 1 so `FlussoLaneParked` fires,
    while the sink's other lanes keep writing. Once the destination accepts it, the reindex goes on as in 1. The
-   wait is kept in memory: a failed run of the sink keeps it, but **a restart of flusso forgets a reindex that
-   never managed to create its new generation**, so ask for it again after the restart. One whose new generation
-   was created (only a later step failed) is picked up by the next start, which backfills that generation; the
-   item the lane was stuck on is then replayed and written like any other, not held.
+   wait is kept in memory: a failed run of the sink keeps it, a restart of flusso does not. After a restart: if
+   the new generation was created (only a later step failed), the next start backfills it; if the index was
+   still being backfilled when the reindex was asked, the next start resumes that backfill; otherwise **the
+   reindex is gone, so ask for it again**. Either way the item the lane was stuck on is replayed and written
+   like any other, not held.
 3. **A reindex of several indexes** goes ahead for each index that can be staged, even when another cannot; each
    that cannot waits and is retried as in 2.
 4. **Until the new generation is seeded**, the index's fences answer `503` with reason `rebuilding` (as for any
@@ -859,10 +882,13 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
 6. **`/status`:** the lane's health goes from `refused`, `blocked` or `restaging` to `open` once the reindex is
    staged (at once, or at the retry that succeeds); no new fields. `flusso_lane_parked` drops to 0 for the lane.
 7. **A stop before the new generation is seeded** drains normally (exit 0): the stuck item's change is not
-   confirmed, so the next start replays it and requests the backfill again. **A stop while a reindex waits for its
-   retry** (2) also drains at once: the retry is not made, a reindex not yet staged is dropped, nothing new is
-   created or backfilled, and the lane's waiting changes are left unconfirmed, so the next start replays them
-   (what it does about the reindex: 2).
+   confirmed, so the next start replays it and requests the backfill again. **A stop while a lane is `restaging`**
+   (a reindex waiting for its retry, as in 2, or an index whose target went missing) also drains at once: nothing
+   is staged, retried or backfilled once stopping (a staging already under way finishes but asks for nothing and
+   opens nothing), a reindex not yet staged is dropped, and the lane's waiting changes are left unconfirmed, so
+   the next start stages the index and replays them (what it does about the reindex: 2). A lane parked on a
+   refused or blocked item still writes it once at the stop and, refused again, holds the stop until its deadline,
+   as before.
 8. **Runbook, a stuck lane:** a reindex of that index on that sink is the way out for a write block on that index
    that won't be lifted, a target that can't be staged, or a mapping or settings change made by hand; for a row
    the mapping refuses, fix the row (or switch the index to `on_error = "skip"`). A lane `restaging` with
