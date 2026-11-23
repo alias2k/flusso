@@ -985,8 +985,12 @@ destination that is down alike, so the line is drawn from what the staging saw, 
 path (an index refused while the destination answers is the lane's; the destination not answering is the sink's):
 
 - **at least one index was ensured:** the destination answers. Every index is then started (eight at a time),
-  never stopped at the first failure, so only the indexes that themselves failed are left out: each is left
-  `restaging` with `could not be ensured: <error>` and the staging goes on with the rest (review of #476, 2);
+  not stopped at the first failure, so only the indexes that themselves failed are left out: each is left
+  `restaging` with `could not be ensured: <error>` (the latest error, if it was left out before) and the staging
+  goes on with the rest (review of #476, 2). It stops starting indexes once a wave's worth (8) failed in a row,
+  even after a success (the destination stopped answering), or once the stop is asked; the indexes not tried
+  are left `restaging` as `not tried: …` and staged again by `start_restages` under its own bound (second review
+  of #476, 2);
 - **none of the first wave was:** further indexes are tried one at a time, at most one more wave's worth
   (`STAGE_CONCURRENCY`, 8). The first that is ensured shows the destination answers, and the staging goes on as
   above (review of #476, 3);
@@ -994,9 +998,18 @@ path (an index refused while the destination answers is the lane's; the destinat
   `flusso_meta`, #474's 503, which every index reads): the staging fails as a whole and the daemon backs off and
   retries, as today. A sink with one index keeps today's behaviour, there being nothing to isolate.
 
-A destination that is down costs a staging attempt one wave plus eight more calls: refused connections fail at
-once; a destination that takes connections and never answers costs nine request timeouts (one for the wave, one
-per extra try), spaced out by the daemon's restart backoff. **The limit that remains:** a sink whose first
+**What a failing destination costs a staging attempt** (OpenSearch's request timeout defaults to 30 s; refused
+connections fail at once, so the cost below is for a destination that takes connections and never answers):
+
+- *nothing ever ensured:* one wave, then up to eight tries one at a time: up to nine request timeouts, 270 s,
+  against 30 s on `main` before #471. Accepted: it is what tells a refused first wave from a dead destination,
+  and the daemon's restart backoff spaces the attempts. A stop asked meanwhile starts no further try, so it waits
+  at most the one call in flight.
+- *the destination dies mid-staging, after some index was ensured:* the calls in flight when the eighth failure
+  in a row arrives still complete, so at most three waves, three request timeouts, whatever the number of
+  indexes; the rest are left out, not tried.
+- *a stop during the staging:* no index is started after it; the staging returns once the calls in flight
+  return, at most one request timeout. **The limit that remains:** a sink whose first
 sixteen indexes in order are all refused while the rest are fine is still read as a destination that is down
 (no port change can tell an index's refusal from the destination's without a new `Sink` method).
 

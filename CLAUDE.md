@@ -1764,7 +1764,8 @@ is the one concrete piece.
   (`ensure_again`: an intact target keeps its backfill and walk), the rest go on, and `reopen_restaged` skips it; a
   walk checkpoint is recorded only for the backfill it belongs to (`walked.rs` keeps each page's ticket, and
   `record_walked` drops a reached mark whose ticket no longer `answers`: `Walked::discard_unless`; the note's R5);
-  once one index is ensured every index is started (`Spread::OnceAnswered`), while none is up to eight more are
+  once one index is ensured every index is started (`Spread::OnceAnswered`) until eight fail in a row or the stop is
+  asked (the rest left out as `not tried`), while none is up to eight more are
   tried one at a time, and none ensured then is the destination's failure and fails the staging as a whole, as does
   a `Fresh` first staging on any index (its rebuild must be staged before `prepare`); `start_restages` runs at most
   `STAGE_CONCURRENCY` stagings at once (`ensure_per_index`, `leave_restaging`; guards

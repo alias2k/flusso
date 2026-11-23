@@ -357,6 +357,16 @@ impl LaneState {
         true
     }
 
+    /// A lane a staging left out was left out again: its reason becomes the
+    /// latest error (#471). A lane restaging for another cause keeps its own.
+    pub(crate) fn left_out_again(&mut self, reason: String) {
+        if self.unensured
+            && let LaneHealth::Restaging { reason: kept, .. } = &mut self.health
+        {
+            *kept = reason;
+        }
+    }
+
     /// The index is staged again: the lane opens, keeping its backoff until
     /// one of its writes lands. How long it was not open.
     pub(crate) fn reopen(&mut self, now: Instant) -> Option<Duration> {

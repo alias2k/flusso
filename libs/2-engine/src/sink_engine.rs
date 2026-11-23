@@ -526,8 +526,10 @@ impl SinkEngine {
     /// each restart of this engine (with `Resumed`).
     ///
     /// The indexes are staged concurrently, at most eight at a time, each
-    /// index's own steps in order. After a failure no further index is
-    /// started; the error names every failure seen.
+    /// index's own steps in order. Under `Fresh` no further index is started
+    /// after a failure and the error names every failure seen; under
+    /// `Resumed` an index that can't be ensured is left restaging and the rest
+    /// go on (#471, `ensure_per_index`).
     #[tracing::instrument(name = "sink.stage", skip_all, fields(sink = %self.name, ?continuity))]
     pub async fn stage(&self, continuity: Continuity) -> Result<()> {
         let started = Instant::now();
@@ -651,7 +653,8 @@ impl SinkEngine {
         if tried.done.is_empty() && !tried.failed.is_empty() {
             return Err(EngineError::Staging(StagingFailures(tried.failed)));
         }
-        let unensured = self.leave_restaging(tried.failed, tried.not_started, false);
+        let stopping = self.stop.is_requested();
+        let unensured = self.leave_restaging(tried.failed, tried.not_started, stopping);
         Ok((tried.done, unensured))
     }
 
@@ -670,17 +673,23 @@ impl SinkEngine {
             .into_iter()
             .map(|(index, error)| (index, format!("could not be ensured{when}: {error}")))
             .chain(not_started.into_iter().map(|index| {
-                (
-                    index,
-                    format!("not ensured{when}: another index failed first"),
-                )
+                let why = if stopping {
+                    "not ensured during the stop: not tried".to_owned()
+                } else {
+                    format!(
+                        "not tried: {STAGE_CONCURRENCY} indexes in a row could not be ensured before it"
+                    )
+                };
+                (index, why)
             }));
         let now = Instant::now();
         let mut left = BTreeSet::new();
         for (index, reason) in unstaged {
             let lane = LaneKey::new(index.clone(), self.name.clone());
             let mut state = self.lane_state(&lane);
-            if state.restage(reason.clone(), now) {
+            if !state.restage(reason.clone(), now) {
+                state.left_out_again(reason.clone());
+            } else {
                 state.unensured = true;
                 if stopping {
                     tracing::warn!(%lane, %reason, "not ensured during the stop; its items are released unapplied");
@@ -826,11 +835,24 @@ impl SinkEngine {
         let mut failed_once = false;
         let mut answered = false;
         let mut probes = 0;
+        let mut in_a_row = 0;
+        // A staging that began under the stop ensures every index (X21); one
+        // under way starts no index once the stop is asked: what is left is
+        // the stop's to release.
+        let began_stopping = self.stop.is_requested();
         loop {
             loop {
-                let open = !failed_once || (spread == Spread::OnceAnswered && answered);
+                if !began_stopping && self.stop.is_requested() {
+                    break;
+                }
+                // A wave's worth of failures in a row, even after a success:
+                // the destination stopped answering (#471, second review).
+                let open = (!failed_once || (spread == Spread::OnceAnswered && answered))
+                    && in_a_row < STAGE_CONCURRENCY;
                 let room = if open {
                     running.len() < STAGE_CONCURRENCY
+                } else if answered {
+                    false
                 } else {
                     // Nothing ensured yet: one more index at a time, up to one
                     // more wave's worth, before reading the destination as down.
@@ -852,8 +874,13 @@ impl SinkEngine {
             let Some(outcome) = running.next().await else {
                 break;
             };
-            failed_once |= outcome.2.is_err();
-            answered |= outcome.2.is_ok();
+            if outcome.2.is_ok() {
+                answered = true;
+                in_a_row = 0;
+            } else {
+                failed_once = true;
+                in_a_row += 1;
+            }
             outcomes.push(outcome);
         }
         outcomes.sort_unstable_by_key(|(order, _, _)| *order);
