@@ -566,6 +566,7 @@ yet acknowledged: `seq → build number`, on the lane's `LaneRun`.
 | `skip_backfill` (stop) → `acknowledge` | a snapshot item acknowledged unwritten | through `acknowledged` |
 | `seed`/`seed_returned`/`put_back_complete`, the completion acknowledged in `grant` | a `SnapshotComplete` | no build number: not an item of the account |
 | `landed`'s `Err` arm, `fail`, the run's end | a handle dropped unacknowledged | never leaves the account; nothing is pruned once the run failed; the next run starts again from the redelivery |
+| `grant`'s `parts` (window → `launch`), `landed`'s `landed_parts` during its acknowledgement loop, `refresh_returned`'s `waiting` | short-lived local holders inside one `&mut self` call | no seed runs while they hold a handle: seeding happens only in `supersede`, which `landed` calls after its acknowledgement loop (every landed part already acknowledged or moved to `refreshing`), and neither `grant` nor `refresh_returned` calls it |
 
 **A write mixing a block and refusals for one index.** `held_indexes` lets a block win over refusals of the
 same index, and a blocked part's report names no documents, so a substitute in such a write adds nothing to
@@ -579,9 +580,10 @@ the one case the map can't see, because the sink port doesn't say which items a 
 `an_item_waiting_for_a_caught_up_write_keeps_the_map`); the boundary and memory bound
 (`an_entry_stays_while_an_older_item_is_unacknowledged_and_goes_after`: an item numbered 11 prunes while 9 is in
 flight, the entry 10 stays; once 9 is acknowledged it goes and the lane keeps no state); the seed's caught-up wait
-(`the_parked_item_waiting_for_its_caught_up_write_keeps_the_map`: a lane isn't probed while its own caught-up write
-is out, so the item waiting for one when its substitute lands is the parked item itself, whose acknowledgement
-waits for the quiet lane's caught-up write). The random schedules: the seeds refusing documents write up to four
+(`the_parked_item_is_never_rewritten_whole`, the review's strengthened version, round 3: a lane isn't probed while
+its own caught-up write is out, so the item waiting for one when its substitute lands is the parked item itself,
+whose acknowledgement waits for the quiet lane's caught-up write; the test waits for every acknowledgement and
+counts the writes holding the document). The random schedules: the seeds refusing documents write up to four
 items at once and, two in five, report writes searchable within 50 ms; after a substitute the sink's next write
 fails now and then (a part, a sibling's, or a caught-up write); they assert lanes asked again after a substitute
 and writes failed after one.
@@ -591,10 +593,28 @@ and writes failed after one.
 | Mutation | Killed by |
 | --- | --- |
 | a received item left out of the account | both random schedules |
-| a caught-up wait left out of the seed | the open-stream schedules |
+| a caught-up wait left out of the seed | `the_parked_item_is_never_rewritten_whole` (round 3; before, nothing killed it reliably) |
 | an entry dropped one item too early (`> floor + 1`) | `an_entry_stays_while_an_older_item_is_unacknowledged_and_goes_after` |
 | an entry never dropped | the same |
 | pruning after the run failed | none: redundant. A handle dropped by the failure never leaves the account, so the floor can't pass it either way; the check stays as a second barrier |
 
 Not done: under the routing mutation (a `Rebuild` sent to the backfill inbox) the open-stream schedule still
 runs to nextest's kill; the directed `rebuilds` tests fail at once.
+
+### 14.11 Fix round 3 (review of #458 at `ff8b7b43`)
+
+- **F9 depends on the stream port's order**, now written into `Consumer`'s contract (`stream/src/queue.rs`):
+  items come in publication order, and a delivery returned (nacked or dropped) comes back in that order among
+  the returned ones, before any item not yet delivered. 14.10's proof uses exactly this ("by the time a run has
+  received item `b`, every unacknowledged item below `b` was received in this run"). The channel adapter's
+  `a_returned_delivery_comes_back_before_anything_not_yet_delivered` pins it.
+- **m2:** the substitute lane is not read once the run failed, so no probe write starts after a failure.
+- **m3:** `supersede` returns at once for an empty set of documents (no account seeded for nothing).
+- **m4:** a landed substitute's documents (and those of one refused for others) join the map before its
+  delivery is acknowledged.
+- **m1:** after every refusal stretch following a substitute the sink's next write fails; the schedules count
+  each armed failure a write consumed and assert at least 20 (62 in the closed-stream test).
+- **The bench.** Nothing on the open path changed between `8b87df0d` (gate green) and `ff8b7b43`: `queue` and
+  `acknowledged` each test `superseding > 0` first, the account lives on the per-run lane state, and
+  `ff8b7b43` removed a per-landing `Vec` `8b87df0d` allocated. A throwaway pinned local A/B of `live_drain_held`
+  against `origin/main` was within its noise (the machine's own load moved the base by 2× between rounds).
