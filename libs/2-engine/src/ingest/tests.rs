@@ -2657,6 +2657,264 @@ async fn a_batch_split_across_lanes_gives_its_bytes_back_once_the_last_lane_land
     }
 }
 
+/// The channel stream, recording the lane of every substitute published.
+#[derive(Debug)]
+struct SubstituteLanes {
+    inner: Arc<ChannelStream>,
+    lanes: Arc<Mutex<Vec<stream::LaneKey>>>,
+}
+
+#[derive(Debug)]
+struct RecordsLane {
+    inner: Box<dyn stream::Producer<stream::Substitute>>,
+    lanes: Arc<Mutex<Vec<stream::LaneKey>>>,
+}
+
+#[async_trait]
+impl stream::Producer<stream::Substitute> for RecordsLane {
+    async fn publish(&self, item: stream::Substitute) -> stream::Result<()> {
+        let lane = item.lane.clone();
+        self.inner.publish(item).await?;
+        self.lanes.lock().unwrap().push(lane);
+        Ok(())
+    }
+}
+
+impl Stream for SubstituteLanes {
+    fn lane(&self, key: &stream::LaneKey) -> stream::Result<stream::Lane> {
+        self.inner.lane(key)
+    }
+
+    fn substitutes(&self, sink: &SinkName) -> stream::Result<stream::SubstituteLane> {
+        let lane = self.inner.substitutes(sink)?;
+        Ok(stream::SubstituteLane {
+            producer: Box::new(RecordsLane {
+                inner: lane.producer,
+                lanes: Arc::clone(&self.lanes),
+            }),
+            consumer: lane.consumer,
+        })
+    }
+
+    fn lanes(&self, sink: &SinkName) -> Vec<stream::LaneKey> {
+        self.inner.lanes(sink)
+    }
+
+    fn requests(&self) -> stream::Result<stream::RequestLane> {
+        self.inner.requests()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.inner.is_idle()
+    }
+}
+
+/// Review of `main` at `9b70cd6e`, 1, end to end: a real ingest engine's
+/// item, a real sink engine. One row is a document of two indexes under one
+/// rendered id; the sink refuses it in both, so both lanes park, and each
+/// asks for a fresh build of its own item and gets one; once the row is
+/// fixed both land. (Each index has its own builder, so one build's ids
+/// hold one index: `keys_of` keying by index is the guard should that
+/// change.)
+#[tokio::test(start_paused = true)]
+async fn each_index_sharing_a_rendered_id_gets_its_own_fresh_build() {
+    let channel = Arc::new(ChannelStream::over(64, [users(), orders()], [sink_name()]));
+    let substituted = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(SubstituteLanes {
+        inner: Arc::clone(&channel),
+        lanes: Arc::clone(&substituted),
+    });
+    let db = Database::new(0, vec![Change::upsert(1)]);
+    let stop = Stop::new();
+    let ingest = IngestEngine::new(
+        Arc::new(Feed::new(&db).open()) as Arc<dyn ChangeCapture>,
+        Arc::new(TwoIndexes),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![sink_name()],
+        Arc::new(crate::Progress::of([users(), orders()], [sink_name()])),
+    )
+    .with_stop(stop.clone());
+    let recorder = Recorder::seeded(true);
+    recorder.refused_ids.lock().unwrap().insert(1);
+    let engine = SinkEngine::new(
+        sink_name(),
+        Arc::clone(&recorder) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        [users(), orders()]
+            .into_iter()
+            .map(|index| IndexMapping { index, ..mapping() })
+            .collect(),
+        ingest.progress(),
+    )
+    .with_backoff(crate::Backoff::new(Duration::from_millis(100), Duration::from_secs(1)).unwrap());
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let sink = tokio::spawn(async move {
+        let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+        engine.run(&mut rx).await
+    });
+    let ingest = tokio::spawn(async move { ingest.run().await });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let lanes = substituted.lock().unwrap().clone();
+        if [users(), orders()]
+            .iter()
+            .all(|index| lanes.iter().any(|lane| lane.index == *index))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "every refused lane gets a fresh build: {lanes:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    recorder.refused_ids.lock().unwrap().clear();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !channel.is_idle() {
+        assert!(tokio::time::Instant::now() < deadline, "both lanes land");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(60), ingest)
+        .await
+        .expect("the ingest run ends")
+        .unwrap()
+        .unwrap();
+    sink.abort();
+}
+
+/// Rows 1 and 2 as documents of `orders` keyed by two composite keys that
+/// render alike: `a:b`+`c` and `a`+`b:c` are both `a:b:c`.
+#[derive(Debug)]
+struct AlikeKeys;
+
+impl AlikeKeys {
+    fn key(row: &RowKey) -> RowKey {
+        let (x, y) = match row.0.first() {
+            Some((_, GenericValue::BigInt(1))) => ("a:b", "c"),
+            _ => ("a", "b:c"),
+        };
+        RowKey(vec![
+            (
+                kernel::ColumnName::try_new("x").unwrap(),
+                GenericValue::String(x.to_owned()),
+            ),
+            (
+                kernel::ColumnName::try_new("y").unwrap(),
+                GenericValue::String(y.to_owned()),
+            ),
+        ])
+    }
+}
+
+#[async_trait]
+impl DocumentBuilder for AlikeKeys {
+    async fn resolve(
+        &self,
+        _table: &TableName,
+        key: &RowKey,
+        _before: Option<&RowImage>,
+        _after: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        Ok(vec![DocumentId {
+            index: orders(),
+            key: Self::key(key),
+        }])
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        Ok(Document::Upsert {
+            id: id.clone(),
+            body: GenericValue::Map(BTreeMap::new()),
+        })
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        Vec::new()
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(None)
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        _: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Review of `main` at `9b70cd6e`, 3, end to end: a real ingest engine's
+/// item holds two documents whose keys render alike. Its refused lane can't
+/// tell which key is which, so it asks for no fresh build (a wrong key would
+/// rebuild one row twice and leave the other's refusal in place): it probes
+/// the item itself (F2), which lands once the refusal ends.
+#[tokio::test(start_paused = true)]
+async fn an_item_whose_keys_render_alike_probes_itself() {
+    let channel = Arc::new(ChannelStream::over(64, [orders()], [sink_name()]));
+    let substituted = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(SubstituteLanes {
+        inner: Arc::clone(&channel),
+        lanes: Arc::clone(&substituted),
+    });
+    let db = Database::new(0, vec![Change::upsert(1), Change::upsert(2)]);
+    let stop = Stop::new();
+    let ingest = IngestEngine::new(
+        Arc::new(Feed::new(&db).open()) as Arc<dyn ChangeCapture>,
+        Arc::new(AlikeKeys),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![sink_name()],
+        Arc::new(crate::Progress::of([orders()], [sink_name()])),
+    )
+    .with_stop(stop.clone());
+    let recorder = Recorder::seeded(true);
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let engine = SinkEngine::new(
+        sink_name(),
+        Arc::clone(&recorder) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![IndexMapping {
+            index: orders(),
+            ..mapping()
+        }],
+        ingest.progress(),
+    )
+    .with_backoff(crate::Backoff::new(Duration::from_millis(100), Duration::from_secs(1)).unwrap());
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let sink = tokio::spawn(async move {
+        let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+        engine.run(&mut rx).await
+    });
+    let ingest = tokio::spawn(async move { ingest.run().await });
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(
+        substituted.lock().unwrap().is_empty(),
+        "no fresh build with keys it cannot vouch for"
+    );
+    assert!(!channel.is_idle(), "the refused item still waits");
+    recorder.refused_indexes.lock().unwrap().clear();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !channel.is_idle() {
+        assert!(tokio::time::Instant::now() < deadline, "the item lands");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    stop.request();
+    tokio::time::timeout(Duration::from_secs(60), ingest)
+        .await
+        .expect("the ingest run ends")
+        .unwrap()
+        .unwrap();
+    sink.abort();
+}
+
 /// Stage 9: with two sinks, each lane's item holds the one id vector its
 /// build made, by refcount: nothing about the ids is copied per lane.
 #[tokio::test(start_paused = true)]

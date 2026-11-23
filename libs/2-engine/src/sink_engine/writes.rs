@@ -128,7 +128,7 @@
 
 use std::cmp::Ordering as Order;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -3030,26 +3030,33 @@ fn run_rejected(report: &WriteReport, lane: usize, lanes: &[LaneRun]) -> Vec<Str
         .collect()
 }
 
-/// The root keys of `batch`'s documents, in envelope order, matched by
-/// rendered id against the build's ids the item carries (a build's ids are
-/// a superset: documents left out as failed, or by F9's `without`, have no
-/// envelope); `None` when the item carries none or an envelope has no match,
-/// and then the probe writes the item itself (F2): never a wrong key.
+/// The root keys of `batch`'s documents, in envelope order, matched by index
+/// and rendered id against the build's ids the item carries (a superset:
+/// several indexes, documents left out as failed or by F9's `without`);
+/// `None` when the item carries none, an envelope has no match, or two keys
+/// of its index render as its id, and then the probe writes the item itself
+/// (F2): never a wrong key.
 fn keys_of(batch: &Batch) -> Option<Vec<kernel::RowKey>> {
     let ids = batch.ids.as_ref()?;
     if batch.envelopes.is_empty() {
         return None;
     }
-    let by_id: std::collections::HashMap<String, &kernel::DocumentId> =
-        ids.iter().map(|id| (id.rendered(), id)).collect();
+    let mut by_id: HashMap<String, Vec<&kernel::DocumentId>> = HashMap::new();
+    for id in ids.iter() {
+        by_id.entry(id.rendered()).or_default().push(id);
+    }
     batch
         .envelopes
         .iter()
         .map(|envelope| {
-            by_id
-                .get(&envelope.id)
-                .filter(|id| id.index == envelope.index)
-                .map(|id| id.key.clone())
+            let mut own = by_id
+                .get(&envelope.id)?
+                .iter()
+                .filter(|id| id.index == envelope.index);
+            let key = &own.next()?.key;
+            // Two keys of one index rendering alike: the envelope can't say
+            // which it is, so no keys at all rather than a wrong one.
+            own.all(|other| other.key == *key).then(|| key.clone())
         })
         .collect()
 }
@@ -3193,6 +3200,64 @@ mod tests {
             keys_of(&batch(vec![envelope("orders", 1)], None)),
             None,
             "no ids"
+        );
+    }
+
+    /// Review of `main` at `9b70cd6e`, 1: one build's ids cover several
+    /// indexes, whose ids may render alike (`orders` 1 and `users` 1, two
+    /// indexes over one table). Each index finds its own key.
+    #[test]
+    fn a_rendered_id_shared_by_two_indexes_still_finds_its_key() {
+        let ids = Arc::new(vec![id("orders", 1), id("users", 1)]);
+        for index in ["orders", "users"] {
+            let batch = Batch {
+                envelopes: vec![envelope(index, 1)].into(),
+                ids: Some(Arc::clone(&ids)),
+                ..Batch::default()
+            };
+            assert_eq!(keys_of(&batch), Some(vec![id(index, 1).key]), "{index}");
+        }
+    }
+
+    /// Review of `main` at `9b70cd6e`, 3: two keys of one index that render
+    /// alike (`a:b`+`c` and `a`+`b:c`) cannot be told apart by the envelope:
+    /// no keys, and the probe writes the item itself (F2).
+    #[test]
+    fn two_keys_rendering_alike_in_one_index_give_no_keys() {
+        let composite = |a: &str, b: &str| kernel::DocumentId {
+            index: IndexName::try_new("orders").unwrap(),
+            key: kernel::RowKey(vec![
+                (
+                    kernel::ColumnName::try_new("x").unwrap(),
+                    kernel::GenericValue::String(a.to_owned()),
+                ),
+                (
+                    kernel::ColumnName::try_new("y").unwrap(),
+                    kernel::GenericValue::String(b.to_owned()),
+                ),
+            ]),
+        };
+        let first = composite("a:b", "c");
+        let second = composite("a", "b:c");
+        assert_eq!(first.rendered(), second.rendered());
+        let delete = |id: &kernel::DocumentId| {
+            Envelope::delete(id.index.clone(), id.rendered(), None, chrono::Utc::now())
+        };
+        let batch = Batch {
+            envelopes: vec![delete(&first)].into(),
+            ids: Some(Arc::new(vec![first.clone(), second.clone()])),
+            ..Batch::default()
+        };
+        assert_eq!(keys_of(&batch), None, "ambiguous: probe the item itself");
+        let repeated = Batch {
+            envelopes: vec![delete(&first)].into(),
+            ids: Some(Arc::new(vec![first.clone(), first.clone()])),
+            ..Batch::default()
+        };
+        assert_eq!(
+            keys_of(&repeated),
+            Some(vec![first.key.clone()]),
+            "one key listed twice is not ambiguous"
         );
     }
 
