@@ -802,8 +802,8 @@ and the confirmed slot stay before its change, and the next start replays it. It
 so nothing behind it on the lane can raise `applied` past it either. A fence on the lane never sees it applied;
 once stopping, `/wait` answers `503 stopping` anyway.
 
-**What releases each item at a stop.** Every `Queue` variant, every lane state; "released" is acknowledged
-unwritten and unapplied.
+**What releases each item at a stop.** Every `Queue` variant in the run's window, every lane state; "released" is
+acknowledged unwritten and unapplied. Items elsewhere are in the list after the table.
 
 | Item \ lane | open | parked (refused, blocked) | restaging (target gone) | owed (restaging, a reindex owed) | holding (X2) |
 | --- | --- | --- | --- | --- | --- |
@@ -814,6 +814,20 @@ unwritten and unapplied.
 | a staging out (restage, owed retry) | — | — | finishes as state only: lane stays restaging, no new ask (one in progress completes, unserved) | the same, lane stays owed | — |
 | the control's reindex, staged inline | the same as a retry: staged indexes owed, no lane opened (`settle_reindex`); the drain waits for that round trip | the same | the same | the same | the same |
 | the run fails during the stop | restarted after the daemon's backoff; staging only ensures (X21); the restarted run treats each lane as this table says | the same | the same; one that can't be ensured stays restaging | the same | the same |
+
+**Where else an item can be at a stop** (third review of #470, traced):
+
+- **In flight** (a write's `Part`): it lands, and its position is applied only up to the first entry of its lane
+  still `Writing` (a released item stays `Writing` in `Fences`); or it comes back (a missing target puts it back in
+  the window, released as above; a refusal parks the lane: the parked row).
+- **Held** (`run.held`, X2): released unapplied by `release_held_on_stop` (X10); one redelivered later is held again
+  on arrival, then released.
+- **Waiting on a caught-up write** (`Refreshing`): acknowledged when that empty write returns; a failure fails the
+  run, which the daemon restarts (X21).
+- **A seed in flight** (`Seeding`, its `SnapshotComplete` taken): it finishes, seeding the index or not, and the
+  completion is acknowledged after it, as without a stop.
+- **Still on the lane**: read and treated as the table says (a restaging lane's are read and released until none
+  is ready).
 
 For every sink shape: releasing and skipping run in `advance`, before any grant, and take no write slot, so an
 ordered sink or `writes = 1` drains the same (`a_stop_releases_the_completion_waiting_on_an_owed_lane` runs both).

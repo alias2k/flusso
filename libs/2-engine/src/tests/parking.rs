@@ -3193,10 +3193,12 @@ async fn a_stop_releases_a_lane_restaging_a_missing_target() {
         .insert("orders".to_owned());
     rig.live(&orders(), 1..2, 0).await;
     let stop = Stop::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
     let engine = Arc::new(
         rig.engine(FailurePolicy::Stop)
             .with_backoff(slow_backoff())
-            .with_stop(stop.clone()),
+            .with_stop(stop.clone())
+            .with_observer(rebuild_events(&events)),
     );
     let task = tokio::spawn({
         let engine = Arc::clone(&engine);
@@ -3223,6 +3225,7 @@ async fn a_stop_releases_a_lane_restaging_a_missing_target() {
     }
     complete(&rig, &orders(), stream::Ticket::new(99)).await;
     let ensured = rig.sink.ensured.lock().unwrap().len();
+    let before_stop = events.lock().unwrap().len();
     stop.request();
     let idle = idle_within(&rig, Duration::from_secs(300)).await;
     assert!(
@@ -3235,6 +3238,8 @@ async fn a_stop_releases_a_lane_restaging_a_missing_target() {
         ensured,
         "not staged again once stopping"
     );
+    let after: Vec<String> = events.lock().unwrap()[before_stop..].to_vec();
+    assert!(after.is_empty(), "nothing asked for or seeded: {after:?}");
     assert_eq!(rig.applied(&orders()), before(0), "nothing applied");
     task.abort();
 }
