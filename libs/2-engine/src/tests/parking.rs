@@ -83,6 +83,8 @@ struct Gate {
     ensure_fails: std::sync::atomic::AtomicBool,
     /// `ensure_index` fails for these indexes only.
     ensure_fails_for: Mutex<BTreeSet<String>>,
+    /// `forget_walked` fails (its write refused by a cluster-wide block).
+    forget_fails: std::sync::atomic::AtomicBool,
     /// Review r2: a write holding one of these ids takes that long.
     slow_ids: Mutex<BTreeMap<String, Duration>>,
     /// Review r2: a write holding this id fails as a whole.
@@ -251,6 +253,12 @@ impl Sink for Gate {
     }
 
     async fn forget_walked(&self, index: &IndexName) -> sink::Result<()> {
+        if self.forget_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SinkError::Write(
+                "cluster_block_exception: [FORBIDDEN/12/index read-only / allow delete (api)]"
+                    .to_owned(),
+            ));
+        }
         self.forgotten.lock().unwrap().push(index.to_string());
         Ok(())
     }
@@ -2719,6 +2727,202 @@ async fn a_reindex_of_two_indexes_stages_one_while_the_other_is_retried() {
     })
     .await;
     assert!(!task.is_finished());
+    task.abort();
+}
+
+/// Review of #470, 1: in one reindex, `users` cannot stage and asking for
+/// `orders`' backfill again fails (the same block refuses `forget_walked`,
+/// a write). Neither is lost: both are owed, the sink's run goes on, and
+/// both are staged and backfilled once the block lifts.
+#[tokio::test(start_paused = true)]
+async fn a_failed_ask_for_a_backfill_leaves_every_index_of_the_reindex_owed() {
+    let rig = Rig::new(Gate::default());
+    rig.sink
+        .unseeded
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(slow_backoff())
+            .with_observer(rebuild_events(&events)),
+    );
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .unwrap();
+    let (_, first) = next_backfill(&rig).await;
+    rig.sink.answer(&orders(), Some(Answer::Refuse));
+    rig.stream
+        .lane(&lane(orders()))
+        .unwrap()
+        .producer
+        .publish(match item(&orders(), 1..2, None) {
+            LaneItem::Batch(batch) => LaneItem::Batch(Batch {
+                ticket: Some(first),
+                ..batch
+            }),
+            other => other,
+        })
+        .await
+        .unwrap();
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    eventually("the lane parks on the page", || {
+        !engine.lane_health(&lane(orders())).is_open()
+    })
+    .await;
+    rig.sink.answer(&orders(), None);
+    rig.sink
+        .forget_fails
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("users".to_owned());
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders(), users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!task.is_finished(), "the sink's run goes on");
+    for of in [orders(), users()] {
+        assert_eq!(
+            engine.lane_health(&lane(of.clone())).kind(),
+            "restaging",
+            "{of} is owed its reindex"
+        );
+    }
+    rig.sink
+        .forget_fails
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    rig.sink.ensure_fails_for.lock().unwrap().clear();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let mut asked = BTreeMap::new();
+    for _ in 0..2 {
+        let (index, ticket) = next_backfill(&rig).await;
+        asked.insert(index.to_string(), ticket);
+    }
+    assert_eq!(
+        asked.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["orders", "users"],
+        "both retried and backfilled"
+    );
+    for (index, ticket) in asked {
+        complete(&rig, &IndexName::try_new(index).unwrap(), ticket).await;
+    }
+    eventually("both seeded", || {
+        last_event(&events, &orders()).as_deref() == Some("seeded orders")
+            && last_event(&events, &users()).as_deref() == Some("seeded users")
+    })
+    .await;
+    assert!(!task.is_finished());
+    task.abort();
+}
+
+/// A stream whose request lane refuses to publish while `refuse` is set.
+#[derive(Debug)]
+struct RefusingRequests {
+    inner: Arc<ChannelStream>,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Debug)]
+struct RefusingProducer {
+    inner: Box<dyn stream::Producer<Request>>,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl stream::Producer<Request> for RefusingProducer {
+    async fn publish(&self, item: Request) -> stream::Result<()> {
+        if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(stream::QueueError::Publish("broker unavailable".to_owned()));
+        }
+        self.inner.publish(item).await
+    }
+}
+
+impl Stream for RefusingRequests {
+    fn lane(&self, key: &LaneKey) -> stream::Result<stream::Lane> {
+        self.inner.lane(key)
+    }
+
+    fn substitutes(&self, sink: &kernel::SinkName) -> stream::Result<stream::SubstituteLane> {
+        self.inner.substitutes(sink)
+    }
+
+    fn lanes(&self, sink: &kernel::SinkName) -> Vec<LaneKey> {
+        self.inner.lanes(sink)
+    }
+
+    fn requests(&self) -> stream::Result<stream::RequestLane> {
+        let lane = self.inner.requests()?;
+        Ok(stream::RequestLane {
+            producer: Box::new(RefusingProducer {
+                inner: lane.producer,
+                refuse: Arc::clone(&self.refuse),
+            }),
+            consumer: lane.consumer,
+        })
+    }
+
+    fn is_idle(&self) -> bool {
+        self.inner.is_idle()
+    }
+}
+
+/// Review of #470, 1: a reindex staged but whose backfill request cannot be
+/// published is owed, not lost: retried once requests go through.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_whose_backfill_request_fails_is_owed() {
+    let rig = Rig::new(Gate::default());
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        SinkEngine::new(
+            sink_name("primary"),
+            Arc::clone(&rig.sink) as Arc<dyn Sink>,
+            Arc::new(RefusingRequests {
+                inner: Arc::clone(&rig.stream),
+                refuse: Arc::clone(&refuse),
+            }) as Arc<dyn Stream>,
+            vec![mapping(orders()), mapping(users())],
+            Arc::clone(&rig.progress),
+        )
+        .with_writes(4)
+        .with_failure_policies(FailurePolicies::new(FailurePolicy::Stop))
+        .with_backoff(slow_backoff())
+        .with_observer(rebuild_events(&events)),
+    );
+    engine.set_blame(Blame::Nobody);
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!task.is_finished(), "the sink's run goes on");
+    let health = engine.lane_health(&lane(orders()));
+    assert!(
+        matches!(&health, LaneHealth::Restaging { reason, .. } if reason.contains("broker unavailable")),
+        "owed, with its reason: {health:?}"
+    );
+    refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let (index, ticket) = next_backfill(&rig).await;
+    assert_eq!(index, orders());
+    complete(&rig, &orders(), ticket).await;
+    eventually("seeded", || {
+        last_event(&events, &orders()).as_deref() == Some("seeded orders")
+    })
+    .await;
+    assert!(engine.lane_health(&lane(orders())).is_open());
     task.abort();
 }
 

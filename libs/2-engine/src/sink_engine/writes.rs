@@ -309,7 +309,7 @@ enum Outcome {
     /// A lane's index staged again after its target went missing.
     Restage(Result<()>),
     /// The retry of a reindex a lane is owed (X15).
-    Reindex(Result<Reindexed>),
+    Reindex(Reindexed),
 }
 
 /// A lane waiting for its empty caught-up write: the item whose
@@ -652,7 +652,7 @@ impl<'a> Run<'a> {
         };
         if let Some(indexes) = pending {
             let started = Instant::now();
-            let reindexed = self.engine.reindex(indexes).await?;
+            let reindexed = self.engine.reindex(indexes).await;
             self.reindex_failed(reindexed.failed);
             self.reindexed(&reindexed.staged).await?;
             self.engine.observer.on_stage(
@@ -812,12 +812,11 @@ impl<'a> Run<'a> {
     /// The retry of an owed reindex returned (X15, X16): staged, it is the
     /// reindex, and the lane is handled as one (`reindexed`); failed again, it
     /// is tried again after its backoff, with the new reason.
-    async fn reindex_returned(&mut self, flight: u64, result: Result<Reindexed>) -> Result<()> {
+    async fn reindex_returned(&mut self, flight: u64, reindexed: Reindexed) -> Result<()> {
         let Some(at) = self.restaging.iter().position(|(id, _)| *id == flight) else {
             return Ok(());
         };
         self.restaging.swap_remove(at);
-        let reindexed = result?;
         self.reindex_failed(reindexed.failed);
         self.reindexed(&reindexed.staged).await
     }
@@ -1733,8 +1732,8 @@ impl<'a> Run<'a> {
                 self.restage_returned(landed.flight, result);
                 return Ok(());
             }
-            Outcome::Reindex(result) => {
-                return self.reindex_returned(landed.flight, result).await;
+            Outcome::Reindex(reindexed) => {
+                return self.reindex_returned(landed.flight, reindexed).await;
             }
         };
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {

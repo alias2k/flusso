@@ -1738,7 +1738,9 @@ is the one concrete piece.
   error as reason and `start_restages` retries the reindex (`reindex_again`) on the restage backoff, so the
   fence's `rebuilding` stays true until a seed (§15.3; guards `a_reindex_whose_staging_fails_is_retried_until_it_stages`,
   `a_reindex_of_two_indexes_stages_one_while_the_other_is_retried`, `an_owed_reindex_outlives_a_failed_run`);
-  asking for the backfill failing fails the run. For each index staged, a lane parked or restaging opens (`writes.rs`'s `reindexed`), a parked lane's front item is held (`LaneRun.held`,
+  asking for an index's backfill failing makes that index owed too, never fails the run (`stage_reindex`
+  records every index staged or owed before returning; guards `a_failed_ask_for_a_backfill_leaves_every_index_of_the_reindex_owed`,
+  `a_reindex_whose_backfill_request_fails_is_owed`). For each index staged, a lane parked or restaging opens (`writes.rs`'s `reindexed`), a parked lane's front item is held (`LaneRun.held`,
   `LaneState.held_for_seed` by item key and build so a redelivery is held again) unwritten and unacknowledged
   until the index is seeded, then acknowledged and reported applied (`release_held`), so the slot never passes
   its change before the new generation holds it; an outstanding backfill of a lane not open is cut and asked again
