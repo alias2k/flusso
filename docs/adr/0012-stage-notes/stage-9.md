@@ -931,7 +931,7 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
    the reindex: 2). **Two waits remain:** a reindex asked for just before the stop and still creating its new
    generation holds the stop until that one round trip with the destination returns; and a sink run that failed
    during the stop is restarted only after the daemon's restart backoff, which doubles while the sink keeps failing
-   without progress, up to `max_restart_backoff` (60 s by default), past the default 30 s `--shutdown-timeout-secs`,
+   without progress, up to `[backoff] max_ms` (60 s by default), past the default 30 s `--shutdown-timeout-secs`,
    so such a stop can end at its deadline (exit 1). A lane parked on a
    refused or blocked item still writes it once at the stop and, refused again, holds the stop until its deadline,
    as before.
