@@ -1187,7 +1187,12 @@ async fn a_fixed_row_unparks_its_lane() {
             [1_000, 3_000],
             "{position:?}: at 1 s, then 2 s later"
         );
-        assert!(builder.asked().iter().all(|(_, _, ids)| ids == &[0, 1]));
+        let asked_ids: Vec<Vec<i64>> = builder.asked().into_iter().map(|(_, _, ids)| ids).collect();
+        assert_eq!(
+            asked_ids,
+            [vec![0, 1], vec![1]],
+            "0 landed with the first substitute: the item is built again without it"
+        );
         assert_eq!(engine.lane_health(&lane(orders())).kind(), "refused");
         rig.sink.refused_ids.lock().unwrap().clear();
         eventually("the fixed row unparks the lane", || {
@@ -1417,6 +1422,252 @@ async fn a_stop_probes_a_refused_lane_with_its_own_item() {
         builder.asked().len(),
         1,
         "no fresh build asked once stopping"
+    );
+    task.abort();
+    answers.abort();
+}
+
+// Review of #458 (F9's record, B1 and B2).
+
+/// B2: F9's record is dropped when a newer item is *received*, but an
+/// older item received before it can still be redelivered whole after the run
+/// fails: the older build of 1 (number 2) is then written over the substitute
+/// (number 10).
+#[tokio::test(start_paused = true)]
+async fn a_redelivered_older_item_is_still_written_without_the_substitutes_documents() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+    // Built before the substitute: 1 and 2, then a backlog past the window's
+    // lookahead; built after it (number 2000): 3.
+    let mut items: Vec<(Vec<i64>, u64)> = vec![(vec![1], 1), (vec![1, 2], 2)];
+    for k in 0..40 {
+        items.push((vec![100 + k], 3 + k as u64));
+    }
+    items.push((vec![3], 2000));
+    let last = items.len() as u64 - 1;
+    for (position, (ids, build)) in items.iter().enumerate() {
+        let position = position as u64;
+        rig.progress.published(
+            &lane(orders()),
+            stream::ItemKey::new(position),
+            Position::new(position),
+            Position::new(position),
+        );
+        rig.stream
+            .lane(&lane(orders()))
+            .unwrap()
+            .producer
+            .publish(keyed(&orders(), ids, Some(position), *build))
+            .await
+            .unwrap();
+    }
+    let builder = Arc::new(Builder::default());
+    let answers = answering(&rig, Arc::clone(&builder), 1000);
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    eventually("a fresh build is asked", || builder.asked().len() == 1).await;
+    // The item numbered 2 (now [2]) takes 5 s to write and then fails as a
+    // whole; meanwhile the backlog drains and the item numbered 2000 is
+    // received.
+    *rig.sink.slow_id.lock().unwrap() = Some("2".to_owned());
+    rig.sink.refused_ids.lock().unwrap().clear();
+    eventually("the substitute unparks the lane", || {
+        engine.lane_health(&lane(orders())).is_open()
+    })
+    .await;
+    rig.sink
+        .fail
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let ended = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("the run ends on the failed write");
+    assert!(ended.unwrap().is_err());
+    rig.sink
+        .fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    *rig.sink.slow_id.lock().unwrap() = None;
+    // The daemon's restart: stage the same engine again, then run it again
+    // (`supervise.rs`); its lanes' F9 maps live on it.
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .unwrap();
+    let task = spawn(Arc::clone(&engine));
+    eventually("every item lands after the restart", || {
+        rig.applied(&orders()) == through(last)
+    })
+    .await;
+    let writes = written(&rig, &orders());
+    let strings = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+    assert!(
+        !writes.contains(&strings(&["1", "2"])),
+        "the older build of 1 (number 2) was written over the substitute (number 1000): {writes:?}"
+    );
+    task.abort();
+    answers.abort();
+}
+
+/// B1: a second substitute on the same lane replaces F9's record, so an
+/// item still to come that was built before the first substitute writes the
+/// first substitute's documents back to an older build.
+#[tokio::test(start_paused = true)]
+async fn a_second_substitute_keeps_what_the_first_one_supersedes() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+    for (ids, position, build) in [(&[1][..], 0, 1), (&[1, 2][..], 1, 2)] {
+        rig.progress.published(
+            &lane(orders()),
+            stream::ItemKey::new(position),
+            Position::new(position),
+            Position::new(position),
+        );
+        rig.stream
+            .lane(&lane(orders()))
+            .unwrap()
+            .producer
+            .publish(keyed(&orders(), ids, Some(position), build))
+            .await
+            .unwrap();
+    }
+    let builder = Arc::new(Builder::default());
+    let answers = answering(&rig, Arc::clone(&builder), 10);
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    eventually("a fresh build is asked", || builder.asked().len() == 1).await;
+    // 1 is fixed, 2 is now refused: the item numbered 2 parks the lane again.
+    {
+        let mut refused = rig.sink.refused_ids.lock().unwrap();
+        refused.clear();
+        refused.insert("2".to_owned());
+    }
+    eventually("a second fresh build is asked", || {
+        builder.asked().iter().any(|(_, _, ids)| ids == &[2])
+    })
+    .await;
+    // Built before either substitute (number 3), still in the channel: the
+    // window was not taking from the parked lane.
+    rig.progress.published(
+        &lane(orders()),
+        stream::ItemKey::new(2),
+        Position::new(2),
+        Position::new(2),
+    );
+    rig.stream
+        .lane(&lane(orders()))
+        .unwrap()
+        .producer
+        .publish(keyed(&orders(), &[1], Some(2), 3))
+        .await
+        .unwrap();
+    rig.sink.refused_ids.lock().unwrap().clear();
+    eventually("every item lands", || rig.applied(&orders()) == through(2)).await;
+    let writes = written(&rig, &orders());
+    let last_two = writes
+        .iter()
+        .rposition(|ids| ids == &["2".to_owned()])
+        .expect("the substitute of 2 is written");
+    assert!(
+        writes
+            .iter()
+            .skip(last_two + 1)
+            .all(|ids| !ids.contains(&"1".to_owned())),
+        "the item numbered 3 writes 1 back over the first substitute (number 10): {writes:?}"
+    );
+    task.abort();
+    answers.abort();
+}
+
+/// an item every document of which a substitute superseded is
+/// written empty, and still acknowledged with its position.
+#[tokio::test(start_paused = true)]
+async fn an_item_emptied_by_a_substitute_still_lands() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+    for (ids, position, build) in [(&[1][..], 0, 1), (&[1][..], 1, 2)] {
+        rig.progress.published(
+            &lane(orders()),
+            stream::ItemKey::new(position),
+            Position::new(position),
+            Position::new(position),
+        );
+        rig.stream
+            .lane(&lane(orders()))
+            .unwrap()
+            .producer
+            .publish(keyed(&orders(), ids, Some(position), build))
+            .await
+            .unwrap();
+    }
+    let builder = Arc::new(Builder::default());
+    let answers = answering(&rig, Arc::clone(&builder), 10);
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    eventually("a fresh build is asked", || builder.asked().len() == 1).await;
+    rig.sink.refused_ids.lock().unwrap().clear();
+    eventually("both items land", || rig.applied(&orders()) == through(1)).await;
+    eventually("all acknowledged", || rig.stream.is_idle()).await;
+    task.abort();
+    answers.abort();
+}
+
+/// B1, past the lookahead: the above with every item published up front, in build order, the
+/// older build of 1 sitting past the window's lookahead.
+#[tokio::test(start_paused = true)]
+async fn a_backlog_past_the_lookahead_keeps_what_the_first_substitute_supersedes() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+    let mut items: Vec<(Vec<i64>, u64)> = vec![(vec![1], 1), (vec![1, 2], 2)];
+    for k in 0..60 {
+        items.push((vec![100 + k], 3 + k as u64));
+    }
+    items.push((vec![1], 70));
+    let last = items.len() as u64 - 1;
+    for (position, (ids, build)) in items.iter().enumerate() {
+        let position = position as u64;
+        rig.progress.published(
+            &lane(orders()),
+            stream::ItemKey::new(position),
+            Position::new(position),
+            Position::new(position),
+        );
+        rig.stream
+            .lane(&lane(orders()))
+            .unwrap()
+            .producer
+            .publish(keyed(&orders(), ids, Some(position), *build))
+            .await
+            .unwrap();
+    }
+    let builder = Arc::new(Builder::default());
+    let answers = answering(&rig, Arc::clone(&builder), 1000);
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    eventually("a fresh build is asked", || builder.asked().len() == 1).await;
+    {
+        let mut refused = rig.sink.refused_ids.lock().unwrap();
+        refused.clear();
+        refused.insert("2".to_owned());
+    }
+    eventually("a fresh build of 2 is asked", || {
+        builder.asked().iter().any(|(_, _, ids)| ids == &[2])
+    })
+    .await;
+    rig.sink.refused_ids.lock().unwrap().clear();
+    eventually("every item lands", || {
+        rig.applied(&orders()) == through(last)
+    })
+    .await;
+    let writes = written(&rig, &orders());
+    let last_two = writes
+        .iter()
+        .rposition(|ids| ids == &["2".to_owned()])
+        .expect("the substitute of 2 is written");
+    assert!(
+        writes
+            .iter()
+            .skip(last_two + 1)
+            .all(|ids| !ids.contains(&"1".to_owned())),
+        "the item numbered 70 writes 1 back over the first substitute (number 1000): {writes:?}"
     );
     task.abort();
     answers.abort();

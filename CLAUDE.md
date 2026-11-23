@@ -1716,9 +1716,14 @@ is the one concrete piece.
   walk mark) and the lane opens; refused, it is dropped and the backoff doubles; a ticket the lane
   doesn't wait for is dropped. **Build numbers** (`Batch.build`, one counter on `IngestEngine`, taken
   at publish; publication order per index is grant order, and builds of one document never overlap):
-  once a substitute numbered `b` lands, the lane's items numbered below `b` are written without its
-  documents (`health.rs`'s `Superseded`/`supersedes`, kept on `LaneState` until an item past `b`
-  arrives), so no document goes back to an older build. A stop's last probe writes the item as it is
+  each lane keeps a map, document id → the highest build number of a substitute that landed with it
+  (`LaneState.superseded`, merged, never replaced; also the documents of a substitute refused for others,
+  which landed anyway), and an item numbered below an entry is written without that document
+  (`health.rs`'s `supersedes`); an entry goes only once no item numbered below it can be delivered again
+  (`writes.rs`'s `prune_superseded`: the lane's smallest unacknowledged build number, or one past the
+  newest received in this run, has reached it), and the map lives on the `SinkEngine`, which the daemon
+  runs again after a failure, so a redelivered older item is still stripped; a run-wide count of lanes
+  with entries is all an open lane pays per received item. So no document goes back to an older build. A stop's last probe writes the item as it is
   (`probe_now` drops an awaited rebuild; builders don't take rebuilds once stopping). Guards:
   `tests::parking`'s `a_fixed_row_unparks_its_lane`, `a_deleted_row_unparks_its_lane_with_a_delete`,
   `a_stale_or_unanswered_fresh_build_falls_back_to_the_item`,

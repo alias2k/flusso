@@ -778,6 +778,9 @@ struct Recorder {
     /// Indexes whose every document is rejected: under `on_error = "stop"`
     /// their lane parks.
     refused_indexes: Mutex<HashSet<String>>,
+    /// Documents whose upsert is refused, whatever their index: a row a fix
+    /// makes indexable again (stage 9, fresh builds).
+    refused_ids: Mutex<HashSet<i64>>,
     /// When each index was marked seeded.
     marked_at: Mutex<BTreeMap<String, tokio::time::Instant>>,
     /// When each document was first written.
@@ -790,9 +793,14 @@ impl Recorder {
     /// The documents of a refused index in `envelopes`, rejected.
     fn rejected(&self, envelopes: &[Envelope]) -> Vec<sink::RejectedDocument> {
         let refused = self.refused_indexes.lock().unwrap();
+        let ids = self.refused_ids.lock().unwrap();
         envelopes
             .iter()
-            .filter(|envelope| refused.contains(envelope.index.as_ref()))
+            .filter(|envelope| {
+                refused.contains(envelope.index.as_ref())
+                    || (envelope.op == kernel::Op::Upsert
+                        && envelope.id.parse().is_ok_and(|id: i64| ids.contains(&id)))
+            })
             .map(|envelope| sink::RejectedDocument {
                 index: envelope.index.as_ref().to_owned(),
                 id: envelope.id.clone(),
@@ -1477,6 +1485,45 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize,
             recorder.refused_indexes.lock().unwrap().clear();
         })
     });
+    // Over two indexes, the other seeds refuse a few `orders` documents now
+    // and then (stage 9): each stretch parks the lane on a refusal, which a
+    // fresh build lifts once the stretch ends, and the next stretch parks it
+    // again, often behind a substitute that landed. Every other such seed
+    // fails the whole run once a fresh build was published, so a restarted
+    // run redelivers items built before it.
+    let refusing = (two && seed % 3 != 1).then(|| {
+        let recorder = Arc::clone(&recorder);
+        let mut random = Rng::new(seed.wrapping_mul(53));
+        let ids = ids as u64;
+        let substituted = Arc::clone(&deployment.substituted);
+        let failing = Arc::clone(&deployment.failing);
+        let fail_once = seed % 4 == 0;
+        tokio::spawn(async move {
+            for _ in 0..1 + random.below(4) {
+                tokio::time::sleep(Duration::from_millis(random.below(150))).await;
+                let refused: HashSet<i64> = (0..1 + random.below(3))
+                    .map(|_| (random.below(ids) | 1) as i64)
+                    .collect();
+                *recorder.refused_ids.lock().unwrap() = refused;
+                tokio::time::sleep(Duration::from_millis(20 + random.below(1500))).await;
+                recorder.refused_ids.lock().unwrap().clear();
+            }
+            if fail_once {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                while substituted.load(Ordering::SeqCst) == 0
+                    && tokio::time::Instant::now() < deadline
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                if substituted.load(Ordering::SeqCst) > 0 {
+                    // The ingest run, and the sink engine's run: the lane
+                    // redelivers to it items built before the substitute.
+                    failing.lock().unwrap().insert("orders".to_owned());
+                    recorder.fail_next.store(true, Ordering::SeqCst);
+                }
+            }
+        })
+    });
     let failed = if open {
         deployment.run_until_landed(&db, &stop, 8).await
     } else {
@@ -1484,6 +1531,11 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize,
     };
     if let Some(stuck) = stuck {
         stuck.await.unwrap();
+    }
+    if let Some(refusing) = refusing {
+        refusing.abort();
+        let _ = refusing.await;
+        recorder.refused_ids.lock().unwrap().clear();
     }
 
     let context = format!(
@@ -1567,9 +1619,12 @@ impl Restarted {
         assert!(self.indexes > 0, "no schedule restarted an index alone");
         assert!(self.walks > 0, "no schedule retried a walk alone");
         assert!(self.runs > 0, "no schedule restarted a whole run");
+        // Refused documents switch on and off in a third of the two-index
+        // seeds: fresh builds are common, not a lucky few (review of #458).
         assert!(
-            self.substituted > 0,
-            "no schedule built a parked lane's item again"
+            self.substituted >= 50,
+            "only {} fresh builds over every schedule",
+            self.substituted
         );
     }
 }

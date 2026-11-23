@@ -50,7 +50,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 
 use stream::Ticket;
 
@@ -221,25 +221,19 @@ pub(crate) struct LaneState {
     /// The fresh build asked for the parked item and not answered yet: no
     /// probe of the item is made meanwhile.
     pub(crate) rebuild: Option<Ticket>,
-    /// The last substitute landed on this lane, while items built before it
-    /// may still come: their builds of its documents are left out.
-    pub(crate) superseded: Option<Superseded>,
+    /// F9: each document a landed substitute carried, with the highest build
+    /// number of such a substitute. An item numbered below an entry is written
+    /// without that document. Merged into, never replaced; an entry goes once
+    /// no item numbered below it can be delivered again (`writes.rs`'s
+    /// `prune_superseded`).
+    pub(crate) superseded: BTreeMap<String, u64>,
 }
 
-/// A substitute that landed: its build number and its documents' ids. An item
-/// of the lane built before it (a smaller build number) is written without
-/// those documents, so no document goes back to an older build.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Superseded {
-    pub(crate) build: u64,
-    pub(crate) ids: HashSet<String>,
-}
-
-/// Whether an item numbered `build` was built before the substitute
-/// `superseded` stands for, so its builds of the substitute's documents are
-/// older and left out (O2). An item with no number is written whole.
-pub(crate) fn supersedes(superseded: &Superseded, build: Option<u64>) -> bool {
-    build.is_some_and(|build| build < superseded.build)
+/// Whether an item numbered `build` was built before the substitute numbered
+/// `substitute`, so its build of that substitute's document is older and left
+/// out (O2). An item with no number is written whole.
+pub(crate) fn supersedes(substitute: u64, build: Option<u64>) -> bool {
+    build.is_some_and(|build| build < substitute)
 }
 
 impl LaneState {
@@ -254,14 +248,14 @@ impl LaneState {
             probes: 0,
             unproven: false,
             rebuild: None,
-            superseded: None,
+            superseded: BTreeMap::new(),
         }
     }
 
     /// The state reset to an open lane on its schedule, keeping what a
     /// landed substitute supersedes.
     fn reset(&mut self) {
-        let superseded = self.superseded.take();
+        let superseded = std::mem::take(&mut self.superseded);
         *self = Self::new(self.schedule);
         self.superseded = superseded;
     }
@@ -350,7 +344,7 @@ impl LaneState {
     /// Whether the engine keeps this state: a lane not open, or one keeping
     /// its backoff.
     pub(crate) fn is_kept(&self) -> bool {
-        !self.is_open() || self.unproven || self.superseded.is_some()
+        !self.is_open() || self.unproven || !self.superseded.is_empty()
     }
 
     /// Staging failed: try again after the backoff, doubled each time up to

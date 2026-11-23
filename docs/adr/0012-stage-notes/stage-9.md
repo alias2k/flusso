@@ -481,5 +481,9 @@ build number still unacknowledged, or, with none, one past the largest received,
   that substitute are acknowledged. Each parked item is fresh-built at most once per probe, so the map holds at
   most the documents of the parked items fresh-built while older items of the lane were still unacknowledged:
   in practice the refused items' documents, a few ids each.
+- **A substitute refused for some of its documents** (found by the extended schedules, seed 2): its other
+  documents landed, at its build. They join the map too, so the parked item, older, is written without them
+  and the next fresh build asks only for what is left. Without it the item's own probe (F15's fallback) wrote
+  its older builds over them.
 - **Cost while no substitute landed:** none per item; a run-wide count of lanes with entries is checked per
   received item (one integer compare), and the prune runs only on a lane with entries.
