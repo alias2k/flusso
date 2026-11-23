@@ -393,9 +393,66 @@ awaits a substitute.
 
 | # | Decision | Recommended | Other way | Predicate |
 | --- | --- | --- | --- | --- |
-| O1 | A fresh build that fails on the ingest side | the index's failure (restart, `/status` down), as the same row's live build fails the same way | the lane's: park again, the index untouched | `ingest::rebuild::fails_the_index` |
+| O1 | A fresh build that fails on the ingest side | the index's failure (restart, `/status` down), as the same row's live build fails the same way | the lane's: park again, the index untouched (needs a failure answer on the substitute lane) | — (`builds.rs`'s `land`: `Job::Rebuild` halts as `Job::Live`) |
 | O2 | Older builds of a substitute's ids queued behind it | dropped (F9): one unpark, no document going back | written in order: each refused again parks again | `sink_engine::substitute::supersedes` |
 | O3 | A stop's last probe of a refused lane | the item as it is | a fresh build (needs builders serving rebuilds while stopping) | — (F13) |
 | O4 | A reindex of a parked lane (slice 2) | acknowledges the parked item unwritten | writes it into the new generation | slice 2 |
 | O5 | An impostor (slice 4) | left alone, named, lane restaging | deleted and replaced | slice 4 |
-| O6 | Rule 5 | F14 (counted, never refused) | the ADR's `Charge::forget` | — |
+| O6 | Rule 5 | F14 (never refused, not counted) | the ADR's `Charge::forget` | — |
+
+### 14.8 Slice 1 as built (`feat/lane-failure-2`)
+
+What differs from 14.1, and why:
+
+- **F14: not counted.** The fresh build asks the gate with no budget part, which the gate admits without
+  touching the budget: it is never refused and never counted. One per parked lane, the size of the item it
+  replaces, and gone once it lands or is refused. Counting it would need a budget reservation that can't be
+  refused, which the budget has no path for.
+- **F15 (new): a fresh build is waited for at most the lane's backoff and `SUBSTITUTE_WAIT` (5 s)**; then the
+  item itself is the probe (today's behaviour), and the next probe asks again; a substitute arriving after
+  that is stale (F8). Found by `ingest::tests::builders`: an index's builder blocked publishing to its own
+  parked, full lane can't serve its inbox, so the substitute never comes. In production the lane's bound is
+  the 2^20-item backstop and the budget binds first (a builder held by the budget keeps serving), so this is
+  the test-sized case; the fallback keeps the engine from waiting on it. Cost: a fresh build slower than the
+  wait is wasted and the lane probes its item.
+- **F16 (new): the request is offered, never waited for** (`now_or_never`): a request lane nobody reads (the
+  ingest engine stopping, or not draining) would otherwise stall every lane of the sink. Not taken, the probe
+  writes the item. Found by the same test (its sink engine isn't told about the stop).
+- **One gate ask per pass.** The builder offers a fresh build inside `Builds::choose`, as the live part of the
+  one ask, ahead of the live candidate. A separate ask joined and left the live line on every pass, and each
+  change of the lines woke the builder to ask again: a spin a random schedule found (seed 58, `builds = 1`).
+- **`/status` unchanged.** A lane waiting for its substitute shows `refused` with `next_probe` at the end of
+  the wait; no `rebuilding` field (14.5's row is not built).
+- **O1 has no predicate**: the other way needs a failure answer on the substitute lane.
+
+**Tests.** `tests::parking`: `a_fixed_row_unparks_its_lane` (F1, F5, F6, F12, live and backfill),
+`a_deleted_row_unparks_its_lane_with_a_delete` (F7), `a_stale_or_unanswered_fresh_build_falls_back_to_the_item`
+(F8, F15), `an_older_build_queued_behind_the_parked_item_is_not_written_over_its_substitute` (F9),
+`a_stop_probes_a_refused_lane_with_its_own_item` (F13); the existing parking tests (items without keys) pin
+F2. `ingest::tests::rebuilds`: `a_rebuild_is_built_once_and_sent_to_its_sink_only` (F3, F4, F7's ingest half),
+`every_item_carries_its_keys_and_a_growing_build_number`, `a_failing_rebuild_restarts_its_index_and_is_served_after`
+(F10, F11). `ingest::tests::builders` (F15, F16). The random schedules (refused `orders` stretches over two
+indexes) now go through fresh builds end to end and assert some were published; their per-seed checks (no
+version going down, the documents equal the rows) cover F9 against the real builder.
+
+**Not built in slice 1:** F14's own test (`a_parked_lane_with_a_full_budget_unparks`), the live e2e of a row
+OpenSearch refuses being fixed, and the live `shutdown` e2e with a parked lane: see the PR.
+
+**Mutations** (each compiles, none hangs):
+
+| Mutation | Killed by |
+| --- | --- |
+| F1: no fresh build is ever asked | `a_fixed_row_unparks_its_lane`, `a_deleted_row_*`, `a_stale_or_unanswered_*`, `a_stop_probes_a_refused_lane_*`, `an_older_build_*` |
+| F3: a `Rebuild` routed to the backfill inbox | `rebuilds::a_rebuild_is_built_once_*`, `rebuilds::a_failing_rebuild_*`, four `builders` tests |
+| F3: admission ignored (a fresh build beside a running build of its documents) | both random schedules |
+| F5: the item written in place of its substitute | `a_deleted_row_unparks_its_lane_with_a_delete` |
+| F8: a substitute for another ticket accepted | `a_stale_or_unanswered_fresh_build_falls_back_to_the_item` |
+| F9: older builds written whole | `an_older_build_queued_behind_the_parked_item_*`, both random schedules |
+| F13: fresh builds asked while stopping | `a_stop_probes_a_refused_lane_with_its_own_item` |
+| F15: no fallback (a day's wait) | `a_stale_or_unanswered_*`, eight `builders` tests |
+| F16: the request awaited | `builders::a_stop_with_an_exempt_index_still_stuck_does_not_end` |
+| a delete's key left out | `rebuilds::a_rebuild_is_built_once_and_sent_to_its_sink_only` |
+| no build number on a live item | `rebuilds::every_item_carries_its_keys_and_a_growing_build_number` |
+
+Not mutated: F11's halting (a failed fresh build fails its builder through `publish_slot` whether or not it
+halts further grants, so no mutation of that line changes an outcome), F14 (no test, above).

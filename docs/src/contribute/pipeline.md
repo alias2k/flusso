@@ -128,6 +128,12 @@ When its backoff is due, its front item is written alone: a **probe**. The wait 
 - **Refused or blocked again:** the backoff doubles.
 - **A stop:** every parked lane is probed once more at once.
 
+**A refused lane probes a fresh build.** When the front item carries its documents' keys (`Batch.keys`), the probe asks the index's builder to build them again (`Request::Rebuild`) instead of writing the item. The builder builds them now, as one live-kind build the budget never refuses, and sends them back on the sink's substitute lane (`Stream::substitutes`), apart from the lane the item heads. The substitute is written in the item's place; landed, the item is acknowledged and the lane opens. So a row fixed meanwhile unparks its lane, and a deleted one comes back as a delete.
+
+- Items behind the parked one built before the substitute (a smaller `Batch.build`) are written without its documents: no document goes back to an older build.
+- No answer within the backoff (at most 5 s), or a request lane that can't take the request at once: the item itself is the probe, and the next probe asks again.
+- A blocked lane, an item without keys, and a stop's last probe write the item as it is.
+
 ### A missing target is staged again, alone
 
 A restaging lane waits until nothing of it is in flight. Then it runs `ensure_index` for its index alone, beside the other lanes' writes (the port allows staging beside writes of other indexes), then `seeding` and a `Backfill` request when the index is unseeded and none is outstanding for its current target (a restage always cuts the backfill in flight, see [A backfill whose target changed can't seed it](#a-backfill-whose-target-changed-cant-seed-it)). Then it opens and writes its items again. A failed staging is retried with the same backoff, and a lane reopened by staging keeps that backoff until one of its writes lands, so a target staging can't cure is never a loop.
