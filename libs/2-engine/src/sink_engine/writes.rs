@@ -1702,11 +1702,12 @@ impl<'a> Run<'a> {
             // documents that were not refused landed, at its newer build: the
             // parked item, older, is written without them from now on (F9).
             let mut landed_anyway = None;
+            let mut done_with = None;
             if flight.probe == Some(part.lane)
                 && let Some(substitute) = substitute.take()
             {
                 part.documents = Documents::new(&part.batch.envelopes);
-                substitute.handle.ack().await?;
+                done_with = Some(substitute.handle);
                 let refused = self
                     .lanes
                     .get(part.lane)
@@ -1725,10 +1726,13 @@ impl<'a> Run<'a> {
                 }
             }
             self.put_back(part);
-            if let Some((lane, build, landed)) = landed_anyway
-                && !landed.is_empty()
-            {
+            if let Some((lane, build, landed)) = landed_anyway {
                 self.supersede(lane, build, landed);
+            }
+            // Acknowledged once its landed documents are in the map: a
+            // failing acknowledgement can't leave them out (m4).
+            if let Some(handle) = done_with {
+                handle.ack().await?;
             }
         }
         for &lane in &parked {
@@ -1838,10 +1842,10 @@ impl<'a> Run<'a> {
         // The item landed through its substitute (F5): the substitute is done
         // with, and the builds it is newer than are left out (F9).
         if let (Some(substitute), Some(lane)) = (substitute.take(), flight.probe) {
-            substitute.handle.ack().await?;
             if let Some(build) = substitute.build {
                 self.supersede(lane, build, substitute.ids);
             }
+            substitute.handle.ack().await?;
         }
         for lane in walked {
             if let Some(landed) = self.record_walked(lane) {
@@ -1853,7 +1857,9 @@ impl<'a> Run<'a> {
 
     /// Whether some lane waits for its fresh build's substitute.
     fn awaits_a_substitute(&self) -> bool {
+        // No probe starts once the run failed (review of #458, m2).
         self.unhealthy > 0
+            && self.failure.is_none()
             && self.substitutes.is_some()
             && self.lanes.iter().any(|run| run.health.rebuild.is_some())
     }
@@ -2036,6 +2042,9 @@ impl<'a> Run<'a> {
     /// from every place a received, unacknowledged item of it can be: the
     /// window, the writes in flight, the items waiting for a caught-up write.
     fn supersede(&mut self, lane: usize, build: u64, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
         let mut found: BTreeMap<u64, Option<u64>> = BTreeMap::new();
         for queued in self.window.iter_mut().filter(|queued| queued.lane == lane) {
             if let Queue::Batch { batch, documents } = &mut queued.item {
