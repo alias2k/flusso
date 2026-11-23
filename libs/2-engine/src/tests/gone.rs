@@ -1221,6 +1221,77 @@ async fn a_cut_found_beside_an_index_left_restaging_is_asked_again_at_once() {
     );
 }
 
+/// Review of #476, 1: an index a restart's staging left out (one ensure
+/// failing for a moment) keeps its running backfill when its target is
+/// intact: staged again with ensure's rules, nothing is cut, forgotten or
+/// asked again, and the lane opens.
+#[tokio::test(start_paused = true)]
+async fn an_index_left_out_by_a_staging_keeps_its_backfill_when_its_target_is_intact() {
+    let mut pair = Pair::new(Targets::default());
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(pair.requests().await.len(), 2);
+
+    pair.sink.fail_ensure(&orders(), 1);
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let lane = LaneKey::new(orders(), primary());
+    let health = pair.engine.lane_health(&lane);
+    assert!(
+        matches!(&health, crate::LaneHealth::Restaging { reason, .. } if reason.contains("could not be ensured")),
+        "{health:?}"
+    );
+    let running = pair.run();
+    let opened = tokio::time::timeout(Duration::from_secs(60), async {
+        while !pair.engine.lane_health(&lane).is_open() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(opened.is_ok(), "the lane opens once its index is ensured");
+    assert!(
+        pair.requests().await.is_empty(),
+        "its outstanding backfill goes on: nothing asked again"
+    );
+    assert_eq!(*pair.sink.forgets.lock().unwrap(), 0, "its walk is kept");
+    running.abort();
+}
+
+/// Review of #476, 1, the counter-case: the target left out was recreated
+/// meanwhile, so its outstanding backfill can't seed it: the later staging
+/// cuts it and asks again from the first key.
+#[tokio::test(start_paused = true)]
+async fn an_index_left_out_by_a_staging_whose_target_changed_is_asked_again() {
+    let mut pair = Pair::new(Targets::default());
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let first = pair.requests().await;
+
+    pair.sink.fail_ensure(&orders(), 1);
+    pair.sink.delete(&orders());
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let running = pair.run();
+    let asked = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let asked = pair.requests().await;
+            if !asked.is_empty() {
+                return asked;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("asked again");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let fresh = asked.first().unwrap();
+    assert_eq!(fresh.index, orders());
+    assert_eq!(fresh.after, None);
+    assert!(fresh.ticket > ticket_of(&first, &orders()), "{asked:?}");
+    assert_eq!(
+        *pair.sink.forgets.lock().unwrap(),
+        1,
+        "its walk is forgotten"
+    );
+    running.abort();
+}
+
 /// (d) A restage finds the `users` target missing and creates a new one, then
 /// fails to forget its checkpoint; before it is retried, the run fails on
 /// `orders`. The restart's staging finds `users` as the restage left it, and

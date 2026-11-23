@@ -300,7 +300,7 @@ async fn every_failure_seen_is_named_and_the_chains_in_flight_finish() {
 async fn after_a_failure_no_new_index_is_started() {
     let staged = staged(SlowSink::default().failing((0..INDEXES).map(name)), INDEXES);
     let started = tokio::time::Instant::now();
-    let error = staged.engine.stage(Continuity::Resumed).await.unwrap_err();
+    let error = staged.engine.stage(Continuity::Fresh).await.unwrap_err();
 
     assert!(
         started.elapsed() < CALL * 2,
@@ -418,4 +418,133 @@ async fn a_reindex_naming_an_index_twice_stages_it_once() {
         );
     }
     assert_eq!(requests(&stream).await, vec![all]);
+}
+
+fn restaging(staged: &Staged) -> Vec<String> {
+    (0..INDEXES)
+        .map(name)
+        .filter(|index| {
+            staged
+                .engine
+                .lane_health(&stream::LaneKey::new(
+                    IndexName::try_new(index.as_str()).unwrap(),
+                    sink_name("primary"),
+                ))
+                .kind()
+                == "restaging"
+        })
+        .collect()
+}
+
+/// Review of #476, 2 and 4: under `Resumed`, one index failing anywhere among
+/// many leaves only itself out: once one index was ensured the destination
+/// answers, so every other index is still started, at most
+/// [`STAGE_CONCURRENCY`] at a time.
+#[tokio::test(start_paused = true)]
+async fn a_failing_index_anywhere_among_many_leaves_only_itself_out() {
+    for failing in [0, INDEXES / 2, INDEXES - 1] {
+        let staged = staged(
+            SlowSink::seeded((0..INDEXES).map(name)).failing([name(failing)]),
+            INDEXES,
+        );
+        staged.engine.stage(Continuity::Resumed).await.unwrap();
+        assert_eq!(restaging(&staged), [name(failing)], "failing {failing}");
+        for i in 0..INDEXES {
+            assert!(
+                staged
+                    .sink
+                    .calls_for(&name(i))
+                    .contains(&"ensure".to_owned()),
+                "failing {failing}: {} was tried",
+                name(i)
+            );
+        }
+        assert!(staged.sink.peak.load(Ordering::SeqCst) <= STAGE_CONCURRENCY);
+    }
+}
+
+/// Review of #476, 3: a first wave refused whole with healthy indexes after
+/// it: further indexes are tried one at a time; the first that is ensured
+/// shows the destination answers, and the rest go on.
+#[tokio::test(start_paused = true)]
+async fn a_refused_first_wave_with_healthy_indexes_after_it_goes_on() {
+    let refused: Vec<String> = (0..STAGE_CONCURRENCY).map(name).collect();
+    let staged = staged(
+        SlowSink::seeded((0..INDEXES).map(name)).failing(refused.clone()),
+        INDEXES,
+    );
+    staged.engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(restaging(&staged), refused);
+    assert!(staged.sink.peak.load(Ordering::SeqCst) <= STAGE_CONCURRENCY);
+}
+
+/// Review of #476, 3: a destination that refuses everything costs one wave
+/// and at most [`STAGE_CONCURRENCY`] more tries, one at a time, then the
+/// staging fails as a whole and marks no lane.
+#[tokio::test(start_paused = true)]
+async fn a_destination_down_is_tried_one_more_wave_one_at_a_time_then_fails() {
+    let staged = staged(SlowSink::default().failing((0..INDEXES).map(name)), INDEXES);
+    let started = tokio::time::Instant::now();
+    assert!(staged.engine.stage(Continuity::Resumed).await.is_err());
+    let ensures = staged
+        .sink
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("ensure "))
+        .count();
+    assert_eq!(
+        ensures,
+        2 * STAGE_CONCURRENCY,
+        "one wave and one more, no more"
+    );
+    assert!(
+        started.elapsed() <= CALL * u32::try_from(STAGE_CONCURRENCY + 1).unwrap(),
+        "the extra tries go one at a time: {:?}",
+        started.elapsed()
+    );
+    assert!(restaging(&staged).is_empty(), "no lane marked");
+}
+
+/// Review of #476, 2: many lanes due to be staged again at once are staged
+/// at most [`STAGE_CONCURRENCY`] at a time, never in one unbounded burst.
+#[tokio::test(start_paused = true)]
+async fn many_lanes_due_at_once_are_staged_again_at_most_the_bound_at_a_time() {
+    let staged = staged(SlowSink::seeded((0..INDEXES).map(name)), INDEXES);
+    staged.engine.stage(Continuity::Resumed).await.unwrap();
+    let now = tokio::time::Instant::now();
+    for i in 0..INDEXES {
+        let lane = stream::LaneKey::new(IndexName::try_new(name(i)).unwrap(), sink_name("primary"));
+        let mut state = staged.engine.lane_state(&lane);
+        assert!(state.restage("gone".to_owned(), now));
+        staged.engine.store_lane(&lane, &state, true);
+    }
+    staged.sink.peak.store(0, Ordering::SeqCst);
+    let engine = Arc::new(staged.engine);
+    let running = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        async move {
+            let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+            engine.run(&mut rx).await
+        }
+    });
+    let opened = tokio::time::timeout(Duration::from_secs(60), async {
+        while (0..INDEXES).any(|i| {
+            !engine
+                .lane_health(&stream::LaneKey::new(
+                    IndexName::try_new(name(i)).unwrap(),
+                    sink_name("primary"),
+                ))
+                .is_open()
+        }) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(opened.is_ok(), "every lane is staged again and opens");
+    assert!(
+        staged.sink.peak.load(Ordering::SeqCst) <= STAGE_CONCURRENCY,
+        "at most the bound at a time: {}",
+        staged.sink.peak.load(Ordering::SeqCst)
+    );
+    running.abort();
 }

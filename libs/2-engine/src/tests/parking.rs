@@ -3756,6 +3756,15 @@ async fn a_restart_goes_on_without_the_index_it_cannot_ensure() {
     })
     .await;
     assert_eq!(engine.lane_health(&lane(orders())).kind(), "restaging");
+    assert_eq!(
+        rig.applied(&orders()),
+        before(0),
+        "its change is not applied: the slot and its fences hold"
+    );
+    assert!(
+        !rig.stream.is_idle(),
+        "its item stays delivered and unacknowledged"
+    );
 
     rig.sink.ensure_fails_for.lock().unwrap().clear();
     tokio::time::sleep(Duration::from_secs(61)).await;
