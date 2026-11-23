@@ -456,3 +456,30 @@ OpenSearch refuses being fixed, and the live `shutdown` e2e with a parked lane: 
 
 Not mutated: F11's halting (a failed fresh build fails its builder through `publish_slot` whether or not it
 halts further grants, so no mutation of that line changes an outcome), F14 (no test, above).
+
+### 14.9 Fix round 1 (review of #458 at `67921532`): F9 redesigned
+
+F9 as built kept one (build, ids) record per lane, replaced by each landed substitute and dropped as soon as
+an item numbered past it was **received**. Both are wrong: a second substitute erased what the first one
+superseded (B1), and an older item received before the newer one can still come back whole when a run fails
+and the lane redelivers it (B2). Either way an older build of a document was written over a newer one.
+
+**F9 (replaces 14.1's).** Per lane, a map from document id to the highest build number of a substitute that
+landed with that document. Merged into (the maximum per id), never replaced. An item numbered `b` is written
+without every document whose entry is above `b`. An entry `s` is dropped only once no item numbered below `s`
+can be delivered again: the lane delivers in build order, so that holds once the run has received an item
+numbered at least `s` and every item of the lane it received numbered below `s` is acknowledged (the smallest
+build number still unacknowledged, or, with none, one past the largest received, is at least `s`).
+
+- **Where it lives:** on the lane's `LaneState`, which the `SinkEngine` keeps across its runs. The daemon
+  restarts a failed sink engine by running the same `SinkEngine` again (`supervise.rs`), so the map outlives
+  every run a redelivery can follow; a process restart loses the in-process lanes with it. A restarted run
+  knows nothing it received before, so it keeps every entry until its own deliveries prove one can go: never
+  early. Pinned by `review_a_redelivered_older_item_is_still_written_without_the_substitutes_documents` (a run
+  failing after the substitute) and a daemon-path test restarting the sink engine.
+- **Memory bound:** one entry per document a substitute landed with, kept until the lane's items built before
+  that substitute are acknowledged. Each parked item is fresh-built at most once per probe, so the map holds at
+  most the documents of the parked items fresh-built while older items of the lane were still unacknowledged:
+  in practice the refused items' documents, a few ids each.
+- **Cost while no substitute landed:** none per item; a run-wide count of lanes with entries is checked per
+  received item (one integer compare), and the prune runs only on a lane with entries.
