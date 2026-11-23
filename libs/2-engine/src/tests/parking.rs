@@ -3015,6 +3015,58 @@ async fn a_reindex_pending_at_a_stop_is_not_staged() {
     task.abort();
 }
 
+/// Review of #470, 5: an index a reindex never started (another failed
+/// first; at most `STAGE_CONCURRENCY` stage at once) is owed and announced
+/// `rebuilding` too: its fences say why they wait instead of timing out.
+#[tokio::test(start_paused = true)]
+async fn an_index_never_started_is_announced_rebuilding_once_owed() {
+    let names: Vec<IndexName> = (0..=crate::sink_engine::STAGE_CONCURRENCY)
+        .map(|at| index(&format!("i{at}")))
+        .collect();
+    let stream = Arc::new(ChannelStream::over(
+        64,
+        names.clone(),
+        [sink_name("primary")],
+    ));
+    let progress = Arc::new(Progress::of(names.clone(), [sink_name("primary")]));
+    let sink = Arc::new(Gate::default());
+    sink.ensure_fails
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let engine = Arc::new(
+        SinkEngine::new(
+            sink_name("primary"),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            names.iter().cloned().map(mapping).collect(),
+            progress,
+        )
+        .with_backoff(slow_backoff())
+        .with_observer(rebuild_events(&events)),
+    );
+    engine.set_blame(Blame::Nobody);
+    let (control, task) = spawn_controlled(Arc::clone(&engine));
+    control
+        .send(SinkControl::Reindex {
+            indexes: names.clone(),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let last = names.last().unwrap().clone();
+    let health = engine.lane_health(&LaneKey::new(last.clone(), sink_name("primary")));
+    assert!(
+        matches!(&health, LaneHealth::Restaging { reason, .. } if reason.contains("not started")),
+        "never started, owed: {health:?}"
+    );
+    assert_eq!(
+        last_event(&events, &last).as_deref(),
+        Some(format!("rebuilding {last}").as_str()),
+        "announced: {events:?}"
+    );
+    task.abort();
+}
+
 /// X17 (review 2): the owed reindex is on the lane's state, so a run that
 /// fails meanwhile keeps it: staging at the next start leaves the lane
 /// `restaging`, and the next run's retry stages the reindex.

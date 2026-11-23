@@ -829,10 +829,15 @@ impl<'a> Run<'a> {
     }
 
     /// Each of `failed` could not stage its reindex (X15): its lane is owed
-    /// it, `restaging` with the reason, retried after its backoff.
+    /// it, `restaging` with the reason, retried after its backoff. An owed
+    /// index is rebuilding for whoever asked, so its fences say so, also when
+    /// its staging never started (review of #470, 5).
     fn reindex_failed(&mut self, failed: Vec<(IndexName, String)>) {
         let now = Instant::now();
         for (index, reason) in failed {
+            self.engine
+                .observer
+                .on_index_rebuilding(&self.engine.name, &index);
             let Some(run) = self.lanes.iter_mut().find(|run| run.key.index == index) else {
                 continue;
             };
