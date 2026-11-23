@@ -1539,13 +1539,10 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> Schedule {
                 // After a substitute, the sink's next write fails as a whole
                 // (a part, a sibling's, or a caught-up write): its run ends and
                 // the lane redelivers what it had not acknowledged.
-                if substituted.load(Ordering::SeqCst) > 0 && random.below(2) == 0 {
-                    let before = recorder.failed_writes.load(Ordering::SeqCst);
-                    recorder.fail_next.store(true, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(random.below(100))).await;
-                    if recorder.failed_writes.load(Ordering::SeqCst) > before {
-                        failed_after.fetch_add(1, Ordering::SeqCst);
-                    }
+                if substituted.load(Ordering::SeqCst) > 0
+                    && !recorder.fail_next.swap(true, Ordering::SeqCst)
+                {
+                    failed_after.fetch_add(1, Ordering::SeqCst);
                 }
             }
             if fail_once {
@@ -1559,7 +1556,9 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> Schedule {
                     // The ingest run, and the sink engine's run: the lane
                     // redelivers to it items built before the substitute.
                     failing.lock().unwrap().insert("orders".to_owned());
-                    recorder.fail_next.store(true, Ordering::SeqCst);
+                    if !recorder.fail_next.swap(true, Ordering::SeqCst) {
+                        failed_after.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
             }
         })
@@ -1613,7 +1612,10 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> Schedule {
         db.expected(),
         "the documents differ from the rows ({context})"
     );
-    recorder.fail_next.store(false, Ordering::SeqCst);
+    // A failure armed and never consumed (no write came) failed nothing.
+    if recorder.fail_next.swap(false, Ordering::SeqCst) {
+        failed_after_a_substitute.fetch_sub(1, Ordering::SeqCst);
+    }
     let substituted = deployment.substituted.load(Ordering::SeqCst);
     (
         substituted,
@@ -1685,7 +1687,11 @@ impl Restarted {
             self.parked_again > 0,
             "no lane parked again after a substitute"
         );
-        assert!(self.failed_after > 0, "no write failed after a substitute");
+        assert!(
+            self.failed_after >= 20,
+            "only {} writes failed after a substitute",
+            self.failed_after
+        );
     }
 }
 
