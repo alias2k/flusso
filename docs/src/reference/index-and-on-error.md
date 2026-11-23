@@ -21,10 +21,25 @@ All three of `name`, `schema`, and `enabled` are required.
 
 | Value | What happens to the document | What happens to its index |
 | --- | --- | --- |
-| `"stop"` (default) | Nothing is dropped. A rejected document's batch stays unconfirmed; a document that fails to build is retried after a wait, doubling up to 60 s by default. With two or more indexes only its index stops meanwhile ([A failing index](config-toml.md#a-failing-index)); with one, the ingest engine restarts. | A rejection **parks** the index's lane on that sink: it writes the same batch again alone after 1 s, then with the wait doubling up to 60 s, until it lands. The index's later changes wait behind it; the other indexes keep being written. See [A lane is stalled](../operate/stalled-lane.md). |
+| `"stop"` (default) | Nothing is dropped. A rejected document's batch stays unconfirmed; a document that fails to build is retried after a wait, doubling up to 60 s by default. With two or more indexes only its index stops meanwhile ([A failing index](config-toml.md#a-failing-index)); with one, the ingest engine restarts. | A rejection **parks** the index's lane on that sink. After 1 s, then with the wait doubling up to 60 s, it writes a [fresh build](#a-refused-lanes-fresh-build) of the batch alone, until it lands. The index's later changes wait behind it; the other indexes keep being written. See [A lane is stalled](../operate/stalled-lane.md). |
 | `"skip"` | A rejected document is **quarantined**: logged, counted in `flusso.documents.quarantined`, shown in `/status` as `documents_quarantined`. A document that fails to build keeps its previous indexed version (none on a first backfill). It doesn't land until its source row changes again. | Keeps going: the rest of the batch is applied and acknowledged, and the slot moves past the bad document. |
 
 The top-level `on_error` is the default for every index; an `[[index]]` entry's `on_error` overrides it. In a write holding several indexes, each is decided by its own policy: a `stop` rejection parks only its own lane, the others land, and a `skip` index's rejections are quarantined. The policy is operational, not part of the document shape, so changing it never triggers a reindex. The runbook is [Handle rejected documents](../operate/rejected-documents.md).
+
+### A refused lane's fresh build
+
+A lane parked on a refused document, under `stop`, doesn't write the same batch forever. At each probe it asks for a **fresh build**: the batch's documents built again from the rows as they are now. The fresh build is written alone, in the batch's place.
+
+- **A fixed row lands.** The lane opens and the batches queued behind it follow. No restart.
+- **A deleted row is written as a delete**, which lands, so deleting the row also opens the lane.
+- **Still refused**, the lane stays parked, and the next probe asks again.
+- **The schedule is [`[backoff]`](config-toml.md#backoff)'s, as before.** A probe waits for its fresh build at most its backoff wait, and never more than 5 s. Past that it writes the batch as it was, and the next probe asks again.
+- **A document never goes back to an older version.** Once a fresh build lands, older copies of its documents still queued on that lane are skipped, also when a failed sink run sends them again.
+- **Only refused lanes rebuild.** A `blocked` lane writes the same batch until the block lifts.
+- **A stop doesn't rebuild.** Its last probe of a parked lane writes the batch as it was.
+- **A fresh build that fails in the database** (a query Postgres refuses, a script failing on the row) is the index's own failure, as a live build's is: `/status` shows `ingest.indexes.<name>.state` `down`, with `last_error.live`, and counts it in `restarts.live` ([A failing index](config-toml.md#a-failing-index)). With one index, it fails the whole run, at every probe.
+
+A lane waiting for its fresh build shows `refused`, with `next_probe` at the end of the wait. Each probe counts once in [`flusso.lane.probes`](metrics.md), by how its write came back.
 
 ### What never reaches on_error
 

@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use kernel::{IndexName, SinkName};
 use stream::{
     AckHandle, Consumer, Delivery, Lane, LaneItem, LaneKey, Producer, QueueError, Request,
-    RequestLane, Result, Stream,
+    RequestLane, Result, Stream, Substitute, SubstituteLane,
 };
 use tokio::sync::mpsc;
 
@@ -31,6 +31,20 @@ use tokio::sync::mpsc;
 pub struct ChannelStream {
     lanes: BTreeMap<LaneKey, Arc<Channel<LaneItem>>>,
     requests: Arc<Channel<Request>>,
+    /// Each sink's substitute lane: fresh builds of its parked lanes' items.
+    substitutes: BTreeMap<SinkName, Arc<Channel<Substitute>>>,
+}
+
+/// Each sink of `lanes` with its substitute lane, holding up to the
+/// [`LANE_BACKSTOP`]: at most one substitute per lane is outstanding, so it
+/// never binds.
+fn substitute_lanes<'a>(
+    lanes: impl IntoIterator<Item = &'a LaneKey>,
+) -> BTreeMap<SinkName, Arc<Channel<Substitute>>> {
+    lanes
+        .into_iter()
+        .map(|key| (key.sink.clone(), Arc::new(Channel::new(LANE_BACKSTOP))))
+        .collect()
 }
 
 /// How many items a lane built from configuration holds before publishing
@@ -63,6 +77,7 @@ impl ChannelStream {
                 .map(|key| (key.clone(), Arc::new(Channel::new(bound(key)))))
                 .collect(),
             requests: Arc::new(Channel::new(capacity)),
+            substitutes: substitute_lanes(&lanes),
         }
     }
 
@@ -85,7 +100,9 @@ impl ChannelStream {
     /// however many lanes a sink has.
     fn bounded_per_lane(bound: usize, lanes: impl IntoIterator<Item = LaneKey>) -> Self {
         let bound = bound.max(1);
+        let lanes: Vec<LaneKey> = lanes.into_iter().collect();
         Self {
+            substitutes: substitute_lanes(&lanes),
             lanes: lanes
                 .into_iter()
                 .map(|key| (key, Arc::new(Channel::new(bound))))
@@ -147,6 +164,21 @@ impl Stream for ChannelStream {
             .filter(|key| &key.sink == sink)
             .cloned()
             .collect()
+    }
+
+    fn substitutes(&self, sink: &SinkName) -> Result<SubstituteLane> {
+        let channel = self
+            .substitutes
+            .get(sink)
+            .ok_or_else(|| QueueError::UnknownLane(format!("substitutes of {sink}")))?;
+        Ok(SubstituteLane {
+            producer: Box::new(ChannelProducer {
+                channel: Arc::clone(channel),
+            }),
+            consumer: Box::new(ChannelConsumer {
+                channel: Arc::clone(channel),
+            }),
+        })
     }
 
     fn requests(&self) -> Result<RequestLane> {

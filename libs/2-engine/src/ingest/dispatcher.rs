@@ -153,11 +153,20 @@ enum Fed {
     Gone,
 }
 
+/// Where one builder's requests go: backfills to its inbox, fresh builds to
+/// their own channel, so a walk in progress doesn't hold a parked lane's
+/// fresh build back (stage 9).
+#[derive(Clone)]
+pub(super) struct Route {
+    pub(super) requests: mpsc::UnboundedSender<Delivery<Request>>,
+    pub(super) rebuilds: mpsc::UnboundedSender<Delivery<Request>>,
+}
+
 /// One builder as the dispatcher sees it: its index's inbox, its signals,
 /// and its result once it returned.
 pub(super) struct Builder<'a> {
     pub(super) index: IndexName,
-    pub(super) inbox: mpsc::UnboundedSender<Delivery<Request>>,
+    pub(super) route: Route,
     pub(super) signals: &'a Signals,
     pub(super) result: oneshot::Receiver<Result<BuilderEnd>>,
 }
@@ -176,9 +185,9 @@ impl IngestEngine {
         let mut tick = tokio::time::interval(CONFIRM_TICK);
         let mut stopping = false;
         let signals: Vec<&Signals> = builders.iter().map(|builder| builder.signals).collect();
-        let routes: Vec<(IndexName, mpsc::UnboundedSender<Delivery<Request>>)> = builders
+        let routes: Vec<(IndexName, Route)> = builders
             .iter()
-            .map(|builder| (builder.index.clone(), builder.inbox.clone()))
+            .map(|builder| (builder.index.clone(), builder.route.clone()))
             .collect();
         let mut results: Vec<oneshot::Receiver<Result<BuilderEnd>>> =
             builders.into_iter().map(|builder| builder.result).collect();
@@ -302,18 +311,21 @@ impl IngestEngine {
 async fn forward(
     request: Option<Delivery<Request>>,
     requests: &mut Box<dyn Consumer<Request>>,
-    routes: &[(IndexName, mpsc::UnboundedSender<Delivery<Request>>)],
+    routes: &[(IndexName, Route)],
 ) -> Result<bool> {
     let Some(delivery) = request else {
         tracing::warn!("request lane closed; no further backfills can be served");
         *requests = Box::new(ClosedConsumer);
         return Ok(true);
     };
-    let Request::Backfill { index, sink, .. } = delivery.item();
+    let (index, sink) = (delivery.item().index(), delivery.item().sink());
     match routes.iter().find(|(own, _)| own == index) {
-        Some((_, inbox)) => Ok(inbox.send(delivery).is_ok()),
+        Some((_, route)) => Ok(match delivery.item() {
+            Request::Backfill { .. } => route.requests.send(delivery).is_ok(),
+            Request::Rebuild { .. } => route.rebuilds.send(delivery).is_ok(),
+        }),
         None => {
-            tracing::warn!(%index, %sink, "backfill requested for an index with no lane here; ignoring");
+            tracing::warn!(%index, %sink, "a request for an index with no lane here; ignoring");
             let (_, handle) = delivery.into_parts();
             handle.ack().await?;
             Ok(true)
@@ -324,7 +336,7 @@ async fn forward(
 /// Forward every request ready now, until a builder is gone.
 async fn forward_ready(
     requests: &mut Box<dyn Consumer<Request>>,
-    routes: &[(IndexName, mpsc::UnboundedSender<Delivery<Request>>)],
+    routes: &[(IndexName, Route)],
 ) -> Result<bool> {
     while !requests.is_empty() {
         match requests.recv().now_or_never() {
@@ -347,12 +359,12 @@ async fn forward_ready(
 /// dropped (it is cancel-safe) and the lane is used directly.
 async fn feed(
     requests: &mut Box<dyn Consumer<Request>>,
-    routes: &[(IndexName, mpsc::UnboundedSender<Delivery<Request>>)],
+    routes: &[(IndexName, Route)],
     signals: &[&Signals],
     reports: &Reports,
 ) -> Result<Fed> {
     loop {
-        if routes.iter().any(|(_, inbox)| inbox.is_closed()) {
+        if routes.iter().any(|(_, route)| route.requests.is_closed()) {
             return Ok(Fed::Gone);
         }
         let next = {
@@ -460,7 +472,14 @@ mod tests {
         });
         let (inbox, gone) = mpsc::unbounded_channel();
         drop(gone);
-        let routes = vec![(IndexName::try_new("users").unwrap(), inbox)];
+        let (rebuilds, _kept) = mpsc::unbounded_channel();
+        let routes = vec![(
+            IndexName::try_new("users").unwrap(),
+            Route {
+                requests: inbox,
+                rebuilds,
+            },
+        )];
         forward_ready(&mut requests, &routes).await.unwrap();
         assert!(!requests.is_empty(), "the request is back on its lane");
     }

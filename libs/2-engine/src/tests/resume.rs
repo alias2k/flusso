@@ -238,6 +238,7 @@ impl Rig {
                 hold: Default::default(),
                 walked: Some(WalkMark::new(key)),
                 ticket: None,
+                ..Default::default()
             }))
             .await
             .unwrap();
@@ -259,7 +260,9 @@ impl Rig {
         let mut seen = Vec::new();
         while !consumer.is_empty() {
             let delivery = consumer.recv().await.unwrap().unwrap();
-            let Request::Backfill { after, .. } = delivery.item().clone();
+            let Request::Backfill { after, .. } = delivery.item().clone() else {
+                panic!("a backfill request")
+            };
             seen.push(after.map(|mark| mark.as_str().to_owned()));
             delivery.into_parts().1.ack().await.unwrap();
         }

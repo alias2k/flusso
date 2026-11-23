@@ -179,7 +179,7 @@ pub struct SinkEngine {
     /// serving.
     outstanding: Mutex<BTreeMap<IndexName, Asked>>,
     /// The last ticket a request of this engine carried.
-    tickets: AtomicU64,
+    pub(super) tickets: AtomicU64,
     /// The fence levels over the live items received, per lane in key order.
     /// Survives a restart of this engine's run, so a redelivered item keeps
     /// its place and an item written before a failure is still reported once
@@ -285,6 +285,14 @@ impl SinkEngine {
         &self,
     ) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<LaneKey, LaneState>> {
         self.health.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `lane`'s F9 map, if the engine keeps state for the lane (tests).
+    #[cfg(test)]
+    pub(crate) fn superseded_map(&self, lane: &LaneKey) -> Option<BTreeMap<String, u64>> {
+        self.lock_health()
+            .get(lane)
+            .map(|state| state.superseded.clone())
     }
 
     /// `lane`'s state as the last run left it; open when never stored.

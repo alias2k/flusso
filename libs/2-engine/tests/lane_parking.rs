@@ -12,6 +12,13 @@
 //!   again (a fresh generation, backfilled) while the other index stays
 //!   current; no restart.
 //!
+//! - [`a_row_opensearch_refuses_unparks_its_lane_once_fixed_or_deleted`]: a
+//!   row OpenSearch refuses under `on_error = "stop"` (a value its `date`
+//!   field can't take) parks its lane; fixed with an `UPDATE`, the lane's
+//!   next probe writes a fresh build of it, which lands, with no restart;
+//!   deleted, the fresh build is a delete, which lands too. A sibling index
+//!   stays current throughout (stage 9, fresh builds).
+//!
 //! Requires Docker. Ignored by default; run with:
 //!
 //! ```text
@@ -278,6 +285,107 @@ async fn a_write_blocked_index_parks_alone_and_catches_up_once_lifted() {
     live.task.abort();
 }
 
+/// A row OpenSearch refuses parks its lane (`stop`); fixed in Postgres, the
+/// next probe's fresh build lands and the lane opens, no restart; a second
+/// refused row, deleted, unparks it the same way, as a delete. `steady`
+/// stays current throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_row_opensearch_refuses_unparks_its_lane_once_fixed_or_deleted() {
+    let pg = start_postgres("fresh").await;
+    let os = start_opensearch("fresh").await;
+    let live = deploy(
+        &pg,
+        &os,
+        &["fixed", "steady"],
+        FailurePolicies::new(FailurePolicy::Stop),
+    )
+    .await;
+    live.seeded(2).await;
+    let parked = |live: &Deployment| matches!(live.health("fixed"), LaneHealth::Parked { .. });
+
+    exec(
+        &pg.pool,
+        "INSERT INTO fixed (id, name, born) VALUES ('1', 'broken', 'not a date')",
+    )
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !parked(&live) {
+        live.still_running();
+        assert!(
+            Instant::now() < deadline,
+            "the refused row never parked its lane"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(live.health("fixed").kind(), "refused");
+    exec(
+        &pg.pool,
+        "INSERT INTO steady (id, name) VALUES ('1', 'one')",
+    )
+    .await;
+    assert!(
+        live.sees("steady", "1", "one", Duration::from_secs(30))
+            .await,
+        "the sibling stays current beside the parked lane"
+    );
+
+    exec(
+        &pg.pool,
+        "UPDATE fixed SET name = 'fixed', born = '2024-01-02' WHERE id = '1'",
+    )
+    .await;
+    assert!(
+        live.sees("fixed", "1", "fixed", Duration::from_secs(60))
+            .await,
+        "the fixed row lands through the next probe's fresh build"
+    );
+    assert!(live.health("fixed").is_open(), "the lane opened");
+
+    exec(
+        &pg.pool,
+        "INSERT INTO fixed (id, name, born) VALUES ('2', 'doomed', 'not a date either')",
+    )
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !parked(&live) {
+        live.still_running();
+        assert!(
+            Instant::now() < deadline,
+            "the second refused row never parked"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    exec(&pg.pool, "DELETE FROM fixed WHERE id = '2'").await;
+    exec(
+        &pg.pool,
+        "INSERT INTO steady (id, name) VALUES ('2', 'two')",
+    )
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while parked(&live) {
+        live.still_running();
+        assert!(
+            Instant::now() < deadline,
+            "the deleted row never unparked its lane"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        live.sees("steady", "2", "two", Duration::from_secs(30))
+            .await,
+        "the sibling still current"
+    );
+    assert_eq!(
+        live.name("fixed", "2").await,
+        None,
+        "the deleted row is not in the index"
+    );
+    assert_eq!(live.name("fixed", "1").await.as_deref(), Some("fixed"));
+    live.still_running();
+    live.task.abort();
+}
+
 /// The generation behind `lost` is deleted while the deployment runs: its
 /// lane is staged again into a fresh generation and backfilled, while
 /// `steady` stays current. No restart.
@@ -357,7 +465,7 @@ async fn deploy(pg: &Pg, os: &Os, indexes: &[&str], policies: FailurePolicies) -
     for index in indexes {
         exec(
             &pg.pool,
-            &format!("CREATE TABLE {index} (id text PRIMARY KEY, name text)"),
+            &format!("CREATE TABLE {index} (id text PRIMARY KEY, name text, born text)"),
         )
         .await;
     }
@@ -458,8 +566,22 @@ fn schema(table: &str) -> IndexSchema {
         doc_id: None,
         soft_delete: None,
         filters: None,
-        fields: vec![keyword("id"), keyword("name")],
+        fields: if table == "fixed" {
+            vec![keyword("id"), keyword("name"), date("born")]
+        } else {
+            vec![keyword("id"), keyword("name")]
+        },
     }
+}
+
+/// A `date` field over a text column: a value that is no date reaches
+/// OpenSearch as written, and its `date` mapping refuses it.
+fn date(name: &str) -> Field {
+    let mut field = keyword(name);
+    if let FieldSource::Column(column) = &mut field.source {
+        column.ty = FlussoType::Date;
+    }
+    field
 }
 
 fn keyword(name: &str) -> Field {

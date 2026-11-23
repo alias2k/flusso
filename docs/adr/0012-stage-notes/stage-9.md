@@ -1,6 +1,6 @@
 # Stage 9 design: one lane fails, the sink goes on
 
-**Status: §12 steps 1, 2, 3 and 6 built (PR #427, §13 "As built"); steps 4 (fresh builds, needs 8a) and 5 (reindex per lane) to come.**
+**Status: §12 steps 1, 2, 3 and 6 built (PR #427, §13 "As built"). The second half (fresh builds, reindex per lane, a closed index, an auto-created impostor) is designed against `main` after 8a in §14; slice 1 (fresh builds) is built on `feat/lane-failure-2`.**
 
 **ADR 0012 §6:** "per-lane failure: parking with fresh builds; re-staging on `index_not_found`". Plus the budget's fifth rule ("a parked lane's item is released once its fresh build is requested") and §5's "a stalled lane pins the slot and alerts" (stage 8c). Dropping and rebuilding a stalled index stays with #394.
 
@@ -243,3 +243,378 @@ What is in, and where it differs from the design above.
 - **Not built:** §6 (fresh builds, `Charge::forget`, rule 5), §12 step 5 (reindex per lane), the per-index memory share (8a): a lane parked long enough fills the budget and paces every index, as a stalled sink does today. The live `shutdown` e2e with a parked lane and the seeded schedule with random parks (§11) are not added; the stop rules are covered by `tests::parking` on paused time.
 
 Guards: `tests::parking`, `sink_engine::health::tests`, the reworked `tests::{concurrent,merge,wait,refresh}` stop-rejection cases, the daemon's `status_reports_each_lanes_health` and `a_stop_rejection_halts_its_lane_writing_several_items_at_once`, the CLI's metric and deadline-message tests, the sink's `bulk::tests`, `reindex`'s `generation_deleted_while_running_is_reported_missing_and_is_rebuilt`, and the `lane_parking` live e2e.
+
+
+## 14. Second half, designed against `main` (after 8a, `90073906`)
+
+What 8a built changes three things the first half assumed:
+
+- **One builder per index**, with its own inbox fed by the dispatcher, its own slots (published in grant
+  order), the shared gate (`builds` permits) and the shared budget (rules 1–5 of `budget.rs`; note the
+  budget's own rule 5 is "an index holding no live bytes gets one live batch", not the ADR's "parked item
+  released").
+- **A lane is a bounded FIFO.** A parked lane's front item heads it; everything the index published since
+  queues behind it, up to the lane's bound, and the builder holds (`held_by: lane`) once it is full.
+- **Pending sets drop an id once it is published**, so nothing on the ingest side remembers which ids an
+  item carried.
+
+### 14.1 Fresh builds (§6), re-derived
+
+**The path a fresh build takes.** It cannot ride the parked lane: it would queue behind the very item it
+replaces, past the window's lookahead, and a full lane would block the builder that publishes it (the
+lane is full *because* it is parked). So substitutes get their own path:
+
+- **`Stream::substitutes(sink)`** (port): one small lane per sink, downward, unbounded in practice (at
+  most one substitute per lane of the sink is ever outstanding), with the usual delivery/ack/redelivery.
+  Its items are `stream::Substitute { lane: LaneKey, ticket: Ticket, batch: Batch }`. The default
+  implementation answers "no substitute lane" (`QueueError::Unsupported`); a sink engine over such a stream
+  probes the same item, as today. The channel adapter implements it.
+- **`Request::Rebuild { index, sink, keys: Vec<RowKey>, ticket }`** (port): up the request lane, routed by
+  the dispatcher to the index's builder inbox like a `Backfill`.
+
+**The keys (open point 2, decided: the item carries them).** An envelope's `id` is the key rendered as
+text, composite parts joined with `:`; that is not reversible (a text part may hold `:`), and a reverse map
+would have to remember every unacknowledged document. So `Batch.keys: Arc<[RowKey]>`, one per envelope, in
+envelope order, empty when unknown (an item built before this, or by a test). The builder *moves* each
+`DocumentId`'s key into it as it renders the envelope (no clone, one allocation per batch). `RowKey` moves
+from the `source` port to the kernel (it is kernel types only; `source` re-exports it), so the stream port
+can name it.
+
+**Build numbers.** `Batch.build: Option<u64>`: the index's build number, from one counter per index that
+outlives builder restarts and engine runs (on `IngestEngine`), taken at publish. Slots publish in grant
+order, and two builds of one document never overlap (admission), so for one document a larger number is a
+later build reading newer state. Live, backfill and fresh builds share the counter.
+
+**The rules** (each pinned by the test named; `T:` = engine test, `S:` = sink-engine test):
+
+| # | Rule | Test |
+| --- | --- | --- |
+| F1 | A lane parked on a **refusal** whose front item carries keys asks, when its probe is due, for a fresh build (`Rebuild` with the front item's keys and a new ticket) instead of writing the item; at most one is outstanding per lane | S `a_fixed_row_unparks_its_lane` |
+| F2 | A **blocked** lane, and a refused lane whose item carries no keys or whose stream has no substitute lane, probes the same item (first half) | S `a_lifted_block_opens_the_lane_and_a_block_loses_nothing_under_either_policy`, `a_lane_without_substitutes_probes_the_same_item` |
+| F3 | The builder serves a `Rebuild` as one build of those keys, granted by the gate like a live batch and admitted only when no running build holds one of its ids; it publishes the result to the substitute lane of that sink only, and acknowledges the request once published | T `a_rebuild_is_built_once_and_sent_to_its_sink_only` |
+| F4 | No pending entry, no `Progress` registration, no `Outstanding` record: the parked item stays the one item its position and fences wait on | T `a_rebuild_is_built_once_and_sent_to_its_sink_only` (nothing reaches a lane) |
+| F5 | The substitute is written alone as the lane's probe in the parked item's place: landed, the parked item is acknowledged (its key applied, its walk mark recorded, as if it had landed) together with the substitute, and the lane opens | S `a_fixed_row_unparks_its_lane` |
+| F6 | A refused substitute parks again with doubled backoff; the parked item stays as it was; the substitute is acknowledged and dropped | S `a_fixed_row_unparks_its_lane` |
+| F7 | A deleted row is fresh-built as a delete, which lands | S `a_deleted_row_unparks_its_lane_with_a_delete` |
+| F8 | A substitute naming another ticket than the lane awaits (an older one, a lane opened meanwhile) is acknowledged and dropped | S `a_stale_or_unanswered_fresh_build_falls_back_to_the_item` |
+| F9 | **Superseded builds.** Once a substitute with build number `b` lands, every item of that lane with a build number below `b` is written without the substitute's ids (they would write an older build over a newer one). The record lives on the lane's state (it outlives a run) until an item numbered past `b` was received | S `an_older_build_queued_behind_the_parked_item_is_not_written_over_its_substitute` and 14.9's; random schedules |
+| F10 | A rebuild for an index whose builder is down waits in its inbox and is served after the restart (8a keeps the inbox) | T `a_failing_rebuild_restarts_its_index_and_is_served_after` |
+| F11 | A rebuild whose build fails (an error, a panic, a `Failed` document under `stop`) is the **index's** failure, as a live build's is: the builder restarts alone (or the run, with one index); the request, unacknowledged, is served again | T `a_failing_rebuild_restarts_its_index_and_is_served_after` |
+| F12 | A refused backfill item (no position) is replaced the same way: its walk mark is recorded when the substitute lands | S `a_fixed_row_unparks_its_lane` (its backfill case) |
+| F13 | At a stop, a refused lane's last probe writes its item as it is: builders don't serve rebuilds once the stop is requested (they are left on the request lane) | S `a_stop_probes_a_refused_lane_with_its_own_item` |
+| F14 | The budget counts a fresh build like a live batch of its index but never refuses it: it is one item per parked lane, and the item it replaces can't be released before it lands | T `a_rebuild_is_served_with_the_budget_held_full` |
+
+**Rule 5 of the ADR (`Charge::forget`) is not built.** It would release the parked item's bytes from the
+accounting while the ledger still holds them, so the budget, the exemption and `Outstanding`'s record would
+all read less than is held. F14 gets the same outcome (the fresh build is never waited on the parked item's
+bytes) and keeps the count honest: the bound grows by one fresh build per parked lane, the size of the item
+it replaces.
+
+**Order, case by case.**
+
+- *Items queued behind the parked one* (§6's decision stands: the front item's ids only). They are older
+  or newer builds of their own ids; F9 drops exactly the older builds of the substitute's ids, so a row
+  updated several times while broken unparks once, and no document goes back to an older build.
+- *A live build of the same id granted meanwhile.* Admission keeps the two builds apart. Granted before
+  the rebuild, it is older, queued behind the parked item, and F9 drops it there; granted after, it is
+  newer and written after the substitute in lane order.
+- *A backfill page holding the id.* The same, by build number.
+- *Other sinks.* The substitute goes to one lane; the other sinks' lanes see nothing.
+
+**Per-index restart (8a).** F10, F11. A builder restarting drops its fresh builds in flight with its other
+builds (8a's `abandon`); their requests stay unacknowledged in its inbox, so they are served after it.
+
+### 14.2 Reindex per index and lane (§12 step 5)
+
+Today (`main`): a reindex is staged once every write of the sink returned (`take_pending_reindex` waits for
+`flights.is_empty()`), then `reindex` + `ensure_index` + a `Backfill` request. A parked lane stays parked on
+its item, which its next probe writes into the new generation; a restaging lane is staged by both.
+
+| # | Rule | Test |
+| --- | --- | --- |
+| X1 | A reindex of one index on one sink waits only for that lane's writes, not the sink's (the port already allows staging beside other indexes' writes, §13) | S `a_reindex_waits_only_for_its_own_lanes_writes` |
+| X2 | A parked lane's reindex acknowledges its parked item unwritten (the snapshot it requests reads every row after the item's changes), opens the lane, and its queued items are written into the new generation | S `a_reindex_unparks_a_refused_lane`; e2e `lane_parking` |
+| X3 | A blocked lane's reindex is the same: the new generation carries no block | S, e2e |
+| X4 | A restaging lane's reindex replaces its staging | S |
+| X5 | `POST /indexes/<name>/reindex?sink=` answers as today; `/status` shows the lane `open` once staged | CLI |
+
+### 14.3 A closed index is `blocked` (§1)
+
+OpenSearch answers a write to a closed index item by item with `index_closed_exception` (400). Today that is
+a rejection: `skip` quarantines the documents, `stop` parks the lane as `refused`. Rule C1:
+`bulk::is_blocked` takes `index_closed_exception` (at any status) as a block, so the lane parks `blocked`
+and the same item lands once the index is opened. Live e2e `a_closed_index_blocks_its_lane_until_opened`
+(close the generation, write, `/status` `blocked`, nothing quarantined under `skip`, open, lands).
+
+### 14.4 An auto-created impostor
+
+What still gets through, to be established by test before any change (`reindex` e2e):
+
+- Seeded writes go through the hash alias with `require_alias`: a deleted generation is `index_not_found`
+  → `missing` → restage. Safe.
+- **Unseeded generations are written by name.** Deleted mid-backfill, the next write auto-creates an index
+  of that name (dynamic mapping, no alias, default settings) and the lane goes on writing into it.
+- `ensure_index` finding the name taken: to check whether it adopts what it finds.
+
+Rules (proposed): I1, every write goes through an alias with `require_alias` (an unseeded generation gets
+its own write alias, created with it); I2, `ensure_index` refuses an index of a generation's name that
+doesn't carry flusso's marker (mapping `_meta`) and the lane stays `restaging` with the reason naming it;
+I3, the impostor is **left alone** and named in the log and `/status` (recommended: it holds whatever was
+written into it, and deleting what flusso can't prove it created is not flusso's to do; the operator
+deletes it, the next staging goes on).
+
+### 14.5 What each state looks like
+
+| State | `/status` lane `health` | `reason` | metrics |
+| --- | --- | --- | --- |
+| parked on a refusal, fresh build asked | `refused` | the refusal, plus `rebuilding: true` while a fresh build is outstanding | `flusso_lane_parked{why="refused"}` 1; `flusso_lane_probes{outcome}`: a fresh build's outcome as any probe's |
+| substitute landed | `open` | — | parked 0 |
+| blocked (incl. closed) | `blocked` | OpenSearch's reason | `why="blocked"` |
+| impostor | `restaging` | names the impostor index | — (as restaging) |
+
+`ingest.indexes.<name>`: a fresh build is a build of the index (`working`, `held_by` unchanged); a failing
+one is the index's live failure (`state: down`, `last_error.live`, `restarts.live`).
+
+### 14.6 Slice plan
+
+1. **Fresh builds** (14.1): port (`RowKey` to the kernel, `Batch.keys`, `Batch.build`,
+   `Request::Rebuild`, `Stream::substitutes`, `Substitute`), channel adapter, ingest (dispatcher, builder,
+   publish), sink engine (ask, substitute probe, F9). Also the seeded schedule with random refusals and
+   parks, and the live `shutdown` e2e with a parked lane (§11's two not added).
+2. **Reindex per lane** (14.2).
+3. **A closed index** (14.3), small: may ride with 2.
+4. **The impostor** (14.4): the test first, then I1–I3.
+
+Each is a PR correct alone. Slice 1 adds no work to the paths `main` measures: keys are moved, not cloned;
+the build number is one atomic add per published item; the substitute lane is polled only while a lane
+awaits a substitute.
+
+### 14.7 Decisions for the owner (each built as recommended, behind one predicate)
+
+| # | Decision | Recommended | Other way | Predicate |
+| --- | --- | --- | --- | --- |
+| O1 | A fresh build that fails on the ingest side | the index's failure (restart, `/status` down), as the same row's live build fails the same way | the lane's: park again, the index untouched (needs a failure answer on the substitute lane) | — (`builds.rs`'s `land`: `Job::Rebuild` halts as `Job::Live`) |
+| O2 | Older builds of a substitute's ids queued behind it | dropped (F9): one unpark, no document going back | written in order: each refused again parks again | `sink_engine::substitute::supersedes` |
+| O3 | A stop's last probe of a refused lane | the item as it is | a fresh build (needs builders serving rebuilds while stopping) | — (F13) |
+| O4 | A reindex of a parked lane (slice 2) | acknowledges the parked item unwritten | writes it into the new generation | slice 2 |
+| O5 | An impostor (slice 4) | left alone, named, lane restaging | deleted and replaced | slice 4 |
+| O6 | Rule 5 | F14 (never refused, not counted) | the ADR's `Charge::forget` | — |
+
+### 14.8 Slice 1 as built (`feat/lane-failure-2`)
+
+What differs from 14.1, and why:
+
+- **F14: not counted.** The fresh build asks the gate with no budget part, which the gate admits without
+  touching the budget: it is never refused and never counted. One per parked lane, the size of the item it
+  replaces, and gone once it lands or is refused. Counting it would need a budget reservation that can't be
+  refused, which the budget has no path for.
+- **F15 (new): a fresh build is waited for at most the lane's backoff and `SUBSTITUTE_WAIT` (5 s)**; then the
+  item itself is the probe (today's behaviour), and the next probe asks again; a substitute arriving after
+  that is stale (F8). Found by `ingest::tests::builders`: an index's builder blocked publishing to its own
+  parked, full lane can't serve its inbox, so the substitute never comes. In production the lane's bound is
+  the 2^20-item backstop and the budget binds first (a builder held by the budget keeps serving), so this is
+  the test-sized case; the fallback keeps the engine from waiting on it. Cost: a fresh build slower than the
+  wait is wasted and the lane probes its item.
+- **F16 (new): the request is offered, never waited for** (`now_or_never`): a request lane nobody reads (the
+  ingest engine stopping, or not draining) would otherwise stall every lane of the sink. Not taken, the probe
+  writes the item. Found by the same test (its sink engine isn't told about the stop).
+- **One gate ask per pass.** The builder offers a fresh build inside `Builds::choose`, as the live part of the
+  one ask, ahead of the live candidate. A separate ask joined and left the live line on every pass, and each
+  change of the lines woke the builder to ask again: a spin a random schedule found (seed 58, `builds = 1`).
+- **`/status` unchanged.** A lane waiting for its substitute shows `refused` with `next_probe` at the end of
+  the wait; no `rebuilding` field (14.5's row is not built).
+- **O1 has no predicate**: the other way needs a failure answer on the substitute lane.
+
+**Tests.** `tests::parking`: `a_fixed_row_unparks_its_lane` (F1, F5, F6, F12, live and backfill),
+`a_deleted_row_unparks_its_lane_with_a_delete` (F7), `a_stale_or_unanswered_fresh_build_falls_back_to_the_item`
+(F8, F15), `an_older_build_queued_behind_the_parked_item_is_not_written_over_its_substitute` (F9),
+`a_stop_probes_a_refused_lane_with_its_own_item` (F13); the existing parking tests (items without keys) pin
+F2. `ingest::tests::rebuilds`: `a_rebuild_is_built_once_and_sent_to_its_sink_only` (F3, F4, F7's ingest half),
+`every_item_carries_its_keys_and_a_growing_build_number`, `a_failing_rebuild_restarts_its_index_and_is_served_after`
+(F10, F11). `ingest::tests::builders` (F15, F16). The random schedules (refused `orders` stretches over two
+indexes) now go through fresh builds end to end and assert some were published; their per-seed checks (no
+version going down, the documents equal the rows) cover F9 against the real builder.
+
+**Not built in slice 1:** the live `shutdown` e2e with a parked lane (the stop rules are pinned on paused time).
+F14's test and the live e2e came in fix round 1 (14.9).
+
+**Mutations** (each compiles, none hangs):
+
+| Mutation | Killed by |
+| --- | --- |
+| F1: no fresh build is ever asked | `a_fixed_row_unparks_its_lane`, `a_deleted_row_*`, `a_stale_or_unanswered_*`, `a_stop_probes_a_refused_lane_*`, `an_older_build_*` |
+| F3: a `Rebuild` routed to the backfill inbox | `rebuilds::a_rebuild_is_built_once_*`, `rebuilds::a_failing_rebuild_*`, four `builders` tests |
+| F3: admission ignored (a fresh build beside a running build of its documents) | both random schedules |
+| F5: the item written in place of its substitute | `a_deleted_row_unparks_its_lane_with_a_delete` |
+| F8: a substitute for another ticket accepted | `a_stale_or_unanswered_fresh_build_falls_back_to_the_item` |
+| F9: older builds written whole | `an_older_build_queued_behind_the_parked_item_*`, both random schedules |
+| F13: fresh builds asked while stopping | `a_stop_probes_a_refused_lane_with_its_own_item` |
+| F15: no fallback (a day's wait) | `a_stale_or_unanswered_*`, eight `builders` tests |
+| F16: the request awaited | `builders::a_stop_with_an_exempt_index_still_stuck_does_not_end` |
+| a delete's key left out | `rebuilds::a_rebuild_is_built_once_and_sent_to_its_sink_only` |
+| no build number on a live item | `rebuilds::every_item_carries_its_keys_and_a_growing_build_number` |
+
+Not mutated: F11's halting (a failed fresh build fails its builder through `publish_slot` whether or not it
+halts further grants, so no mutation of that line changes an outcome), F14 (no test, above).
+
+### 14.9 Fix round 1 (review of #458 at `67921532`): F9 redesigned
+
+F9 as built kept one (build, ids) record per lane, replaced by each landed substitute and dropped as soon as
+an item numbered past it was **received**. Both are wrong: a second substitute erased what the first one
+superseded (B1), and an older item received before the newer one can still come back whole when a run fails
+and the lane redelivers it (B2). Either way an older build of a document was written over a newer one.
+
+**F9 (replaces 14.1's).** Per lane, a map from document id to the highest build number of a substitute that
+landed with that document. Merged into (the maximum per id), never replaced. An item numbered `b` is written
+without every document whose entry is above `b`. An entry `s` is dropped only once no item numbered below `s`
+can be delivered again: the lane delivers in build order, so that holds once the run has received an item
+numbered at least `s` and every item of the lane it received numbered below `s` is acknowledged (the smallest
+build number still unacknowledged, or, with none, one past the largest received, is at least `s`).
+
+- **Where it lives:** on the lane's `LaneState`, which the `SinkEngine` keeps across its runs. The daemon
+  restarts a failed sink engine by running the same `SinkEngine` again (`supervise.rs`), so the map outlives
+  every run a redelivery can follow; a process restart loses the in-process lanes with it. A restarted run
+  knows nothing it received before, so it keeps every entry until its own deliveries prove one can go: never
+  early. Pinned by `review_a_redelivered_older_item_is_still_written_without_the_substitutes_documents` (a run
+  failing after the substitute) and a daemon-path test restarting the sink engine.
+- **Memory bound:** one entry per document a substitute landed with, kept until the lane's items built before
+  that substitute are acknowledged. Each parked item is fresh-built at most once per probe, so the map holds at
+  most the documents of the parked items fresh-built while older items of the lane were still unacknowledged:
+  in practice the refused items' documents, a few ids each.
+- **A substitute refused for some of its documents** (found by the extended schedules, seed 2): its other
+  documents landed, at its build. They join the map too, so the parked item, older, is written without them
+  and the next fresh build asks only for what is left. Without it the item's own probe (F15's fallback) wrote
+  its older builds over them.
+- **Cost while no substitute landed:** none per item; a run-wide count of lanes with entries is checked per
+  received item (one integer compare), and the prune runs only on a lane with entries.
+
+**The rest of fix round 1.**
+
+| Item | Change | Tests |
+| --- | --- | --- |
+| B3: the in-process gate (+13 to +16% on `live_drain_held`) | the sink engine's open-lane path is `main`'s again: a fresh build's handle rides on its probe's `Flight` (not on every `Part`), the substitute lane is polled inside the lane-wake branch (no extra branch future), and a received item is looked at for F9 only while some lane has entries (a run-wide count). Ingest: a build of one index (every build since 8a) publishes its envelopes and keys as they are, no regrouping (which on `main` also cloned each envelope's index name) | the gate |
+| B4: the live e2e | `lane_parking`'s `a_row_opensearch_refuses_unparks_its_lane_once_fixed_or_deleted`: a `date` field over a text column holding no date parks the lane (`stop`); an `UPDATE` unparks it at the next probe, no restart; a second row, deleted, unparks it with the delete; the sibling stays current. Red with fresh builds turned off | live |
+| 5: F14 | adopted | `a_rebuild_is_served_with_the_budget_held_full` |
+| 6: memory nobody counts | stated, not counted: (a) the keys, one `RowKey` per document (a column name and the value, tens of bytes beside a document of KiBs), now live until every lane acknowledged the item instead of being freed at build; (b) `without` copies the envelopes it keeps of an item older than a landed substitute, while the ledger holds the original until the item is acknowledged: only items of a lane with F9 entries that hold one of those documents, each once; (c) a fresh build's documents, outside the budget (F14): one per lane, see 7 | — |
+| 7: stale fresh builds | at most one fresh build waits per lane in a builder (`Builds::ask_rebuild`: a newer ticket replaces the waiting one, the replaced request is acknowledged), so a builder blocked for a while builds one, not one per timed-out ask; the substitute lane then holds at most one late answer per lane, read and dropped the next time the lane waits for one | `a_newer_request_for_a_lane_replaces_the_one_waiting` |
+| 8: O3 | a stop forgets the fresh builds not granted (`Builds::drop_rebuilds` in `grant`); their requests are served on the next start | — (a race: no directed test) |
+| minor | the table above names real tests; F2's `Unsupported` branch is tested; a request that strays into a snapshot is acknowledged with it (under the routing mutation the tests now fail at once instead of spinning to nextest's kill); an ask and its fallback count one probe | `a_lane_without_substitutes_probes_the_same_item` |
+
+**O1, a caveat.** With one index a failing fresh build fails the whole run, on every probe, so the lane's probe
+backoff and the run's restart backoff run side by side; with several, the index's builder restarts alone on its
+own backoff.
+
+**Remaining cost per item on the open path.** Ingest: the keys moved into their own vector and an `Arc<[RowKey]>`
+per index per build (one allocation and a copy of 24 bytes per document), one relaxed `fetch_add` per published
+slot, and `Batch` 32 bytes larger (copied per lane and per redelivery ledger entry). Sink: one integer compare
+per received item. A throwaway local A/B of `live_drain_held` (pinned, three rounds) was within its noise either
+way; the CI gate decides.
+
+**Mutations** (fix round 1; each compiles, none hangs):
+
+| Mutation | Killed by |
+| --- | --- |
+| B1: a substitute replaces the map | `a_second_substitute_*`, `a_backlog_past_the_lookahead_*`, the open-stream schedules (`a_fixed_row_unparks_its_lane` failed under it only through a side effect, corrected in round 2) |
+| B2: entries pruned past unacknowledged items | both random schedules |
+| a refused substitute's landed documents forgotten | the closed-stream schedules |
+| F14: a fresh build asks the budget | `a_rebuild_is_served_with_the_budget_held_full` |
+| 7: a newer request queued beside the older | `a_newer_request_for_a_lane_replaces_the_one_waiting` |
+| F3: a `Rebuild` routed to the backfill inbox | four `rebuilds` tests (fail at once now) |
+
+### 14.10 Fix round 2 (review of #458 at `8b87df0d`): when an F9 entry may go
+
+The round-1 drop rule read the lane's oldest unacknowledged item from the window and the writes in flight
+only. Two handles were outside it: one dropped unacknowledged by a failed write (its item comes back with the
+next run), and one waiting for its lane's caught-up write (`refreshing`). A sibling write landing afterwards
+dropped the entry, and the redelivered older item was written over the substitute.
+
+**The rule.** While a lane has F9 entries, the run keeps **one account** of the lane's items received and not
+yet acknowledged: `seq → build number`, on the lane's `LaneRun`.
+
+- An item enters it where it is received (`queue`, the one place a delivery becomes an item of the run), and
+  leaves it only where its acknowledgement returned `Ok` (`acknowledged`, the one place a lane item's handle is
+  acknowledged: live and snapshot parts, a stop's skipped snapshot items, completions, and items that waited for
+  a caught-up write all go through it). A handle dropped unacknowledged (a failed write, a failed run, the run's
+  end) never leaves the account, so the floor never passes it.
+- When a lane's map becomes non-empty in the middle of a run (its first substitute lands), the account is seeded
+  from every place a received, unacknowledged item of the lane can be: the window, the parts of writes in
+  flight, and the items waiting for a caught-up write. Those are the only places a lane item's handle is held
+  between `queue` and `acknowledged`; anything else is a handle already dropped, which happens only when the run
+  fails, and **once the run has failed nothing is pruned** for the rest of it.
+- A run starts with an empty account for a lane that has entries (the account is the run's; the map is the
+  engine's). An entry `s` goes when the account's smallest build number reaches `s`, or, with the account
+  empty, when the run has received an item numbered at least `s − 1` (the next one the lane can bring is
+  numbered past it). Proof sketch: a lane delivers in build-number order and redelivers what was left
+  unacknowledged before anything new; so by the time a run has received an item numbered `b`, every
+  unacknowledged item numbered below `b` was received in this run before it, and sits in the account unless it
+  was acknowledged. An item with no build number blocks every drop.
+- **Boundary.** With the oldest unacknowledged item numbered `s − 1` the entry `s` stays; numbered `s`, it goes.
+- **Memory.** Once every item of the lane received before the substitute is acknowledged, the map empties, the
+  account is dropped and the lane's state is released (`LaneState::is_kept`).
+- **Cost.** With no entry anywhere, none: the account exists only while its lane has entries.
+
+**Why no path bypasses it: every place a lane item's handle lives in a run** (`sink_engine/writes.rs`).
+
+| Where | Created, moved, dropped or acknowledged | Covered by |
+| --- | --- | --- |
+| `queue` | a delivery becomes a `Queued` in the window | enters the account here (while the lane keeps one) |
+| `take_from_window` → `grant`/`pick` | moved into a `Part` of a `Flight` | still in the account; seeding reads `parts_in_flight` |
+| `substituted` | the parked item's handle moved into the probe's `Part` | the same |
+| `put_back` | a held part back into the window | the same (it never left) |
+| `landed` → `acknowledge` → `acknowledged` | a landed part | leaves the account only after `ack` returned `Ok` |
+| `acknowledge` → `start_refresh` (`Refreshing.handle`) → `refresh_returned` → `acknowledged` | an item waiting for its lane's caught-up write | stays in the account until then; seeding reads `refreshing` |
+| `skip_backfill` (stop) → `acknowledge` | a snapshot item acknowledged unwritten | through `acknowledged` |
+| `seed`/`seed_returned`/`put_back_complete`, the completion acknowledged in `grant` | a `SnapshotComplete` | no build number: not an item of the account |
+| `landed`'s `Err` arm, `fail`, the run's end | a handle dropped unacknowledged | never leaves the account; nothing is pruned once the run failed; the next run starts again from the redelivery |
+| `grant`'s `parts` (window → `launch`), `landed`'s `landed_parts` during its acknowledgement loop, `refresh_returned`'s `waiting` | short-lived local holders inside one `&mut self` call | no seed runs while they hold a handle: seeding happens only in `supersede`, which `landed` calls after its acknowledgement loop (every landed part already acknowledged or moved to `refreshing`), and neither `grant` nor `refresh_returned` calls it |
+
+**A write mixing a block and refusals for one index.** `held_indexes` lets a block win over refusals of the
+same index, and a blocked part's report names no documents, so a substitute in such a write adds nothing to
+the map. That is right in every case OpenSearch produces: a write block (`index.blocks.*`) and a role without
+write permission refuse every item of the index in the request, so none of its documents landed. The only way
+some could have landed is a block set while the `_bulk` request was being applied; then those documents are
+written again by the parked item's next probe (an older build over a newer one, until the row next changes) —
+the one case the map can't see, because the sink port doesn't say which items a block refused.
+
+**Tests** (round 2): the two reproductions, adopted (`a_sibling_write_landing_after_a_failed_one_keeps_the_map`,
+`an_item_waiting_for_a_caught_up_write_keeps_the_map`); the boundary and memory bound
+(`an_entry_stays_while_an_older_item_is_unacknowledged_and_goes_after`: an item numbered 11 prunes while 9 is in
+flight, the entry 10 stays; once 9 is acknowledged it goes and the lane keeps no state); the seed's caught-up wait
+(`the_parked_item_is_never_rewritten_whole`, the review's strengthened version, round 3: a lane isn't probed while
+its own caught-up write is out, so the item waiting for one when its substitute lands is the parked item itself,
+whose acknowledgement waits for the quiet lane's caught-up write; the test waits for every acknowledgement and
+counts the writes holding the document). The random schedules: the seeds refusing documents write up to four
+items at once and, two in five, report writes searchable within 50 ms; after a substitute the sink's next write
+fails now and then (a part, a sibling's, or a caught-up write); they assert lanes asked again after a substitute
+and writes failed after one.
+
+**Mutations** (round 2; each compiles, none hangs):
+
+| Mutation | Killed by |
+| --- | --- |
+| a received item left out of the account | both random schedules |
+| a caught-up wait left out of the seed | `the_parked_item_is_never_rewritten_whole` (round 3; before, nothing killed it reliably) |
+| an entry dropped one item too early (`> floor + 1`) | `an_entry_stays_while_an_older_item_is_unacknowledged_and_goes_after` |
+| an entry never dropped | the same |
+| pruning after the run failed | none: redundant. A handle dropped by the failure never leaves the account, so the floor can't pass it either way; the check stays as a second barrier |
+
+Not done: under the routing mutation (a `Rebuild` sent to the backfill inbox) the open-stream schedule still
+runs to nextest's kill; the directed `rebuilds` tests fail at once.
+
+### 14.11 Fix round 3 (review of #458 at `ff8b7b43`)
+
+- **F9 depends on the stream port's order**, now written into `Consumer`'s contract (`stream/src/queue.rs`):
+  items come in publication order, and a delivery returned (nacked or dropped) comes back in that order among
+  the returned ones, before any item not yet delivered. 14.10's proof uses exactly this ("by the time a run has
+  received item `b`, every unacknowledged item below `b` was received in this run"). The channel adapter's
+  `a_returned_delivery_comes_back_before_anything_not_yet_delivered` pins it.
+- **m2:** the substitute lane is not read once the run failed, so no probe write starts after a failure.
+- **m3:** `supersede` returns at once for an empty set of documents (no account seeded for nothing).
+- **m4:** a landed substitute's documents (and those of one refused for others) join the map before its
+  delivery is acknowledged.
+- **m1:** after every refusal stretch following a substitute the sink's next write fails; the schedules count
+  each armed failure a write consumed and assert at least 20 (62 in the closed-stream test).
+- **The bench.** Nothing on the open path changed between `8b87df0d` (gate green) and `ff8b7b43`: `queue` and
+  `acknowledged` each test `superseding > 0` first, the account lives on the per-run lane state, and
+  `ff8b7b43` removed a per-landing `Vec` `8b87df0d` allocated. A throwaway pinned local A/B of `live_drain_held`
+  against `origin/main` was within its noise (the machine's own load moved the base by 2× between rounds).

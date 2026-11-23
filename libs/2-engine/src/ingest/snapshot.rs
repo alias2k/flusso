@@ -87,12 +87,20 @@ impl IngestEngine {
         let mut handles = Vec::with_capacity(deliveries.len());
         for delivery in deliveries {
             let (request, handle) = delivery.into_parts();
+            // Only backfills are gathered: fresh builds reach the builder on
+            // their own channel.
             let Request::Backfill {
                 index,
                 sink,
                 after,
                 ticket,
-            } = request.clone();
+            } = request.clone()
+            else {
+                // Acknowledged with the snapshot's requests: dropped, it would
+                // come straight back.
+                handles.push((request, handle));
+                continue;
+            };
             if scopes.contains(&index) {
                 let answered = requested
                     .entry(sink.clone())
@@ -253,7 +261,10 @@ impl Snapshot {
                     sink,
                     after,
                     ticket,
-                } = request;
+                } = request
+                else {
+                    return stream::Delivery::new(request, handle);
+                };
                 let after = reached
                     .get(&LaneKey::new(index.clone(), sink.clone()))
                     .cloned()

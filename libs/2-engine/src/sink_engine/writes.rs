@@ -138,13 +138,15 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use kernel::{Envelope, IndexName, Position};
 use sink::{CaughtUp, Visibility, WriteReport};
-use stream::{AckHandle, Batch, Consumer, Delivery, ItemKey, LaneItem, LaneKey, Ticket};
+use stream::{
+    AckHandle, Batch, Consumer, Delivery, ItemKey, LaneItem, LaneKey, Request, Substitute, Ticket,
+};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::Instrument;
 
 use super::flights::Flights;
-use super::health::LaneState;
+use super::health::{LaneState, supersedes};
 use super::walked::Walked;
 use super::{
     Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, SinkControl, SinkEngine, shown_id,
@@ -188,6 +190,13 @@ struct LaneRun {
     /// Open, parked or being staged again; outlives the run (the engine
     /// keeps it).
     health: LaneState,
+    /// The largest build number received in this run, noted while the lane
+    /// has F9 entries (`prune_superseded`).
+    newest: Option<u64>,
+    /// While the lane has F9 entries: every item of it received in this run
+    /// and not acknowledged, by receive order, with its build number (none:
+    /// unknown). What decides when an entry may go (the note's 14.10).
+    account: Option<BTreeMap<u64, Option<u64>>>,
 }
 
 impl LaneRun {
@@ -242,6 +251,16 @@ struct Flight {
     caught_up: Option<(u64, Vec<LaneKey>)>,
     /// The parked lane this write probes: its front item, alone.
     probe: Option<usize>,
+    /// The fresh build the probe writes in its item's place (F5).
+    substitute: Option<Box<Substituted>>,
+}
+
+/// A fresh build written in a parked item's place: its delivery, its build
+/// number and its documents' ids (what it supersedes once it lands, F9).
+struct Substituted {
+    handle: Box<dyn AckHandle>,
+    build: Option<u64>,
+    ids: Vec<String>,
 }
 
 /// One lane item of a write.
@@ -293,6 +312,8 @@ struct Refreshing {
     lane: usize,
     /// The waiting item's lane order.
     seq: Option<u64>,
+    /// The waiting item's build number.
+    build: Option<u64>,
     oldest: bool,
     covers_below: u64,
     /// Something of the lane landed while this was out: its position may be
@@ -321,6 +342,13 @@ pub(super) struct Run<'a> {
     refreshing: Vec<(u64, Refreshing)>,
     /// Lanes being staged again, by flight: they hold no write slot.
     restaging: Vec<(u64, usize)>,
+    /// The sink's substitute lane, when the stream has one: fresh builds of
+    /// parked lanes' items (stage 9). Without it a refused lane writes its
+    /// own item again.
+    substitutes: Option<Box<dyn Consumer<Substitute>>>,
+    /// Lanes whose F9 map has entries: while none has, a received item is
+    /// not looked at for them.
+    superseding: usize,
     /// Lanes not open (parked or restaging): while none is, nothing of the
     /// parking is looked at.
     unhealthy: usize,
@@ -363,8 +391,11 @@ impl<'a> Run<'a> {
             .into_iter()
             .map(|(key, consumer)| {
                 let blamed = blame.covers(&key);
+                let health = engine.lane_state(&key);
+                // A run starts its F9 account empty (14.10).
+                let account = (!health.superseded.is_empty()).then(BTreeMap::new);
                 LaneRun {
-                    health: engine.lane_state(&key),
+                    health,
                     barrier: blamed && !matches!(blame, Blame::Nobody),
                     counts: blamed,
                     key,
@@ -373,14 +404,29 @@ impl<'a> Run<'a> {
                     live_waiting: 0,
                     backfill_waiting: 0,
                     walked: Walked::default(),
+                    newest: None,
+                    account,
                 }
             })
             .collect();
         let unhealthy = lanes.iter().filter(|lane| !lane.health.is_open()).count();
+        // A restarted run keeps applying what the last one's substitutes
+        // supersede (B2): the lanes it redelivers may hold older builds.
+        let superseding = lanes
+            .iter()
+            .filter(|lane| !lane.health.superseded.is_empty())
+            .count();
+        let substitutes = engine
+            .stream
+            .substitutes(&engine.name)
+            .ok()
+            .map(|lane| lane.consumer);
         Self {
             engine,
             lanes,
             restaging: Vec::new(),
+            substitutes,
+            superseding,
             unhealthy,
             stop_probed: false,
             window: VecDeque::new(),
@@ -454,6 +500,7 @@ impl<'a> Run<'a> {
             let stop = &engine.stop;
             let watch_stop =
                 (self.backfill_waiting > 0 || self.unhealthy > 0) && !stop.is_requested();
+            let awaiting = self.awaits_a_substitute();
             if self.flights.is_empty() && self.window.is_empty() {
                 self.idle_since.get_or_insert_with(Instant::now);
             }
@@ -489,7 +536,13 @@ impl<'a> Run<'a> {
                         self.engine.report_searchable();
                         self.refresh_due();
                     }
-                    () = until(lane_wake), if lane_wake.is_some() => {}
+                    woke = lane_event(lane_wake, &mut self.substitutes, awaiting), if lane_wake.is_some() || awaiting => {
+                        if let Some(substitute) = woke
+                            && let Err(error) = self.substituted(substitute).await
+                        {
+                            self.fail(error, &[]);
+                        }
+                    }
                 }
                 continue;
             }
@@ -539,7 +592,14 @@ impl<'a> Run<'a> {
                     self.hold_until = None;
                     self.close_idle();
                 }
-                () = until(lane_wake), if lane_wake.is_some() => self.close_idle(),
+                woke = lane_event(lane_wake, &mut self.substitutes, awaiting), if lane_wake.is_some() || awaiting => {
+                    self.close_idle();
+                    if let Some(substitute) = woke
+                        && let Err(error) = self.substituted(substitute).await
+                    {
+                        self.fail(error, &[]);
+                    }
+                }
                 () = stop.requested(), if watch_stop => self.close_idle(),
                 _ = idle_tick.tick() => self.close_idle(),
             }
@@ -572,6 +632,7 @@ impl<'a> Run<'a> {
         if !self.engine.reindex_pending() {
             if self.unhealthy > 0 {
                 self.start_restages();
+                self.ask_rebuilds().await?;
             }
             // An ordered sink first takes every lane's front, so the pick by
             // position sees an earlier item a lane held back while its write
@@ -929,6 +990,11 @@ impl<'a> Run<'a> {
                     fences.received(&run.key, key, position);
                     self.next_due = fences.next_due();
                 }
+                let batch = if self.superseding > 0 {
+                    self.past_superseded(lane, batch)
+                } else {
+                    batch
+                };
                 let documents = Documents::new(&batch.envelopes);
                 Queue::Batch { batch, documents }
             }
@@ -936,6 +1002,15 @@ impl<'a> Run<'a> {
         };
         let seq = self.next_seq;
         self.next_seq += 1;
+        // Received: into its lane's F9 account (14.10), while it keeps one.
+        if self.superseding > 0
+            && let Queue::Batch { batch, .. } = &item
+            && let Some(run) = self.lanes.get_mut(lane)
+            && let Some(account) = run.account.as_mut()
+        {
+            account.insert(seq, batch.build);
+            run.newest = run.newest.max(batch.build);
+        }
         if let Queue::Complete { .. } = &item
             && let Some(run) = self.lanes.get_mut(lane)
         {
@@ -996,7 +1071,8 @@ impl<'a> Run<'a> {
                 run.walked.hold(seq);
             }
             let oldest = self.is_oldest(lane, seq);
-            self.acknowledge(handle, lane, seq, oldest, None).await?;
+            self.acknowledge(handle, lane, seq, batch.build, oldest, None)
+                .await?;
         }
         Ok(())
     }
@@ -1025,7 +1101,8 @@ impl<'a> Run<'a> {
                         run.walked.ended(seq, Instant::now());
                     }
                     if self.engine.cut_short(&index) || self.engine.superseded(&index, ticket) {
-                        self.acknowledge(handle, lane, seq, true, None).await?;
+                        self.acknowledge(handle, lane, seq, None, true, None)
+                            .await?;
                     } else if let Some(landed) = self.seed(index, ticket, handle, lane, seq) {
                         self.landed(landed).await?;
                     }
@@ -1076,7 +1153,12 @@ impl<'a> Run<'a> {
             if let Some(lane) = probe
                 && let Some(run) = self.lanes.get_mut(lane)
             {
-                run.health.probes += 1;
+                // The item itself is the probe: a fresh build still awaited
+                // is no longer (it would come too late, F15), and the ask
+                // already counted this probe.
+                if run.health.rebuild.take().is_none() {
+                    run.health.probes += 1;
+                }
                 if run.health.probes > 1 {
                     tracing::info!(lane = %run.key, probe = run.health.probes, "probing the parked lane again: its front item, alone");
                 }
@@ -1096,7 +1178,7 @@ impl<'a> Run<'a> {
                 })
                 .collect();
             caught_up.dedup();
-            if let Some(landed) = self.launch(parts, envelopes, work, caught_up, probe) {
+            if let Some(landed) = self.launch(parts, envelopes, work, caught_up, probe, None) {
                 self.landed(landed).await?;
             }
         }
@@ -1393,6 +1475,7 @@ impl<'a> Run<'a> {
         work: Work,
         caught_up: Vec<usize>,
         probe: Option<usize>,
+        substitute: Option<Box<Substituted>>,
     ) -> Option<Landed> {
         let flight = self.next_flight;
         self.next_flight += 1;
@@ -1412,6 +1495,7 @@ impl<'a> Run<'a> {
                 started: Instant::now(),
                 caught_up: covers_below,
                 probe,
+                substitute,
             },
         ));
         let sink = &self.engine.sink;
@@ -1517,8 +1601,15 @@ impl<'a> Run<'a> {
         }
         self.engine.seeded(&seeding.index, seeding.ticket, took);
         let oldest = self.is_oldest(seeding.lane, seeding.seq);
-        self.acknowledge(seeding.handle, seeding.lane, seeding.seq, oldest, None)
-            .await?;
+        self.acknowledge(
+            seeding.handle,
+            seeding.lane,
+            seeding.seq,
+            None,
+            oldest,
+            None,
+        )
+        .await?;
         if let Some(run) = self.lanes.get_mut(seeding.lane) {
             run.barrier = false;
         }
@@ -1554,7 +1645,8 @@ impl<'a> Run<'a> {
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
             return Ok(());
         };
-        let (_, flight) = self.flying.swap_remove(index);
+        let (_, mut flight) = self.flying.swap_remove(index);
+        let mut substitute = flight.substitute.take();
         self.engine.observer.on_stage(
             StageTiming::new(Stage::Write, landed.took)
                 .work(flight.work)
@@ -1595,18 +1687,53 @@ impl<'a> Run<'a> {
         let held_lane = |run: Option<&LaneRun>| {
             run.is_some_and(|run| held.contains_key(run.key.index.as_ref()))
         };
-        let (failed, landed_parts): (Vec<Part>, Vec<Part>) = flight
-            .parts
+        let (failed, landed_parts): (Vec<Part>, Vec<Part>) = std::mem::take(&mut flight.parts)
             .into_iter()
             .partition(|part| held_lane(self.lanes.get(part.lane)));
         self.engine
             .quarantine(&report, |index| !held.contains_key(index));
         let mut parked: Vec<usize> = Vec::new();
-        for part in failed {
+        for mut part in failed {
             if !parked.contains(&part.lane) {
                 parked.push(part.lane);
             }
+            // A substitute refused again is done with (F6): the item goes
+            // back as it was, and the next probe asks for another. Its
+            // documents that were not refused landed, at its newer build: the
+            // parked item, older, is written without them from now on (F9).
+            let mut landed_anyway = None;
+            let mut done_with = None;
+            if flight.probe == Some(part.lane)
+                && let Some(substitute) = substitute.take()
+            {
+                part.documents = Documents::new(&part.batch.envelopes);
+                done_with = Some(substitute.handle);
+                let refused = self
+                    .lanes
+                    .get(part.lane)
+                    .and_then(|run| held.get(run.key.index.as_ref()))
+                    .and_then(|why| match why {
+                        Held::Refused { .. } => Some(run_rejected(&report, part.lane, &self.lanes)),
+                        _ => None,
+                    });
+                if let (Some(refused), Some(build)) = (refused, substitute.build) {
+                    let landed: Vec<String> = substitute
+                        .ids
+                        .into_iter()
+                        .filter(|id| !refused.contains(id))
+                        .collect();
+                    landed_anyway = Some((part.lane, build, landed));
+                }
+            }
             self.put_back(part);
+            if let Some((lane, build, landed)) = landed_anyway {
+                self.supersede(lane, build, landed);
+            }
+            // Acknowledged once its landed documents are in the map: a
+            // failing acknowledgement can't leave them out (m4).
+            if let Some(handle) = done_with {
+                handle.ack().await?;
+            }
         }
         for &lane in &parked {
             let Some(index) = self.lanes.get(lane).map(|run| run.key.index.to_string()) else {
@@ -1677,6 +1804,7 @@ impl<'a> Run<'a> {
         }
         let mut acknowledged = Ok(());
         for (part, last) in landed_parts.into_iter().zip(last_of_lane) {
+            let build = part.batch.build;
             // Let go of the batch before acknowledging it, so the lane frees it
             // as the acknowledgement lands.
             drop(part.documents);
@@ -1697,7 +1825,7 @@ impl<'a> Run<'a> {
                 )
             };
             if let Err(error) = self
-                .acknowledge(part.handle, part.lane, part.seq, oldest, wants)
+                .acknowledge(part.handle, part.lane, part.seq, build, oldest, wants)
                 .await
             {
                 acknowledged = Err(error);
@@ -1711,12 +1839,296 @@ impl<'a> Run<'a> {
             }
         }
         acknowledged?;
+        // The item landed through its substitute (F5): the substitute is done
+        // with, and the builds it is newer than are left out (F9).
+        if let (Some(substitute), Some(lane)) = (substitute.take(), flight.probe) {
+            if let Some(build) = substitute.build {
+                self.supersede(lane, build, substitute.ids);
+            }
+            substitute.handle.ack().await?;
+        }
         for lane in walked {
             if let Some(landed) = self.record_walked(lane) {
                 Box::pin(self.landed(landed)).await?;
             }
         }
         Ok(())
+    }
+
+    /// Whether some lane waits for its fresh build's substitute.
+    fn awaits_a_substitute(&self) -> bool {
+        // No probe starts once the run failed (review of #458, m2).
+        self.unhealthy > 0
+            && self.failure.is_none()
+            && self.substitutes.is_some()
+            && self.lanes.iter().any(|run| run.health.rebuild.is_some())
+    }
+
+    /// Ask, for each lane parked on a refusal whose probe is due, for a fresh
+    /// build of its front item's documents (F1): the item goes unwritten until
+    /// the substitute comes. Not once the stop is asked (F13), not without a
+    /// substitute lane, and not for an item that doesn't carry its keys: those
+    /// write the item itself (F2).
+    async fn ask_rebuilds(&mut self) -> Result<()> {
+        if self.substitutes.is_none() || self.engine.stop.is_requested() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        for lane in 0..self.lanes.len() {
+            let wants = self
+                .lanes
+                .get(lane)
+                .is_some_and(|run| run.health.wants_rebuild(now));
+            if !wants || self.lane_in_flight(lane) {
+                continue;
+            }
+            let keys = self
+                .window
+                .iter()
+                .find(|queued| queued.lane == lane)
+                .and_then(|queued| match &queued.item {
+                    Queue::Batch { batch, .. }
+                        if !batch.keys.is_empty() && batch.keys.len() == batch.envelopes.len() =>
+                    {
+                        Some(batch.keys.to_vec())
+                    }
+                    _ => None,
+                });
+            let (Some(keys), Some(run)) = (keys, self.lanes.get_mut(lane)) else {
+                continue;
+            };
+            let ticket = Ticket::new(self.engine.tickets.fetch_add(1, Ordering::Relaxed) + 1);
+            let producer = self.engine.stream.requests()?.producer;
+            let request = Request::Rebuild {
+                index: run.key.index.clone(),
+                sink: run.key.sink.clone(),
+                keys,
+                ticket,
+            };
+            // Offered, never waited for: a request lane nobody reads (the
+            // ingest engine stopping) would stall every lane of the sink.
+            // Not taken, the probe writes the item itself (F16).
+            match producer.publish(request).now_or_never() {
+                Some(published) => published?,
+                None => continue,
+            }
+            tracing::info!(lane = %run.key, %ticket, "asking for the parked item's documents to be built again");
+            run.health.asked(ticket, now);
+            self.engine.store_lane(&run.key, &run.health, false);
+        }
+        Ok(())
+    }
+
+    /// A substitute arrived: written alone, as its lane's probe, in its
+    /// parked item's place (F5); one the lane no longer waits for is
+    /// acknowledged and dropped (F8).
+    async fn substituted(
+        &mut self,
+        delivery: Option<stream::Result<Option<Delivery<Substitute>>>>,
+    ) -> Result<()> {
+        let Some(delivery) = delivery else {
+            return Ok(());
+        };
+        let Some(delivery) = delivery? else {
+            tracing::warn!("the substitute lane closed: parked lanes write their own items again");
+            self.substitutes = None;
+            for run in &mut self.lanes {
+                run.health.rebuild = None;
+            }
+            return Ok(());
+        };
+        let (substitute, handle) = delivery.into_parts();
+        let lane = self.lanes.iter().position(|run| run.key == substitute.lane);
+        let front = lane.and_then(|lane| {
+            let awaited = self.lanes.get(lane).is_some_and(|run| {
+                !run.health.is_open() && run.health.rebuild == Some(substitute.ticket)
+            });
+            if !awaited || self.lane_in_flight(lane) {
+                return None;
+            }
+            self.window
+                .iter()
+                .position(|queued| queued.lane == lane)
+                .filter(|at| {
+                    matches!(
+                        self.window.get(*at),
+                        Some(Queued {
+                            item: Queue::Batch { .. },
+                            ..
+                        })
+                    )
+                })
+        });
+        let (Some(lane), Some(at)) = (lane, front) else {
+            tracing::debug!(lane = %substitute.lane, ticket = %substitute.ticket, "a substitute no lane waits for; dropped");
+            handle.ack().await?;
+            return Ok(());
+        };
+        let Some(Queued {
+            item: Queue::Batch { batch, .. },
+            handle: item_handle,
+            seq,
+            ready_at,
+            ..
+        }) = self.take_from_window(at)
+        else {
+            return Ok(());
+        };
+        if let Some(run) = self.lanes.get_mut(lane) {
+            run.health.rebuild = None;
+        }
+        let fresh = substitute.batch;
+        let substituted = Box::new(Substituted {
+            handle,
+            build: fresh.build,
+            ids: fresh
+                .envelopes
+                .iter()
+                .map(|envelope| envelope.id.clone())
+                .collect(),
+        });
+        let envelopes = Arc::clone(&fresh.envelopes);
+        let part = Part {
+            handle: item_handle,
+            lane,
+            key: batch.key,
+            position: batch.position,
+            documents: Documents::new(&fresh.envelopes),
+            seq,
+            batch,
+            ready_at,
+        };
+        let work = work_of(part.position);
+        let quiet = !self.window.iter().any(|queued| queued.lane == lane)
+            && self
+                .lanes
+                .get(lane)
+                .is_some_and(|run| run.consumer.is_empty());
+        let caught_up = if quiet { vec![lane] } else { Vec::new() };
+        if let Some(landed) = self.launch(
+            vec![part],
+            vec![envelopes],
+            work,
+            caught_up,
+            Some(lane),
+            Some(substituted),
+        ) {
+            self.landed(landed).await?;
+        }
+        Ok(())
+    }
+
+    /// `batch` of `lane` without the documents a landed substitute built later
+    /// (F9), noting how far the lane's deliveries got.
+    fn past_superseded(&mut self, lane: usize, batch: Batch) -> Batch {
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return batch;
+        };
+        if run.health.superseded.is_empty() {
+            return batch;
+        }
+        let superseded = &run.health.superseded;
+        let build = batch.build;
+        without(batch, |id| {
+            superseded
+                .get(id)
+                .is_some_and(|substitute| supersedes(*substitute, build))
+        })
+    }
+
+    /// `lane`'s substitute numbered `build` landed with the documents `ids`:
+    /// merge them into the lane's map and leave them out of the older items
+    /// already waiting. A lane without entries yet starts its account (14.10)
+    /// from every place a received, unacknowledged item of it can be: the
+    /// window, the writes in flight, the items waiting for a caught-up write.
+    fn supersede(&mut self, lane: usize, build: u64, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut found: BTreeMap<u64, Option<u64>> = BTreeMap::new();
+        for queued in self.window.iter_mut().filter(|queued| queued.lane == lane) {
+            if let Queue::Batch { batch, documents } = &mut queued.item {
+                found.insert(queued.seq, batch.build);
+                if supersedes(build, batch.build)
+                    && batch.envelopes.iter().any(|e| ids.contains(&e.id))
+                {
+                    *batch = without(std::mem::take(batch), |id| ids.iter().any(|own| own == id));
+                    *documents = Documents::new(&batch.envelopes);
+                }
+            }
+        }
+        for part in self.parts_in_flight(lane) {
+            found.insert(part.seq, part.batch.build);
+        }
+        for (_, refreshing) in &self.refreshing {
+            if refreshing.lane == lane
+                && refreshing.handle.is_some()
+                && let Some(seq) = refreshing.seq
+            {
+                found.insert(seq, refreshing.build);
+            }
+        }
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        let was_empty = run.health.superseded.is_empty();
+        for id in ids {
+            let entry = run.health.superseded.entry(id).or_insert(build);
+            *entry = (*entry).max(build);
+        }
+        if run.account.is_none() {
+            run.newest = found.values().copied().max().flatten();
+            run.account = Some(found);
+        }
+        if was_empty && !run.health.superseded.is_empty() {
+            self.superseding += 1;
+        }
+        self.engine.store_lane(&run.key, &run.health, false);
+    }
+
+    /// Drop the F9 entries of `lane` no item can be written over any more
+    /// (14.10): those numbered at most the smallest build number in the
+    /// lane's account, or, with the account empty, at most one past the
+    /// newest received in this run. Nothing once the run has failed, nor
+    /// while an item of unknown number is unacknowledged.
+    fn prune_superseded(&mut self, lane: usize) {
+        if self.failure.is_some() {
+            return;
+        }
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        let Some(account) = &run.account else {
+            return;
+        };
+        let floor = if account.is_empty() {
+            match run.newest {
+                Some(newest) => newest.saturating_add(1),
+                None => return,
+            }
+        } else {
+            let mut least = u64::MAX;
+            for build in account.values() {
+                match build {
+                    Some(build) => least = least.min(*build),
+                    None => return,
+                }
+            }
+            least
+        };
+        let before = run.health.superseded.len();
+        run.health
+            .superseded
+            .retain(|_, substitute| *substitute > floor);
+        if run.health.superseded.len() == before {
+            return;
+        }
+        if run.health.superseded.is_empty() {
+            run.account = None;
+            run.newest = None;
+            self.superseding = self.superseding.saturating_sub(1);
+        }
+        self.engine.store_lane(&run.key, &run.health, false);
     }
 
     /// Put a seed's `SnapshotComplete` back in the window, at its place in
@@ -1921,6 +2333,7 @@ impl<'a> Run<'a> {
         handle: Box<dyn AckHandle>,
         lane: usize,
         seq: u64,
+        build: Option<u64>,
         oldest: bool,
         wants: Option<bool>,
     ) -> Result<()> {
@@ -1929,6 +2342,7 @@ impl<'a> Run<'a> {
                 handle: Some(handle),
                 lane,
                 seq: Some(seq),
+                build,
                 oldest,
                 covers_below: 0,
                 again: false,
@@ -1944,7 +2358,7 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        self.acknowledged(handle, lane, oldest).await
+        self.acknowledged(handle, lane, Some(seq), oldest).await
     }
 
     /// The lane's key, if it is quiet (nothing of it waiting, in flight or on
@@ -1979,6 +2393,7 @@ impl<'a> Run<'a> {
                         handle: None,
                         lane,
                         seq: None,
+                        build: None,
                         oldest: false,
                         covers_below: 0,
                         again: false,
@@ -2029,9 +2444,22 @@ impl<'a> Run<'a> {
         &mut self,
         handle: Box<dyn AckHandle>,
         lane: usize,
+        seq: Option<u64>,
         oldest: bool,
     ) -> Result<()> {
         handle.ack().await?;
+        // Acknowledged: the item leaves its lane's F9 account (14.10), the
+        // one place it does.
+        if self.superseding > 0
+            && let Some(seq) = seq
+            && let Some(account) = self
+                .lanes
+                .get_mut(lane)
+                .and_then(|run| run.account.as_mut())
+        {
+            account.remove(&seq);
+            self.prune_superseded(lane);
+        }
         if oldest && self.failure.is_none() && self.lanes.get(lane).is_some_and(|run| run.counts) {
             self.engine.advanced.fetch_add(1, Ordering::Relaxed);
         }
@@ -2100,7 +2528,7 @@ impl<'a> Run<'a> {
                 continue;
             }
             if let Some(handle) = refreshing.handle {
-                self.acknowledged(handle, refreshing.lane, refreshing.oldest)
+                self.acknowledged(handle, refreshing.lane, refreshing.seq, refreshing.oldest)
                     .await?;
             }
         }
@@ -2323,6 +2751,68 @@ struct Returned {
     next_due: Option<Instant>,
     /// The written lanes that want an empty caught-up write once quiet.
     wanting: Vec<LaneKey>,
+}
+
+/// `batch` without the documents `ids` names (and their keys); the batch
+/// itself when it holds none of them.
+fn without(batch: Batch, left_out: impl Fn(&str) -> bool) -> Batch {
+    if !batch
+        .envelopes
+        .iter()
+        .any(|envelope| left_out(&envelope.id))
+    {
+        return batch;
+    }
+    let keyed = batch.keys.len() == batch.envelopes.len();
+    let mut envelopes = Vec::with_capacity(batch.envelopes.len());
+    let mut keys = Vec::new();
+    for (at, envelope) in batch.envelopes.iter().enumerate() {
+        if left_out(&envelope.id) {
+            continue;
+        }
+        envelopes.push(envelope.clone());
+        if keyed && let Some(key) = batch.keys.get(at) {
+            keys.push(key.clone());
+        }
+    }
+    Batch {
+        envelopes: envelopes.into(),
+        keys: keys.into(),
+        ..batch
+    }
+}
+
+/// The ids `report` refused of `lane`'s index.
+fn run_rejected(report: &WriteReport, lane: usize, lanes: &[LaneRun]) -> Vec<String> {
+    let Some(run) = lanes.get(lane) else {
+        return Vec::new();
+    };
+    report
+        .rejected
+        .iter()
+        .filter(|doc| doc.index == run.key.index.as_ref())
+        .map(|doc| doc.id.clone())
+        .collect()
+}
+
+/// A parked or restaging lane's due time (`None`), or the next delivery of
+/// the substitute lane while a lane `awaits` one: one branch of the run's
+/// loop for both, so a sink with every lane open polls what `main` polled.
+async fn lane_event(
+    wake: Option<Instant>,
+    substitutes: &mut Option<Box<dyn Consumer<Substitute>>>,
+    awaits: bool,
+) -> Option<Option<stream::Result<Option<Delivery<Substitute>>>>> {
+    match substitutes {
+        Some(consumer) if awaits => tokio::select! {
+            () = until(wake) => None,
+            delivery = consumer.recv() => Some(Some(delivery)),
+        },
+        _ => {
+            until(wake).await;
+            None
+        }
+    }
 }
 
 /// Live changes carry a position; a backfill batch has none.

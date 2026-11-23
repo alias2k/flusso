@@ -264,6 +264,7 @@ async fn a_live_item_without_a_key_fails_the_sink_engine() {
             hold: Default::default(),
             walked: None,
             ticket: None,
+            ..Default::default()
         }))
         .await
         .unwrap();

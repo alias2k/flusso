@@ -87,10 +87,24 @@ pub(super) enum Job {
     },
     /// A snapshot's end: `SnapshotComplete` to every lane that asked.
     Complete(Box<Snapshot>),
+    /// A parked lane's fresh build (stage 9): published to that lane's sink
+    /// alone, as a substitute.
+    Rebuild(Rebuild),
     /// A walk's batch or end, discarded because the walk failed (slice 8,
     /// fix round 2): publishes nothing, its place kept so the slots around
     /// it publish in grant order.
     Discarded,
+}
+
+/// A parked lane's request for a fresh build of its item's documents
+/// (stage 9, F3): which lane, the request's ticket, and its delivery's
+/// handle, acknowledged once the substitute is published. Dropped
+/// unacknowledged (a restart, a stop), the request is delivered again.
+#[derive(Debug)]
+pub(super) struct Rebuild {
+    pub(super) lane: stream::LaneKey,
+    pub(super) ticket: stream::Ticket,
+    pub(super) handle: Box<dyn stream::AckHandle>,
 }
 
 /// A walk of this builder failed (ADR 0012 stage 8a, slice 8-1 fix round
@@ -210,11 +224,13 @@ pub(super) struct LiveCandidate<L> {
 
 /// Which kind of batch a free slot goes to; a live grant carries back what
 /// the live candidate was offered with and the indexes it may take.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum Grant<L> {
     /// What the live candidate was offered with, and the indexes taken.
     Live(L, Vec<IndexName>),
     Backfill,
+    /// A parked lane's fresh build: its documents and its request.
+    Rebuild(Vec<DocumentId>, Rebuild),
 }
 
 /// The granted, unpublished slots and the builds running for them.
@@ -244,6 +260,9 @@ pub(super) struct Builds {
     halted: bool,
     /// A walk failed and the builder's loop hasn't taken it yet.
     walk_failure: Option<WalkFailure>,
+    /// Parked lanes' requests for a fresh build, oldest first, with the
+    /// documents to build (stage 9).
+    rebuilds: VecDeque<(Vec<DocumentId>, Rebuild)>,
     spare: Vec<Vec<DocumentId>>,
     budget: Option<Arc<Budget>>,
     /// Bytes per document, per index, live and backfill: a running average
@@ -363,7 +382,52 @@ impl Builds {
             several: false,
             waiters: Vec::new(),
             asked_at: 0,
+            rebuilds: VecDeque::new(),
         }
+    }
+
+    /// Queue a parked lane's request for a fresh build of `ids`: at most one
+    /// per lane, the newest ticket's (a lane asks again only once it stopped
+    /// waiting for the last answer). The request it leaves out, to be
+    /// acknowledged unanswered.
+    pub(super) fn ask_rebuild(
+        &mut self,
+        ids: Vec<DocumentId>,
+        rebuild: Rebuild,
+    ) -> Option<Rebuild> {
+        match self
+            .rebuilds
+            .iter_mut()
+            .find(|(_, queued)| queued.lane == rebuild.lane)
+        {
+            Some(queued) if queued.1.ticket < rebuild.ticket => {
+                Some(std::mem::replace(queued, (ids, rebuild)).1)
+            }
+            Some(_) => Some(rebuild),
+            None => {
+                self.rebuilds.push_back((ids, rebuild));
+                None
+            }
+        }
+    }
+
+    /// Forget every fresh build not granted yet: a stop serves none (F13);
+    /// their requests, unacknowledged, are served on the next start.
+    pub(super) fn drop_rebuilds(&mut self) {
+        self.rebuilds.clear();
+    }
+
+    /// Whether a fresh build waits to be granted.
+    pub(super) fn rebuilds_waiting(&self) -> bool {
+        !self.rebuilds.is_empty()
+    }
+
+    /// Whether the oldest fresh build may take the next live permit: no
+    /// running build holds one of its documents (F3).
+    fn rebuild_ready(&self) -> bool {
+        self.rebuilds
+            .front()
+            .is_some_and(|(ids, _)| !self.holds_any(ids))
     }
 
     /// Ask the gate beside other builders (G9′): see `several`.
@@ -687,13 +751,25 @@ impl Builds {
                 && (self.several || self.affordable(Work::Backfill, &documents).is_some()))
             .then_some(documents)
         });
-        let live_parts = live
-            .as_ref()
-            .map(|(_, taken)| self.reserving(Work::Live, taken));
+        // A parked lane's fresh build goes first among live work, asked with
+        // no budget part: the budget never refuses it (F14). One ask a pass,
+        // or the builder's place in the live line would come and go, and every
+        // change of the lines wakes it to ask again.
+        let rebuild = self.rebuild_ready();
+        let live_parts = if rebuild {
+            Some(Vec::new())
+        } else {
+            live.as_ref()
+                .map(|(_, taken)| self.reserving(Work::Live, taken))
+        };
         let backfill_parts = backfill
             .as_ref()
             .map(|documents| self.reserving(Work::Backfill, documents));
         match (self.ask(live_parts, backfill_parts)?, live) {
+            (Work::Live, _) if rebuild => self
+                .rebuilds
+                .pop_front()
+                .map(|(ids, rebuild)| Grant::Rebuild(ids, rebuild)),
             (Work::Live, Some((live, taken))) => Some(Grant::Live(
                 live,
                 taken.into_iter().map(|(index, _)| index).collect(),
@@ -770,7 +846,12 @@ impl Builds {
         let seq = self.front + self.slots.len() as u64;
         let permit = self.granted.take();
         let live = matches!(job, Job::Live { .. });
-        let work = if live { Work::Live } else { Work::Backfill };
+        let rebuild = matches!(job, Job::Rebuild(_));
+        let work = if live || rebuild {
+            Work::Live
+        } else {
+            Work::Backfill
+        };
         {
             let since = {
                 let mut waits = lock(&self.waits);
@@ -800,7 +881,7 @@ impl Builds {
         // hashed.
         let held = (self.limit > 1).then(|| hashes(&ids));
         let ids = Arc::new(ids);
-        let backfilling = (self.limit > 1 && !live).then(|| Arc::clone(&ids));
+        let backfilling = (self.limit > 1 && !live && !rebuild).then(|| Arc::clone(&ids));
         let documents = Arc::clone(documents);
         let mut build: BoxFuture<'static, Output> = Box::pin(async move {
             let started = Instant::now();
@@ -925,7 +1006,8 @@ impl Builds {
         };
         // A walk's failure is the walk's alone beside other builders (slice
         // 8, fix round 2): it halts no live grant.
-        let live = matches!(slot.job, Job::Live { .. });
+        // A fresh build's failure is its index's, as a live build's (O1).
+        let live = matches!(slot.job, Job::Live { .. } | Job::Rebuild(_));
         if halts(&built) && (live || !self.several) {
             self.halted = true;
         }
@@ -977,7 +1059,7 @@ impl Builds {
             let of_the_walk = match &slot.job {
                 Job::Backfill { reached: its, .. } => Arc::ptr_eq(its, reached),
                 Job::Complete(snapshot) => Arc::ptr_eq(&snapshot.reached, reached),
-                Job::Live { .. } | Job::Discarded => false,
+                Job::Live { .. } | Job::Rebuild(_) | Job::Discarded => false,
             };
             if !of_the_walk {
                 continue;

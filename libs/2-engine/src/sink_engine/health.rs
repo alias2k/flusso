@@ -15,6 +15,16 @@
 //!   in flight its index is staged again ([`Sink::ensure_index`]) and a
 //!   backfill requested, then the lane opens and writes its items again.
 //!
+//! **Fresh builds** (stage 9, second half, §14.1 of the note). A lane parked
+//! on a refusal doesn't write its item again: when its probe is due it asks
+//! its index's builder to build the item's documents again, and the answer
+//! (a substitute) is written alone in the item's place. Landed, the item is
+//! acknowledged as if it had, and the lane opens; refused, the backoff
+//! doubles. So a row fixed meanwhile unparks its lane. A landed substitute
+//! is newer than any build of its documents queued behind it, so those
+//! older builds are left out of the items that carry them
+//! ([`LaneState::superseded`]).
+//!
 //! The state outlives a run of the sink engine: a run that fails for another
 //! reason leaves a parked lane parked, with its schedule.
 //!
@@ -40,7 +50,18 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
+use std::collections::BTreeMap;
+
+use stream::Ticket;
+
 use crate::Backoff;
+
+/// The longest a refused lane waits for the fresh build it asked for before
+/// it writes its item itself (F15); its backoff when shorter. A fresh build
+/// of one item normally comes well within it, and a builder that can't answer
+/// (blocked publishing to this very lane, or stopping) costs at most this
+/// beside each probe.
+pub(crate) const SUBSTITUTE_WAIT: Duration = Duration::from_secs(5);
 
 /// About thirty years: where a wait no `Instant` can hold is put instead
 /// (tokio's own "far future").
@@ -197,6 +218,22 @@ pub(crate) struct LaneState {
     /// missing again is staged after the backoff, not at once, so a target
     /// staging can't cure is never a loop of writes and stagings.
     pub(crate) unproven: bool,
+    /// The fresh build asked for the parked item and not answered yet: no
+    /// probe of the item is made meanwhile.
+    pub(crate) rebuild: Option<Ticket>,
+    /// F9: each document a landed substitute carried, with the highest build
+    /// number of such a substitute. An item numbered below an entry is written
+    /// without that document. Merged into, never replaced; an entry goes once
+    /// no item numbered below it can be delivered again (`writes.rs`'s
+    /// `prune_superseded`).
+    pub(crate) superseded: BTreeMap<String, u64>,
+}
+
+/// Whether an item numbered `build` was built before the substitute numbered
+/// `substitute`, so its build of that substitute's document is older and left
+/// out (O2). An item with no number is written whole.
+pub(crate) fn supersedes(substitute: u64, build: Option<u64>) -> bool {
+    build.is_some_and(|build| build < substitute)
 }
 
 impl LaneState {
@@ -210,7 +247,17 @@ impl LaneState {
             due: Instant::now(),
             probes: 0,
             unproven: false,
+            rebuild: None,
+            superseded: BTreeMap::new(),
         }
+    }
+
+    /// The state reset to an open lane on its schedule, keeping what a
+    /// landed substitute supersedes.
+    fn reset(&mut self) {
+        let superseded = std::mem::take(&mut self.superseded);
+        *self = Self::new(self.schedule);
+        self.superseded = superseded;
     }
 }
 
@@ -290,14 +337,14 @@ impl LaneState {
         if !self.unproven || !self.is_open() {
             return false;
         }
-        *self = Self::new(self.schedule);
+        self.reset();
         true
     }
 
     /// Whether the engine keeps this state: a lane not open, or one keeping
     /// its backoff.
     pub(crate) fn is_kept(&self) -> bool {
-        !self.is_open() || self.unproven
+        !self.is_open() || self.unproven || !self.superseded.is_empty()
     }
 
     /// Staging failed: try again after the backoff, doubled each time up to
@@ -307,10 +354,13 @@ impl LaneState {
         self.restage_backoff = self.schedule.after(self.restage_backoff);
     }
 
-    /// Probe at once: a stop doesn't wait out the backoff.
+    /// Probe at once: a stop doesn't wait out the backoff, nor for a fresh
+    /// build asked for (builders don't serve one once stopping, F13), so the
+    /// item itself is written.
     pub(crate) fn probe_now(&mut self, now: Instant) -> bool {
+        let asked = self.rebuild.take().is_some();
         if let LaneHealth::Parked { next_probe, .. } = &mut self.health
-            && *next_probe > now
+            && (*next_probe > now || asked)
         {
             *next_probe = now;
             self.due = now;
@@ -319,13 +369,38 @@ impl LaneState {
         false
     }
 
+    /// A fresh build was asked as `ticket`: it is waited for one backoff, then
+    /// the item itself is the probe (F15: a builder blocked publishing to this
+    /// full lane can't answer).
+    pub(crate) fn asked(&mut self, ticket: Ticket, now: Instant) {
+        self.rebuild = Some(ticket);
+        self.probes += 1;
+        self.due = later(now, self.backoff.min(SUBSTITUTE_WAIT));
+        if let LaneHealth::Parked { next_probe, .. } = &mut self.health {
+            *next_probe = self.due;
+        }
+    }
+
+    /// Whether a refused lane's due probe asks for a fresh build: parked on a
+    /// refusal, its probe due, none asked yet.
+    pub(crate) fn wants_rebuild(&self, now: Instant) -> bool {
+        matches!(
+            self.health,
+            LaneHealth::Parked {
+                reason: ParkReason::Refused { .. },
+                ..
+            }
+        ) && self.due <= now
+            && self.rebuild.is_none()
+    }
+
     /// Open: a probe landed or the index is staged. How long it was not.
     pub(crate) fn open(&mut self, now: Instant) -> Option<Duration> {
         let since = match &self.health {
             LaneHealth::Open => return None,
             LaneHealth::Parked { since, .. } | LaneHealth::Restaging { since, .. } => *since,
         };
-        *self = Self::new(self.schedule);
+        self.reset();
         Some(now.saturating_duration_since(since))
     }
 }

@@ -162,6 +162,10 @@ pub struct IngestEngine {
     /// published, across runs (each moved some lane's resume point): what
     /// starts a walk failure's waits over (slice 8, fix round 2).
     walk_batches: BTreeMap<IndexName, AtomicU64>,
+    /// The next build number ([`stream::Batch::build`]): one counter for
+    /// every index, so each index's numbers grow in publication order across
+    /// runs and builder restarts (stage 9, fresh builds).
+    build_numbers: AtomicU64,
     stop: Stop,
     /// How many times this engine moved the source forward (see
     /// [`advances`](Self::advances)), across restarts of its run.
@@ -225,6 +229,7 @@ impl IngestEngine {
                 .indexes()
                 .map(|index| (index.clone(), AtomicU64::new(0)))
                 .collect(),
+            build_numbers: AtomicU64::new(1),
             stop: Stop::new(),
             advances: AtomicU64::new(0),
             furthest: Mutex::new(Furthest::default()),
@@ -528,11 +533,13 @@ impl IngestEngine {
             )
             .of_queue(slot);
             let (inbox, delivered) = tokio::sync::mpsc::unbounded_channel();
+            let (rebuilds, rebuild_requests) = tokio::sync::mpsc::unbounded_channel();
             let (done, result) = tokio::sync::oneshot::channel();
             futures.push(self.build(
                 Building {
                     runs,
                     inbox: delivered,
+                    rebuilds: rebuild_requests,
                     signals,
                     reports: &reports,
                     several,
@@ -549,7 +556,10 @@ impl IngestEngine {
             ));
             dispatched.push(dispatcher::Builder {
                 index,
-                inbox,
+                route: dispatcher::Route {
+                    requests: inbox,
+                    rebuilds,
+                },
                 signals,
                 result,
             });

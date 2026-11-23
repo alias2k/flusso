@@ -6,6 +6,7 @@ pub mod config;
 pub mod envelope;
 pub mod options;
 pub mod port_entry;
+pub mod row_key;
 pub mod traits;
 
 pub use adapter::*;
@@ -14,6 +15,7 @@ pub use config::*;
 pub use envelope::*;
 pub use options::*;
 pub use port_entry::*;
+pub use row_key::*;
 pub use traits::*;
 
 #[cfg(feature = "derive")]

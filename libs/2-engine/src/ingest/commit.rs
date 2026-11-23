@@ -22,9 +22,9 @@ use std::task::Poll;
 
 use chrono::Utc;
 use futures::future::try_join_all;
-use kernel::{Envelope, IndexName, Position, SinkName};
+use kernel::{Envelope, IndexName, Position, RowKey, SinkName};
 use source::document::{BuildFailure, Document, DocumentId};
-use stream::{Batch, Hold, ItemKey, LaneItem, LaneKey, Producer};
+use stream::{Batch, Hold, ItemKey, LaneItem, LaneKey, Producer, Substitute};
 use tokio::time::Instant;
 
 use super::builds::{Builds, Built, Grant, Job, LiveCandidate};
@@ -82,6 +82,9 @@ impl IngestEngine {
                 .as_ref()
                 .filter(|active| active.batch.count > 0 && (active.batch.is_full() || active.done))
                 .map(|active| active.batch.ids.as_slice());
+            if self.stop.is_requested() {
+                builds.drop_rebuilds();
+            }
             match builds.choose(live, backfill) {
                 Some(Grant::Live(candidate, admitted)) => {
                     self.start_live(runs, builds, candidate, &admitted).await;
@@ -90,6 +93,15 @@ impl IngestEngine {
                     if let Some(active) = snapshot.as_mut() {
                         self.start_backfill(active, builds).await;
                     }
+                }
+                // A parked lane's fresh build: one item, which its lane waits
+                // on (stage 9, F3).
+                Some(Grant::Rebuild(ids, rebuild)) => {
+                    builds
+                        .start(&self.documents, ids, Job::Rebuild(rebuild), &|built| {
+                            self.halts(built)
+                        })
+                        .await;
                 }
                 None => {
                     let published = self.publish_ready(builds, lanes, Some(&mut *runs)).await?;
@@ -516,7 +528,18 @@ impl IngestEngine {
         charges: super::builds::Charges,
         lanes: &Lanes,
     ) -> Result<()> {
+        let build = matches!(
+            job,
+            Job::Live { .. } | Job::Backfill { .. } | Job::Rebuild(_)
+        )
+        .then(|| {
+            self.build_numbers
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        });
         match (job, built) {
+            (Job::Rebuild(rebuild), Some(built)) => {
+                self.publish_rebuild(built, rebuild, build).await?;
+            }
             (Job::Complete(mut finished), _) => {
                 let started = Instant::now();
                 self.finish_snapshot(&mut finished, lanes).await?;
@@ -538,7 +561,7 @@ impl IngestEngine {
                     changes,
                     steps,
                 };
-                self.publish_live(built, &taken, granted, charges, lanes)
+                self.publish_live(built, &taken, granted, charges, lanes, build)
                     .await?;
             }
             (
@@ -549,7 +572,7 @@ impl IngestEngine {
                 },
                 Some(built),
             ) => {
-                self.publish_backfill(built, &requested, &marks, charges, lanes)
+                self.publish_backfill(built, &requested, &marks, charges, lanes, build)
                     .await?;
                 // Its lanes' resume points moved (a batch the source marked:
                 // one that can't mark walks starts each retry from the first
@@ -589,13 +612,14 @@ impl IngestEngine {
         granted: Granted,
         charges: super::builds::Charges,
         lanes: &Lanes,
+        build: Option<u64>,
     ) -> Result<()> {
         let Granted {
             position,
             changes,
             steps,
         } = granted;
-        let (envelopes, by_index) = self.envelopes(built.documents?, Some(position))?;
+        let (envelopes, keys, by_index) = self.envelopes(built.documents?, Some(position))?;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Live));
         // From here a lane that hasn't taken its index's item answers for it.
@@ -618,14 +642,14 @@ impl IngestEngine {
         let mut by_lane: Vec<Item<'_>> = Vec::new();
         let mut skipped: Vec<(&LaneKey, Step)> = Vec::new();
         let mut keyed: Option<(&IndexName, ItemKey)> = None;
-        let groups = group_by_index(envelopes);
+        let groups = group_by_index(envelopes, keys);
         let holds = self.holds(&groups, charges);
         for (lane, producer) in lanes {
             let Some(step) = steps.get(&lane.index).copied() else {
                 continue;
             };
             match groups.get(&lane.index) {
-                Some(envelopes) => {
+                Some(group) => {
                     let item_key = match keyed {
                         Some((index, item_key)) if *index == lane.index => item_key,
                         _ => {
@@ -652,10 +676,12 @@ impl IngestEngine {
                         LaneItem::Batch(Batch {
                             key: Some(item_key),
                             position: Some(position),
-                            envelopes: Arc::clone(envelopes),
+                            envelopes: Arc::clone(&group.envelopes),
                             hold: holds.get(&lane.index).cloned().unwrap_or_default(),
                             walked: None,
                             ticket: None,
+                            keys: Arc::clone(&group.keys),
+                            build,
                         }),
                     ));
                 }
@@ -694,18 +720,19 @@ impl IngestEngine {
         marks: &BTreeMap<IndexName, stream::WalkMark>,
         charges: super::builds::Charges,
         lanes: &Lanes,
+        build: Option<u64>,
     ) -> Result<()> {
-        let (envelopes, by_index) = self.envelopes(built.documents?, None)?;
+        let (envelopes, keys, by_index) = self.envelopes(built.documents?, None)?;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Backfill));
         let started = Instant::now();
-        let groups = group_by_index(envelopes);
+        let groups = group_by_index(envelopes, keys);
         let backfill_holds = self.holds(&groups, charges);
-        let documents: usize = groups.values().map(|envelopes| envelopes.len()).sum();
+        let documents: usize = groups.values().map(|group| group.envelopes.len()).sum();
         let mut publishes = Vec::new();
         for (sink, indexes) in requested {
             for (index, ticket) in indexes {
-                let Some(envelopes) = groups.get(index) else {
+                let Some(group) = groups.get(index) else {
                     continue;
                 };
                 let key = LaneKey::new(index.clone(), sink.clone());
@@ -720,10 +747,12 @@ impl IngestEngine {
                     LaneItem::Batch(Batch {
                         key: None,
                         position: None,
-                        envelopes: Arc::clone(envelopes),
+                        envelopes: Arc::clone(&group.envelopes),
                         hold: backfill_holds.get(index).cloned().unwrap_or_default(),
                         walked: marks.get(index).cloned(),
                         ticket: Some(*ticket),
+                        keys: Arc::clone(&group.keys),
+                        build,
                     }),
                 ));
             }
@@ -735,6 +764,44 @@ impl IngestEngine {
             documents_by_index: by_index.into_iter().collect(),
             build: built.took,
         });
+        Ok(())
+    }
+
+    /// A parked lane's fresh build (stage 9, F3–F4): its documents, keys and
+    /// build number as a [`Substitute`] on its sink's substitute lane, then
+    /// the request acknowledged. Nothing is registered: the parked item
+    /// stays the one its position waits on, and no budget counts it (one per
+    /// parked lane, granted with no budget part).
+    async fn publish_rebuild(
+        &self,
+        built: Built,
+        rebuild: super::builds::Rebuild,
+        build: Option<u64>,
+    ) -> Result<()> {
+        let (envelopes, keys, _) = self.envelopes(built.documents?, None)?;
+        self.observer
+            .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Live));
+        let super::builds::Rebuild {
+            lane,
+            ticket,
+            handle,
+        } = rebuild;
+        let substitutes = self.stream.substitutes(&lane.sink)?;
+        tracing::info!(%lane, %ticket, documents = envelopes.len(), "a parked lane's documents built again; sending them in its item's place");
+        substitutes
+            .producer
+            .publish(Substitute {
+                lane,
+                ticket,
+                batch: Batch {
+                    envelopes: envelopes.into(),
+                    keys: keys.into(),
+                    build,
+                    ..Batch::default()
+                },
+            })
+            .await?;
+        handle.ack().await?;
         Ok(())
     }
 
@@ -803,7 +870,7 @@ impl IngestEngine {
     /// outstanding items (whether the index is free, for the exemption).
     fn holds(
         &self,
-        groups: &BTreeMap<IndexName, Arc<[Envelope]>>,
+        groups: &BTreeMap<IndexName, Group>,
         mut charges: super::builds::Charges,
     ) -> BTreeMap<IndexName, Hold> {
         let Some(exemption) = &self.exemption else {
@@ -831,22 +898,23 @@ impl IngestEngine {
 
     /// The built documents as envelopes tagged with `position`, counted per
     /// index. A failed document is decided by its index's `on_error`.
-    fn envelopes(
-        &self,
-        documents: Vec<Document>,
-        position: Option<Position>,
-    ) -> Result<(Vec<Envelope>, BTreeMap<IndexName, usize>)> {
+    fn envelopes(&self, documents: Vec<Document>, position: Option<Position>) -> Result<Envelopes> {
         let mut by_index: BTreeMap<IndexName, usize> = BTreeMap::new();
         let mut envelopes = Vec::with_capacity(documents.len());
+        let mut keys = Vec::with_capacity(documents.len());
         let ts = Utc::now();
         for document in documents {
-            let envelope = match document {
-                Document::Upsert { id, body } => {
-                    Envelope::upsert(id.index.clone(), document_id(&id), body, position, ts)
-                }
-                Document::Delete { id } => {
-                    Envelope::delete(id.index.clone(), document_id(&id), position, ts)
-                }
+            // The key is moved beside its envelope, not cloned: a lane item
+            // carries its documents' keys for a fresh build (stage 9).
+            let (envelope, key) = match document {
+                Document::Upsert { id, body } => (
+                    Envelope::upsert(id.index.clone(), document_id(&id), body, position, ts),
+                    id.key,
+                ),
+                Document::Delete { id } => (
+                    Envelope::delete(id.index.clone(), document_id(&id), position, ts),
+                    id.key,
+                ),
                 Document::Failed { id, failure } => {
                     self.document_failed(&id, failure)?;
                     continue;
@@ -854,8 +922,9 @@ impl IngestEngine {
             };
             *by_index.entry(envelope.index.clone()).or_insert(0) += 1;
             envelopes.push(envelope);
+            keys.push(key);
         }
-        Ok((envelopes, by_index))
+        Ok((envelopes, keys, by_index))
     }
 
     /// Report a document that could not be built, then apply its policy: `stop`
@@ -916,16 +985,49 @@ type Item<'a> = (
 
 /// The envelopes of each index, in build order, each group shared by every
 /// lane of its index.
-fn group_by_index(envelopes: Vec<Envelope>) -> BTreeMap<IndexName, Arc<[Envelope]>> {
-    let mut groups: BTreeMap<IndexName, Vec<Envelope>> = BTreeMap::new();
-    for envelope in envelopes {
-        groups
-            .entry(envelope.index.clone())
-            .or_default()
-            .push(envelope);
+fn group_by_index(envelopes: Vec<Envelope>, keys: Vec<RowKey>) -> BTreeMap<IndexName, Group> {
+    // One index, as every build of a builder since 8a: the vectors are the
+    // group as they are, nothing moved or cloned per envelope.
+    if let Some(first) = envelopes.first()
+        && envelopes
+            .iter()
+            .all(|envelope| envelope.index == first.index)
+    {
+        let index = first.index.clone();
+        return BTreeMap::from([(
+            index,
+            Group {
+                envelopes: envelopes.into(),
+                keys: keys.into(),
+            },
+        )]);
+    }
+    let mut groups: BTreeMap<IndexName, (Vec<Envelope>, Vec<RowKey>)> = BTreeMap::new();
+    for (envelope, key) in envelopes.into_iter().zip(keys) {
+        let group = groups.entry(envelope.index.clone()).or_default();
+        group.0.push(envelope);
+        group.1.push(key);
     }
     groups
         .into_iter()
-        .map(|(index, envelopes)| (index, envelopes.into()))
+        .map(|(index, (envelopes, keys))| {
+            (
+                index,
+                Group {
+                    envelopes: envelopes.into(),
+                    keys: keys.into(),
+                },
+            )
+        })
         .collect()
+}
+
+/// A build's envelopes, each one's root key beside it (same order), and
+/// how many of each index.
+type Envelopes = (Vec<Envelope>, Vec<RowKey>, BTreeMap<IndexName, usize>);
+
+/// One index's envelopes of a build, with each one's root key.
+struct Group {
+    envelopes: Arc<[Envelope]>,
+    keys: Arc<[RowKey]>,
 }

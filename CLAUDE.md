@@ -1698,6 +1698,42 @@ is the one concrete piece.
   An ordered sink's order is per lane: a parked lane is overtaken (stdout never parks).
   The health (`LaneHealth`, public; `on_lane_health`/`on_lane_probe` events) lives on the
   `SinkEngine` and outlives a run; a parked lane stays parked across a failed run, on its schedule.
+  **A refused lane's probe is a fresh build** (stage 9 second half, slice 1; the note's §14.1): when its
+  probe is due and its front item carries its keys (`Batch.keys`, one `RowKey` per envelope, moved in
+  by `commit.rs`'s `envelopes`; `RowKey` lives in the kernel), the sink engine offers
+  `Request::Rebuild { index, sink, keys, ticket }` (`now_or_never`: a request lane nobody reads never
+  stalls the sink) and waits for the answer on its sink's **substitute lane** (`Stream::substitutes`,
+  a default that answers `Unsupported` and leaves the old same-item probe; the channel adapter has one per
+  sink) at most its backoff and `SUBSTITUTE_WAIT` (5 s), then probes the item itself (a builder blocked
+  publishing to this full lane can't answer). The dispatcher routes a `Rebuild` to the index's builder on
+  a channel of its own (`dispatcher::Route.rebuilds`: a running walk doesn't hold it back); `Builds::choose`
+  offers it to the gate in the same pass as the live and snapshot batches, asked as live with no budget
+  part (never refused, not counted: one per parked lane), admitted only when no running build holds one
+  of its documents, at most one waiting per lane (a newer ticket replaces it, `Builds::ask_rebuild`) and
+  none granted once stopping (`drop_rebuilds`); `Job::Rebuild` publishes it as a `stream::Substitute` to that
+  sink only and acks the request; nothing is registered (the parked item stays the one its position waits on); a failing fresh
+  build halts as a live one (the index restarts alone). The substitute is written alone as the lane's
+  probe in the item's place (`Part.substitute`): landed, the item is acknowledged as if it had (key,
+  walk mark) and the lane opens; refused, it is dropped and the backoff doubles; a ticket the lane
+  doesn't wait for is dropped. **Build numbers** (`Batch.build`, one counter on `IngestEngine`, taken
+  at publish; publication order per index is grant order, and builds of one document never overlap):
+  each lane keeps a map, document id → the highest build number of a substitute that landed with it
+  (`LaneState.superseded`, merged, never replaced; also the documents of a substitute refused for others,
+  which landed anyway), and an item numbered below an entry is written without that document
+  (`health.rs`'s `supersedes`); an entry goes only once no item numbered below it can be delivered again
+  (`writes.rs`'s `prune_superseded`, the note's 14.10: while the lane has entries its run keeps one
+  account of its items received and not acknowledged, entered in `queue`, left only in `acknowledged`
+  after `ack` returned `Ok`, seeded mid-run from the window, the writes in flight and the caught-up waits;
+  the entry goes once the account's smallest build, or with none one past the newest received in this
+  run, has reached it; nothing is pruned once the run failed), and the map lives on the `SinkEngine`, which the daemon
+  runs again after a failure, so a redelivered older item is still stripped; a run-wide count of lanes
+  with entries is all an open lane pays per received item. So no document goes back to an older build. A stop's last probe writes the item as it is
+  (`probe_now` drops an awaited rebuild; builders don't take rebuilds once stopping). Guards:
+  `tests::parking`'s `a_fixed_row_unparks_its_lane`, `a_deleted_row_unparks_its_lane_with_a_delete`,
+  `a_stale_or_unanswered_fresh_build_falls_back_to_the_item`,
+  `an_older_build_queued_behind_the_parked_item_is_not_written_over_its_substitute`,
+  `a_stop_probes_a_refused_lane_with_its_own_item`; `ingest::tests::rebuilds`; the random schedules
+  (refused `orders` stretches), which assert fresh builds were published.
   The run ends only on a sink-wide failure (a write `Err`, a seed, a lane delivery or ack). `/status`
   `sinks.<s>.lanes.<i>.health` (`open`/`refused`/`blocked`/`restaging`, the same words as the
   metric's `why`; "parked" names the refused and blocked states together: the metric, the alert, the

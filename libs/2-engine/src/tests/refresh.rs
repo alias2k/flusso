@@ -333,6 +333,7 @@ impl Rig {
                 hold: Default::default(),
                 walked: walked.map(WalkMark::new),
                 ticket: None,
+                ..Default::default()
             }))
             .await
             .unwrap();

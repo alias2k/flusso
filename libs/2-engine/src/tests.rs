@@ -1723,6 +1723,7 @@ impl PositionRig {
                 hold: Default::default(),
                 walked: None,
                 ticket: None,
+                ..Default::default()
             }))
             .await
             .unwrap();

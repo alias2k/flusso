@@ -965,6 +965,7 @@ mod tests {
                     hold: Default::default(),
                     walked: None,
                     ticket: None,
+                    ..Default::default()
                 });
                 tokio::time::timeout(
                     std::time::Duration::from_secs(5),

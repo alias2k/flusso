@@ -778,6 +778,14 @@ struct Recorder {
     /// Indexes whose every document is rejected: under `on_error = "stop"`
     /// their lane parks.
     refused_indexes: Mutex<HashSet<String>>,
+    /// Documents whose upsert is refused, whatever their index: a row a fix
+    /// makes indexable again (stage 9, fresh builds).
+    refused_ids: Mutex<HashSet<i64>>,
+    /// Each write reports its documents searchable within this, so a lane
+    /// going quiet gets a caught-up write (OpenSearch's default).
+    within: Mutex<Option<Duration>>,
+    /// Writes `fail_next` failed.
+    failed_writes: AtomicUsize,
     /// When each index was marked seeded.
     marked_at: Mutex<BTreeMap<String, tokio::time::Instant>>,
     /// When each document was first written.
@@ -790,9 +798,14 @@ impl Recorder {
     /// The documents of a refused index in `envelopes`, rejected.
     fn rejected(&self, envelopes: &[Envelope]) -> Vec<sink::RejectedDocument> {
         let refused = self.refused_indexes.lock().unwrap();
+        let ids = self.refused_ids.lock().unwrap();
         envelopes
             .iter()
-            .filter(|envelope| refused.contains(envelope.index.as_ref()))
+            .filter(|envelope| {
+                refused.contains(envelope.index.as_ref())
+                    || (envelope.op == kernel::Op::Upsert
+                        && envelope.id.parse().is_ok_and(|id: i64| ids.contains(&id)))
+            })
             .map(|envelope| sink::RejectedDocument {
                 index: envelope.index.as_ref().to_owned(),
                 id: envelope.id.clone(),
@@ -858,6 +871,7 @@ impl Sink for Recorder {
             resumed.await;
         }
         if self.fail_next.swap(false, Ordering::SeqCst) {
+            self.failed_writes.fetch_add(1, Ordering::SeqCst);
             return Err(sink::SinkError::Write("the write failed".to_owned()));
         }
         let delay = *self.write_delay.lock().unwrap();
@@ -931,7 +945,11 @@ impl Sink for Recorder {
         drop(last);
         let position = envelopes.first().and_then(|envelope| envelope.position);
         self.items.lock().unwrap().push((position, documents));
-        Ok(WriteReport::clean().rejecting(rejected))
+        let report = WriteReport::clean().rejecting(rejected);
+        Ok(match *self.within.lock().unwrap() {
+            Some(within) => report.visible(sink::Visibility::Within(within)),
+            None => report,
+        })
     }
 
     async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {
@@ -960,7 +978,30 @@ struct Spy {
     inner: Arc<ChannelStream>,
     published: Published,
     failing: FailingLanes,
+    items: ItemLog,
+    /// Fresh builds published (stage 9).
+    substituted: Arc<AtomicUsize>,
 }
+
+/// A substitute lane's producer counting what it publishes.
+#[derive(Debug)]
+struct CountsSubstitutes {
+    inner: Box<dyn stream::Producer<stream::Substitute>>,
+    count: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl stream::Producer<stream::Substitute> for CountsSubstitutes {
+    async fn publish(&self, item: stream::Substitute) -> stream::Result<()> {
+        self.inner.publish(item).await?;
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Every batch published, in publication order: its documents' keys (as
+/// ids), its envelopes' ids and its build number.
+type ItemLog = Arc<Mutex<Vec<(Vec<i64>, Vec<String>, Option<u64>)>>>;
 
 /// The indexes whose lanes fail their next publish, once each.
 type FailingLanes = Arc<Mutex<HashSet<String>>>;
@@ -977,6 +1018,7 @@ struct SpyProducer {
     lane: stream::LaneKey,
     published: Published,
     failing: FailingLanes,
+    items: ItemLog,
 }
 
 #[async_trait]
@@ -985,6 +1027,17 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
         // The engine awaits each item's send before the next one's: logged
         // after the send, the log is lane order.
         let position = item.position();
+        if let stream::LaneItem::Batch(batch) = &item {
+            self.items.lock().unwrap().push((
+                batch.keys.iter().map(id_of).collect(),
+                batch
+                    .envelopes
+                    .iter()
+                    .map(|envelope| envelope.id.clone())
+                    .collect(),
+                batch.build,
+            ));
+        }
         if self
             .failing
             .lock()
@@ -1015,6 +1068,18 @@ impl Stream for Spy {
                 lane: key.clone(),
                 published: Arc::clone(&self.published),
                 failing: Arc::clone(&self.failing),
+                items: Arc::clone(&self.items),
+            }),
+            consumer: lane.consumer,
+        })
+    }
+
+    fn substitutes(&self, sink: &SinkName) -> stream::Result<stream::SubstituteLane> {
+        let lane = self.inner.substitutes(sink)?;
+        Ok(stream::SubstituteLane {
+            producer: Box::new(CountsSubstitutes {
+                inner: lane.producer,
+                count: Arc::clone(&self.substituted),
             }),
             consumer: lane.consumer,
         })
@@ -1040,6 +1105,10 @@ struct Deployment {
     published: Published,
     /// Lanes to fail on their next publish.
     failing: FailingLanes,
+    /// Every batch published, in order.
+    items: ItemLog,
+    /// Fresh builds published.
+    substituted: Arc<AtomicUsize>,
     feed: Arc<Feed>,
     recorder: Arc<Recorder>,
     ingest: IngestEngine,
@@ -1074,10 +1143,14 @@ impl Deployment {
         let feed = Arc::new(feed);
         let published: Published = Arc::default();
         let failing: FailingLanes = Arc::default();
+        let items: ItemLog = Arc::default();
+        let substituted: Arc<AtomicUsize> = Arc::default();
         let spy = Arc::new(Spy {
             inner: Arc::clone(&stream),
             published: Arc::clone(&published),
             failing: Arc::clone(&failing),
+            items: Arc::clone(&items),
+            substituted: Arc::clone(&substituted),
         });
         let ingest = IngestEngine::new(
             Arc::clone(&feed) as Arc<dyn ChangeCapture>,
@@ -1099,6 +1172,8 @@ impl Deployment {
         Self {
             stream,
             published,
+            items,
+            substituted,
             failing,
             feed,
             recorder,
@@ -1179,6 +1254,12 @@ impl Deployment {
 
     fn ingest(mut self, f: impl FnOnce(IngestEngine) -> IngestEngine) -> Self {
         self.ingest = f(self.ingest);
+        self
+    }
+
+    /// The sink engine writes `writes` items at once.
+    fn sink_writes(mut self, writes: usize) -> Self {
+        self.sink = self.sink.map(|sink| sink.with_writes(writes));
         self
     }
 
@@ -1301,6 +1382,7 @@ impl Deployment {
 mod builders;
 mod exemption;
 mod reading;
+mod rebuilds;
 mod restart;
 mod states;
 mod walk_failures;
@@ -1342,7 +1424,7 @@ impl crate::Observer for IndexRestarts {
 /// may hold documents it gave back. Panics on the first broken guarantee.
 /// Returns how many indexes' builders restarted alone, how many walks were
 /// retried alone, and how many runs failed.
-async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize) {
+async fn schedule(seed: u64, builds: usize, open: bool) -> Schedule {
     let mut random = Rng::new(seed);
     let ids = 2 + random.below(7) as i64;
     let rows = if random.below(2) == 0 {
@@ -1400,6 +1482,17 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize)
                 .with_stop(stop.clone())
                 .with_observer(observer)
         });
+    // The seeds refusing documents (below) write up to four items at once, so
+    // a write of a lane can fail while a sibling write of the same lane lands,
+    // and two in five report writes searchable within 50 ms, so a quiet lane's
+    // last item waits for a caught-up write, which can fail too.
+    let refusing_seed = two && seed % 3 != 1;
+    if refusing_seed {
+        deployment = deployment.sink_writes(1 + (seed % 4) as usize);
+        if seed % 5 < 2 {
+            *recorder.within.lock().unwrap() = Some(Duration::from_millis(50));
+        }
+    }
     // Over two indexes, every third seed holds `orders` stuck for a random
     // stretch (every document refused, its lane parked): held at its cap it
     // becomes exempt (6b-2) while failures restart the run, and nothing of it
@@ -1419,6 +1512,57 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize)
             recorder.refused_indexes.lock().unwrap().clear();
         })
     });
+    // Over two indexes, the other seeds refuse a few `orders` documents now
+    // and then (stage 9): each stretch parks the lane on a refusal, which a
+    // fresh build lifts once the stretch ends, and the next stretch parks it
+    // again, often behind a substitute that landed. Every other such seed
+    // fails the whole run once a fresh build was published, so a restarted
+    // run redelivers items built before it.
+    let failed_after_a_substitute = Arc::new(AtomicUsize::new(0));
+    let refusing = refusing_seed.then(|| {
+        let failed_after = Arc::clone(&failed_after_a_substitute);
+        let recorder = Arc::clone(&recorder);
+        let mut random = Rng::new(seed.wrapping_mul(53));
+        let ids = ids as u64;
+        let substituted = Arc::clone(&deployment.substituted);
+        let failing = Arc::clone(&deployment.failing);
+        let fail_once = seed % 4 == 0;
+        tokio::spawn(async move {
+            for _ in 0..1 + random.below(4) {
+                tokio::time::sleep(Duration::from_millis(random.below(150))).await;
+                let refused: HashSet<i64> = (0..1 + random.below(3))
+                    .map(|_| (random.below(ids) | 1) as i64)
+                    .collect();
+                *recorder.refused_ids.lock().unwrap() = refused;
+                tokio::time::sleep(Duration::from_millis(20 + random.below(1500))).await;
+                recorder.refused_ids.lock().unwrap().clear();
+                // After a substitute, the sink's next write fails as a whole
+                // (a part, a sibling's, or a caught-up write): its run ends and
+                // the lane redelivers what it had not acknowledged.
+                if substituted.load(Ordering::SeqCst) > 0
+                    && !recorder.fail_next.swap(true, Ordering::SeqCst)
+                {
+                    failed_after.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            if fail_once {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                while substituted.load(Ordering::SeqCst) == 0
+                    && tokio::time::Instant::now() < deadline
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                if substituted.load(Ordering::SeqCst) > 0 {
+                    // The ingest run, and the sink engine's run: the lane
+                    // redelivers to it items built before the substitute.
+                    failing.lock().unwrap().insert("orders".to_owned());
+                    if !recorder.fail_next.swap(true, Ordering::SeqCst) {
+                        failed_after.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        })
+    });
     let failed = if open {
         deployment.run_until_landed(&db, &stop, 8).await
     } else {
@@ -1426,6 +1570,11 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize)
     };
     if let Some(stuck) = stuck {
         stuck.await.unwrap();
+    }
+    if let Some(refusing) = refusing {
+        refusing.abort();
+        let _ = refusing.await;
+        recorder.refused_ids.lock().unwrap().clear();
     }
 
     let context = format!(
@@ -1463,7 +1612,15 @@ async fn schedule(seed: u64, builds: usize, open: bool) -> (usize, usize, usize)
         db.expected(),
         "the documents differ from the rows ({context})"
     );
+    // A failure armed and never consumed (no write came) failed nothing.
+    if recorder.fail_next.swap(false, Ordering::SeqCst) {
+        failed_after_a_substitute.fetch_sub(1, Ordering::SeqCst);
+    }
+    let substituted = deployment.substituted.load(Ordering::SeqCst);
     (
+        substituted,
+        usize::from(substituted >= 2),
+        failed_after_a_substitute.load(Ordering::SeqCst),
         restarts.live.load(Ordering::SeqCst),
         restarts.walks.load(Ordering::SeqCst),
         failed,
@@ -1479,17 +1636,31 @@ fn seeds(count: u64) -> Vec<u64> {
     }
 }
 
+/// What a schedule did: fresh builds published, whether a lane asked for
+/// one again, sink writes failed after one, builders restarted alone, walks
+/// retried alone, whole runs restarted.
+type Schedule = (usize, usize, usize, usize, usize, usize);
+
 /// Counts what restarted across schedules: indexes' builders alone, walks
 /// alone, whole runs.
 #[derive(Debug, Default)]
 struct Restarted {
+    /// Fresh builds of parked lanes' items published (stage 9).
+    substituted: usize,
+    /// Schedules whose lanes asked for a fresh build again after one.
+    parked_again: usize,
+    /// Sink writes failed after a substitute was published.
+    failed_after: usize,
     indexes: usize,
     walks: usize,
     runs: usize,
 }
 
 impl Restarted {
-    fn add(&mut self, (indexes, walks, runs): (usize, usize, usize)) {
+    fn add(&mut self, (substituted, parked_again, failed_after, indexes, walks, runs): Schedule) {
+        self.substituted += substituted;
+        self.parked_again += parked_again;
+        self.failed_after += failed_after;
         self.indexes += indexes;
         self.walks += walks;
         self.runs += runs;
@@ -1505,6 +1676,22 @@ impl Restarted {
         assert!(self.indexes > 0, "no schedule restarted an index alone");
         assert!(self.walks > 0, "no schedule retried a walk alone");
         assert!(self.runs > 0, "no schedule restarted a whole run");
+        // Refused documents switch on and off in a third of the two-index
+        // seeds: fresh builds are common, not a lucky few (review of #458).
+        assert!(
+            self.substituted >= 50,
+            "only {} fresh builds over every schedule",
+            self.substituted
+        );
+        assert!(
+            self.parked_again > 0,
+            "no lane parked again after a substitute"
+        );
+        assert!(
+            self.failed_after >= 20,
+            "only {} writes failed after a substitute",
+            self.failed_after
+        );
     }
 }
 
