@@ -1721,8 +1721,11 @@ is the one concrete piece.
   (`LaneState.superseded`, merged, never replaced; also the documents of a substitute refused for others,
   which landed anyway), and an item numbered below an entry is written without that document
   (`health.rs`'s `supersedes`); an entry goes only once no item numbered below it can be delivered again
-  (`writes.rs`'s `prune_superseded`: the lane's smallest unacknowledged build number, or one past the
-  newest received in this run, has reached it), and the map lives on the `SinkEngine`, which the daemon
+  (`writes.rs`'s `prune_superseded`, the note's 14.10: while the lane has entries its run keeps one
+  account of its items received and not acknowledged, entered in `queue`, left only in `acknowledged`
+  after `ack` returned `Ok`, seeded mid-run from the window, the writes in flight and the caught-up waits;
+  the entry goes once the account's smallest build, or with none one past the newest received in this
+  run, has reached it; nothing is pruned once the run failed), and the map lives on the `SinkEngine`, which the daemon
   runs again after a failure, so a redelivered older item is still stripped; a run-wide count of lanes
   with entries is all an open lane pays per received item. So no document goes back to an older build. A stop's last probe writes the item as it is
   (`probe_now` drops an awaited rebuild; builders don't take rebuilds once stopping). Guards:
