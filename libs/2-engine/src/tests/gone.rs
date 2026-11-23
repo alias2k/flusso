@@ -1170,9 +1170,10 @@ fn ticket_of(requests: &[Asked], index: &IndexName) -> Ticket {
         .unwrap()
 }
 
-/// (c) Staging finds the `users` target new while `orders` fails to stage:
-/// the pass fails as a whole, and the next one, finding `users` as it left
-/// it, must still ask for it again (and not for `orders`).
+/// (c) Staging finds the `users` target new while `orders` fails to stage,
+/// under a `Fresh` source, where one index failing fails the pass as a whole
+/// (#471, R4): the next pass, finding `users` as it left it, must still ask
+/// for it again (and not for `orders`).
 #[tokio::test(start_paused = true)]
 async fn a_cut_found_beside_another_index_failing_to_stage_is_kept() {
     let mut pair = Pair::new(Targets::default());
@@ -1182,7 +1183,28 @@ async fn a_cut_found_beside_another_index_failing_to_stage_is_kept() {
 
     pair.sink.delete(&users());
     pair.sink.fail_ensure(&orders(), 1);
-    assert!(pair.engine.stage(Continuity::Resumed).await.is_err());
+    assert!(pair.engine.stage(Continuity::Fresh).await.is_err());
+    pair.engine.stage(Continuity::Fresh).await.unwrap();
+
+    let again = pair.requests().await;
+    assert_eq!(again.len(), 1, "{again:?}");
+    let fresh = again.first().unwrap();
+    assert_eq!(fresh.index, users());
+    assert_eq!(fresh.after, None);
+    assert!(fresh.ticket > ticket_of(&first, &users()), "{again:?}");
+}
+
+/// (c, #471) The same under `Resumed`: the pass goes on without `orders`
+/// (left restaging) and asks for `users` again in that same pass.
+#[tokio::test(start_paused = true)]
+async fn a_cut_found_beside_an_index_left_restaging_is_asked_again_at_once() {
+    let mut pair = Pair::new(Targets::default());
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let first = pair.requests().await;
+    assert_eq!(first.len(), 2, "{first:?}");
+
+    pair.sink.delete(&users());
+    pair.sink.fail_ensure(&orders(), 1);
     pair.engine.stage(Continuity::Resumed).await.unwrap();
 
     let again = pair.requests().await;
@@ -1191,6 +1213,12 @@ async fn a_cut_found_beside_another_index_failing_to_stage_is_kept() {
     assert_eq!(fresh.index, users());
     assert_eq!(fresh.after, None);
     assert!(fresh.ticket > ticket_of(&first, &users()), "{again:?}");
+    assert_eq!(
+        pair.engine
+            .lane_health(&stream::LaneKey::new(orders(), pair.engine.name().clone()))
+            .kind(),
+        "restaging"
+    );
 }
 
 /// (d) A restage finds the `users` target missing and creates a new one, then

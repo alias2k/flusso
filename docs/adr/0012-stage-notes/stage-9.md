@@ -780,11 +780,10 @@ backfill of another that had staged. X11 is replaced:
 | X21 | *Third review of #470, 2.* A sink run that fails during the stop is still restarted by the daemon (a transient write error must not turn a clean stop into exit 1), but staging under a stop only ensures (`stage_while_stopping`): no backfill is asked for, no restaging lane reopens, and an index that can't be ensured (or isn't tried after another failed) doesn't fail the staging: its lane is left `restaging` with why, and the restarted run releases it like any other. The restart still waits the daemon's restart backoff first. A stop that lands while a staging is already ensuring is looked at again once the ensures returned, before any ask or reopen, so that staging ensures only too (fourth review of #470, 3); an index that failed to ensure then fails that staging, and its retry takes the stop path. It is meant for a run restarted during the stop. A first staging can reach it too, when the stop lands between the daemon's look at the stop and the staging's own, and a staging already running when the stop comes may have staged part of a sink before it is dropped; neither matters, because once a stop is requested the engines are never started and the source is never prepared for the first time (X22) | `staging_after_a_run_failed_during_the_stop_only_ensures`, `an_open_lane_not_ensured_under_the_stop_is_released`, `a_stop_during_a_staging_makes_it_ensure_only` |
 | X22 | *Fourth review of #470, 1.* The source is prepared only after every rebuild was staged (#120), whatever the stop does: the daemon's first staging looks at the stop before staging and again once staging returned (`biased`, stop first, then a check), so the engines never start behind a stop, and the ingest engine checks the stop before the source's first `prepare` and ends without preparing. What holds: once a stop is requested, the engines are never started and the source is never prepared for the first time; a first staging the stop cut short, or turned into ensure only (skipping a `Fresh` rebuild), is never followed by `prepare`. The check after staging has its own case: a sink that asks for the stop from inside its staging ends it in the poll that already passed the stop, and only that check keeps the engines from starting. The ingest engine's check is for a source this engine has not prepared (`has_prepared`): a run restarted after going live, the stop already asked, prepares and opens as before, because its stream is how the stop's final position reaches the source (fifth review of #470, 2); ending it early would exit 0 with that position unconfirmed | `a_stop_before_the_first_staging_never_prepares` (daemon, deterministic: nothing ensured, nothing prepared), `a_shutdown_racing_the_first_staging_never_prepares_without_the_rebuild` (daemon, 60 runs), `a_stop_requested_inside_the_first_staging_starts_no_engine` (daemon), `a_stop_requested_before_the_run_prepares_and_reads_nothing`, `a_restarted_run_with_the_stop_asked_still_opens_and_closes_its_stream` (engine) |
 
-**Known limit, outside a stop (third review of #470, 2; to be filed).** `stage()` fails as a whole when one index
-can't be ensured. So after any failed run, an index whose cause persists (an owed reindex's `ensure_index` still
-refused, a target that still can't be created) blocks the restart of the whole sink, and its other lanes wait with
-it, until the cause lifts. X17 assumes the restart's `ensure_index` succeeds. Unchanged here; only staging under a
-stop leaves such an index restaging instead (X21).
+**Fixed by #471 (§18).** `stage()` failed as a whole when one index couldn't be ensured, so after any failed run an
+index whose cause persisted blocked the restart of the whole sink. A staging under `Resumed` now leaves such an
+index restaging and goes on with the rest (§18, R2); only a staging none of whose indexes is ensured, or a `Fresh`
+first staging, fails as a whole.
 
 **One rule for every reindex path (third review of #470, 1).** The control's reindex is staged inline in the run's
 `advance`; an owed retry is a flight. Both end in `settle_reindex`, so a stop seen after staging records the staged
@@ -884,7 +883,7 @@ slot (`pinned_by`) and its fences stay before its first unwritten change; other 
 **Staging a closed index (C2).** `ensure_index` refreshes a seeded generation once per start (what an earlier run
 left unrefreshed). `_refresh` on a closed index fails with `index_closed_exception`, so today a closed index fails
 `ensure_index`, so the whole sink's staging fails, at start and at every restart of the sink's run: every lane of
-the sink stops, not one (the known limit of §15.3). C2: that refresh skips an index it can't reach
+the sink stops, not one (the limit §15.3 named; fixed since by §18). C2: that refresh skips an index it can't reach
 (`?ignore_unavailable=true`, as the caught-up write's refresh already does). A closed index then stages, its lane
 opens, its first write parks it `blocked`, and opening the index lets it land. The rest of `ensure_index` reads
 settings and aliases, which a closed index answers. The seed's own refresh (`mark_seeded`) stays strict: a closed
@@ -1144,3 +1143,21 @@ Nothing changes for users. An unseeded generation deleted mid-backfill and auto-
 never seeded: the seed refuses an index whose uuid flusso did not record, the next staging deletes it and creates
 a clean generation under the same name, and a fresh backfill seeds it, with no operator (issue #428). A
 generation created before uuids were recorded is adopted as it is.
+
+### #471: a sink's staging per index (follow-up to the second half)
+
+1. **One index that can't be prepared no longer stops its whole sink after a restart.** When a sink's run fails
+   (a write error, the destination briefly unreachable) flusso restarts it and prepares each of its indexes again.
+   An index that can't be prepared (its target gone and not recreatable, a reindex still waiting, a refusal
+   naming that index) used to fail that whole step, so none of the sink's indexes was written until it cleared.
+   Now that index's lane stays `restaging` and the sink's other indexes go on writing.
+2. **It recovers by itself.** The lane tries again on its backoff (`[backoff]`) and opens once the index can be
+   prepared, with no restart; an unseeded index is backfilled then.
+3. **Meanwhile:** `/status` shows the lane `restaging` with `could not be ensured: <the destination's answer>`,
+   `flusso_lane_parked{why="restaging"}` is 1 (so `FlussoLaneParked` fires once it lasts), and the lane holds the
+   replication slot (`pinned_by`) and its fences, as any restaging lane.
+4. **The same at a start whose source kept its resume point.** A start after a restart of flusso, or any start
+   other than the very first, goes on without the index it can't prepare.
+5. **Unchanged:** when the destination itself is down (no index can be prepared, the meta index unreachable),
+   the sink waits and retries as before; and a first start with a new replication slot still waits until every
+   index can be prepared, since only then can flusso know which indexes need rebuilding before it begins reading.

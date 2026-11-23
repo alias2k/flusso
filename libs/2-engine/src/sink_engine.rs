@@ -493,14 +493,20 @@ impl SinkEngine {
             return Ok(());
         }
         let backfill = self.options.backfill;
-        let mut seeded = self
-            .each_index(
-                self.mappings.iter(),
-                Step::Ensure {
-                    ask_seeded: backfill,
-                },
+        let step = Step::Ensure {
+            ask_seeded: backfill,
+        };
+        // A `Fresh` source needs every seeded index's rebuild staged before it
+        // is prepared (#120), and an index not ensured can't be told seeded:
+        // that staging waits for every index (#471, R4).
+        let (mut seeded, unensured) = if continuity == Continuity::Fresh {
+            (
+                self.each_index(self.mappings.iter(), step).await?,
+                BTreeSet::new(),
             )
-            .await?;
+        } else {
+            self.ensure_per_index(step).await?
+        };
         self.observer
             .on_indexes_ensured(&self.name, self.mappings.len());
         // A stop that came while ensuring makes this staging ensure only too
@@ -512,7 +518,7 @@ impl SinkEngine {
 
         if !backfill {
             tracing::info!("backfill disabled for this sink; live changes only");
-            self.reopen_restaged();
+            self.reopen_restaged(&unensured);
             self.staged(started);
             return Ok(());
         }
@@ -561,7 +567,7 @@ impl SinkEngine {
         } else {
             tracing::info!("every index is seeded; no backfill needed");
         }
-        self.reopen_restaged();
+        self.reopen_restaged(&unensured);
         self.staged(started);
         Ok(())
     }
@@ -579,42 +585,71 @@ impl SinkEngine {
             .await;
         self.observer
             .on_indexes_ensured(&self.name, self.mappings.len());
-        let unstaged = tried
-            .failed
-            .into_iter()
-            .map(|(index, error)| {
-                (
-                    index,
-                    format!("could not be ensured during the stop: {error}"),
-                )
-            })
-            .chain(tried.not_started.into_iter().map(|index| {
-                (
-                    index,
-                    "not ensured during the stop: another index failed first".to_owned(),
-                )
-            }));
-        let now = Instant::now();
-        for (index, reason) in unstaged {
-            let lane = LaneKey::new(index, self.name.clone());
-            let mut state = self.lane_state(&lane);
-            if state.restage(reason, now) {
-                tracing::warn!(%lane, "could not be ensured during the stop; its items are released unapplied");
-            }
-            self.store_lane(&lane, &state, true);
-        }
+        self.leave_restaging(tried.failed, tried.not_started, " during the stop");
         self.staged(started);
     }
 
-    /// Every index was just ensured: a lane waiting to be staged again after
-    /// its target went missing is staged. A lane owed a reindex is not: its
-    /// retry stages the reindex (X17).
-    fn reopen_restaged(&self) {
+    /// Ensure every index on its own (#471, R1): an index that can't be
+    /// ensured, or wasn't tried after another failed, is left restaging with
+    /// why, for its lane's restage path to stage again, and the rest go on.
+    /// When none could be ensured the destination is down, not an index: the
+    /// staging fails as a whole, for the daemon to back off and retry. What
+    /// each ensured index staged, and the indexes left restaging.
+    async fn ensure_per_index(
+        &self,
+        step: Step,
+    ) -> Result<(Vec<(&IndexMapping, Staged)>, BTreeSet<IndexName>)> {
+        let tried = self.try_each_index(self.mappings.iter(), step).await;
+        if tried.done.is_empty() && !tried.failed.is_empty() {
+            return Err(EngineError::Staging(StagingFailures(tried.failed)));
+        }
+        let unensured = self.leave_restaging(tried.failed, tried.not_started, "");
+        Ok((tried.done, unensured))
+    }
+
+    /// Leave each index of `failed` and `not_started` restaging, with why
+    /// (`when` qualifies the reason): the lanes the staging couldn't ensure.
+    fn leave_restaging(
+        &self,
+        failed: Vec<(IndexName, sink::SinkError)>,
+        not_started: Vec<IndexName>,
+        when: &str,
+    ) -> BTreeSet<IndexName> {
+        let unstaged = failed
+            .into_iter()
+            .map(|(index, error)| (index, format!("could not be ensured{when}: {error}")))
+            .chain(not_started.into_iter().map(|index| {
+                (
+                    index,
+                    format!("not ensured{when}: another index failed first"),
+                )
+            }));
+        let now = Instant::now();
+        let mut left = BTreeSet::new();
+        for (index, reason) in unstaged {
+            let lane = LaneKey::new(index.clone(), self.name.clone());
+            let mut state = self.lane_state(&lane);
+            if state.restage(reason.clone(), now) {
+                tracing::warn!(%lane, %reason, "the index could not be ensured; its lane is restaging and the sink's other indexes go on");
+            }
+            self.store_lane(&lane, &state, true);
+            left.insert(index);
+        }
+        left
+    }
+
+    /// Every index but `unensured` was just ensured: a lane waiting to be
+    /// staged again after its target went missing is staged. A lane owed a
+    /// reindex is not: its retry stages the reindex (X17). Nor is one whose
+    /// index wasn't ensured: its restage path stages it (#471, R3).
+    fn reopen_restaged(&self, unensured: &BTreeSet<IndexName>) {
         let restaged: Vec<LaneKey> = self
             .lock_health()
             .iter()
-            .filter(|(_, state)| {
-                matches!(state.health, LaneHealth::Restaging { .. }) && state.reindex.is_none()
+            .filter(|(lane, state)| {
+                matches!(state.health, LaneHealth::Restaging { .. })
+                    && state.reindex.is_none()
+                    && !unensured.contains(&lane.index)
             })
             .map(|(lane, _)| lane.clone())
             .collect();

@@ -249,11 +249,14 @@ async fn a_fresh_source_requests_the_rebuilt_and_the_unseeded_indexes_once() {
     );
 }
 
+/// A staging that fails as a whole (a `Fresh` source, where one index not
+/// ensured fails it: #471, R4) names every failure it saw, and the chains in
+/// flight finish.
 #[tokio::test(start_paused = true)]
 async fn every_failure_seen_is_named_and_the_chains_in_flight_finish() {
     let failing = [name(3), name(5)];
     let staged = staged(SlowSink::default().failing(failing.clone()), INDEXES);
-    let error = staged.engine.stage(Continuity::Resumed).await.unwrap_err();
+    let error = staged.engine.stage(Continuity::Fresh).await.unwrap_err();
 
     let EngineError::Staging(failures) = &error else {
         panic!("expected a staging error, got {error:?}");

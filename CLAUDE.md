@@ -1759,7 +1759,13 @@ is the one concrete piece.
   `a_stop_releases_the_completion_waiting_on_an_owed_lane`, `a_stop_releases_a_lane_restaging_a_missing_target`,
   `a_stop_during_an_owed_retry_records_it_and_writes_nothing_more`,
   `a_retry_returning_staged_during_a_stop_leaves_the_lane_owed`). Both reindex paths (inline, retry) end in
-  `settle_reindex`. A run restarted during the stop stages with `stage_while_stopping`: ensure only, an index that
+  `settle_reindex`. Staging is per index under `Resumed` (#471, the note's §18): an index it can't ensure is left
+  `restaging` with why and staged again by its lane's restage path, the rest go on, and `reopen_restaged` skips it;
+  none ensured is the destination's failure and fails the staging as a whole, as does a `Fresh` first staging on any
+  index (its rebuild must be staged before `prepare`) (`ensure_per_index`, `leave_restaging`; guards
+  `a_restart_goes_on_without_the_index_it_cannot_ensure`, `a_resumed_start_goes_on_without_the_index_it_cannot_ensure`,
+  `a_staging_none_of_whose_indexes_is_ensured_fails_as_a_whole`, `a_fresh_staging_waits_for_every_index`). A run
+  restarted during the stop stages with `stage_while_stopping`: ensure only, an index that
   can't be ensured left restaging; a stop landing while a staging ensures is looked at again before any ask or
   reopen (guards `staging_after_a_run_failed_during_the_stop_only_ensures`,
   `an_open_lane_not_ensured_under_the_stop_is_released`, `a_stop_during_a_staging_makes_it_ensure_only`). The
