@@ -34,10 +34,10 @@ Spread over six runs on `main`, pinned to 4 CPUs:
 | `sinks1/256` | 32–68 ms (91%) | 74–78 ms (5%) |
 | `sinks2/256` | 29–52 ms (72%) | 73–75 ms (3%) |
 
-**What the figure means.** The hold releases the sink on the first line of build *n + 1*, so the free overlaps the next build on **every** batch. That is the contended upper bound, not what production does: production has the sink freeing too, but a real build mostly waits on Postgres. The sink-frees regime costs about 2.4× locally and about 3× on CI's runner against the ingest-frees one, and batch size now barely moves the figure: the held `/1`, `/64` and `/256` sit within about 15% of each other (CI, `sinks1`: 130.8 / 148.5 / 143.5 ms).
+**What the figure means.** The hold releases the sink on the first line of build *n + 1*, so the free overlaps the next build on **every** batch. That is the contended upper bound, not what production does: production has the sink freeing too, but a real build mostly waits on Postgres. The sink-frees regime costs about 2.4× locally and about 3× on CI's runner against the ingest-frees one. Batch size moves the figure, since the ingest's work per batch is what it measures: with the engine spawned, CI's `sinks1` read about 184 / 121 / 48 ms for `/1`, `/64` and `/256`.
 
 - **Still caught:** allocation volume, and the ingest engine's work per batch.
-- **Not caught:** sink-side cost smaller than the ingest's per-batch work, and gains from larger batches.
+- **Not caught:** sink-side cost smaller than the ingest's per-batch work.
 
 **What the hold itself costs.** With the ingest engine forced to free every batch (the hold then only adds its wake-up), `live_drain_held` against `main`'s `live_drain` measured, medians of six pinned to 4 CPUs: 1–3% at `/64` and `/256`, 3–6% at `/1` (one `Notify` wake-up per batch). An earlier check with a 50 µs busy-wait in place of the hold measured 31–32 ms, the ingest-frees figure.
 
@@ -57,6 +57,20 @@ Medians, with the spread (max over min) in brackets. That session ran beside oth
 - **The build-start point** overlaps the free with the same work every time.
 
 The rename restarted the history's `inprocess/live_drain/*` series as `inprocess/live_drain_held/*`: the old points measured the race, and the new ones would have read as a step up.
+
+### Why the engine bench spawns its engines
+
+Each engine in `benches/engine.rs` is a task spawned onto the runtime's workers, as the daemon's supervisor spawns it. Criterion's async iteration only stages the sinks, awaits the ingest engine's task and waits for the lanes to drain: the supervisor's part.
+
+Until issue #447 the ingest engine ran inside that iteration, i.e. inside `Runtime::block_on` of a multi-thread runtime. That differs from a worker in one way that matters:
+
+- when a task's cooperative budget is spent, tokio defers the refused future's wake-up until the poll returns, but only where a scheduler context is set (a worker, or a current-thread `block_on`);
+- under a multi-thread `block_on` the future wakes at once, so the poller in `ingest/together.rs`, which drives the reader and the builders as futures of one task, re-polls it up to its cap of 64 polls each time the budget runs out;
+- the binary never pays that, so the old bench overstated the per-batch cost, most at `/1`.
+
+The runtime is multi-threaded like the binary's (`apps/cli/src/main.rs`) and pins 4 workers: the binary's default on CI's 4-core runner, and the same shape on a larger machine.
+
+The change stepped the `inprocess/live_drain_held/*` and `inprocess/snapshot/rows` series. Their points from then on carry `extra.images.engine` (stamped in `bench.yml`), which restarts the regression window instead of reading as a regression. The first PR comparison after it measured the harness change, not the engines.
 
 The scenarios and the Docker-backed component benches start the same Postgres image as the e2e suites; see [Which Postgres](testing.md#which-postgres).
 
