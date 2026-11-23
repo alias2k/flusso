@@ -717,7 +717,9 @@ impl Lane {
             .expect("no backfill request")
             .unwrap()
             .unwrap();
-        let (Request::Backfill { after, ticket, .. }, handle) = delivery.into_parts();
+        let (Request::Backfill { after, ticket, .. }, handle) = delivery.into_parts() else {
+            panic!("a backfill request")
+        };
         handle.ack().await.unwrap();
         (after.map(|mark| mark.as_str().to_owned()), ticket)
     }
@@ -744,6 +746,7 @@ impl Lane {
                 hold: Default::default(),
                 walked: Some(stream::WalkMark::new(format!("{last:04}"))),
                 ticket: Some(ticket),
+                ..Default::default()
             }))
             .await
             .unwrap();
@@ -1111,7 +1114,10 @@ impl Pair {
                 after,
                 ticket,
                 ..
-            } = request;
+            } = request
+            else {
+                panic!("a backfill request")
+            };
             seen.push(Asked {
                 index,
                 ticket,
@@ -1149,6 +1155,7 @@ impl Pair {
                 hold: Default::default(),
                 walked: None,
                 ticket: Some(ticket),
+                ..Default::default()
             }))
             .await
             .unwrap();

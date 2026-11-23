@@ -6,8 +6,8 @@
 //! use kernel::Position;
 //! use stream::{Batch, ItemKey, LaneItem, Ticket};
 //!
-//! let live = LaneItem::Batch(Batch { key: Some(ItemKey::new(0)), position: Some(Position::new(7)), envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: None });
-//! let snapshot = LaneItem::Batch(Batch { key: None, position: None, envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: Some(Ticket::new(1)) });
+//! let live = LaneItem::Batch(Batch { key: Some(ItemKey::new(0)), position: Some(Position::new(7)), ..Batch::default() });
+//! let snapshot = LaneItem::Batch(Batch { ticket: Some(Ticket::new(1)), ..Batch::default() });
 //! assert_eq!(live.position(), Some(Position::new(7)));
 //! assert_eq!(live.key(), Some(ItemKey::new(0)));
 //! assert_eq!(snapshot.position(), None, "snapshot rows carry no position");
@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use kernel::{Envelope, IndexName, Position, SinkName};
+use kernel::{Envelope, IndexName, Position, RowKey, SinkName};
 use serde::{Deserialize, Serialize};
 
 /// The unit a lane carries down to one sink engine.
@@ -68,7 +68,7 @@ impl std::fmt::Display for LaneKey {
 /// The envelopes are shared, not owned: one build is published to every lane
 /// and held for redelivery without copying the documents, so a batch is
 /// immutable once built — a sink stamps nothing into it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
     /// The item's number on its index's lanes: increasing per index in the
     /// order the items are published, the same on every lane of the index.
@@ -94,6 +94,30 @@ pub struct Batch {
     /// [`LaneItem::SnapshotComplete`] names it). `None` on a live batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<Ticket>,
+    /// The root key of each envelope's document, in envelope order: what a
+    /// sink engine hands back in a [`Request::Rebuild`] to have the documents
+    /// built again. Empty when unknown, and then nothing can be rebuilt.
+    #[serde(default, skip_serializing_if = "<[RowKey]>::is_empty")]
+    pub keys: Arc<[RowKey]>,
+    /// Its build's number on its index: one counter per index, taken as the
+    /// item is published, shared by live, snapshot and fresh builds. Two
+    /// builds of one document never overlap, so for one document a larger
+    /// number is a later build. `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<u64>,
+}
+
+/// A fresh build of a parked lane's item, sent back to that lane's sink
+/// engine on its sink's substitute lane ([`Stream::substitutes`]), apart from
+/// the lane it replaces an item of: that lane is held up by the very item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Substitute {
+    /// The lane whose parked item it replaces.
+    pub lane: LaneKey,
+    /// The [`Request::Rebuild`] it answers.
+    pub ticket: Ticket,
+    /// The documents, built again; neither a key nor a position.
+    pub batch: Batch,
 }
 
 /// A live item's number on its index's lanes (see [`Batch::key`]): what
@@ -238,6 +262,42 @@ pub enum Request {
         #[serde(default)]
         ticket: Ticket,
     },
+    /// Build the documents of `keys` of `index` again now, and send them to
+    /// `sink` as a [`Substitute`] naming `ticket`, on its substitute lane
+    /// only. Asked by a lane parked on a refused item, for that item's
+    /// documents. Acknowledged by the ingest engine once the substitute is
+    /// published.
+    Rebuild {
+        index: IndexName,
+        sink: SinkName,
+        keys: Vec<RowKey>,
+        ticket: Ticket,
+    },
+}
+
+impl Request {
+    /// The index the request is for.
+    pub fn index(&self) -> &IndexName {
+        match self {
+            Request::Backfill { index, .. } | Request::Rebuild { index, .. } => index,
+        }
+    }
+
+    /// The sink that asked.
+    pub fn sink(&self) -> &SinkName {
+        match self {
+            Request::Backfill { sink, .. } | Request::Rebuild { sink, .. } => sink,
+        }
+    }
+}
+
+/// The two ends of one sink's substitute lane.
+#[derive(Debug)]
+pub struct SubstituteLane {
+    /// Where the ingest engine publishes fresh builds for the sink.
+    pub producer: Box<dyn crate::Producer<Substitute>>,
+    /// Where the sink's engine receives them.
+    pub consumer: Box<dyn crate::Consumer<Substitute>>,
 }
 
 /// The two ends of one `(index, sink)` lane.
@@ -275,6 +335,16 @@ pub trait Stream: std::fmt::Debug + Send + Sync {
 
     /// The request lane.
     fn requests(&self) -> crate::Result<RequestLane>;
+
+    /// `sink`'s substitute lane: fresh builds of its parked lanes' items, at
+    /// most one per lane outstanding, delivered apart from the lanes. Fresh
+    /// ends over the same lane on each call, as [`lane`](Self::lane). A stream
+    /// without one answers [`QueueError::Unsupported`](crate::QueueError),
+    /// and a parked lane over it writes its own item again instead.
+    fn substitutes(&self, sink: &SinkName) -> crate::Result<SubstituteLane> {
+        let _ = sink;
+        Err(crate::QueueError::Unsupported("substitute lanes"))
+    }
 
     /// Whether every lane is drained: nothing queued and nothing delivered but
     /// unacknowledged. The daemon waits for this before it stops the sink

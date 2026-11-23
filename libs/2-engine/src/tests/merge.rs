@@ -201,6 +201,7 @@ fn item(index_name: &str, ids: std::ops::Range<i64>, position: Option<u64>) -> L
         hold: Default::default(),
         walked: None,
         ticket: None,
+        ..Default::default()
     })
 }
 

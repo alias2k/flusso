@@ -23,6 +23,7 @@ fn batch(position: u64) -> LaneItem {
         hold: Default::default(),
         walked: None,
         ticket: None,
+        ..Default::default()
     })
 }
 

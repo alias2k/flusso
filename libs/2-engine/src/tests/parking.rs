@@ -258,6 +258,7 @@ fn item(of: &IndexName, ids: std::ops::Range<i64>, position: Option<u64>) -> Lan
         hold: Default::default(),
         walked: None,
         ticket: None,
+        ..Default::default()
     })
 }
 

@@ -291,6 +291,7 @@ async fn a_skipped_lane_is_not_held_by_a_full_lane_of_another_index() {
             hold: Default::default(),
             walked: None,
             ticket: None,
+            ..Default::default()
         }))
         .await
         .unwrap();

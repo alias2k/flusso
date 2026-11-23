@@ -844,6 +844,7 @@ async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_th
             hold: Default::default(),
             walked: None,
             ticket: None,
+            ..Default::default()
         })
     };
     let snapshot = stream::LaneItem::Batch(stream::Batch {
@@ -853,6 +854,7 @@ async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_th
         hold: Default::default(),
         walked: None,
         ticket: None,
+        ..Default::default()
     });
     lane.publish(live(5)).await.unwrap();
     lane.publish(snapshot.clone()).await.unwrap();

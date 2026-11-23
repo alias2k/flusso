@@ -26,4 +26,8 @@ pub enum QueueError {
     /// No such lane: the lane set is fixed when the stream is built.
     #[error("no lane `{0}`")]
     UnknownLane(String),
+
+    /// The stream doesn't offer this (an adapter without substitute lanes).
+    #[error("not offered by this stream: {0}")]
+    Unsupported(&'static str),
 }

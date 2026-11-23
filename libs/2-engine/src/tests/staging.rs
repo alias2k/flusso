@@ -168,7 +168,9 @@ async fn requests(stream: &ChannelStream) -> Vec<Vec<String>> {
         {
             let (request, handle) = delivery.into_parts();
             handle.ack().await.unwrap();
-            let Request::Backfill { index, .. } = request;
+            let Request::Backfill { index, .. } = request else {
+                panic!("a backfill request")
+            };
             requests.push(index.as_ref().to_owned());
         }
         // One staging's requests, one per index, read together.

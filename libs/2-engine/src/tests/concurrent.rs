@@ -554,6 +554,7 @@ impl Rig {
                     hold: Default::default(),
                     walked: None,
                     ticket: None,
+                    ..Default::default()
                 }))
                 .await
                 .unwrap();
@@ -585,6 +586,7 @@ impl Rig {
                     hold: Default::default(),
                     walked: None,
                     ticket: None,
+                    ..Default::default()
                 }))
                 .await
                 .unwrap();
@@ -1230,6 +1232,7 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
             hold: Default::default(),
             walked: None,
             ticket: None,
+            ..Default::default()
         }))
         .await
         .unwrap();

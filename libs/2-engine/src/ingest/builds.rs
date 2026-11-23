@@ -87,10 +87,23 @@ pub(super) enum Job {
     },
     /// A snapshot's end: `SnapshotComplete` to every lane that asked.
     Complete(Box<Snapshot>),
+    /// A parked lane's fresh build (stage 9): published to that lane's sink
+    /// alone, as a substitute.
+    Rebuild(Rebuild),
     /// A walk's batch or end, discarded because the walk failed (slice 8,
     /// fix round 2): publishes nothing, its place kept so the slots around
     /// it publish in grant order.
     Discarded,
+}
+
+/// A parked lane's request for a fresh build of its item's documents
+/// (stage 9, F3): which lane, the request's ticket, and its delivery's
+/// handle, acknowledged once the substitute is published. Dropped
+/// unacknowledged (a restart, a stop), the request is delivered again.
+pub(super) struct Rebuild {
+    pub(super) lane: stream::LaneKey,
+    pub(super) ticket: stream::Ticket,
+    pub(super) handle: Box<dyn stream::AckHandle>,
 }
 
 /// A walk of this builder failed (ADR 0012 stage 8a, slice 8-1 fix round
@@ -244,6 +257,9 @@ pub(super) struct Builds {
     halted: bool,
     /// A walk failed and the builder's loop hasn't taken it yet.
     walk_failure: Option<WalkFailure>,
+    /// Parked lanes' requests for a fresh build, oldest first, with the
+    /// documents to build (stage 9).
+    rebuilds: VecDeque<(Vec<DocumentId>, Rebuild)>,
     spare: Vec<Vec<DocumentId>>,
     budget: Option<Arc<Budget>>,
     /// Bytes per document, per index, live and backfill: a running average
@@ -363,7 +379,31 @@ impl Builds {
             several: false,
             waiters: Vec::new(),
             asked_at: 0,
+            rebuilds: VecDeque::new(),
         }
+    }
+
+    /// Queue a parked lane's request for a fresh build of `ids`.
+    pub(super) fn ask_rebuild(&mut self, ids: Vec<DocumentId>, rebuild: Rebuild) {
+        self.rebuilds.push_back((ids, rebuild));
+    }
+
+    /// Whether a fresh build waits to be granted.
+    pub(super) fn rebuilds_waiting(&self) -> bool {
+        !self.rebuilds.is_empty()
+    }
+
+    /// The oldest fresh build, when it may start now: the queue has room, no
+    /// running build holds one of its documents, and the gate gives a permit
+    /// (asked as live, with no budget part: the budget never refuses it,
+    /// F14).
+    pub(super) fn choose_rebuild(&mut self) -> Option<(Vec<DocumentId>, Rebuild)> {
+        let (ids, _) = self.rebuilds.front()?;
+        if !self.has_room() || self.holds_any(ids) {
+            return None;
+        }
+        self.ask(Some(Vec::new()), None)?;
+        self.rebuilds.pop_front()
     }
 
     /// Ask the gate beside other builders (G9′): see `several`.
@@ -770,7 +810,12 @@ impl Builds {
         let seq = self.front + self.slots.len() as u64;
         let permit = self.granted.take();
         let live = matches!(job, Job::Live { .. });
-        let work = if live { Work::Live } else { Work::Backfill };
+        let rebuild = matches!(job, Job::Rebuild(_));
+        let work = if live || rebuild {
+            Work::Live
+        } else {
+            Work::Backfill
+        };
         {
             let since = {
                 let mut waits = lock(&self.waits);
@@ -800,7 +845,7 @@ impl Builds {
         // hashed.
         let held = (self.limit > 1).then(|| hashes(&ids));
         let ids = Arc::new(ids);
-        let backfilling = (self.limit > 1 && !live).then(|| Arc::clone(&ids));
+        let backfilling = (self.limit > 1 && !live && !rebuild).then(|| Arc::clone(&ids));
         let documents = Arc::clone(documents);
         let mut build: BoxFuture<'static, Output> = Box::pin(async move {
             let started = Instant::now();
@@ -925,7 +970,8 @@ impl Builds {
         };
         // A walk's failure is the walk's alone beside other builders (slice
         // 8, fix round 2): it halts no live grant.
-        let live = matches!(slot.job, Job::Live { .. });
+        // A fresh build's failure is its index's, as a live build's (O1).
+        let live = matches!(slot.job, Job::Live { .. } | Job::Rebuild(_));
         if halts(&built) && (live || !self.several) {
             self.halted = true;
         }
@@ -977,7 +1023,7 @@ impl Builds {
             let of_the_walk = match &slot.job {
                 Job::Backfill { reached: its, .. } => Arc::ptr_eq(its, reached),
                 Job::Complete(snapshot) => Arc::ptr_eq(&snapshot.reached, reached),
-                Job::Live { .. } | Job::Discarded => false,
+                Job::Live { .. } | Job::Rebuild(_) | Job::Discarded => false,
             };
             if !of_the_walk {
                 continue;

@@ -220,6 +220,7 @@ fn item(position: u64, ids: &[&str]) -> stream::LaneItem {
         hold: Default::default(),
         walked: None,
         ticket: None,
+        ..Default::default()
     })
 }
 

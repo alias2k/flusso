@@ -960,7 +960,12 @@ struct Spy {
     inner: Arc<ChannelStream>,
     published: Published,
     failing: FailingLanes,
+    items: ItemLog,
 }
+
+/// Every batch published, in publication order: its documents' keys (as
+/// ids), its envelopes' ids and its build number.
+type ItemLog = Arc<Mutex<Vec<(Vec<i64>, Vec<String>, Option<u64>)>>>;
 
 /// The indexes whose lanes fail their next publish, once each.
 type FailingLanes = Arc<Mutex<HashSet<String>>>;
@@ -977,6 +982,7 @@ struct SpyProducer {
     lane: stream::LaneKey,
     published: Published,
     failing: FailingLanes,
+    items: ItemLog,
 }
 
 #[async_trait]
@@ -985,6 +991,17 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
         // The engine awaits each item's send before the next one's: logged
         // after the send, the log is lane order.
         let position = item.position();
+        if let stream::LaneItem::Batch(batch) = &item {
+            self.items.lock().unwrap().push((
+                batch.keys.iter().map(id_of).collect(),
+                batch
+                    .envelopes
+                    .iter()
+                    .map(|envelope| envelope.id.clone())
+                    .collect(),
+                batch.build,
+            ));
+        }
         if self
             .failing
             .lock()
@@ -1015,9 +1032,14 @@ impl Stream for Spy {
                 lane: key.clone(),
                 published: Arc::clone(&self.published),
                 failing: Arc::clone(&self.failing),
+                items: Arc::clone(&self.items),
             }),
             consumer: lane.consumer,
         })
+    }
+
+    fn substitutes(&self, sink: &SinkName) -> stream::Result<stream::SubstituteLane> {
+        self.inner.substitutes(sink)
     }
 
     fn lanes(&self, sink: &SinkName) -> Vec<stream::LaneKey> {
@@ -1040,6 +1062,8 @@ struct Deployment {
     published: Published,
     /// Lanes to fail on their next publish.
     failing: FailingLanes,
+    /// Every batch published, in order.
+    items: ItemLog,
     feed: Arc<Feed>,
     recorder: Arc<Recorder>,
     ingest: IngestEngine,
@@ -1074,10 +1098,12 @@ impl Deployment {
         let feed = Arc::new(feed);
         let published: Published = Arc::default();
         let failing: FailingLanes = Arc::default();
+        let items: ItemLog = Arc::default();
         let spy = Arc::new(Spy {
             inner: Arc::clone(&stream),
             published: Arc::clone(&published),
             failing: Arc::clone(&failing),
+            items: Arc::clone(&items),
         });
         let ingest = IngestEngine::new(
             Arc::clone(&feed) as Arc<dyn ChangeCapture>,
@@ -1099,6 +1125,7 @@ impl Deployment {
         Self {
             stream,
             published,
+            items,
             failing,
             feed,
             recorder,
@@ -1301,6 +1328,7 @@ impl Deployment {
 mod builders;
 mod exemption;
 mod reading;
+mod rebuilds;
 mod restart;
 mod states;
 mod walk_failures;

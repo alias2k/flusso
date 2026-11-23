@@ -81,6 +81,9 @@ pub(super) struct Coalescing {
 pub(super) struct Building<'a> {
     pub(super) runs: Runs,
     pub(super) inbox: mpsc::UnboundedReceiver<Delivery<Request>>,
+    /// Parked lanes' requests for a fresh build (stage 9), apart from the
+    /// inbox: they are served while a walk runs.
+    pub(super) rebuilds: mpsc::UnboundedReceiver<Delivery<Request>>,
     pub(super) signals: &'a Signals,
     pub(super) reports: &'a Reports,
     /// Other builders run beside it: a builder held by the budget folds, so
@@ -223,6 +226,8 @@ impl IngestEngine {
     async fn building(&self, building: &mut Building<'_>) -> Result<BuilderEnd> {
         let runs = &mut building.runs;
         let inbox = &mut building.inbox;
+        let rebuilds = &mut building.rebuilds;
+        let mut rebuilds_open = true;
         let signals = building.signals;
         let reports = building.reports;
         let several = building.several;
@@ -270,6 +275,8 @@ impl IngestEngine {
                 && snapshot.is_none()
                 && coalescing.is_none()
                 && inbox.is_empty()
+                && rebuilds.is_empty()
+                && !builds.rebuilds_waiting()
             {
                 if signals.ended() {
                     self.settle(runs, &mut builds, lanes).await?;
@@ -395,6 +402,23 @@ impl IngestEngine {
                     self.grant(runs, snapshot, &mut builds, lanes).await?;
                     mark = Instant::now();
                 },
+                // Not once the stop is asked: a stop's last probe writes the
+                // parked item as it is (F13), and the request waits on its
+                // lane for the next start.
+                delivery = rebuilds.recv(), if rebuilds_open && !self.stop.is_requested() => {
+                    let Some(delivery) = delivery else {
+                        rebuilds_open = false;
+                        continue;
+                    };
+                    self.waited(mark, None, snapshot, quiet, clock);
+                    signals.received();
+                    queue_rebuild(&mut builds, delivery);
+                    while let Ok(more) = rebuilds.try_recv() {
+                        queue_rebuild(&mut builds, more);
+                    }
+                    self.grant(runs, snapshot, &mut builds, lanes).await?;
+                    mark = Instant::now();
+                }
                 delivery = inbox.recv(), if snapshot.is_none() => {
                     let Some(delivery) = delivery else { continue };
                     let at = self.waited(mark, None, snapshot, quiet, clock);
@@ -560,15 +584,42 @@ pub(super) fn enter_fold(runs: &mut Runs, builds: &mut Builds) {
     runs.lead().fold(runs.slot(), true);
 }
 
+/// Queue a parked lane's request for a fresh build of its item's documents
+/// (stage 9, F3); a request of another kind is left for its lane.
+fn queue_rebuild(builds: &mut Builds, delivery: Delivery<Request>) {
+    let (request, handle) = delivery.into_parts();
+    let Request::Rebuild {
+        index,
+        sink,
+        keys,
+        ticket,
+    } = request
+    else {
+        return;
+    };
+    let ids = keys
+        .into_iter()
+        .map(|key| source::document::DocumentId {
+            index: index.clone(),
+            key,
+        })
+        .collect();
+    builds.ask_rebuild(
+        ids,
+        super::builds::Rebuild {
+            lane: stream::LaneKey::new(index, sink),
+            ticket,
+            handle,
+        },
+    );
+}
+
 /// Whether every sink with a lane asked (`main`'s rule: requests come one per
 /// index, and once every sink asked a snapshot starts at once).
 fn everyone_asked(deliveries: &[Delivery<Request>], lanes: &Lanes) -> bool {
     let asked: HashSet<&SinkName> = deliveries
         .iter()
-        .map(|delivery| {
-            let Request::Backfill { sink, .. } = delivery.item();
-            sink
-        })
+        .map(|delivery| delivery.item().sink())
         .collect();
     lanes.keys().all(|lane| asked.contains(&lane.sink))
 }

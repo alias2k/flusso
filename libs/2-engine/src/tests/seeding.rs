@@ -310,6 +310,7 @@ fn batch(lane: &str, id: &str, position: Option<Position>) -> LaneItem {
         hold: Default::default(),
         walked: None,
         ticket: None,
+        ..Default::default()
     })
 }
 
