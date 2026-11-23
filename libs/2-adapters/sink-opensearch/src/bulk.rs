@@ -21,10 +21,12 @@
 //! - **missing**: `index_not_found_exception`, the target is gone (deleted
 //!   while running); the engine stages that index again;
 //! - **blocked**: `cluster_block_exception` (403: `index.blocks.write`,
-//!   `read_only`, `read_only_allow_delete`) or an item-level 403
-//!   `security_exception` (a role without write permission on that index);
-//!   the documents are fine, so the engine parks the index's lane and writes
-//!   them again once the block is lifted, never quarantining them (#404).
+//!   `read_only`, `read_only_allow_delete`), an item-level 403
+//!   `security_exception` (a role without write permission on that index), or
+//!   `index_closed_exception` (a closed index, `POST /<index>/_close`); the
+//!   documents are fine, so the engine parks the index's lane and writes them
+//!   again once the block is lifted or the index opened, never quarantining
+//!   them (#404, stage 9 slice 3).
 //!
 //! ```text
 //! {"index":{"_index":"users_1a2b_1","_id":"42","status":403,
@@ -250,9 +252,33 @@ pub(crate) fn is_missing(kind: Option<&str>) -> bool {
 /// (`cluster_block_exception`; the flood-stage one answers 429 and is busy,
 /// asked first) or a role without write permission on the index (an
 /// item-level 403 `security_exception`; a request-level 403 refuses the whole
-/// `_bulk` and fails the write).
+/// `_bulk` and fails the write), or a closed index (`index_closed_exception`,
+/// whatever the status).
 pub(crate) fn is_blocked(status: u64, kind: Option<&str>) -> bool {
-    kind == Some("cluster_block_exception") || (status == 403 && kind == Some("security_exception"))
+    matches!(
+        kind,
+        Some("cluster_block_exception" | "index_closed_exception")
+    ) || (status == 403 && kind == Some("security_exception"))
+}
+
+/// The reason a blocked item is reported with: OpenSearch's, except for a
+/// closed index, whose reason (`closed`) names nothing: then the index, from
+/// the error, else from the action.
+fn blocked_reason(
+    error: Option<&Value>,
+    kind: Option<&str>,
+    reason: String,
+    action: Option<&BulkAction>,
+) -> String {
+    if kind != Some("index_closed_exception") {
+        return reason;
+    }
+    let index = error
+        .and_then(|e| e.get("index"))
+        .and_then(Value::as_str)
+        .or_else(|| action.map(BulkAction::index))
+        .unwrap_or("?");
+    format!("index [{index}] is closed")
 }
 
 /// Read the item-level outcome of a 2xx bulk response to `actions`.
@@ -340,12 +366,12 @@ pub(crate) fn read_bulk_response(
                     actions.len()
                 )));
             }
-            let list = if missing {
-                &mut read.missing
+            if missing {
+                read.missing.push((i, reason));
             } else {
-                &mut read.blocked
-            };
-            list.push((i, reason));
+                read.blocked
+                    .push((i, blocked_reason(error, kind, reason, action.copied())));
+            }
             continue;
         }
 

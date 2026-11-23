@@ -33,9 +33,12 @@ Some refusals are about an **index**, not its documents. The sink reports them p
 | --- | --- | --- |
 | `403 cluster_block_exception` | `index.blocks.write`, `index.blocks.read_only` or `index.blocks.read_only_allow_delete`, set by an operator | `blocked` |
 | `403 security_exception` | a role without write permission on that index | `blocked` |
+| `400 index_closed_exception` | the index closed with `POST /<index>/_close` (some versions answer `403 cluster_block_exception`, `FORBIDDEN/4/index closed`, instead) | `blocked` |
 | `404 index_not_found_exception` | the generation was deleted while flusso runs: see [Seeding](#seeding) | `restaging` |
 
 A `blocked` lane writes its oldest batch again alone on the [`[backoff]`](config-toml.md#backoff) schedule (1 s, doubling to 60 s, by default). Once the block is lifted the next try lands and the lane resumes, with no restart. Meanwhile [`/status`](http.md#lane-health) shows the lane `blocked` with OpenSearch's reason, and the lane holds the replication slot: the runbook is [A lane is stalled](../operate/stalled-lane.md).
+
+**A closed index** gets its own reason, `index [<generation>] is closed`, since OpenSearch's reads only `closed`. Opening that generation (`POST /<generation>/_open`, or through its alias) lets the next try land. It doesn't stop the sink from starting either: staging skips the refresh it can't make on a closed generation, and the lane parks at its first write. **`{prefix}flusso_meta` is not covered**: closed, it fails the sink's staging, so none of the sink's indexes is written until it's opened.
 
 ```text
 {"index":{"_index":"users_1a2b3c4d_1","_id":"42","status":403,

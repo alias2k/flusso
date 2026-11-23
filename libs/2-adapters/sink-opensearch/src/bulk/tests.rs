@@ -300,6 +300,36 @@ fn a_write_block_is_blocked_never_rejected() {
     assert!(read.busy.is_empty());
 }
 
+/// A closed index (`POST /<index>/_close`) answers each item 400
+/// `index_closed_exception`, through the hash alias as by name: the documents
+/// are fine and land once it is opened, so they are blocked, never rejected,
+/// whatever the status (slice 3, C1). Its reason, `closed`, names nothing,
+/// so the blocked reason names the index: the error's, else the action's.
+#[test]
+fn a_closed_index_is_blocked_never_rejected() {
+    let actions = [index_action("1"), delete_action("2"), index_action("3")];
+    let resp = json!({
+        "errors": true,
+        "items": [
+            { "index": { "_index": "users_1", "_id": "1", "status": 400,
+                "error": { "type": "index_closed_exception", "reason": "closed",
+                    "index": "users_1a2b_3", "index_uuid": "x1" } } },
+            { "delete": { "_index": "users_1", "_id": "2", "status": 403,
+                "error": { "type": "index_closed_exception", "reason": "closed" } } },
+            { "index": { "_index": "users_1", "_id": "3", "status": 201 } }
+        ]
+    });
+    let read = read(&resp, &actions).unwrap();
+    assert!(read.rejected.is_empty(), "{:?}", read.rejected);
+    assert_eq!(
+        read.blocked.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert_eq!(read.blocked[0].1, "index [users_1a2b_3] is closed");
+    assert_eq!(read.blocked[1].1, "index [users_1] is closed");
+    assert!(read.busy.is_empty() && read.missing.is_empty());
+}
+
 /// A role without write permission on one index answers its items 403
 /// `security_exception`: a misconfiguration of that index, blocked like a
 /// write block.

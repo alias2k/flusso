@@ -19,6 +19,11 @@
 //!   deleted, the fresh build is a delete, which lands too. A sibling index
 //!   stays current throughout (stage 9, fresh builds).
 //!
+//! - [`a_closed_index_blocks_its_lane_until_opened`] and
+//!   [`a_reindex_moves_a_closed_index_to_a_new_generation`]: a closed index
+//!   (`POST /<index>/_close`) parks its lane as blocked until it is opened or
+//!   reindexed, and doesn't fail the sink's staging (stage 9, slice 3).
+//!
 //! Requires Docker. Ignored by default; run with:
 //!
 //! ```text
@@ -146,6 +151,51 @@ impl Deployment {
             "{index}/_settings: {}",
             response.text().await.unwrap()
         );
+    }
+
+    /// The concrete generation `index`'s alias points at.
+    async fn generation(&self, index: &str) -> String {
+        let body: serde_json::Value = self
+            .http
+            .get(format!("{}/{index}/_alias", self.os))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let names: Vec<String> = body.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(names.len(), 1, "{index} names one generation: {names:?}");
+        names.into_iter().next().unwrap()
+    }
+
+    /// `POST /<generation>/<action>` (`_close`, `_open`), which must succeed.
+    async fn index_action(&self, generation: &str, action: &str) {
+        let response = self
+            .http
+            .post(format!("{}/{generation}/{action}", self.os))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "{generation}/{action}: {}",
+            response.text().await.unwrap()
+        );
+    }
+
+    /// Wait until `index`'s lane is parked as blocked.
+    async fn blocked(&self, index: &str) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.health(index).kind() != "blocked" {
+            self.still_running();
+            assert!(
+                Instant::now() < deadline,
+                "{index} never parked as blocked: {:?}",
+                self.health(index)
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Wait until `count` indexes are marked seeded.
@@ -383,6 +433,140 @@ async fn a_row_opensearch_refuses_unparks_its_lane_once_fixed_or_deleted() {
         "the deleted row is not in the index"
     );
     assert_eq!(live.name("fixed", "1").await.as_deref(), Some("fixed"));
+    live.still_running();
+    live.task.abort();
+}
+
+/// A closed index (stage 9, slice 3, C1–C3): two indexes' generations are
+/// closed, one under `on_error = "stop"` and one under `skip`. Each lane
+/// parks as blocked with a reason naming the index, nothing is quarantined,
+/// the third index stays current, a blocked lane pins the slot, and opening
+/// the indexes lets both catch up, no restart. Closed again, the sink's
+/// staging (a restart's) still succeeds: one closed index never stops the
+/// sink's start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_closed_index_blocks_its_lane_until_opened() {
+    let pg = start_postgres("closed").await;
+    let os = start_opensearch("closed").await;
+    let live = deploy(
+        &pg,
+        &os,
+        &["shut_stop", "shut_skip", "steady"],
+        FailurePolicies::new(FailurePolicy::Skip).with_override("shut_stop", FailurePolicy::Stop),
+    )
+    .await;
+    live.seeded(3).await;
+    let mut generations = BTreeMap::new();
+    for index in ["shut_stop", "shut_skip"] {
+        let generation = live.generation(index).await;
+        live.index_action(&generation, "_close").await;
+        generations.insert(index, generation);
+    }
+    for index in ["shut_stop", "shut_skip", "steady"] {
+        exec(
+            &pg.pool,
+            &format!("INSERT INTO {index} (id, name) VALUES ('1', 'one'), ('2', 'two')"),
+        )
+        .await;
+    }
+    assert!(
+        live.sees("steady", "1", "one", Duration::from_secs(30))
+            .await,
+        "the steady index stays current beside the closed ones"
+    );
+    for index in ["shut_stop", "shut_skip"] {
+        live.blocked(index).await;
+        if let LaneHealth::Parked { reason, .. } = live.health(index) {
+            assert!(
+                reason.to_string().contains("is closed"),
+                "the reason names the closed index: {reason}"
+            );
+        }
+    }
+    assert!(
+        live.quarantined.0.lock().unwrap().is_empty(),
+        "a closed index quarantines nothing: {:?}",
+        live.quarantined.0.lock().unwrap()
+    );
+    let pinning = live.progress.pinned_by();
+    assert!(
+        pinning == Some(engine::Pin::Lane(lane("shut_stop")))
+            || pinning == Some(engine::Pin::Lane(lane("shut_skip"))),
+        "a closed index's lane pins the slot: {pinning:?}"
+    );
+
+    for generation in generations.values() {
+        live.index_action(generation, "_open").await;
+    }
+    for index in ["shut_stop", "shut_skip"] {
+        for (id, name) in [("1", "one"), ("2", "two")] {
+            assert!(
+                live.sees(index, id, name, Duration::from_secs(90)).await,
+                "{index}/{id} lands once the index is opened"
+            );
+        }
+        assert!(live.health(index).is_open(), "{index} opened again");
+    }
+    assert!(live.quarantined.0.lock().unwrap().is_empty());
+
+    live.index_action(&generations["shut_stop"], "_close").await;
+    live.task.abort();
+    live.sink
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .expect("a closed index doesn't fail the sink's staging (C2)");
+}
+
+/// A closed index cured by a reindex of it instead of opening it (C4): the
+/// lane opens, the new generation is backfilled and seeded, the aliases move
+/// off the closed generation, and the rows read back from the new one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_reindex_moves_a_closed_index_to_a_new_generation() {
+    let pg = start_postgres("reclose").await;
+    let os = start_opensearch("reclose").await;
+    let live = deploy(
+        &pg,
+        &os,
+        &["shut", "steady"],
+        FailurePolicies::new(FailurePolicy::Stop),
+    )
+    .await;
+    live.seeded(2).await;
+    let closed = live.generation("shut").await;
+    live.index_action(&closed, "_close").await;
+    for index in ["shut", "steady"] {
+        exec(
+            &pg.pool,
+            &format!("INSERT INTO {index} (id, name) VALUES ('1', 'one'), ('2', 'two')"),
+        )
+        .await;
+    }
+    live.blocked("shut").await;
+    live.control
+        .send(SinkControl::Reindex {
+            indexes: vec![IndexName::try_new("shut").unwrap()],
+        })
+        .await
+        .unwrap();
+    for (id, name) in [("1", "one"), ("2", "two")] {
+        assert!(
+            live.sees("shut", id, name, Duration::from_secs(90)).await,
+            "shut/{id} is read from the new generation once seeded"
+        );
+    }
+    assert_ne!(
+        live.generation("shut").await,
+        closed,
+        "the aliases moved off the closed generation"
+    );
+    assert!(live.health("shut").is_open());
+    assert!(
+        live.sees("steady", "2", "two", Duration::from_secs(30))
+            .await,
+        "the sibling stays current"
+    );
     live.still_running();
     live.task.abort();
 }

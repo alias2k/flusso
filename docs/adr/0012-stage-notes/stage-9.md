@@ -857,6 +857,65 @@ rare; telling the restart's request apart from an older one needs more state tha
 **X13, stated:** a held item acknowledged at a stop still counts in `is_oldest` until that acknowledgement
 returned; items behind it are not the supervisor's progress.
 
+## 16. Slice 3 (`feat/lane-failure-4`): a closed index is `blocked`
+
+§14.3 re-derived against `main` at `989c27ca` (after slices 1, 2 and #470).
+
+**What OpenSearch answers.** A write to a closed index (`POST /<index>/_close`) fails item by item in a 2xx
+`_bulk`: `{"type":"index_closed_exception","reason":"closed","index":"<name>"}` at status 400. That holds through
+the hash alias with `require_alias` (the alias resolves to the closed generation) and for an unseeded generation
+written by name. Some versions answer the same write with `cluster_block_exception` `FORBIDDEN/4/index closed`;
+that is already blocked. The answer to read is the error's `type`, not the status.
+
+**Where it is classified, today and after.**
+
+- `bulk::is_blocked(status, kind)` is the one place: a bulk response's item lands in `blocked` or in `rejected`.
+  Today `index_closed_exception` is a rejection: `skip` quarantines the documents (lost, as #404 was for write
+  blocks), `stop` parks the lane `refused`, and its probe asks for a fresh build, which is refused the same way.
+- C1: `is_blocked` takes `index_closed_exception` at any status. Its reason, `closed`, names nothing, so the
+  blocked reason becomes `index [<name>] is closed` (the error's `index`, else the action's).
+- The probe of a parked lane writes through the same `write_parts` → `_bulk` path, so it is classified the same
+  way. A `blocked` lane never asks for a fresh build (F2): nothing is wrong with the documents.
+
+**Engine: nothing new.** A blocked item already parks its lane `blocked` (§3): not granted, items unacknowledged,
+probes on the lane's backoff with the item as it is, open again when a probe lands. The lane's applied mark, the
+slot (`pinned_by`) and its fences stay before its first unwritten change; other lanes write on.
+
+**Staging a closed index (C2).** `ensure_index` refreshes a seeded generation once per start (what an earlier run
+left unrefreshed). `_refresh` on a closed index fails with `index_closed_exception`, so today a closed index fails
+`ensure_index`, so the whole sink's staging fails, at start and at every restart of the sink's run: every lane of
+the sink stops, not one (the known limit of §15.3). C2: that refresh skips an index it can't reach
+(`?ignore_unavailable=true`, as the caught-up write's refresh already does). A closed index then stages, its lane
+opens, its first write parks it `blocked`, and opening the index lets it land. The rest of `ensure_index` reads
+settings and aliases, which a closed index answers. The seed's own refresh (`mark_seeded`) stays strict: a closed
+generation is never marked seeded (its backfill parks before it would be; one closed between its backfill's last
+write and its seed fails that strict refresh, which fails the sink's run once, and the restart settles the lane
+`blocked`). `list_indices` needs no change: `_cat/indices` lists closed indexes by default (tried against
+OpenSearch 2.19), so a reindex never picks a closed generation's name for its new one. The meta index is outside
+all of this: a closed `flusso_meta` still fails staging.
+
+**Meeting what came since.**
+
+- *Fresh builds (slice 1):* a closed index is `blocked`, so no fresh build is asked.
+- *Reindex (slice 2):* the way out is to open the index. A reindex also works: it stages a new open generation and
+  the lane opens (X4: a blocked lane's parked item is held until the seed); the seed moves the aliases off the
+  closed generation and drops it. Pinned by a live test, since removing an alias from a closed index is the step to
+  prove.
+- *An owed reindex:* unaffected; its retries stage a new generation, never write the closed one.
+- *A stop:* a `blocked` lane is probed once and, still closed, holds the stop until the deadline (exit 1), as in
+  §15.3's table; unchanged.
+- *`/status` and metrics:* lane `health: blocked`, `reason: index [<name>] is closed`;
+  `flusso_lane_parked{why="blocked"}` 1, so `FlussoLaneParked` fires past its window.
+
+**Rules and tests.**
+
+| # | Rule | Test |
+| --- | --- | --- |
+| C1 | `index_closed_exception` at any status is blocked, never rejected; its reason names the index | `bulk::tests::a_closed_index_is_blocked_never_rejected` |
+| C2 | Staging a closed index succeeds: the per-start refresh skips it; the seed's refresh doesn't | `lane_parking`'s `a_closed_index_blocks_its_lane_until_opened` (live) |
+| C3 | A closed index parks its lane `blocked` under `stop` and `skip` alike, quarantines nothing, keeps the other lanes current, pins the slot, and lands once opened, no restart | the same |
+| C4 | A reindex of a closed index moves it to a new generation | `lane_parking`'s `a_reindex_moves_a_closed_index_to_a_new_generation` (live) |
+
 ## User-visible, second half
 
 What the documentation agent writes the manual from, per slice. Nothing else in this note is meant for it.
@@ -945,3 +1004,26 @@ What the documentation agent writes the manual from, per slice. Nothing else in 
 10. **A parked lane's fresh build** (slice 1) works for every index; an item whose documents' keys can't be told
     apart from their ids (composite keys whose parts hold `:`, rendering alike) is probed as written instead of
     rebuilt. Nothing to configure.
+
+### Slice 3: a closed index is `blocked` (PR #473)
+
+1. **A closed index parks its lane as `blocked`, not as a refusal.** A write to an index closed with
+   `POST /<index>/_close` used to count as a rejected document: under `on_error = "skip"` the documents were
+   quarantined (lost), under `stop` the lane parked as `refused` and asked for fresh builds that were refused the
+   same way. Now the lane parks `blocked`, whatever `on_error` says, and nothing is quarantined.
+2. **Opening the index unsticks it.** The lane writes the same item again on its backoff (`[backoff]`); once the
+   index is opened (`POST /<index>/_open`) the next probe lands, the lane opens and catches up, with no restart.
+   No fresh build is asked for: nothing is wrong with the documents.
+3. **Meanwhile:** the other indexes of the sink keep writing; the closed index's lane holds the replication slot
+   (`pinned_by` names it) and its fences wait, as for a write block.
+4. **`/status` and metrics:** the lane's `health` is `blocked`, its `reason` `index [<generation>] is closed`;
+   `flusso_lane_parked{why="blocked"}` is 1, so `FlussoLaneParked` fires once it lasts.
+5. **A closed index no longer stops the sink from starting.** Starting flusso (or restarting a sink's run) with
+   one of its indexes closed used to fail that sink's staging, so none of its indexes was written. Now the sink
+   starts, and only the closed index's lane parks, at its first write.
+6. **A reindex is another way out:** `flusso reindex <index> --sink <sink>` builds a new generation, opens the
+   lane, and once backfilled moves the index's aliases off the closed generation and drops it.
+7. **At a stop** a closed index's lane is probed once and, still closed, holds the stop until its deadline (exit
+   1), as for any blocked lane.
+8. **Runbook, a lane `blocked` with `index [...] is closed`:** open the index, or reindex it. Nothing to configure.
+

@@ -133,9 +133,12 @@ impl Sink for OpensearchSink {
             debug!(index, "generation exists; leaving its mapping untouched");
             // What an earlier run wrote without a refresh is remembered
             // nowhere. One refresh per start makes it searchable, so a run can
-            // begin from "everything written so far is searchable".
+            // begin from "everything written so far is searchable". A closed
+            // generation is skipped, not a failure: staging it must not stop
+            // the sink, and its lane parks as blocked at its first write
+            // (stage 9 slice 3, C2).
             if seeded {
-                self.refresh_index(&index).await?;
+                self.refresh_index_if_open(&index).await?;
             }
         } else if seeded {
             warn!(
