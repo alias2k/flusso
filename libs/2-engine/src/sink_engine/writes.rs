@@ -2117,12 +2117,7 @@ impl<'a> Run<'a> {
                 .iter()
                 .find(|queued| queued.lane == lane)
                 .and_then(|queued| match &queued.item {
-                    // Every document's key, or none can be built again.
-                    Queue::Batch { batch, .. } if !batch.envelopes.is_empty() => batch
-                        .envelopes
-                        .iter()
-                        .map(|envelope| envelope.key.clone())
-                        .collect::<Option<Vec<_>>>(),
+                    Queue::Batch { batch, .. } => keys_of(batch),
                     _ => None,
                 });
             let (Some(keys), Some(run)) = (keys, self.lanes.get_mut(lane)) else {
@@ -3035,6 +3030,30 @@ fn run_rejected(report: &WriteReport, lane: usize, lanes: &[LaneRun]) -> Vec<Str
         .collect()
 }
 
+/// The root keys of `batch`'s documents, in envelope order, matched by
+/// rendered id against the build's ids the item carries (a build's ids are
+/// a superset: documents left out as failed, or by F9's `without`, have no
+/// envelope); `None` when the item carries none or an envelope has no match,
+/// and then the probe writes the item itself (F2): never a wrong key.
+fn keys_of(batch: &Batch) -> Option<Vec<kernel::RowKey>> {
+    let ids = batch.ids.as_ref()?;
+    if batch.envelopes.is_empty() {
+        return None;
+    }
+    let by_id: std::collections::HashMap<String, &kernel::DocumentId> =
+        ids.iter().map(|id| (id.rendered(), id)).collect();
+    batch
+        .envelopes
+        .iter()
+        .map(|envelope| {
+            by_id
+                .get(&envelope.id)
+                .filter(|id| id.index == envelope.index)
+                .map(|id| id.key.clone())
+        })
+        .collect()
+}
+
 /// A parked or restaging lane's due time (`None`), or the next delivery of
 /// the substitute lane while a lane `awaits` one: one branch of the run's
 /// loop for both, so a sink with every lane open polls what `main` polled.
@@ -3119,6 +3138,93 @@ fn document_hash(envelope: &Envelope) -> u64 {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn id(index: &str, key: i64) -> kernel::DocumentId {
+        kernel::DocumentId {
+            index: IndexName::try_new(index).unwrap(),
+            key: kernel::RowKey(vec![(
+                kernel::ColumnName::try_new("id").unwrap(),
+                kernel::GenericValue::BigInt(key),
+            )]),
+        }
+    }
+
+    fn envelope(index: &str, key: i64) -> Envelope {
+        Envelope::delete(
+            IndexName::try_new(index).unwrap(),
+            key.to_string(),
+            None,
+            chrono::Utc::now(),
+        )
+    }
+
+    /// Stage 9 (the item carries its build's ids): the keys a fresh build asks
+    /// for are matched by rendered id, in envelope order, against a superset
+    /// (documents left out have no envelope); an envelope with no match, an
+    /// id of another index, or an item with no ids gives none, and the probe
+    /// writes the item itself (F2).
+    #[test]
+    fn a_parked_items_keys_come_from_its_builds_ids_by_rendered_id() {
+        let ids = Arc::new(vec![id("orders", 1), id("orders", 2), id("orders", 3)]);
+        let batch = |envelopes: Vec<Envelope>, ids: Option<Arc<Vec<kernel::DocumentId>>>| Batch {
+            envelopes: envelopes.into(),
+            ids,
+            ..Batch::default()
+        };
+        assert_eq!(
+            keys_of(&batch(
+                vec![envelope("orders", 3), envelope("orders", 1)],
+                Some(Arc::clone(&ids))
+            )),
+            Some(vec![id("orders", 3).key, id("orders", 1).key]),
+            "a superset, matched in envelope order"
+        );
+        assert_eq!(
+            keys_of(&batch(vec![envelope("orders", 4)], Some(Arc::clone(&ids)))),
+            None,
+            "an envelope with no id"
+        );
+        assert_eq!(
+            keys_of(&batch(vec![envelope("users", 1)], Some(Arc::clone(&ids)))),
+            None,
+            "an id of another index"
+        );
+        assert_eq!(
+            keys_of(&batch(vec![envelope("orders", 1)], None)),
+            None,
+            "no ids"
+        );
+    }
+
+    /// Stage 9: an item stripped of superseded documents (F9) keeps its
+    /// build's id vector as it was, shared, not copied, and its remaining
+    /// envelopes still find their keys in it.
+    #[test]
+    fn a_stripped_item_shares_its_ids_and_still_finds_its_keys() {
+        let ids = Arc::new(vec![id("orders", 1), id("orders", 2), id("orders", 3)]);
+        let item = Batch {
+            envelopes: vec![
+                envelope("orders", 1),
+                envelope("orders", 2),
+                envelope("orders", 3),
+            ]
+            .into(),
+            ids: Some(Arc::clone(&ids)),
+            ..Batch::default()
+        };
+        let stripped = without(item, |id| id == "2");
+        assert!(
+            stripped
+                .ids
+                .as_ref()
+                .is_some_and(|kept| Arc::ptr_eq(kept, &ids)),
+            "the same vector"
+        );
+        assert_eq!(
+            keys_of(&stripped),
+            Some(vec![id("orders", 1).key, id("orders", 3).key])
+        );
+    }
 
     #[test]
     fn a_document_is_keyed_by_its_index_and_id() {

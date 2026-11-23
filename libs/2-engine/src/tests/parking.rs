@@ -1078,11 +1078,18 @@ fn keyed(of: &IndexName, ids: &[i64], position: Option<u64>, build: u64) -> Lane
                     position.map(Position::new),
                     chrono::Utc::now(),
                 )
-                .with_key(key(*id))
             })
             .collect::<Vec<_>>()
             .into(),
         build: Some(build),
+        ids: Some(Arc::new(
+            ids.iter()
+                .map(|id| kernel::DocumentId {
+                    index: of.clone(),
+                    key: key(*id),
+                })
+                .collect(),
+        )),
         ..Default::default()
     })
 }
@@ -1150,7 +1157,6 @@ fn answering(rig: &Rig, builder: Arc<Builder>, first_build: u64) -> tokio::task:
                 .map(|id| {
                     if deleted.contains(id) {
                         Envelope::delete(index.clone(), id.to_string(), None, chrono::Utc::now())
-                            .with_key(key(*id))
                     } else {
                         Envelope::upsert(
                             index.clone(),
@@ -1159,8 +1165,14 @@ fn answering(rig: &Rig, builder: Arc<Builder>, first_build: u64) -> tokio::task:
                             None,
                             chrono::Utc::now(),
                         )
-                        .with_key(key(*id))
                     }
+                })
+                .collect();
+            let built_ids = ids
+                .iter()
+                .map(|id| kernel::DocumentId {
+                    index: index.clone(),
+                    key: key(*id),
                 })
                 .collect();
             substitutes
@@ -1170,6 +1182,7 @@ fn answering(rig: &Rig, builder: Arc<Builder>, first_build: u64) -> tokio::task:
                     batch: Batch {
                         envelopes: envelopes.into(),
                         build: Some(build),
+                        ids: Some(Arc::new(built_ids)),
                         ..Default::default()
                     },
                 })

@@ -272,13 +272,13 @@ lane is full *because* it is parked). So substitutes get their own path:
 - **`Request::Rebuild { index, sink, keys: Vec<RowKey>, ticket }`** (port): up the request lane, routed by
   the dispatcher to the index's builder inbox like a `Backfill`.
 
-**The keys (open point 2, decided: the item carries them).** An envelope's `id` is the key rendered as
-text, composite parts joined with `:`; that is not reversible (a text part may hold `:`), and a reverse map
-would have to remember every unacknowledged document. So `Batch.keys: Arc<[RowKey]>`, one per envelope, in
-envelope order, empty when unknown (an item built before this, or by a test). The builder *moves* each
-`DocumentId`'s key into it as it renders the envelope (no clone, one allocation per batch). `RowKey` moves
-from the `source` port to the kernel (it is kernel types only; `source` re-exports it), so the stream port
-can name it.
+**The keys (open point 2, decided: the item carries its build's ids; §15.0 as built).** An envelope's `id` is
+the key rendered as text, composite parts joined with `:`; that is not reversible (a text part may hold `:`),
+and a reverse map would have to remember every unacknowledged document. So each lane item holds, by refcount,
+the id vector its build was handed (`Batch.ids: Option<Arc<Vec<DocumentId>>>`, `#[serde(skip)]`), and the
+sink engine finds a parked item's keys in it by rendered id when it asks for a fresh build. `DocumentId` and
+`RowKey` move from the `source` port to the kernel (kernel types only; `source` re-exports both), so the
+stream port can name them.
 
 **Build numbers.** `Batch.build: Option<u64>`: the index's build number, from one counter per index that
 outlives builder restarts and engine runs (on `IngestEngine`), taken at publish. Slots publish in grant
@@ -377,7 +377,7 @@ one is the index's live failure (`state: down`, `last_error.live`, `restarts.liv
 
 ### 14.6 Slice plan
 
-1. **Fresh builds** (14.1): port (`RowKey` to the kernel, `Batch.keys`, `Batch.build`,
+1. **Fresh builds** (14.1): port (`RowKey` to the kernel, `Batch.keys` (now `Batch.ids`, §15.0), `Batch.build`,
    `Request::Rebuild`, `Stream::substitutes`, `Substitute`), channel adapter, ingest (dispatcher, builder,
    publish), sink engine (ask, substitute probe, F9). Also the seeded schedule with random refusals and
    parks, and the live `shutdown` e2e with a parked lane (§11's two not added).
@@ -628,14 +628,61 @@ of three runs. What slice 1 added per published batch: a `Vec<RowKey>` of the do
 `Arc<[RowKey]>` (two allocations and a copy of 24 bytes per document), one refcount pair per lane for that `Arc`,
 one relaxed atomic add for the build number, and a `Batch` 32 bytes larger.
 
-**Now** the key is a field of the envelope (`Envelope.key: Option<RowKey>`, `#[serde(skip)]`): the builder moves
-each document's key into the envelope it already builds, so the keys cost no allocation and no copy of their
-own, and `Batch.keys` is gone. What a published batch pays over `main`, for one index or several: one relaxed
-`fetch_add` (the build number), a `Batch` 16 bytes larger (`build`), and an `Envelope` 24 bytes larger (copied
-once with the rest when the envelope vector becomes the shared `Arc<[Envelope]>`). The keys are dropped with the
-envelopes when the last lane acknowledges the item, where `main` dropped them at build. Keys do not survive a
-serializing stream (none exists; the in-process channel moves items): an item read back from bytes carries none,
-and its lane's probe writes the item itself (F2).
+A first answer (`d054ce47`) moved each key into its envelope (`Envelope.key`). It cost no allocation, but every
+envelope grew 24 bytes, and every pass a sink engine makes over its envelopes (admission hashing, rendering,
+the F9 checks) walked the wider stride. With two sinks that is paid twice: the gate read `sinks2/1` +7.6%,
+`sinks2/256` +9.1%, `snapshot/rows` +6.5% over `90073906`. It is replaced.
+
+**As built: the item carries its build's own id vector.**
+
+- **What an item carries.** `Batch.ids: Option<Arc<Vec<DocumentId>>>` (`#[serde(skip)]`): the vector of ids the
+  build was handed, the one the builder already made, shared by refcount with every lane of the build (the
+  envelopes are split per index; the vector is not). `Envelope` is `90073906`'s again, byte for byte.
+- **Matching.** `writes.rs`'s `keys_of` renders each id (`DocumentId::rendered`, the same text as the envelope's
+  `id`) and looks each envelope up by its id and index, in envelope order. The vector is a superset: documents
+  left out as failed under `skip` (#198), other indexes' documents, and documents an F9 strip (`without`) took
+  out are in it and unmatched; `without` keeps the same `Arc`, no copy. An envelope with no match, or an item
+  with no ids, gives no keys: the probe writes the item itself (F2), never with a wrong key. Only a parked
+  item's probe pays for the matching (one map of the build's ids).
+- **Deletes and backfill pages** carry ids like live upserts: a delete is built from its id like any document.
+- **A serializing stream** carries none (`#[serde(skip)]`; none exists, the channel moves items).
+- **The reuse pool is kept.** `main` reused a build's id vector at once (`Arc::try_unwrap` → `spare`). Now the
+  vector is lent to the items, so `Builds::land` keeps a handle in `lent` (at most `LENT` = 64) and `spare()`
+  takes the oldest back once only that handle holds it (`Arc::strong_count == 1`, then `try_unwrap` and
+  `clear`). Giving the pool up would have cost one `Vec` allocation per build; keeping it costs none in steady
+  state. It allocates when the oldest lent vector is still held by an unacknowledged item, or more than 64
+  are out (a stalled sink): one `Vec`, as before slice 1 when a build outran its spare. The `DocumentId`s' own
+  heap (the key's values) is freed at `clear`, in the builder, as `main` freed it.
+
+**What a published batch pays over `90073906`** (the path where nothing is refused):
+
+| Cost | Per |
+| --- | --- |
+| One relaxed `fetch_add` (the build number) | build |
+| One refcount increment for the pool's handle, one decrement when the build's own handle is dropped after publishing | build |
+| One refcount increment per lane item, its decrement when the item is acknowledged | lane |
+| An atomic load (`strong_count`) and a `try_unwrap` when the vector comes back | build |
+| `Batch` 24 bytes larger (`build`: 16, `ids`: 8) | lane item |
+| Nothing per envelope, no allocation in steady state | — |
+
+That is more than "one atomic add": the ids ride on refcounts, uncontended, on the cache line the build just
+wrote. The envelopes already took one refcount per lane on `main`; the ids take a second. A sink engine's pass
+over its envelopes costs what it did on `90073906`.
+
+**Two sinks.** What made two sinks cost more was the wider envelope, walked by each sink engine; it is gone.
+Everything else per lane while every lane is open is integer work: the F9 strip is skipped while no lane of the
+engine is superseding (`superseding == 0`), the held-item lists are empty, and `keys_of` runs only for a parked
+lane's probe.
+
+Pinned by: `every_lane_of_a_build_shares_its_one_id_vector` (two sinks: one vector, by pointer),
+`a_parked_items_keys_come_from_its_builds_ids_by_rendered_id` (superset in envelope order, an unmatched
+envelope, another index, no ids), `a_stripped_item_shares_its_ids_and_still_finds_its_keys` (`without`),
+`an_id_list_lent_to_items_is_reused_once_they_are_gone` (the pool),
+`every_item_carries_its_keys_and_a_growing_build_number` (live and backfill items carry ids),
+`a_rebuild_is_built_once_and_sent_to_its_sink_only` (a delete's key), `stream`'s
+`an_item_read_back_from_bytes_carries_no_ids`. Mutations, each caught: `keys_of` ignoring the index; the pool
+never taking a vector back; a live item, then a backfill page, carrying no ids; `without` copying the ids; each
+lane copying the ids; `ids` serialized (`DocumentId` has no serde: does not compile).
 
 ### 15.1 Part 1: reindex a parked, blocked or restaging lane (O4 as recommended)
 

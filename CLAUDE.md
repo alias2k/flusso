@@ -1699,7 +1699,7 @@ is the one concrete piece.
   The health (`LaneHealth`, public; `on_lane_health`/`on_lane_probe` events) lives on the
   `SinkEngine` and outlives a run; a parked lane stays parked across a failed run, on its schedule.
   **A refused lane's probe is a fresh build** (stage 9 second half, slice 1; the note's §14.1): when its
-  probe is due and its front item carries its keys (`Envelope.key`, the document's `RowKey`, never serialized, moved in as `commit.rs`'s `envelopes` builds the envelope: no allocation of its own; `RowKey` lives in the kernel), the sink engine offers
+  probe is due and its front item's keys are found (`Batch.ids`: the build's own `Arc<Vec<DocumentId>>`, shared by refcount with every lane, never serialized; `writes.rs`'s `keys_of` matches each envelope by rendered id and index, and an unmatched one means no keys, so the item itself is probed; the vector is lent, and `Builds::spare` takes it back from `lent` once only the pool holds it, so no allocation per build; `DocumentId`/`RowKey` live in the kernel; the note's §15.0 has the per-batch cost), the sink engine offers
   `Request::Rebuild { index, sink, keys, ticket }` (`now_or_never`: a request lane nobody reads never
   stalls the sink) and waits for the answer on its sink's **substitute lane** (`Stream::substitutes`,
   a default that answers `Unsupported` and leaves the old same-item probe; the channel adapter has one per

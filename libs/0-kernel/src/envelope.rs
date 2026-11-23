@@ -146,14 +146,6 @@ pub struct Envelope<D = GenericValue> {
     /// The built document; absent on a delete.
     #[serde(default = "Option::default", skip_serializing_if = "Option::is_none")]
     pub document: Option<D>,
-    /// The document's root key, inside the pipeline only: what a sink engine
-    /// hands back to have the document built again (a lane parked on a
-    /// refusal). Never written: moved here as the envelope is built, so it
-    /// costs no allocation of its own. It takes part in equality: an envelope
-    /// read back from its serialized form (no key) differs from the
-    /// pipeline's copy (with one).
-    #[serde(skip)]
-    pub key: Option<crate::RowKey>,
 }
 
 /// At-a-glance facts about a serialized document.
@@ -179,15 +171,7 @@ impl<D> Envelope<D> {
             id: self.id,
             meta: self.meta,
             document: self.document.map(f),
-            key: self.key,
         }
-    }
-
-    /// The same envelope, carrying its document's root `key`.
-    #[must_use]
-    pub fn with_key(mut self, key: crate::RowKey) -> Self {
-        self.key = Some(key);
-        self
     }
 }
 
@@ -238,7 +222,6 @@ impl Envelope {
             id: id.into(),
             meta: None,
             document: Some(document),
-            key: None,
         }
     }
 
@@ -259,7 +242,6 @@ impl Envelope {
             id: id.into(),
             meta: None,
             document: None,
-            key: None,
         }
     }
 }

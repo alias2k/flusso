@@ -69,7 +69,6 @@ impl StdoutSink {
             id: envelope.id.clone(),
             meta,
             document: envelope.document.as_ref().map(Json),
-            key: None,
         })
     }
 }

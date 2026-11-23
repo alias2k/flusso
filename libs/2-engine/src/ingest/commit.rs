@@ -619,6 +619,7 @@ impl IngestEngine {
             changes,
             steps,
         } = granted;
+        let ids = built.ids;
         let (envelopes, by_index) = self.envelopes(built.documents?, Some(position))?;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Live));
@@ -681,6 +682,7 @@ impl IngestEngine {
                             walked: None,
                             ticket: None,
                             build,
+                            ids: ids.clone(),
                         }),
                     ));
                 }
@@ -721,6 +723,7 @@ impl IngestEngine {
         lanes: &Lanes,
         build: Option<u64>,
     ) -> Result<()> {
+        let ids = built.ids;
         let (envelopes, by_index) = self.envelopes(built.documents?, None)?;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Backfill));
@@ -751,6 +754,7 @@ impl IngestEngine {
                         walked: marks.get(index).cloned(),
                         ticket: Some(*ticket),
                         build,
+                        ids: ids.clone(),
                     }),
                 ));
             }
@@ -776,6 +780,7 @@ impl IngestEngine {
         rebuild: super::builds::Rebuild,
         build: Option<u64>,
     ) -> Result<()> {
+        let ids = built.ids;
         let (envelopes, _) = self.envelopes(built.documents?, None)?;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Live));
@@ -794,6 +799,7 @@ impl IngestEngine {
                 batch: Batch {
                     envelopes: envelopes.into(),
                     build,
+                    ids,
                     ..Batch::default()
                 },
             })
@@ -900,17 +906,12 @@ impl IngestEngine {
         let mut envelopes = Vec::with_capacity(documents.len());
         let ts = Utc::now();
         for document in documents {
-            // The key is moved into its envelope, not cloned: an item carries
-            // its documents' keys for a fresh build (stage 9) at no
-            // allocation of its own.
             let envelope = match document {
                 Document::Upsert { id, body } => {
-                    let rendered = document_id(&id);
-                    Envelope::upsert(id.index, rendered, body, position, ts).with_key(id.key)
+                    Envelope::upsert(id.index.clone(), document_id(&id), body, position, ts)
                 }
                 Document::Delete { id } => {
-                    let rendered = document_id(&id);
-                    Envelope::delete(id.index, rendered, position, ts).with_key(id.key)
+                    Envelope::delete(id.index.clone(), document_id(&id), position, ts)
                 }
                 Document::Failed { id, failure } => {
                     self.document_failed(&id, failure)?;

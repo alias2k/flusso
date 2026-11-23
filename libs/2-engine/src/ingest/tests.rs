@@ -1029,11 +1029,9 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
         let position = item.position();
         if let stream::LaneItem::Batch(batch) = &item {
             self.items.lock().unwrap().push((
-                batch
-                    .envelopes
-                    .iter()
-                    .map(|envelope| envelope.key.as_ref().map_or(-1, id_of))
-                    .collect(),
+                batch.ids.as_ref().map_or_else(Vec::new, |ids| {
+                    ids.iter().map(|id| id_of(&id.key)).collect()
+                }),
                 batch
                     .envelopes
                     .iter()
@@ -2656,6 +2654,50 @@ async fn a_batch_split_across_lanes_gives_its_bytes_back_once_the_last_lane_land
     crate::tests::assert_released(&budget).await;
     for task in tasks {
         task.abort();
+    }
+}
+
+/// Stage 9: with two sinks, each lane's item holds the one id vector its
+/// build made, by refcount: nothing about the ids is copied per lane.
+#[tokio::test(start_paused = true)]
+async fn every_lane_of_a_build_shares_its_one_id_vector() {
+    let audit = SinkName::try_new("audit").unwrap();
+    let sinks = [sink_name(), audit.clone()];
+    let stream = Arc::new(ChannelStream::over(64, [users(), orders()], sinks.clone()));
+    let db = Database::new(0, (0..4).map(Change::upsert).collect());
+    let ingest = IngestEngine::new(
+        Arc::new(Feed::new(&db)) as Arc<dyn ChangeCapture>,
+        Arc::new(TwoIndexes),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        sinks.to_vec(),
+        Arc::new(crate::Progress::of([users(), orders()], sinks.clone())),
+    )
+    .with_batch(batch(4));
+    tokio::time::timeout(Duration::from_secs(60), ingest.run())
+        .await
+        .expect("the run ends")
+        .unwrap();
+    for index in [users(), orders()] {
+        let mut shared = Vec::new();
+        for sink in &sinks {
+            let mut lane = stream
+                .lane(&stream::LaneKey::new(index.clone(), sink.clone()))
+                .unwrap();
+            let delivery = tokio::time::timeout(Duration::from_secs(5), lane.consumer.recv())
+                .await
+                .expect("the item waits on the lane")
+                .unwrap()
+                .unwrap();
+            let (item, _handle) = delivery.into_parts();
+            let stream::LaneItem::Batch(batch) = item else {
+                panic!("a batch first");
+            };
+            shared.push(batch.ids.expect("the item carries its build's ids"));
+        }
+        assert!(
+            Arc::ptr_eq(&shared[0], &shared[1]),
+            "{index}: one vector, two lanes"
+        );
     }
 }
 

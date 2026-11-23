@@ -100,6 +100,14 @@ pub struct Batch {
     /// number is a later build. `None` when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<u64>,
+    /// The ids the item's build was asked for, shared by reference count with
+    /// every lane the build went to: what a sink engine hands back in a
+    /// [`Request::Rebuild`] (a superset of the envelopes': documents left out
+    /// have no envelope, so a sink matches them by rendered id). Inside the
+    /// pipeline only: never serialized, so an item read back from bytes
+    /// carries none and can't be built again.
+    #[serde(skip)]
+    pub ids: Option<Arc<Vec<kernel::DocumentId>>>,
 }
 
 /// A fresh build of a parked lane's item, sent back to that lane's sink
@@ -345,4 +353,32 @@ pub trait Stream: std::fmt::Debug + Send + Sync {
     /// unacknowledged. The daemon waits for this before it stops the sink
     /// engines after the source stream ended.
     fn is_idle(&self) -> bool;
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// Stage 9: a build's ids live only in memory. An item read back from
+    /// bytes carries none, so its lane's probe writes the item itself (F2)
+    /// rather than ask with keys it cannot vouch for.
+    #[test]
+    fn an_item_read_back_from_bytes_carries_no_ids() {
+        let ids = vec![kernel::DocumentId {
+            index: IndexName::try_new("orders").unwrap(),
+            key: RowKey::from_text(kernel::ColumnName::try_new("id").unwrap(), "7"),
+        }];
+        let item = LaneItem::Batch(Batch {
+            build: Some(3),
+            ids: Some(Arc::new(ids)),
+            ..Batch::default()
+        });
+        let read: LaneItem = serde_json::from_str(&serde_json::to_string(&item).unwrap()).unwrap();
+        let LaneItem::Batch(batch) = read else {
+            panic!("a batch reads back as a batch");
+        };
+        assert_eq!((batch.build, batch.ids), (Some(3), None));
+    }
 }

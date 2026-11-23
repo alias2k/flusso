@@ -110,11 +110,11 @@ async fn a_rebuild_is_built_once_and_sent_to_its_sink_only() {
     assert_eq!(
         substitute
             .batch
-            .envelopes
-            .iter()
-            .map(|envelope| envelope.key.clone())
-            .collect::<Vec<_>>(),
-        [Some(key(5)), Some(key(25))]
+            .ids
+            .as_ref()
+            .map(|ids| ids.iter().map(|id| id.key.clone()).collect::<Vec<_>>()),
+        Some(vec![key(5), key(25)]),
+        "the build's own ids, shared with the item"
     );
     assert!(substitute.batch.build.is_some());
     assert_eq!(
@@ -165,7 +165,10 @@ async fn every_item_carries_its_keys_and_a_growing_build_number() {
     let mut last = 0;
     for (keys, ids, build) in &items {
         let rendered: Vec<i64> = ids.iter().map(|id| id.parse().unwrap()).collect();
-        assert_eq!(keys, &rendered, "a key per envelope, in envelope order");
+        assert!(
+            rendered.iter().all(|id| keys.contains(id)),
+            "the build's ids hold every envelope's: {keys:?} for {rendered:?}"
+        );
         let build = build.expect("a build number");
         assert!(build > last, "{build} after {last}");
         last = build;

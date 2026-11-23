@@ -60,6 +60,9 @@ use crate::observer::{Observer, Wake, Work};
 use crate::progress::{Progress, Step, Token};
 use crate::sink_engine::flights::Flights;
 
+/// The most id lists a builder keeps lent to published items for reuse.
+const LENT: usize = 64;
+
 /// The bytes per document a build is first estimated at, before any build
 /// of its kind landed: ADR 0012's measured `users` document.
 const FIRST_ESTIMATE: usize = 16 * 1024;
@@ -122,6 +125,10 @@ pub(super) struct WalkFailure {
 pub(super) struct Built {
     pub(super) documents: Result<Vec<Document>>,
     pub(super) took: Duration,
+    /// The ids the build was asked for: shared, by reference count, with the
+    /// lane items it publishes, so a parked lane can have them built again
+    /// (stage 9); none for a build that panicked.
+    pub(super) ids: Option<Arc<Vec<DocumentId>>>,
 }
 
 /// What [`Builds::start`] hands a build: the ids, given back when it ends,
@@ -264,6 +271,8 @@ pub(super) struct Builds {
     /// documents to build (stage 9).
     rebuilds: VecDeque<(Vec<DocumentId>, Rebuild)>,
     spare: Vec<Vec<DocumentId>>,
+    /// Id lists lent to published items, oldest first (`spare`).
+    lent: VecDeque<Arc<Vec<DocumentId>>>,
     budget: Option<Arc<Budget>>,
     /// Bytes per document, per index, live and backfill: a running average
     /// of what landed, which a grant reserves per id.
@@ -367,6 +376,7 @@ impl Builds {
             halted: false,
             walk_failure: None,
             spare: Vec::new(),
+            lent: VecDeque::new(),
             budget,
             per_document: PerDocument::default(),
             reserved: Vec::new(),
@@ -817,11 +827,25 @@ impl Builds {
             .then(|| documents.to_vec())
     }
 
-    /// An empty id list to fill, reusing one a finished build gave back.
+    /// An empty id list to fill, reusing one a finished build gave back, or
+    /// the oldest one lent to published items once nothing else holds it (one
+    /// reference count read), so the items carrying a build's ids cost no
+    /// allocation of their own.
     pub(super) fn spare(&mut self, capacity: usize) -> Vec<DocumentId> {
-        self.spare
-            .pop()
-            .unwrap_or_else(|| Vec::with_capacity(capacity))
+        if let Some(ids) = self.spare.pop() {
+            return ids;
+        }
+        if self
+            .lent
+            .front()
+            .is_some_and(|ids| Arc::strong_count(ids) == 1)
+            && let Some(ids) = self.lent.pop_front()
+            && let Ok(mut ids) = Arc::try_unwrap(ids)
+        {
+            ids.clear();
+            return ids;
+        }
+        Vec::with_capacity(capacity)
     }
 
     /// Queue `SnapshotComplete` behind every slot granted so far.
@@ -898,7 +922,11 @@ impl Builds {
             }
             Output {
                 ids,
-                built: Built { documents, took },
+                built: Built {
+                    documents,
+                    took,
+                    ids: None,
+                },
                 bytes,
             }
         });
@@ -991,17 +1019,23 @@ impl Builds {
                     slot.charges
                         .insert(index, Arc::new(reservation.settle(landed)));
                 }
-                if let Ok(mut ids) = Arc::try_unwrap(ids) {
-                    ids.clear();
-                    self.spare.push(ids);
+                // Lent to the items it publishes; back in the pool once every
+                // copy of them is gone (`spare`).
+                if self.lent.len() >= LENT {
+                    self.lent.pop_front();
                 }
-                built
+                self.lent.push_back(Arc::clone(&ids));
+                Built {
+                    ids: Some(ids),
+                    ..built
+                }
             }
             None => Built {
                 documents: Err(EngineError::Source(source::SourceError::Connection(
                     "a document build panicked".to_owned(),
                 ))),
                 took: Duration::ZERO,
+                ids: None,
             },
         };
         // A walk's failure is the walk's alone beside other builders (slice
@@ -1163,6 +1197,20 @@ mod tests {
 
     use super::*;
     use crate::ingest::confirm::CONFIRM_TICK;
+
+    /// Stage 9: a build's id list lent to the items it published comes back
+    /// to the pool once nothing else holds it, so carrying the ids costs no
+    /// allocation per build; while an item still holds it, a new one is made.
+    #[test]
+    fn an_id_list_lent_to_items_is_reused_once_they_are_gone() {
+        let mut builds = Builds::new(2, None);
+        let lent = Arc::new(Vec::with_capacity(512));
+        let held_by_an_item = Arc::clone(&lent);
+        builds.lent.push_back(lent);
+        assert_eq!(builds.spare(4).capacity(), 4, "an item still holds it");
+        drop(held_by_an_item);
+        assert_eq!(builds.spare(4).capacity(), 512, "back from the item");
+    }
 
     /// A release landing right after the budget refused a
     /// batch, before anything else, still wakes the engine at once; the wake
