@@ -660,7 +660,7 @@ probing its item (now into the new generation), a restaging lane keeps its stagi
 | X1 | A reindex of a lane not open opens it, its backoff forgotten | `a_reindex_opens_a_parked_lane_and_holds_its_item_until_seeded` |
 | X2 | The parked item is not written: held, unacknowledged, until the reindexed index is seeded (its `SnapshotComplete` for the new request), then acknowledged and reported applied | the same |
 | X3 | Items behind it are written into the new generation, in lane order; their positions are applied only after the held one's (fences report in key order), so nothing counts as landed before the new generation holds the documents | the same |
-| X4 | A blocked lane: the same | `a_reindex_opens_a_blocked_lane_the_same_way` |
+| X4 | A blocked lane: the same | `a_reindex_opens_a_parked_lane_and_holds_its_item_until_seeded` (its blocked case) |
 | X5 | A restaging lane opens; its held items are written (they were held only for a missing target) | `a_reindex_opens_a_restaging_lane_and_writes_its_items` |
 | X6 | With the lane not open, an outstanding backfill is cut and asked for again, its walk checkpoint forgotten; with the lane open, the reindex is ignored as before | `a_reindex_during_a_backfill_cuts_it_and_asks_again`, `a_reindex_while_the_fresh_backfill_runs_stages_nothing` |
 | X7 | A run failing before the seed: the held item comes back and is held again (the lane's state remembers its build number), so it is never written | `a_held_item_redelivered_after_a_failed_run_is_held_again` |
@@ -675,6 +675,33 @@ before the seed: the item comes back and is held again.
 **F9 across a reindex.** A reindex's backfill pages and later live items are built after the reindex, so they are
 numbered past every entry the lane's map holds; the map and the account are left as they are (the held item is in
 neither the window nor the flights, and stays in the account until its acknowledgement at the seed).
+
+### 15.2 Part 1, fix round 1 (review of #459 at `dfc9ec1a`)
+
+| # | Rule | Test |
+| --- | --- | --- |
+| X8 (B1) | A held item's identity stays on the lane's state (seeded) until its acknowledgement returned `Ok` (`acknowledged`), so an item redelivered after a failure between the seed and that acknowledgement is acknowledged unwritten, never written | `a_failure_between_the_seed_and_the_held_items_ack_never_writes_it` |
+| X9 (S1) | A lane holds a list: a second reindex while items are held adds to it; the next seed releases every held item; a redelivery matches any entry | `a_second_reindex_keeps_the_first_held_item_unwritten` |
+| X10 (S2) | Once stopping, held items are acknowledged without their positions applied: confirmation follows the applied marks (`Progress::landed`), never the acknowledgements, so the slot stays before their changes, the drain ends, and the next start replays them into whatever generation is then backfilled | `a_stop_acknowledges_a_held_item_without_applying_it` |
+| X11 (S4) | A reindex that cannot stage its new generation (a cluster-wide block, any staging error) fails that reindex only: logged with its error, the lane left as it was, the sink's run going on; it is not retried | `a_reindex_that_cannot_stage_leaves_the_lane_and_the_sink_as_they_were` |
+| X12 | A parked lane records its parked item's identity when it parks, so a reindex staged while that item is not in the window (the first pass of a run after a failure) still holds it when it is redelivered | `a_reindex_staged_before_the_parked_item_is_redelivered_still_holds_it` |
+| X13 | A held item counts in `is_oldest` (items behind it are not the supervisor's progress) and in the F9 account's seed | — (stated) |
+
+**Why X10 never confirms past a held change.** At a stop the engine confirms what `Progress::landed()` says
+(`drain_lanes`, then the final confirm before `close_live`). `landed` is the minimum over the lanes' applied marks,
+which move only through `Progress::applied` (a write that returned, or a held item settled at its seed). A held item
+acknowledged at a stop never reaches `applied`, so its lane's mark, and the slot, stay before its change. The
+acknowledgement only empties the channel's ledger, which is what lets `stream.is_idle()` end the drain.
+
+**What a reindex cures (S3).** A reindex recreates the index from the same schema and mapping. It cures what lives
+in the generation: a write block on that index, settings or a mapping changed by hand, `index_settings` changed and
+the process restarted. It does not cure a row the mapping refuses (the new backfill's page is refused, the lane
+parks on it, the index is never seeded, and the held item waits until the row is fixed), nor a cluster-wide block
+(X11: the reindex fails and the lane stays as it was).
+
+**The held state in `/status`.** A lane holding an item reads `open`; it pins the slot until the seed
+(`pinned_by` names it) and its stall age grows, so `FlussoLaneStalled` can fire during a long reindex backfill. Not
+changed here: a `held` health value (excluded from the alert) is the follow-up.
 
 ## User-visible, second half
 
