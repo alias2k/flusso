@@ -140,7 +140,7 @@ It gains nothing the per-index shape lacks.
 | R7 | **Ingest publishes nothing to a detached lane.** For a detached lane, `publish_live` does what it does for a lane with nothing built (a skip, no lane item); the skip's `register` does nothing, and `settle_build` still runs. At the detach, `L` is removed from every running walk and coalescing set of `I` (`Snapshot::requested`), and its request is acknowledged with the snapshot's. Another sink's walk goes on. A `Backfill` request for a detached lane is acknowledged, not served for that lane. |
 | R8 | **Attach by quiesce (§1).** `Request::Attach { attempt }`, on its own route, whose `attempt` is the lane's current one in `Progress`. The builder of `I`: <br>1. quiesces; <br>2. calls `Progress::attach(L)`; <br>3. **then** publishes `LaneItem::Attached { attempt }`; <br>4. then acknowledges the request. <br>**A request finding `L` already attached for its attempt** publishes `Attached` again and is acknowledged (H2). That is the case of a run that died between steps 2 and 3, whose request comes back. **The reverse order** (publish, then attach) **loses data:** the sink would open `L` and ask for its backfill while `Progress` still skips `L`. A run dying in between lets the slot pass changes that never reach `L` and that pages read before them miss. At a process's first staging, no builder runs, and staging attaches directly. **Inside a process, `Progress`'s own state decides the lane.** The record decides only the sink side, and `Progress` only at the first staging (H1). **At the attach, `L.newest` is set to the newest position routed in this process** (`routed_ever`, kept by `forget_all`). Every change up to it was emitted before the attach, so the rebuild's pages, read after it, cover it. A lane that registered nothing then answers `Through(routed_ever)`, not `Idle`, and a quiet database keeps confirming (H7). |
 | R9 | **At most one partial generation.** A rebuild starts only after deleting every unserved generation except `serving`. So does the attach at a start, which also keeps the generation the marker names. |
-| R10 | **The rebuild starts when its probe lands (§6)**, on the doubling schedule, or at `reindex`. **It fails** when its lane is parked or restaging at that moment and its `stuck_since` has passed `rebuild_grace`. The clock was cleared at d3 (H1), so it starts at the first park or restage after `Attached`, and flapping keeps it (R2). The lane then detaches again with attempts + 1: the partial is deleted, and the marker names the next generation. |
+| R10 | **The rebuild starts when its probe lands (§6)**, on the doubling schedule, or at `reindex`. **It fails** when its lane is parked or restaging at that moment and its `stuck_since` has passed `rebuild_grace`. The clock was cleared at d3 (H1), so it starts at the first park or restage after `Attached`, and flapping keeps it (R2). The lane then detaches again, `attempts` unchanged (it counts rebuilds started, at r1c): the partial is deleted, and the marker is moved explicitly past every existing generation, conditionally, keeping its `detaching_from` (§6a). |
 | R11 | **Records are conditional.** The detach record and the stuck clock are separate documents (§4). Every write is a create, or an update on the `seq_no` last read. A conflict re-reads and decides again, so no late write overwrites a newer state (H2). |
 | R12 | **No envelope of a detached index reaches `Sink::write`.** A test guards it. |
 | R13 | **`reindex`** on a detached lane forces the rebuild now. On a rebuilding lane, see O20. `backfill = false` refuses `reindex`, as today. `--skip-backfill` blocks automatic rebuilds only. See O26 for what a restart under it does to a running rebuild. |
@@ -261,9 +261,105 @@ A probe is classified by the cause it meets now, not by the recorded `why`.
 **The schedule.**
 
 - Probes run on the lane's backoff.
-- A rebuild starts at the first landed probe at or after `last_attempt + retry_initial × 2^(attempts − 1)`, capped at `retry_max`. With no attempt yet, the earliest start is `retry_initial` after the detach (O11).
+- A rebuild starts at the first landed probe at or after `last_attempt + retry_initial × 2^attempts`, the wait capped at `retry_max`. With no attempt yet, the earliest start is `retry_initial` after the detach (O11). So each failed rebuild doubles the wait (decision 4). *Corrected in slice 2's opening: the formula used to read `2^(attempts − 1)`, which gave the first retry the same wait as the first attempt, and R10 counted an attempt again at the failure.*
 - `attempts` resets only at a seed.
 - With `rebuild = "operator"`, probes still run and are shown, but only `reindex` rebuilds.
+
+## 6a. Operator actions on a detached or rebuilding lane
+
+Written at the opening of slice 2, before any code. Two seams of the note are settled here:
+
+- **`attempts` counts rebuilds started.** It is incremented at r1c only. A failure (R10) or a forced restart (below) doesn't count again.
+- **Two kinds of marker move.**
+  - **Re-running an unfinished first detach (R4's d2b)** leaves a marker that already carries `detaching_from` exactly as it is (H4).
+  - **Detaching a lane whose rebuild failed or was restarted** must move the marker past the rebuild's generation. That is an explicit move, conditional on the `seq_no` read, which names the next generation past every existing one and keeps `detaching_from` as it is, as the demotion does (§4).
+
+### `reindex` on a rebuilding lane (O20)
+
+A rebuilding lane is in one of three conditions, and each gets one answer:
+
+| Condition | What `reindex` does | HTTP answer |
+| --- | --- | --- |
+| waiting for `Attached` (r2–r3) | nothing: the rebuild is starting | see "How an ignored reindex is answered" |
+| attached and open: the rebuild is progressing | nothing; logged `reindex ignored: the index is being rebuilt` | same |
+| attached, parked or restaging (inside `rebuild_grace`) | restarts the rebuild now, as below | `202` |
+
+**Restarting a parked or restaging rebuild:**
+
+1. **Fail the rebuild as R10 would, without waiting for `rebuild_grace`.**
+   - The lane detaches again (d1–d5, at the lane barrier) and its record becomes `detached`.
+   - `attempts` is unchanged.
+   - d2c deletes the abandoned partial, best effort.
+   - The marker moves explicitly past every existing generation (above).
+2. **Rebuild at once.** This bypasses the probe and the schedule, which is decision 5 and R13. It also bypasses `rebuild = "operator"`, since this is the operator.
+   - r1a deletes every unserved generation but `serving`. If one won't go, the rebuild is not started: the lane stays detached, `reason` names the refusal, and the reindex is owed, as an owed reindex is today (X15): retried on the restage backoff.
+   - Then r1b–r4 run as in §5. r1c counts the attempt, so the next automatic wait doubles from it.
+3. **Under `--skip-backfill`** the operator's reindex still rebuilds, as `stage_reindex` does today (R13). O26 then demotes it at the next start.
+
+**How an ignored reindex is answered.** *Open, for the owner.* Today `POST /indexes/{name}/reindex` answers `202` before the sink engine decides, so an ignored reindex is visible only in the log.
+
+| Option | What it means | For an operator |
+| --- | --- | --- |
+| (a) The daemon reads the lane from `Status` and refuses at the HTTP edge | `409` with `reason: "the index is being rebuilt"` (or `"…starting"`) for that sink. A reindex naming no sink goes on for the sinks where it applies and lists the ignored ones in its `202` body. The engine still ignores one that races past the check | the answer says what happened; `flusso reindex` exits non-zero with the reason |
+| (b) Keep `202`; the engine logs it, and `/status` shows `reindex: ignored, rebuilding` on the lane until the next control | nothing new at the HTTP edge | the operator learns only from the log or `/status` |
+
+Recommended: **(a)**. It is the same shape as the existing `503 stopping` refusal, and `Status` already holds each lane's health.
+
+### `flusso reattach --accept-gap` (O16)
+
+**The surface:**
+
+- **CLI:** `flusso reattach <index> --sink <name> --accept-gap`, with the same `--server` and `--admin-password` as `flusso reindex`.
+  - `--accept-gap` is required. Without it, the command refuses and prints what the gap means.
+  - `--sink` is required, because a reattach is one lane. *Open, for the owner:* whether to accept a missing `--sink` when exactly one `backfill = false` sink holds the index detached. Recommended: no, keep it explicit.
+- **Private HTTP:** `POST /indexes/{name}/reattach?sink=<name>&accept_gap=true`, under the private surface's Basic auth.
+- **Daemon:** `DaemonControl::reattach(index, sink)`, which sends `SinkControl::Reattach { index }` to that sink's engine.
+- **Port:** no new `Sink` method. It uses `detachment`, `ensure_index` and `forget_detachment` (§8).
+
+**Refusals:** checked at the edge from `Status`, and checked again by the engine, which logs a refusal it meets.
+
+| Condition | HTTP |
+| --- | --- |
+| unknown index or sink | `404` |
+| `accept_gap` missing or false | `400`, naming the gap |
+| the lane is not detached (open, parked, restaging, rebuilding) | `409`, `reason: "not detached"` |
+| the sink has `backfill = true` | `409`, `reason: "this sink can rebuild: use reindex"` |
+| the record is not `live_only`, or the marker doesn't name `serving` seeded (an unfinished demotion) | `409`, with the reason. The next staging finishes the demotion (§4); ask again after it |
+| the deployment is stopping | `503`, `reason: "stopping"` |
+| the sink's control queue is full | `503` busy, as `reindex` |
+
+**Steps** (sink engine, between batches, at the lane barrier, as a reindex is staged):
+
+1. **Read the documents** (`detachment`). Check: `live_only`, the marker on `serving` and seeded, the lane still detached. Otherwise refuse and log.
+2. **`ensure_index`.** It adopts the serving generation (the marker names it, seeded), so the target is the hash alias, as for any seeded index.
+3. **Delete the record** (`forget_detachment`, conditional on the `seq_no` read at step 1). **This is the commit point of "accept the gap".**
+4. **Attach.** The sink engine keeps `reattaching: Some(attempt)` in the lane's state and publishes `Request::Attach { attempt }`. The builder quiesces, attaches the lane (`Progress::attach`), then publishes `Attached` (R8). No backfill is asked for.
+5. **On `Attached`** (R6's acknowledgement rules), the lane opens as an ordinary open lane, not rebuilding. `reattaching` is cleared.
+
+**A crash at each point:**
+
+| Killed after | The restart finds | Result |
+| --- | --- | --- |
+| 1, 2 | the `live_only` record | detached, as before: the reattach is lost, nothing changed; ask again |
+| 3 (record gone, not attached) | no record, marker seeded on `serving` | today's staging: the lane starts attached and open, live into `serving`. The gap now runs to the restart; it is accepted |
+| 4, 5 | the same | the same |
+| a sink engine run restart inside the process after 3 | `Progress`: still detached (R8: `Progress` decides in a process) | the lane's `reattaching` re-sends `Request::Attach`, so the attach is idempotent per attempt (R8) |
+
+Why the record goes before the attach:
+
+- **Deleted first,** a crash anywhere after it still ends attached. The operator's decision sticks, and the only cost is a longer gap, which the decision already accepts.
+- **Deleted last,** a crash before the delete would bring the lane back detached after the operator accepted the gap, and it would stay so until they ask again.
+
+**The fence after a reattach.** *Open, for the owner.* The gap is permanent: changes between the detach and the reattach are missing until their rows change again.
+
+| Option | What it means | For an operator |
+| --- | --- | --- |
+| (a) From `Attached` on, the lane serves `Writes`: a fence vouches for every position the lane reaches, gap included | the reattach declares the index current from now on | fenced reads pass again, though a row last changed in the gap reads stale |
+| (b) The fence never vouches past the position frozen at the detach | truthful | `/wait` naming that index on that sink fails for good, since a `backfill = false` sink can never be rebuilt |
+
+Recommended: **(a)**, with the gap named in the reattach's answer, the log, and the runbook. The operator accepted exactly this gap by name.
+
+**`/status` after a reattach:** the lane is `open`, and carries `reattached: { at, gap_since }` until the process restarts, so the gap is visible. This is not a decision.
 
 ## 7. Interactions
 
@@ -309,6 +405,7 @@ A probe is classified by the cause it meets now, not by the recorded `why`.
 - `Fences::forget_lane`.
 - `Staged::{Detached, Rebuilding}`.
 - `SinkControl::Detach`, not public (O12).
+- `SinkControl::Reattach { index }` and `DaemonControl::reattach(index, sink)`, behind `POST /indexes/{name}/reattach` on the private surface and `flusso reattach --accept-gap` (§6a).
 
 **Fence:** `Serving::Detached { through }`, answered at once; `slowest` skips detached lanes.
 
