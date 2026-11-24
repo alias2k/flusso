@@ -1214,5 +1214,5 @@ generation created before uuids were recorded is adopted as it is.
 5. **Unchanged:** when the destination itself is down (no index can be prepared, the meta index unreachable),
    the sink waits and retries as before; and a first start with a new replication slot still waits until every
    index can be prepared, since only then can flusso know which indexes need rebuilding before it begins reading.
-6. **Limit:** if the first sixteen indexes of a sink, in config order, are all refused while the rest are fine,
+6. **Limit:** if the first sixteen indexes of a sink, in index-name order, are all refused while the rest are fine,
    flusso reads the destination as down and waits, as before.
