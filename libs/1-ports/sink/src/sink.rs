@@ -327,12 +327,18 @@ pub struct Detachment {
     /// record beside it: the detach died between its two writes. The marker
     /// was put back on this generation before anything else was staged.
     pub restored: Option<u64>,
+    /// The seed marker carries a `detaching_from` this version can't read
+    /// (why): nothing was put back, and the index is staged as before.
+    pub unreadable_marker: Option<String>,
 }
 
 impl Detachment {
     /// Nothing kept, and nothing put back.
     pub fn is_empty(&self) -> bool {
-        self.record.is_none() && self.stuck.is_none() && self.restored.is_none()
+        self.record.is_none()
+            && self.stuck.is_none()
+            && self.restored.is_none()
+            && self.unreadable_marker.is_none()
     }
 }
 

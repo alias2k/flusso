@@ -18,7 +18,7 @@ use stream::{LaneKey, Request, Stream};
 use stream_channel::ChannelStream;
 
 use super::sink_name;
-use crate::{SinkControl, SinkEngine};
+use crate::{SinkControl, SinkEngine, Stop};
 
 fn name(i: usize) -> String {
     format!("index_{i:02}")
@@ -376,9 +376,11 @@ async fn each_staging_keeps_what_it_read_last() {
     assert_eq!(engine.detachment(&index(0)), None);
 }
 
-/// With nothing kept, staging calls the sink exactly as `main` did, plus the
-/// one read first: the same calls in the same order, and the same backfill
-/// requests, for a start under either source and for a reindex.
+/// With nothing kept, staging calls the sink exactly as a sink keeping no
+/// records (the port's default `detachment`, which makes no call) is called,
+/// plus the one read first: the same calls in the same order, and the same
+/// backfill requests, for a start under either source. Both sinks run on this
+/// code; the engine change is the read at the top of `step` alone.
 #[tokio::test(start_paused = true)]
 async fn with_nothing_kept_the_sink_is_called_as_before_plus_the_read() {
     for continuity in [Continuity::Resumed, Continuity::Fresh] {
@@ -422,4 +424,117 @@ async fn with_nothing_kept_the_sink_is_called_as_before_plus_the_read() {
             assert_eq!(after.detachment(&index(i)), None);
         }
     }
+}
+
+/// A lane staged again after its target went missing reads first: a read
+/// that fails fails the restage before anything else touches the index, and
+/// the lane's restage path keeps it restaging on its schedule.
+#[tokio::test(start_paused = true)]
+async fn a_failed_read_fails_a_restage_before_it_ensures() {
+    let sink = Arc::new(Kept::default());
+    let (engine, _stream) = engine(Arc::clone(&sink) as Arc<dyn Sink>, 1);
+    engine.stage(Continuity::Resumed).await.unwrap();
+    sink.reads.lock().unwrap().insert(name(0), Read::Fails);
+
+    let error = engine.restage(&index(0)).await.unwrap_err();
+    assert!(error.to_string().contains("answered 503"), "{error}");
+    assert_eq!(
+        sink.plain.calls.of(&name(0)),
+        ["detachment", "ensure", "seeded?", "detachment"],
+        "nothing after the failed read"
+    );
+}
+
+/// An index a staging left out is ensured again through the same step: a
+/// read that fails fails it before it ensures.
+#[tokio::test(start_paused = true)]
+async fn a_failed_read_fails_an_ensure_again_before_it_ensures() {
+    let sink = Arc::new(Kept::default());
+    let (engine, _stream) = engine(Arc::clone(&sink) as Arc<dyn Sink>, 1);
+    engine.stage(Continuity::Resumed).await.unwrap();
+    sink.reads.lock().unwrap().insert(name(0), Read::Fails);
+
+    let error = engine.ensure_again(&index(0)).await.unwrap_err();
+    assert!(error.to_string().contains("answered 503"), "{error}");
+    assert_eq!(
+        sink.plain.calls.of(&name(0)),
+        ["detachment", "ensure", "seeded?", "detachment"]
+    );
+}
+
+/// A reindex retried after its staging failed (X15) reads first too: a read
+/// that fails leaves it owed, with why, and nothing reindexed.
+#[tokio::test(start_paused = true)]
+async fn a_failed_read_leaves_a_reindex_retry_owed() {
+    let sink = Arc::new(Kept {
+        plain: Plain {
+            seeded: [name(0)].into(),
+            ..Plain::default()
+        },
+        ..Kept::default()
+    });
+    let (engine, _stream) = engine(Arc::clone(&sink) as Arc<dyn Sink>, 1);
+    engine.stage(Continuity::Resumed).await.unwrap();
+    sink.reads.lock().unwrap().insert(name(0), Read::Fails);
+
+    let retried = engine.reindex_again(&index(0)).await;
+    assert!(retried.staged.is_empty());
+    let [(failed, why)] = retried.failed.as_slice() else {
+        panic!("one failure: {:?}", retried.failed)
+    };
+    assert_eq!(failed, &index(0));
+    assert!(
+        why.starts_with("the reindex could not stage") && why.contains("answered 503"),
+        "{why}"
+    );
+    assert_eq!(
+        sink.plain.calls.of(&name(0)),
+        ["detachment", "ensure", "seeded?", "detachment"],
+        "nothing reindexed"
+    );
+}
+
+/// A staging during the stop reads first as well: a read that fails leaves
+/// its index restaging, with why, for the stop to release, and the other
+/// indexes are ensured.
+#[tokio::test(start_paused = true)]
+async fn a_failed_read_during_the_stop_leaves_its_index_for_the_stop() {
+    let sink = Arc::new(Kept {
+        reads: Mutex::new([(name(1), Read::Fails)].into()),
+        ..Kept::default()
+    });
+    let (engine, _stream) = engine(Arc::clone(&sink) as Arc<dyn Sink>, 2);
+    let stop = Stop::new();
+    stop.request();
+    let engine = engine.with_stop(stop);
+    engine.stage(Continuity::Resumed).await.unwrap();
+
+    assert_eq!(sink.plain.calls.of(&name(0)), ["detachment", "ensure"]);
+    assert_eq!(sink.plain.calls.of(&name(1)), ["detachment"]);
+    let health = engine.lane_health(&lane(1));
+    assert!(
+        matches!(&health, crate::LaneHealth::Restaging { reason, .. }
+            if reason.contains("during the stop") && reason.contains("answered 503")),
+        "{health:?}"
+    );
+}
+
+/// A seed marker the sink couldn't read nor put back is kept like a record
+/// and staged as before (O24).
+#[tokio::test(start_paused = true)]
+async fn an_unreadable_marker_is_kept_and_staged_as_before() {
+    let mut unreadable = Detachment::default();
+    unreadable.unreadable_marker = Some("detaching_from names no generation".to_owned());
+    let sink = Arc::new(Kept {
+        reads: Mutex::new([(name(0), Read::Kept(unreadable.clone()))].into()),
+        ..Kept::default()
+    });
+    let (engine, stream) = engine(Arc::clone(&sink) as Arc<dyn Sink>, 1);
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(
+        sink.plain.calls.of(&name(0)),
+        ["detachment", "ensure", "seeded?"]
+    );
+    assert_eq!(engine.detachment(&index(0)), Some(unreadable));
+    assert_eq!(requests(&stream).await, [(name(0), None)]);
 }

@@ -209,7 +209,36 @@ async fn a_missing_meta_index_or_documents_read_as_nothing_kept() {
 /// taken for "no record" (H6).
 #[tokio::test]
 async fn any_other_answer_fails_the_read() {
-    let answers: [(fn() -> (u16, String), &str); 5] = [
+    let answers: [(fn() -> (u16, String), &str); 10] = [
+        (|| (404, json!({ "error": "not found" }).to_string()), "404"),
+        (
+            || (404, "<html><body>Not Found</body></html>".to_owned()),
+            "404",
+        ),
+        (
+            || mget([json!({}), missing(DETACH), missing(STUCK)]),
+            "neither found nor an error",
+        ),
+        (
+            || {
+                mget([
+                    seeded_marker(),
+                    json!({ "_id": DETACH, "found": "no" }),
+                    missing(STUCK),
+                ])
+            },
+            "neither found nor an error",
+        ),
+        (
+            || {
+                mget([
+                    seeded_marker(),
+                    missing("detach:orders_00000001"),
+                    missing(STUCK),
+                ])
+            },
+            "detach:orders_00000001",
+        ),
         (
             || (503, json!({ "error": "unavailable" }).to_string()),
             "503",
@@ -423,21 +452,35 @@ async fn a_half_detached_marker_beside_a_record_is_left_alone() {
     assert_eq!(stub.lines().len(), 1);
 }
 
-/// A `detaching_from` naming no generation can't be put back: unreadable,
-/// so the read fails rather than guess.
+/// A `detaching_from` this version can't read (no generation, or not an
+/// object) is put back nowhere and fails nothing: it is reported as
+/// unreadable and the index is staged as before (O24), which rebuilds into
+/// the generation the marker names. Failing the read would restage the index
+/// until someone edits the marker.
 #[tokio::test]
-async fn a_malformed_detaching_from_fails_the_read() {
-    let (stub, read) = read(|_, _| {
-        mget([
-            found(ALIAS, json!({ "active_generation": 2, "seeded": false, "detaching_from": { "seeded": true } })),
-            missing(DETACH),
-            missing(STUCK),
-        ])
-    })
-    .await;
-    let error = read.unwrap_err().to_string();
-    assert!(error.contains("detaching_from"), "{error}");
-    assert_eq!(stub.lines().len(), 1);
+async fn a_malformed_detaching_from_is_reported_and_put_back_nowhere() {
+    for detaching_from in [json!({ "seeded": true }), json!(3), json!("generation 1")] {
+        let (stub, read) = read(move |_, _| {
+            mget([
+                found(
+                    ALIAS,
+                    json!({ "active_generation": 2, "seeded": false, "detaching_from": detaching_from.clone() }),
+                ),
+                missing(DETACH),
+                missing(STUCK),
+            ])
+        })
+        .await;
+        let read = read.unwrap();
+        assert_eq!(read.restored, None);
+        assert!(
+            read.unreadable_marker
+                .as_deref()
+                .is_some_and(|why| why.contains("detaching_from")),
+            "{read:?}"
+        );
+        assert_eq!(stub.lines().len(), 1, "nothing written");
+    }
 }
 
 /// A prefixed deployment reads its own meta index and ids.
