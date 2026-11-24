@@ -1,6 +1,12 @@
 # Stage 10 design: detach a stalled index, rebuild it later (#394)
 
-**Status:** design only, for the owner's decisions in §11. Nothing is built.
+**Status:** decided by the owner on 2026-11-24. Every decision in §11 is taken, and the slice order in §10 is accepted. Nothing is built.
+
+**Three consequences the owner accepted knowingly** (§11):
+
+- **O14.** While any lane is detached, a `/wait` naming no index fails for every index, until the caller names what it reads.
+- **O16.** On a `backfill = false` sink, the gap left by a detach is permanent. Deletes in it leave ghost documents, and updates in it stay stale until their row changes again.
+- **O19.** A full disk past the threshold leaves that node's indexes detached until an operator acts, even after OpenSearch lifts the block itself.
 
 - **Revision:** the fifth. Rewritten after three independent design reviews of PR #478, then edited in place after the fourth. The appendix maps every finding to the rule that answers it, or marks it moot.
 - **Base:** `main` at `8a4053b6`. A claim about `main` names the code it was read in; §12 lists what was not verified.
@@ -23,7 +29,7 @@ Every hole the three reviews found in the earlier revisions sat in one place: **
 - a `Through(from)` clamp with an end rule;
 - one rule at a process start and another inside a process.
 
-**The recommended shape removes the cause.** A lane is attached only while no build of its index is in flight: the index's builder **quiesces**, and it never goes down. The steps:
+**The decided shape removes the cause (O23).** A lane is attached only while no build of its index is in flight: the index's builder **quiesces**, and it never goes down. The steps:
 
 1. **The attach request.** The sink engine publishes `Request::Attach { index, sink, attempt }`. The dispatcher routes it on the builder's own channel, as `Rebuild` requests are routed (`dispatcher.rs` `Route`), so it never waits behind a walk. The backfill inbox is read only `if snapshot.is_none()` (`builder.rs:421`).
 2. **Quiesce.** The builder of `I` stops granting batches of `I`, live and backfill. Its running builds finish and are published, ready slots included, each to the lanes it decides at publish, which exclude the detached lane. Walks of `I` for other sinks keep their place: R7 removed `L` from every walk at the detach.
@@ -65,7 +71,7 @@ The quiesce gives nothing back, needs no fold and no hold, raises no failure, an
 - **A lone builder.** With one index, the pause is the whole deployment's, for that moment.
 - **The rebuild's own walk waits behind a walk of `I` that is already running for another sink** (the inbox gate). Meanwhile `L` is attached, writing its live items into the new generation and holding the slot only for them (O27).
 
-**Alternative, not recommended (O23): attach while the whole ingest engine is stopped.** The ingest engine's run would be stopped, the lane staged as a start does, and the run restarted. The cost:
+**The rejected alternative (O23): attach while the whole ingest engine is stopped.** The ingest engine's run would be stopped, the lane staged as a start does, and the run restarted. The cost:
 
 - every index pauses;
 - the unconfirmed tail is replayed: as much WAL as the slowest attached lane holds back, possibly gigabytes;
@@ -126,7 +132,7 @@ It gains nothing the per-index shape lacks.
 | # | Rule |
 | --- | --- |
 | R1 | **Detached** is a lane health, `LaneHealth::Detached`. **Rebuilding** is an ordinary health (open, parked or restaging) plus `LaneState.rebuilding: Some(Rebuilding { attempts })`. The new field is named apart from the existing fresh-build ticket `rebuild`. Every `is_open()` gate then treats a rebuilding lane as the lane it is. The same index on another sink is untouched. |
-| R2 | **Eligible to detach:** `enabled`, the index not `detach = false`, the lane parked or restaging now, and either of two halves. **Time:** `now − stuck_since ≥ stuck_for`. **WAL:** the WAL the detach would free is at least `wal_held` (O25(d)). The lane must be the one `Progress::pinned_by` names. What it frees runs from its own position, `reached(Before(own oldest))`, to the next answer once it is left out: the next-least lane's, or the source's horizon when there is none. Not the whole slot lag, which also counts WAL not yet read and WAL another sink holds (`stall.rs:198-201`). `stuck_since` is set at the lane's first park or restage. It is cleared only once the lane has stayed open with writes landing for `grace`, or at a detach (d3). So a lane flapping between a short open and a long park keeps its clock. An open lane is never eligible. |
+| R2 | **Eligible to detach:** `enabled`, the index not `detach = false`, the lane parked or restaging now, and either of two halves. **Time:** `now − stuck_since ≥ stuck_for`. **WAL:** the WAL the detach would free is at least `wal_held` (O25). The lane must be the one `Progress::pinned_by` names. What it frees runs from its own position, `reached(Before(own oldest))`, to the next answer once it is left out: the next-least lane's, or the source's horizon when there is none. Not the whole slot lag, which also counts WAL not yet read and WAL another sink holds (`stall.rs:198-201`). `stuck_since` is set at the lane's first park or restage. It is cleared only once the lane has stayed open with writes landing for `grace`, or at a detach (d3). So a lane flapping between a short open and a long park keeps its clock. An open lane is never eligible. |
 | R3 | **A detach happens at a refusal.** The daemon asks with `SinkControl::Detach`. The sink engine detaches at the lane's next probe or restage that the destination answers with a refusal: `Refused`, `Blocked` or `Missing`, never a sink-wide failure. A probe that lands drops the ask. After an outage the lane is probed before anything else, so a lane whose cause went away opens instead (O18). |
 | R4 | **Recorded before it takes effect, seed marker first.** `Sink::detach` runs three steps, in this order. **d2b:** an update of the seed marker, conditional on the `seq_no` read at d1, to the next generation, unseeded, with `walked` and `uuid` null, and `detaching_from: { generation, seeded, uuid }` (the serving generation as it was). A marker that already carries `detaching_from` is left exactly as it is, generation included, so re-running a detach never moves it again (H4). Skipped on a `backfill = false` sink. **d2a:** the detach record, created, or updated conditionally on the `seq_no` read at d1. **d2c:** delete the unserved generations other than `serving`, best effort. The lane leaves the minimum only once d2b and d2a both returned `Ok` in this process. A sink that can't record never detaches: stdout keeps nothing. |
 | R5 | **The fence is frozen first.** The fence serves `Detached { through }`, frozen at both levels, and `reached()` no longer raises it. Then `Progress::detach(lane)` runs under the registry lock: the lane's registrations and steps are cleared, `register` on it is a no-op, and it is skipped by `least_of`, `pinned_by`, `own_oldest`, `committed` and every fence over all lanes. `forget_all` keeps the detach. **With no attached lane, `landed()` answers `Landed::Free`:** nothing is needed, so Postgres confirms through its horizon. That is a new `Landed` case (A5). |
@@ -255,7 +261,7 @@ A probe is classified by the cause it meets now, not by the recorded `why`.
 **The schedule.**
 
 - Probes run on the lane's backoff.
-- A rebuild starts at the first landed probe at or after `last_attempt + retry_initial × 2^(attempts − 1)`, capped at `retry_max`.
+- A rebuild starts at the first landed probe at or after `last_attempt + retry_initial × 2^(attempts − 1)`, capped at `retry_max`. With no attempt yet, the earliest start is `retry_initial` after the detach (O11).
 - `attempts` resets only at a seed.
 - With `rebuild = "operator"`, probes still run and are shown, but only `reindex` rebuilds.
 
@@ -312,7 +318,7 @@ A probe is classified by the cause it meets now, not by the recorded `why`.
 
 | Key | Default |
 | --- | --- |
-| `enabled` | `false` until slice 5, then `true` |
+| `enabled` | `false` until slice 4, then `true` |
 | `stuck_for_secs` | 14400 |
 | `wal_held_mib` | half of `max_slot_wal_keep_size`, else 8192 |
 | `grace_secs` | 600 |
@@ -404,63 +410,62 @@ Per index, `detach = false` beside `on_error`. It goes in the lock, **written on
 
 | Spike | Proves | Gates |
 | --- | --- | --- |
-| S1 | the write check writes no document and is refused under: a write block, `read_only`, `read_only_allow_delete`, closed, a cluster block, a `fail` or `drop` pipeline, the alias form, a deleted generation, the NUL `_id` | slice 5 |
-| S2 | `mark_seeded` drops an old generation that is `read_only`, closed or write-blocked. If the call fails, the seed fails and full backfills loop. **Reachable on `main` today** through an operator `reindex` of a seeded index whose generation is blocked | run it now, as its own small issue; it also gates slice 3 |
-| S5 | `Landed::Free` against Postgres: every lane detached, a transaction held for visibility (the `visibility` e2e's standby), and only keepalives arriving. The slot follows the horizon and never passes the held commit | slice 3 |
-| S6 | engine level, injected failures: an ingest run dying between `Progress::attach` and `Attached` (H2); a sink run killed while a discard's acknowledgement is pending (H3) | slice 3 |
-| S3 | `write_serving` through the alias against a deleted, closed or blocked serving generation | slice 5 |
-| S4 | `max_slot_wal_keep_size` read as the deployment's role, and where the meta index's shard sits under flood stage | slice 5 |
+| S1 | the write check writes no document and is refused under: a write block, `read_only`, `read_only_allow_delete`, closed, a cluster block, a `fail` or `drop` pipeline, the alias form, a deleted generation, the NUL `_id` | slice 4 (run in slice 3) |
+| S2 | `mark_seeded` drops an old generation that is `read_only`, closed or write-blocked. If the call fails, the seed fails and full backfills loop. **Reachable on `main` today** through an operator `reindex` of a seeded index whose generation is blocked | issue #479; runs before slice 2 |
+| S5 | `Landed::Free` against Postgres: every lane detached, a transaction held for visibility (the `visibility` e2e's standby), and only keepalives arriving. The slot follows the horizon and never passes the held commit | slice 2 (its first test) |
+| S6 | engine level, injected failures: an ingest run dying between `Progress::attach` and `Attached` (H2); a sink run killed while a discard's acknowledgement is pending (H3) | slice 2 (its first test) |
+| S3 | `write_serving` through the alias against a deleted, closed or blocked serving generation | slice 4 (run in slice 3) |
+| S4 | `max_slot_wal_keep_size` read as the deployment's role, and where the meta index's shard sits under flood stage | slice 4 (run in slice 3) |
 
 ### Slices
 
-Each slice is safe if nothing after it is built.
+The owner accepted this order on 2026-11-24. Each slice is safe if nothing after it is built. Spike S2 is issue #479 and runs before slice 2.
 
 1. **Read the documents; never half-stage.**
    - `stuck` documents are ignored.
    - A `detaching_from` with no record is restored.
    - A `detached` or `rebuilding` record logs loudly and stages as today. That is a correct rebuild, since the marker moved first.
    - A `live_only` record logs loudly and stages as today, and `/status` says a newer flusso detached the index, so a gap exists. Nothing restages forever (H3).
-   - Cost: one meta `GET` per index per staging.
-2. **Spike S2,** now and on its own, since `main` can reach it.
-3. **Detach and rebuild, reachable only from tests,** with `enabled = false`: R1, R4–R9, R11–R14, the quiesce, `Request::Attach` and `Attached`, `Landed::Free`, `routed_ever`, the fence. It starts from S5 and S6.
-4. **Spikes S1, S3, S4.**
-5. **Thresholds and the probe-gated rebuild,** with `enabled = true`: R2, R3, R10, the stuck clock, the probes, the schedule, the alert.
-6. **Runbook and user pages,** written by a docs agent.
-7. **O10,** if measured worth it.
+   - Cost: one `_mget` per index per staging; only a `404` reads as none (H6).
+2. **Detach and rebuild, reachable only from tests,** with `enabled = false`: R1, R4–R9, R11–R14, the quiesce, `Request::Attach` and `Attached`, `Landed::Free`, `routed_ever`, the fence. It starts from S5 and S6. It follows #479 (S2).
+3. **Spikes S1, S3, S4.**
+4. **Thresholds and the probe-gated rebuild,** with `enabled = true`: R2, R3, R10, the stuck clock, the probes, the schedule, the alert. Gated on slice 3.
+5. **Runbook split and manual pages;** a docs agent writes the user pages.
+6. **O10,** later, if measured worth it.
 
-## 11. Decisions for the owner
+## 11. Decisions
 
-New and changed rows are marked.
+Decided by the owner on 2026-11-24. Each row gives the decision and one line on what the rejected alternatives would have cost. Rows marked **accepted knowingly** carry a cost the owner took on deliberately.
 
-| # | Question | Options | For an operator | Recommended |
-| --- | --- | --- | --- | --- |
-| O1 | Default thresholds | (a) 4 h diagnosed, or WAL held past half of `max_slot_wal_keep_size` (8 GiB if unlimited); (b) 1 h; (c) WAL only | (a) leaves 4 h after the parked page | **(a)** |
-| O2 | `/wait` on a detached lane | (a) vouch up to the frozen position, then `503 detached` at once, `rebuilding` from r2; (b) `rebuilding` throughout | (a) tells "nothing kept" from "being rebuilt" | **(a)** |
-| O3 | `/readyz` | (a) unchanged; (b) not ready while a lane is detached | (b) restarts a process a restart doesn't cure | **(a)** |
-| O4 | Alert | `FlussoIndexDetached`, `for: 0m`, `critical` | pages at once, louder than parked or stalled | **as proposed** |
-| O5 | Every lane of a reachable sink refusing data writes | (a) each detaches; (b) none | (a) frees the slot; (b) fills it | **(a)** |
-| O6 | Where `[detach]` lives | (a) on the machine, with `detach = false` in the lock written only when set; (b) all in the lock | (a) tuned per environment | **(a)** |
-| O7 | stdout | (a) never detaches; (b) detaches in memory | (b) misses changes silently across a restart | **(a)** |
-| O8 | Rebuild trigger | (a) the probe (§6); (b) a timer | (b) routes around an operator's block and its seed deletes that generation | **(a)** |
-| O9 | Flap state | (a) in the record; (b) in memory | (b) rebuilds at once at every restart | **(a)** |
-| O10 | An index detached everywhere | (a) stop reading its changes; (b) build it for no lane | (a) saves builds. A constraint for (a): the dispatcher's end check (`dispatcher.rs:207-217`) would raise `DocumentsLeft` at a stop on its marked documents, so (a) must stop marking them, not only stop building | **(a)**, later, once measured |
-| O11 | First rebuild | (a) at least 5 min after the detach, at a landed probe; (b) the first landed probe | (b) meets the cause again | **(a)** |
-| O12 | Operator `detach` command | (a) none; (b) `POST /detach` and `flusso detach` | (b) drops changes on purpose, undone only by a rebuild | **(a)** |
-| O13 | Stuck clock across restarts | (a) recorded, with `seen_at`; (b) memory only | (b): restarts faster than the threshold never detach | **(a)** *(changed: `seen_at`, its own document)* |
-| O14 | A fence naming no sink or no index | (a) `detached` at once; (b) skip detached lanes | (a) a raw `/wait` with no index fails for every index until the caller names what it reads; (b) passes reads of frozen data | **(a)**, documented |
-| O15 | What is left behind | (a) reported, old aliases left as today; (b) swept | (b) deletes data | **(a)** |
-| O16 | Reattaching a `backfill = false` lane | (a) `reindex`; (b) `flusso reattach --accept-gap`; (c) `reindex --accept-gap` | **the gap:** deletes in it leave ghost documents for good; updates in it stay stale until the row changes again | **(b)** |
-| O17 | A park during a rebuild | (a) fails when parked or restaging at that moment, after `rebuild_grace` on a clock started after `Attached`; (b) at once; (c) after `stuck_for` | (b) loses hours of backfill to a 30 s block | **(a)** *(changed: the clock starts at the attach, H1 of round 4)* |
-| O18 | What gates a detach after an outage | (a) the next refusal; (b) time since the destination answered; (c) the run's age | (c) never detaches in a crash loop | **(a)** |
-| O19 | Full disk | (a) the rebuild waits for an operator while the probe meets `read_only_allow_delete`; (b) automatic, with a headroom check; (c) automatic | (a): a flood stage longer than `stuck_for` detaches every index on that node, and each waits for an operator **even after OpenSearch lifts the block itself**. Reads stay frozen and the alert stays critical until `reindex`. (c) writes a second full copy onto a full cluster and can block other tenants' indexes | **(a)**, now classified by the live probe *(changed: cost stated)* |
-| O20 | `reindex` on a rebuilding lane (decision 5: "at any time") | (a) always ignored; (b) restarts the rebuild; **(c) restarts a rebuild that is parked or restaging, ignored while it is open** | (c) is what an operator types it for: the rebuild is stuck; (b) throws away a healthy backfill; (a) leaves no way out but waiting for `rebuild_grace` | **(c)** *(new option)* |
-| O21 | `committed` in `/status` | (a) attached lanes only, with the detached ones listed; (b) frozen at the detach | (b) looks stuck | **(a)** |
-| O22 | Stuck clock while `enabled = false` | (a) not written; (b) written | (a) no writes for an unused feature | **(a)** |
-| O23 *(changed)* | Where the attach happens | (a) the index's builder quiesces (§1); (b) the whole ingest engine is stopped | (a) pauses one index's grants until its running builds publish; nothing replayed or given back. (b) pauses every index, replays the unconfirmed tail, fails `/readyz` and fences for the restart, and restarts other indexes' backfills from where they were asked | **(a)** |
-| O24 *(new)* | Slice 1 on a record left by a newer flusso after a rollback | (a) log loudly and stage as today (a rebuild; for `live_only`, resume over the gap); (b) restage the index until upgraded | (b) pins the slot until the WAL limit drops it for every index | **(a)** |
-| O25 *(changed)* | The WAL half | (a) the lane's WAL behind as `stall.rs` measures it, past `wal_held`; (b) only after `grace` diagnosed; (c) also a hard bound at 90% of `max_slot_wal_keep_size`; **(d) only the lane `pinned_by` names, measuring the WAL its detach would free (its position to the next-least lane's, or to the horizon)** | (a) counts WAL not yet read and WAL another sink holds: after an outage one refused probe detaches every lane of a sink (a storm of full rebuilds), and a lane detaches while another sink still pins the slot, freeing nothing. (d) detaches only what frees WAL, one lane at a time; a lane that pins together with another frees nothing alone and waits for the time half | **(d)**, no grace, `wal_held` at half the limit |
-| O27 *(new)* | The rebuild's walk while another sink's walk of the index runs | (a) wait for it (the inbox gate), with `L` attached and live in the meantime; (b) cut the other walk and re-plan both from their marks | (a) `L` is current for live changes but the new generation stays partial, so reads stay on the old one for up to that walk's length; (b) costs the other sink its walk's position up to the last mark | **(a)** |
-| O26 *(new)* | `--skip-backfill` at a start that finds a running rebuild, including one an operator forced | (a) demote: the rebuild and its partial are dropped, the lane is detached; (b) keep it attached and paused, holding the slot | (b) pins the slot for the whole run; (a) loses the rebuild's progress | **(a)**, with a loud log naming it |
+| # | Question | Decision | Rejected, and what it would have cost |
+| --- | --- | --- | --- |
+| O1 | Default thresholds | 4 h parked or restaging (`stuck_for`), or the WAL half of O25 with `wal_held` at half of `max_slot_wal_keep_size` (8 GiB if unlimited) | 1 h: more rebuilds for short outages. WAL only: never detaches on a quiet database |
+| O2 | `/wait` on a detached lane | vouch up to the position frozen at the detach, then `503 detached` at once; `rebuilding` from r2 until the seed | `rebuilding` throughout: "nothing kept" and "being rebuilt" can't be told apart |
+| O3 | `/readyz` | unchanged | not ready while a lane is detached: restarts or drops a process that a restart doesn't cure |
+| O4 | Alert | `FlussoIndexDetached`, `max by (index, sink) (flusso_lane_detached) > 0`, `for: 0m`, `severity: critical` | — |
+| O5 | Every lane of a reachable sink refusing data writes | each lane detaches on its own | none detach: the slot fills, and past the WAL limit every index of every sink is rebuilt |
+| O6 | Where `[detach]` lives | on the machine (`#[serde(skip)]`, flags and env vars); per index, `detach = false` in the lock, written only when set | all in the lock: thresholds can't follow each environment's disk |
+| O7 | stdout | never detaches: it has nothing to record | detaching in memory: a consumer silently misses changes across a restart |
+| O8 | Rebuild trigger | the probe (§6), on the doubling schedule | a timer: routes around an operator's block, and its seed deletes the blocked generation |
+| O9 | Flap state | in the detach record | in memory: every restart rebuilds at once |
+| O10 | An index detached on every sink | stop reading its changes, as a later slice if it measures worth it. It must stop marking them too, or the dispatcher's end check (`dispatcher.rs:207-217`) raises `DocumentsLeft` at a stop | build it for no lane: wasted builds and reads |
+| O11 | First rebuild | no earlier than `retry_initial` (5 min) after the detach, at a landed probe | the first landed probe: usually meets the cause again |
+| O12 | Operator `detach` command | none | `POST /detach` / `flusso detach`: a new way to drop changes on purpose, undone only by a rebuild |
+| O13 | Stuck clock across restarts | recorded in its own document with `seen_at` (§4) | memory only: a process restarting faster than `stuck_for` never detaches, and the WAL limit then loses the slot for every index |
+| O14 | A fence naming no sink or no index while a lane is detached | answers `detached` at once. **Accepted knowingly:** while any lane is detached, a `/wait` naming no index fails for every index, until the caller names the sink or index it reads (`flusso-query` names its indexes) | skipping detached lanes: passes readers of frozen data |
+| O15 | What is left and reported | `flusso check` unchanged; `/status` and `/indexes` report; a schema change leaves the old alias's documents and generations, as old aliases are left today | sweeping them: deletes data, which nothing does today for any old alias |
+| O16 | Reattaching a detached `backfill = false` lane | a distinct verb, `flusso reattach --accept-gap`. **Accepted knowingly:** the gap is permanent. It holds every build published between the detach and the reattach, and the items discarded at the detach. Deletes in it leave ghost documents for good; updates in it stay stale until the row changes again | `reindex` or `reindex --accept-gap`: makes "rebuild" mean "accept a gap" |
+| O17 | A park during a rebuild | the rebuild fails when its lane is parked or restaging at that moment past `rebuild_grace` (10 min), on a clock started at the first park after `Attached` | at once: loses hours of backfill to a 30 s block. After `stuck_for`: holds the slot for hours per attempt |
+| O18 | What gates a detach after an outage | the lane's next refusal | time since the destination answered: one more clock. The run's age: never detaches in a crash loop |
+| O19 | Full disk (`read_only_allow_delete` met by the probe) | the rebuild waits for an operator. **Accepted knowingly:** a flood stage longer than `stuck_for` leaves every index on that node detached until an operator runs `reindex`, even after OpenSearch lifts the block itself. Reads stay frozen and the alert stays critical | automatic: writes a second full copy onto a full cluster and can block other tenants' indexes. A headroom check: heuristic, since the disk is shared |
+| O20 | `reindex` on a rebuilding lane | restarts a rebuild that is parked or restaging; ignored, and logged, while it is open | always ignored: no way out but waiting for `rebuild_grace`. Always restart: throws away a healthy backfill |
+| O21 | `committed` in `/status` | counts attached lanes only, and lists the detached ones it leaves out | frozen at the detach: the sink looks stuck while detached |
+| O22 | Stuck clock while `enabled = false` | not written | written: meta writes for an unused feature |
+| O23 | Where the attach happens | the index's builder quiesces (§1) | stopping the whole ingest engine: pauses every index, replays the unconfirmed tail, fails `/readyz` and fences during the restart, and restarts other indexes' backfills from where they were asked |
+| O24 | Slice 1 on a record left by a newer flusso after a rollback | log loudly and stage as today: a rebuild, or for `live_only` resuming over the gap | restaging until upgraded: pins the slot until the WAL limit drops it for every index |
+| O25 | The WAL half | only the lane `pinned_by` names, measuring the WAL its detach would free (its position to the next-least lane's, or to the horizon); no grace | the lane's WAL behind as measured today: counts WAL not yet read and WAL another sink holds, so an outage causes a storm of rebuilds and detaches that free nothing. After a grace: the slot can be lost within it. A 90% hard bound: one more rule for the same case |
+| O26 | `--skip-backfill` at a start that finds a running rebuild | demote it, with a loud log: the rebuild and its partial are dropped, the lane is detached | keep it attached and paused: pins the slot for the whole run |
+| O27 | The rebuild's walk while another sink's walk of the index runs | it waits for that walk, with the lane attached and live meanwhile, so reads stay on the old generation for up to that walk's length | cut the other walk: costs the other sink its progress since its last mark |
 
 ## 12. Not verified
 

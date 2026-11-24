@@ -1805,6 +1805,7 @@ is the one concrete piece.
   `skip`: the sibling stays current, nothing quarantined, the lane pins the slot, lifted it catches up
   with no restart; a generation deleted mid-run staged again alone), and `flusso-cli`'s `shutdown`
   `a_stop_with_a_write_blocked_lane_gives_up_at_the_deadline_naming_the_lane_and_a_restart_converges`.
+  Detaching a lane stuck past a threshold and rebuilding its index (#394) is decided but not built: `docs/adr/0012-stage-notes/stage-10.md`.
 - **A document a script fails on is decided on the ingest side (issue #198).** A
   `DocumentBuilder` may return `Document::Failed { id, failure: BuildFailure }`; the ingest engine
   resolves the index's `FailurePolicies` (the same `on_error` the sink engines use, handed to it by
