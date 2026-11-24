@@ -24,6 +24,12 @@
 //! Staging many indexes at once (issue #398) runs on a fresh cluster, where
 //! every index's first meta write races to create the shared meta index, then
 //! on a restart, then as concurrent reindexes.
+//! And a reindex past an old generation an operator blocked or closed (issue
+//! #479): one test per state of the old generation (`index.blocks.write`,
+//! `index.blocks.read_only`, `index.blocks.read_only_allow_delete`, closed),
+//! each asserting what `mark_seeded` promises: the aliases serve the new
+//! generation, every other generation is deleted, the index reads seeded, and
+//! a restart stages nothing more.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -1291,4 +1297,208 @@ async fn many_indexes_staged_at_once_each_get_their_own_generation() {
             vec![format!("{hash_alias}_2")],
         );
     }
+}
+
+/// What the old generation of [`a_seed_past_an_old_generation`] is left in
+/// before the reindex's seed: an operator's block, or closed.
+#[derive(Debug, Clone, Copy)]
+enum OldGeneration {
+    WriteBlocked,
+    ReadOnly,
+    ReadOnlyAllowDelete,
+    Closed,
+}
+
+impl OldGeneration {
+    /// Put `index` in this state.
+    async fn apply(self, client: &reqwest::Client, base: &str, index: &str) {
+        let block = match self {
+            OldGeneration::WriteBlocked => "index.blocks.write",
+            OldGeneration::ReadOnly => "index.blocks.read_only",
+            OldGeneration::ReadOnlyAllowDelete => "index.blocks.read_only_allow_delete",
+            OldGeneration::Closed => {
+                let status = client
+                    .post(format!("{base}/{index}/_close"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status();
+                assert!(status.is_success(), "closing {index} returned {status}");
+                return;
+            }
+        };
+        let status = client
+            .put(format!("{base}/{index}/_settings"))
+            .json(&serde_json::json!({ block: true }))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert!(
+            status.is_success(),
+            "setting {block} on {index} returned {status}"
+        );
+    }
+
+    /// Whether `index` is still in this state: read right before the seed, so
+    /// the test proves the seed met it.
+    async fn holds(self, client: &reqwest::Client, base: &str, index: &str) -> bool {
+        let rows: Value = client
+            .get(format!("{base}/_cat/indices/{index}?h=status&format=json"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let closed = rows[0]["status"].as_str() == Some("close");
+        let block = match self {
+            OldGeneration::Closed => return closed,
+            OldGeneration::WriteBlocked => "index.blocks.write",
+            OldGeneration::ReadOnly => "index.blocks.read_only",
+            OldGeneration::ReadOnlyAllowDelete => "index.blocks.read_only_allow_delete",
+        };
+        !closed && flat_settings(client, base, index).await[block].as_str() == Some("true")
+    }
+}
+
+/// Seed generation 1, put it in `state`, reindex into generation 2 from a
+/// fresh sink (a restart), write, and seed it. Then assert what `mark_seeded`
+/// promises (`sink_impl.rs`): the hash alias and the convenience alias serve
+/// generation 2, every other generation is deleted, the index reads seeded,
+/// and a restart's `ensure_index` stages nothing more (no new generation, the
+/// aliases unmoved, still seeded). Every step's error is printed whole, so a
+/// failing state shows what OpenSearch answered.
+async fn a_seed_past_an_old_generation(state: OldGeneration) {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    // The disk monitor releases a `read_only_allow_delete` block it finds on
+    // a node below the high watermark: off, the block stays as an operator
+    // (or a flood stage that has not passed yet) left it.
+    let status = client
+        .put(format!("{base}/_cluster/settings"))
+        .json(&serde_json::json!({
+            "persistent": { "cluster.routing.allocation.disk.threshold_enabled": false }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(
+        status.is_success(),
+        "turning the disk monitor off returned {status}"
+    );
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+    let gen2 = format!("{hash_alias}_2");
+
+    let run1 = sink(&base);
+    run1.ensure_index(&mapping).await.unwrap();
+    for i in [1, 2, 3] {
+        run1.apply(&upsert(&index, &i.to_string(), &document(i)))
+            .await
+            .unwrap();
+    }
+    run1.flush(true).await.unwrap();
+    run1.mark_seeded(&index).await.unwrap();
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen1.clone()]
+    );
+
+    state.apply(&client, &base, &gen1).await;
+
+    sink(&base)
+        .reindex(&mapping)
+        .await
+        .unwrap_or_else(|error| panic!("{state:?}: reindex failed: {error}"));
+    let run2 = sink(&base);
+    run2.ensure_index(&mapping)
+        .await
+        .unwrap_or_else(|error| panic!("{state:?}: ensure_index of generation 2 failed: {error}"));
+    for i in [1, 2] {
+        run2.apply(&upsert(&index, &i.to_string(), &document(i)))
+            .await
+            .unwrap();
+    }
+    run2.flush(true)
+        .await
+        .unwrap_or_else(|error| panic!("{state:?}: writing generation 2 failed: {error}"));
+    assert!(
+        state.holds(&client, &base, &gen1).await,
+        "{state:?} still holds on generation 1 when the seed runs"
+    );
+    run2.mark_seeded(&index)
+        .await
+        .unwrap_or_else(|error| panic!("{state:?}: mark_seeded failed: {error}"));
+
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen2.clone()],
+        "{state:?}: the hash alias serves generation 2",
+    );
+    assert_eq!(
+        alias_targets(&client, &base, LOGICAL).await,
+        vec![gen2.clone()],
+        "{state:?}: the convenience alias serves generation 2",
+    );
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        vec![gen2.clone()],
+        "{state:?}: the old generation is deleted",
+    );
+    assert!(
+        run2.is_seeded(&index).await.unwrap(),
+        "{state:?}: seeded after mark_seeded"
+    );
+    assert!(
+        !doc_exists(&client, &base, &hash_alias, "3").await,
+        "{state:?}: reads come from the rebuilt generation"
+    );
+
+    let restart = sink(&base);
+    restart
+        .ensure_index(&mapping)
+        .await
+        .unwrap_or_else(|error| panic!("{state:?}: a restart's ensure_index failed: {error}"));
+    assert!(
+        restart.is_seeded(&index).await.unwrap(),
+        "{state:?}: a restart reads the index seeded"
+    );
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        vec![gen2.clone()],
+        "{state:?}: a restart stages no new generation",
+    );
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen2],
+        "{state:?}: a restart leaves the aliases on generation 2",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_seed_past_a_write_blocked_generation_serves_the_new_one_and_deletes_the_old() {
+    a_seed_past_an_old_generation(OldGeneration::WriteBlocked).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_seed_past_a_read_only_generation_serves_the_new_one_and_deletes_the_old() {
+    a_seed_past_an_old_generation(OldGeneration::ReadOnly).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_seed_past_a_read_only_allow_delete_generation_serves_the_new_one_and_deletes_the_old() {
+    a_seed_past_an_old_generation(OldGeneration::ReadOnlyAllowDelete).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_seed_past_a_closed_generation_serves_the_new_one_and_deletes_the_old() {
+    a_seed_past_an_old_generation(OldGeneration::Closed).await;
 }
