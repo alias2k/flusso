@@ -6,6 +6,7 @@
 
 - **An index that can't be written parks alone**; the sink's other indexes keep writing, and a write block or a closed index no longer drops documents under `on_error = "skip"` (#404): [One index's failure parks its own lane](#one-indexs-failure-parks-its-own-lane).
 - **A closed index no longer stops its sink from starting**; only its lane parks, and opening it resumes the lane: [A closed index parks its lane](#a-closed-index-parks-its-lane).
+- **An index that can't be ensured no longer holds its sink after a restart**: only its lane waits, `restaging`, and it opens on its own once the index can be ensured; a start with a new replication slot still waits for every index: [One index that can't be ensured waits alone](#one-index-that-cant-be-ensured-waits-alone).
 - **`on_error = "stop"` no longer stops the sink**, and `/readyz` stays `200` while an index is parked; alert on the new `FlussoLaneParked` instead: [Alerting on a parked index](#alerting-on-a-parked-index).
 - **A reindex unsticks a stuck lane**: it opens a `refused`, `blocked` or `restaging` lane, and one that can't stage is retried on its own instead of dropped: [A reindex unsticks a lane](#a-reindex-unsticks-a-lane).
 - **The retry wait is configurable**: `[backoff]` sets the first and the longest wait of every restart and probe: [Retry timing is configurable](#retry-timing-is-configurable).
@@ -102,6 +103,30 @@ A refused or blocked lane is **parked**: it writes its oldest batch again alone 
 - **The closed lane holds the slot** and its fences, as any parked lane does; the sink's other indexes keep writing.
 - **A stop doesn't wait it out.** The stop probes the lane once; still closed, it holds the drain until `--shutdown-timeout-secs` and flusso exits `1`.
 - **`flusso_meta` is not covered.** A closed `{prefix}flusso_meta` still fails the sink's start: open it.
+
+## One index that can't be ensured waits alone
+
+**What changed.** When a sink's run restarts, flusso ensures each of its indexes again (checks the generation and its `flusso_meta` record, creating what's missing). In 0.18 one index that couldn't be ensured failed that step for the whole sink. In 0.19 that index's lane waits alone:
+
+| | 0.18 | 0.19 |
+| --- | --- | --- |
+| One index can't be ensured after a sink's restart | the sink retries with backoff; none of its indexes is written | that index's lane is `restaging` with `could not be ensured: <error>`; the sink's other indexes write |
+| The same at a start whose replication slot was kept | the start retries; nothing is read for any sink | the start goes on without that index |
+| The same at a start with a new slot | the start retries until every index is ensured | unchanged |
+| `/readyz` meanwhile | `503`: the sink is `failed`, or the deployment `starting` | `200`, unless something else holds it |
+| The cluster down | the sink retries with backoff | unchanged |
+| A cluster that accepts connections and never answers, at a restart | read as down after one request timeout (30 s by default) | after up to nine (270 s by default) |
+
+The waiting lane is tried again at once, then on the [`[backoff]`](#retry-timing-is-configurable) schedule, and opens with no restart. A backfill that was running for it goes on from where it got, or from the first row if its generation was recreated meanwhile. Meanwhile it holds the replication slot and its fences, and `FlussoLaneParked` fires after 5 minutes (`why="restaging"`).
+
+**Who is affected.** Deployments with more than one index on a sink: a refusal about one index no longer stops the others after a failed write or a restart.
+
+**What to do.** Nothing to configure. Alert on `FlussoLaneParked` ([Alerting on a parked index](#alerting-on-a-parked-index)): `/readyz` and the sink's `failed` phase no longer show it. The runbook is [An index that can't be ensured after a restart](stalled-lane.md#an-index-that-cant-be-ensured-after-a-restart).
+
+**What to know.**
+
+- **How flusso tells one index from a cluster that is down.** If no index can be ensured, the cluster is down. A sink whose first sixteen indexes, in index-name order, are all refused while the rest are fine still waits as a whole ([details](../reference/http.md#when-a-restart-cant-ensure-an-index)).
+- **`flusso_indexes{sink}`** counts the indexes the sink's last staging ensured, so after a staging that left an index out it reads one lower, even once that lane opens, until the sink stages again.
 
 ## Retry timing is configurable
 

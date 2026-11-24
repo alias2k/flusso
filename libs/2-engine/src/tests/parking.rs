@@ -3711,6 +3711,132 @@ async fn a_stop_during_a_staging_makes_it_ensure_only() {
     );
 }
 
+/// #471 (R2, R3), the issue's own: `orders` can't be ensured (its target
+/// gone, its staging refused), and a write error on `users` fails the run.
+/// The restart's staging goes on without `orders`: `users` writes again,
+/// `orders` stays restaging, never reopened unensured, and recovers on its
+/// restage path once it can be ensured.
+#[tokio::test(start_paused = true)]
+async fn a_restart_goes_on_without_the_index_it_cannot_ensure() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Missing));
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    rig.live(&orders(), 1..2, 0).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff()));
+    let task = spawn(Arc::clone(&engine));
+    eventually("orders restaging", || {
+        engine.lane_health(&lane(orders())).kind() == "restaging"
+    })
+    .await;
+    *rig.sink.fail_id.lock().unwrap() = Some("9".to_owned());
+    rig.live(&users(), 9..10, 1).await;
+    let ended = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("the run ends on the failed write");
+    assert!(ended.unwrap().is_err());
+    *rig.sink.fail_id.lock().unwrap() = None;
+
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .expect("the restart's staging goes on without the index it can't ensure");
+    assert_eq!(
+        engine.lane_health(&lane(orders())).kind(),
+        "restaging",
+        "never reopened while it can't be ensured"
+    );
+    let task = spawn(Arc::clone(&engine));
+    rig.live(&users(), 10..11, 2).await;
+    eventually("users writes after the restart", || {
+        writes_holding(&rig, &users(), "10") >= 1
+    })
+    .await;
+    assert_eq!(engine.lane_health(&lane(orders())).kind(), "restaging");
+    assert_eq!(
+        rig.applied(&orders()),
+        before(0),
+        "its change is not applied: the slot and its fences hold"
+    );
+    assert!(
+        !rig.stream.is_idle(),
+        "its item stays delivered and unacknowledged"
+    );
+
+    rig.sink.ensure_fails_for.lock().unwrap().clear();
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    eventually("orders recovers on its restage path", || {
+        writes_holding(&rig, &orders(), "1") >= 2
+    })
+    .await;
+    task.abort();
+}
+
+/// #471 (R2): a start under `Resumed` goes on without an index it can't
+/// ensure too, nothing needing a rebuild: that lane is restaging with why,
+/// the others open.
+#[tokio::test(start_paused = true)]
+async fn a_resumed_start_goes_on_without_the_index_it_cannot_ensure() {
+    let rig = Rig::new(Gate::default());
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let engine = rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff());
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .expect("staging goes on without orders");
+    assert!(
+        matches!(
+            engine.lane_health(&lane(orders())),
+            LaneHealth::Restaging { reason, .. } if reason.contains("could not be ensured")
+        ),
+        "{:?}",
+        engine.lane_health(&lane(orders()))
+    );
+    assert!(engine.lane_health(&lane(users())).is_open());
+}
+
+/// #471 (R1): when no index could be ensured the destination is down, not
+/// an index: the staging fails as a whole and no lane is marked.
+#[tokio::test(start_paused = true)]
+async fn a_staging_none_of_whose_indexes_is_ensured_fails_as_a_whole() {
+    let rig = Rig::new(Gate::default());
+    rig.sink
+        .ensure_fails
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let engine = rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff());
+    assert!(
+        engine
+            .stage(source::cdc::Continuity::Resumed)
+            .await
+            .is_err()
+    );
+    for of in [orders(), users()] {
+        assert!(engine.lane_health(&lane(of)).is_open(), "no lane marked");
+    }
+}
+
+/// #471 (R4): with a `Fresh` source an index that can't be ensured can't be
+/// told seeded or not, so whether it needs a rebuild before the source is
+/// prepared is unknown: the first staging waits, failing as a whole.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_staging_waits_for_every_index() {
+    let rig = Rig::new(Gate::default());
+    rig.sink
+        .ensure_fails_for
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let engine = rig.engine(FailurePolicy::Stop).with_backoff(slow_backoff());
+    assert!(engine.stage(source::cdc::Continuity::Fresh).await.is_err());
+}
+
 /// X17 (review 2): the owed reindex is on the lane's state, so a run that
 /// fails meanwhile keeps it: staging at the next start leaves the lane
 /// `restaging`, and the next run's retry stages the reindex.

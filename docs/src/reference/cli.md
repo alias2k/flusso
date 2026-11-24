@@ -124,7 +124,7 @@ A [lane](http.md#lane-health) that isn't being written, or is waiting on a reind
 | The lane at the stop | What the stop does | Exit |
 | --- | --- | --- |
 | `refused` or `blocked` | Writes its oldest item once more, at once and as it was (no [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build)). If it lands, the lane opens and drains. If it is refused or blocked again (a block still set, an index still closed), it holds the drain until the deadline. | `1` at the deadline, naming the lane |
-| `restaging`: its target gone, or a reindex [waiting to stage](http.md#when-the-reindex-cant-stage) | Stages nothing, retries nothing, asks for no backfill. Its changes are let go unwritten and unconfirmed. | `0` |
+| `restaging`: its target gone, a reindex [waiting to stage](http.md#when-the-reindex-cant-stage), or an index a restart [couldn't ensure](http.md#when-a-restart-cant-ensure-an-index) | Stages nothing, retries nothing, asks for no backfill. Its changes are let go unwritten and unconfirmed. | `0` |
 | `open`, its stuck item waiting for a [reindex's](http.md#a-reindex-of-a-lane-flusso-doesnt-write) backfill | Lets the stuck item go, unconfirmed; the items behind it are written as usual. The backfill is abandoned like any other. | `0` |
 
 A change let go was never confirmed to the slot, so the next start reads it again: it stages a `restaging` index, backfills an index left unseeded, and writes the change like any other. What it does about a reindex that was waiting: [A restart keeps or drops it](http.md#when-the-reindex-cant-stage).
@@ -134,7 +134,7 @@ A change let go was never confirmed to the slot, so the next start reads it agai
 **Two waits remain**, beside the parked lane:
 
 - **A reindex being staged when the stop came.** The drain waits for the destination to answer that one staging.
-- **A sink that fails during the stop.** It is restarted after its [`[backoff]`](config-toml.md#backoff) wait, then only makes sure its indexes exist: no backfill is asked for and no lane reopens. That wait doubles each time the sink fails again without progress, up to `max_ms` (60 s by default), past the default 30 s deadline, so such a stop can end at the deadline with exit `1`.
+- **A sink that fails during the stop.** It is restarted after its [`[backoff]`](config-toml.md#backoff) wait, then only makes sure its indexes exist: no backfill is asked for and no lane reopens. An index it can't ensure is left `restaging`, its reason `could not be ensured during the stop: <error>` (or `not ensured during the stop: not tried` for one it didn't get to), and let go like any `restaging` lane. That wait doubles each time the sink fails again without progress, up to `max_ms` (60 s by default), past the default 30 s deadline, so such a stop can end at the deadline with exit `1`.
 
 Until the pipeline is started (through [validation at start](#validation-at-start)), a signal ends the process the default way, at once; a parent that exits meanwhile is noticed as soon as it is.
 

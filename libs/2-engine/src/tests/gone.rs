@@ -200,6 +200,8 @@ struct Generations {
     /// OpenSearch's default `action.auto_create_index` does, instead of
     /// reporting it missing.
     auto_create: bool,
+    /// `ensure_index` is refused, changing nothing, this many times.
+    ensure_refusals: Mutex<usize>,
 }
 
 impl Generations {
@@ -265,6 +267,13 @@ fn row_of(envelope: &Envelope) -> i64 {
 #[async_trait]
 impl Sink for Generations {
     async fn ensure_index(&self, _: &IndexMapping) -> sink::Result<sink::Ensured> {
+        {
+            let mut refusals = self.ensure_refusals.lock().unwrap();
+            if *refusals > 0 {
+                *refusals -= 1;
+                return Err(sink::SinkError::Write("ensure refused".to_owned()));
+            }
+        }
         let mut target = self.target.lock().unwrap();
         if target.exists && !target.impostor {
             return Ok(sink::Ensured::existing(Some(identity(target.generation))));
@@ -1170,9 +1179,10 @@ fn ticket_of(requests: &[Asked], index: &IndexName) -> Ticket {
         .unwrap()
 }
 
-/// (c) Staging finds the `users` target new while `orders` fails to stage:
-/// the pass fails as a whole, and the next one, finding `users` as it left
-/// it, must still ask for it again (and not for `orders`).
+/// (c) Staging finds the `users` target new while `orders` fails to stage,
+/// under a `Fresh` source, where one index failing fails the pass as a whole
+/// (#471, R4): the next pass, finding `users` as it left it, must still ask
+/// for it again (and not for `orders`).
 #[tokio::test(start_paused = true)]
 async fn a_cut_found_beside_another_index_failing_to_stage_is_kept() {
     let mut pair = Pair::new(Targets::default());
@@ -1182,7 +1192,28 @@ async fn a_cut_found_beside_another_index_failing_to_stage_is_kept() {
 
     pair.sink.delete(&users());
     pair.sink.fail_ensure(&orders(), 1);
-    assert!(pair.engine.stage(Continuity::Resumed).await.is_err());
+    assert!(pair.engine.stage(Continuity::Fresh).await.is_err());
+    pair.engine.stage(Continuity::Fresh).await.unwrap();
+
+    let again = pair.requests().await;
+    assert_eq!(again.len(), 1, "{again:?}");
+    let fresh = again.first().unwrap();
+    assert_eq!(fresh.index, users());
+    assert_eq!(fresh.after, None);
+    assert!(fresh.ticket > ticket_of(&first, &users()), "{again:?}");
+}
+
+/// (c, #471) The same under `Resumed`: the pass goes on without `orders`
+/// (left restaging) and asks for `users` again in that same pass.
+#[tokio::test(start_paused = true)]
+async fn a_cut_found_beside_an_index_left_restaging_is_asked_again_at_once() {
+    let mut pair = Pair::new(Targets::default());
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let first = pair.requests().await;
+    assert_eq!(first.len(), 2, "{first:?}");
+
+    pair.sink.delete(&users());
+    pair.sink.fail_ensure(&orders(), 1);
     pair.engine.stage(Continuity::Resumed).await.unwrap();
 
     let again = pair.requests().await;
@@ -1191,6 +1222,83 @@ async fn a_cut_found_beside_another_index_failing_to_stage_is_kept() {
     assert_eq!(fresh.index, users());
     assert_eq!(fresh.after, None);
     assert!(fresh.ticket > ticket_of(&first, &users()), "{again:?}");
+    assert_eq!(
+        pair.engine
+            .lane_health(&stream::LaneKey::new(orders(), pair.engine.name().clone()))
+            .kind(),
+        "restaging"
+    );
+}
+
+/// Review of #476, 1: an index a restart's staging left out (one ensure
+/// failing for a moment) keeps its running backfill when its target is
+/// intact: staged again with ensure's rules, nothing is cut, forgotten or
+/// asked again, and the lane opens.
+#[tokio::test(start_paused = true)]
+async fn an_index_left_out_by_a_staging_keeps_its_backfill_when_its_target_is_intact() {
+    let mut pair = Pair::new(Targets::default());
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(pair.requests().await.len(), 2);
+
+    pair.sink.fail_ensure(&orders(), 1);
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let lane = LaneKey::new(orders(), primary());
+    let health = pair.engine.lane_health(&lane);
+    assert!(
+        matches!(&health, crate::LaneHealth::Restaging { reason, .. } if reason.contains("could not be ensured")),
+        "{health:?}"
+    );
+    let running = pair.run();
+    let opened = tokio::time::timeout(Duration::from_secs(60), async {
+        while !pair.engine.lane_health(&lane).is_open() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(opened.is_ok(), "the lane opens once its index is ensured");
+    assert!(
+        pair.requests().await.is_empty(),
+        "its outstanding backfill goes on: nothing asked again"
+    );
+    assert_eq!(*pair.sink.forgets.lock().unwrap(), 0, "its walk is kept");
+    running.abort();
+}
+
+/// Review of #476, 1, the counter-case: the target left out was recreated
+/// meanwhile, so its outstanding backfill can't seed it: the later staging
+/// cuts it and asks again from the first key.
+#[tokio::test(start_paused = true)]
+async fn an_index_left_out_by_a_staging_whose_target_changed_is_asked_again() {
+    let mut pair = Pair::new(Targets::default());
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let first = pair.requests().await;
+
+    pair.sink.fail_ensure(&orders(), 1);
+    pair.sink.delete(&orders());
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let running = pair.run();
+    let asked = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let asked = pair.requests().await;
+            if !asked.is_empty() {
+                return asked;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("asked again");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let fresh = asked.first().unwrap();
+    assert_eq!(fresh.index, orders());
+    assert_eq!(fresh.after, None);
+    assert!(fresh.ticket > ticket_of(&first, &orders()), "{asked:?}");
+    assert_eq!(
+        *pair.sink.forgets.lock().unwrap(),
+        1,
+        "its walk is forgotten"
+    );
+    running.abort();
 }
 
 /// (d) A restage finds the `users` target missing and creates a new one, then
@@ -1293,5 +1401,548 @@ async fn a_resumed_request_and_a_fresh_one_of_a_lane_are_walked_once_from_the_fi
         "every row once, from the first key"
     );
     assert!(consumer.is_empty(), "one walk, one completion");
+    running.abort();
+}
+
+/// `users` on [`Generations`], `orders` always fine and seeded: a sink of two
+/// indexes, so a staging can leave `users` out while `orders` is ensured
+/// (#471).
+#[derive(Debug)]
+struct Split(Arc<Generations>);
+
+#[async_trait]
+impl Sink for Split {
+    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
+        if mapping.index == users() {
+            return self.0.ensure_index(mapping).await;
+        }
+        Ok(sink::Ensured::existing(Some(sink::TargetId::new(
+            "orders".to_owned(),
+        ))))
+    }
+
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
+        let own: Vec<Envelope> = envelopes
+            .iter()
+            .filter(|envelope| envelope.index == users())
+            .cloned()
+            .collect();
+        if own.is_empty() {
+            return Ok(WriteReport::clean());
+        }
+        self.0.write(&own, caught_up).await
+    }
+
+    async fn seeding(&self, index: &IndexName) -> sink::Result<Seeding> {
+        if *index == users() {
+            return self.0.seeding(index).await;
+        }
+        Ok(Seeding::Seeded)
+    }
+
+    async fn record_walked(&self, index: &IndexName, mark: &str) -> sink::Result<()> {
+        if *index == users() {
+            return self.0.record_walked(index, mark).await;
+        }
+        Ok(())
+    }
+
+    async fn forget_walked(&self, index: &IndexName) -> sink::Result<()> {
+        if *index == users() {
+            return self.0.forget_walked(index).await;
+        }
+        Ok(())
+    }
+
+    async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
+        if *index == users() {
+            return self.0.mark_seeded(index).await;
+        }
+        Ok(())
+    }
+
+    async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
+        if mapping.index == users() {
+            return self.0.reindex(mapping).await;
+        }
+        Ok(())
+    }
+}
+
+/// A sink engine over `users` and `orders` on [`Split`], driven by hand.
+struct TwoLanes {
+    sink: Arc<Generations>,
+    stream: Arc<ChannelStream>,
+    lane: Box<dyn Producer<LaneItem>>,
+    requests: Box<dyn Consumer<Request>>,
+    control: tokio::sync::mpsc::Sender<SinkControl>,
+    receiver: Option<tokio::sync::mpsc::Receiver<SinkControl>>,
+    engine: Arc<SinkEngine>,
+}
+
+impl TwoLanes {
+    fn new(sink: Arc<Generations>, backoff: Duration, writes: usize) -> Self {
+        Self::build(sink, backoff, writes, false)
+    }
+
+    fn build(
+        sink: Arc<Generations>,
+        backoff: Duration,
+        writes: usize,
+        skip_backfill: bool,
+    ) -> Self {
+        let stream = Arc::new(ChannelStream::over(1024, [users(), orders()], [primary()]));
+        let mapping_of = |index: IndexName| IndexMapping { index, ..mapping() };
+        let engine = Arc::new(
+            SinkEngine::new(
+                primary(),
+                Arc::new(Split(Arc::clone(&sink))) as Arc<dyn Sink>,
+                Arc::clone(&stream) as Arc<dyn Stream>,
+                vec![mapping_of(users()), mapping_of(orders())],
+                Arc::new(Progress::of([users(), orders()], [primary()])),
+            )
+            .with_writes(writes)
+            .with_write_documents(10)
+            .with_backoff(crate::Backoff::new(backoff, backoff).unwrap())
+            .skip_backfill(skip_backfill),
+        );
+        let (control, receiver) = tokio::sync::mpsc::channel::<SinkControl>(4);
+        Self {
+            sink,
+            lane: stream
+                .lane(&LaneKey::new(users(), primary()))
+                .unwrap()
+                .producer,
+            requests: stream.requests().unwrap().consumer,
+            stream,
+            control,
+            receiver: Some(receiver),
+            engine,
+        }
+    }
+
+    /// A run of the engine, with no control.
+    fn run(&self) -> JoinHandle<crate::Result<()>> {
+        let engine = Arc::clone(&self.engine);
+        tokio::spawn(async move {
+            let (_control, mut receiver) = tokio::sync::mpsc::channel::<SinkControl>(1);
+            engine.run(&mut receiver).await
+        })
+    }
+
+    /// A run of the engine taking the test's control channel.
+    fn run_controlled(&mut self) -> JoinHandle<crate::Result<()>> {
+        let engine = Arc::clone(&self.engine);
+        let mut receiver = self.receiver.take().unwrap();
+        tokio::spawn(async move { engine.run(&mut receiver).await })
+    }
+
+    /// Hold the write of row 21 to generation 2 for 15 s, past
+    /// `RECORD_EVERY`, then let it land: what triggers a record after the
+    /// first walk's pages landed in the new target.
+    async fn land_late(&self) {
+        let waiting = tokio::time::timeout(Duration::from_secs(120), async {
+            while !self.sink.is_waiting(2, 21) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        assert!(waiting.is_ok(), "row 21's write to generation 2 never came");
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        self.sink.release(2, 21);
+        self.drained().await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+
+    /// The next backfill request: its checkpoint and ticket.
+    async fn request(&mut self) -> (Option<String>, Ticket) {
+        next_backfill(&mut self.requests).await
+    }
+
+    /// A page of `rows` of the `users` walk answering `ticket`.
+    async fn page(&self, rows: std::ops::RangeInclusive<i64>, ticket: Ticket) {
+        self.lane.publish(users_page(rows, ticket)).await.unwrap();
+    }
+
+    async fn drained(&self) {
+        let drained = tokio::time::timeout(Duration::from_secs(600), async {
+            while !self.stream.is_idle() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(drained.is_ok(), "the lanes never drained");
+    }
+
+    fn users_health(&self) -> crate::LaneHealth {
+        self.engine.lane_health(&LaneKey::new(users(), primary()))
+    }
+
+    /// What a new engine over the same sink asks for `users` (the next start).
+    async fn next_start_asks(&self) -> Option<String> {
+        let mut next = TwoLanes::new(Arc::clone(&self.sink), Duration::from_secs(1), 1);
+        next.engine.stage(Continuity::Resumed).await.unwrap();
+        next.request().await.0
+    }
+}
+
+async fn next_backfill(requests: &mut Box<dyn Consumer<Request>>) -> (Option<String>, Ticket) {
+    let delivery = tokio::time::timeout(Duration::from_secs(600), requests.recv())
+        .await
+        .expect("no backfill request")
+        .unwrap()
+        .unwrap();
+    let (Request::Backfill { after, ticket, .. }, handle) = delivery.into_parts() else {
+        panic!("a backfill request")
+    };
+    handle.ack().await.unwrap();
+    (after.map(|mark| mark.as_str().to_owned()), ticket)
+}
+
+fn users_page(rows: std::ops::RangeInclusive<i64>, ticket: Ticket) -> LaneItem {
+    let last = *rows.end();
+    LaneItem::Batch(Batch {
+        key: None,
+        position: None,
+        envelopes: rows
+            .map(|row| {
+                Envelope::upsert(
+                    users(),
+                    row.to_string(),
+                    GenericValue::Map(BTreeMap::new()),
+                    None,
+                    chrono::Utc::now(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        hold: Default::default(),
+        walked: Some(stream::WalkMark::new(format!("{last:04}"))),
+        ticket: Some(ticket),
+        ..Default::default()
+    })
+}
+
+/// `users`' first walk lands rows 1..=10 in generation 1; then the run ends,
+/// the test changes the sink, and the restart's staging leaves `users` out
+/// (its ensure refused `refusals` times). The first walk's ticket.
+async fn left_out(two: &mut TwoLanes, refusals: usize, delete: bool) -> Ticket {
+    two.engine.stage(Continuity::Resumed).await.unwrap();
+    let (_, first) = two.request().await;
+    let running = two.run();
+    two.page(1..=10, first).await;
+    two.drained().await;
+    running.abort();
+    let _ = running.await;
+    if delete {
+        two.sink.delete();
+    }
+    *two.sink.ensure_refusals.lock().unwrap() = refusals;
+    two.engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(two.users_health().kind(), "restaging", "left out");
+    first
+}
+
+/// Review of #476b, 1 (the rule: a walk checkpoint is recorded only for the
+/// backfill it belongs to), through `ensure_again`: `users` is left out, its
+/// target recreated meanwhile; a page of the first walk is taken during the
+/// backoff after a failed retry; the next retry cuts and asks again. That
+/// page lands in the new target, but its mark is never recorded there, and
+/// the next start asks from the first key.
+#[tokio::test(start_paused = true)]
+async fn a_cut_backfills_page_records_no_mark_in_the_new_target_through_ensure_again() {
+    let mut two = TwoLanes::new(
+        Arc::new(Generations::default().holding(2, 21)),
+        Duration::from_secs(1),
+        1,
+    );
+    let first = left_out(&mut two, 2, true).await;
+    two.page(11..=20, first).await;
+    two.page(21..=30, first).await;
+    let running = two.run();
+    let (after, fresh) = two.request().await;
+    assert_eq!(after, None);
+    assert!(fresh > first);
+    two.land_late().await;
+    assert!(two.sink.ahead().is_empty(), "{:?}", two.sink.ahead());
+    running.abort();
+    assert_eq!(
+        two.next_start_asks().await,
+        None,
+        "the next start asks from the first key"
+    );
+}
+
+/// The same rule through a reindex of a lane left out: the cut is the
+/// reindex's, the old walk's page is never recorded in the new target.
+#[tokio::test(start_paused = true)]
+async fn a_cut_backfills_page_records_no_mark_in_the_new_target_through_a_reindex() {
+    let mut two = TwoLanes::new(
+        Arc::new(Generations::default().holding(2, 21)),
+        Duration::from_secs(60),
+        1,
+    );
+    let first = left_out(&mut two, 2, true).await;
+    two.page(11..=20, first).await;
+    two.page(21..=30, first).await;
+    let running = two.run_controlled();
+    let refused = tokio::time::timeout(Duration::from_secs(30), async {
+        while *two.sink.ensure_refusals.lock().unwrap() > 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(refused.is_ok(), "the first retry was refused");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    two.control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    let (after, fresh) = two.request().await;
+    assert_eq!(after, None);
+    assert!(fresh > first);
+    two.land_late().await;
+    assert!(two.sink.ahead().is_empty(), "{:?}", two.sink.ahead());
+    running.abort();
+    assert_eq!(two.next_start_asks().await, None);
+}
+
+/// The same rule on the missing-target path alone (`main`'s own exposure): a
+/// write finds `users`' target gone while its staging again is refused; a
+/// page of the first walk is taken meanwhile, then a reindex cuts. Its mark
+/// is never recorded in the new target.
+#[tokio::test(start_paused = true)]
+async fn a_cut_backfills_page_records_no_mark_after_a_missing_target() {
+    let mut two = TwoLanes::new(
+        Arc::new(Generations::default().holding(2, 21)),
+        Duration::from_secs(60),
+        1,
+    );
+    two.engine.stage(Continuity::Resumed).await.unwrap();
+    let (_, first) = two.request().await;
+    let running = two.run_controlled();
+    two.page(1..=10, first).await;
+    two.drained().await;
+    two.sink.delete();
+    *two.sink.ensure_refusals.lock().unwrap() = 1;
+    two.page(11..=11, first).await;
+    let restaged = tokio::time::timeout(Duration::from_secs(30), async {
+        while *two.sink.ensure_refusals.lock().unwrap() > 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(restaged.is_ok(), "the restage was refused");
+    assert_eq!(two.users_health().kind(), "restaging");
+    two.page(12..=20, first).await;
+    two.page(21..=30, first).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    two.control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    let (after, fresh) = two.request().await;
+    assert_eq!(after, None);
+    assert!(fresh > first);
+    two.land_late().await;
+    assert!(two.sink.ahead().is_empty(), "{:?}", two.sink.ahead());
+    running.abort();
+    assert_eq!(two.next_start_asks().await, None);
+}
+
+/// The same rule for a page whose write is still in flight when the cut is
+/// asked for: the reindex waits for that write, which finds the target gone;
+/// the page lands later in the new target, and its mark is never recorded.
+#[tokio::test(start_paused = true)]
+async fn a_cut_backfills_page_in_flight_when_the_cut_is_asked_records_no_mark() {
+    let sink = Arc::new(Generations::default().holding(1, 11).holding(2, 21));
+    let mut two = TwoLanes::new(Arc::clone(&sink), Duration::from_secs(60), 1);
+    two.engine.stage(Continuity::Resumed).await.unwrap();
+    let (_, first) = two.request().await;
+    let running = two.run_controlled();
+    two.page(1..=10, first).await;
+    two.page(11..=20, first).await;
+    two.page(21..=30, first).await;
+    let waiting = tokio::time::timeout(Duration::from_secs(60), async {
+        while !sink.is_waiting(1, 11) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(waiting.is_ok(), "the page's write is in flight");
+    two.control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    sink.delete();
+    sink.release(1, 11);
+    let (after, fresh) = two.request().await;
+    assert_eq!(after, None);
+    assert!(fresh > first);
+    two.land_late().await;
+    assert!(sink.ahead().is_empty(), "{:?}", sink.ahead());
+    running.abort();
+    assert_eq!(two.next_start_asks().await, None);
+}
+
+/// The other half of the rule: `users` left out with its target intact keeps
+/// its walk. Pages of the first walk are taken before the lane reopens and
+/// the first of them is held in flight: no mark is recorded past it, and
+/// once it lands the walk's mark is recorded, and the next start resumes
+/// after it.
+#[tokio::test(start_paused = true)]
+async fn an_intact_left_out_lane_keeps_its_walk_and_records_no_mark_past_a_page() {
+    let sink = Arc::new(Generations::default().holding(1, 11).holding(1, 31));
+    let mut two = TwoLanes::new(Arc::clone(&sink), Duration::from_secs(1), 8);
+    let first = left_out(&mut two, 2, false).await;
+    two.page(11..=20, first).await;
+    two.page(21..=30, first).await;
+    two.page(31..=40, first).await;
+    let running = two.run();
+    let waiting = tokio::time::timeout(Duration::from_secs(60), async {
+        while !(sink.is_waiting(1, 11) && sink.is_waiting(1, 31)) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(
+        waiting.is_ok(),
+        "the first and last pages' writes are in flight"
+    );
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    sink.release(1, 31);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        sink.ahead().is_empty(),
+        "no mark past the held page: {:?}",
+        sink.ahead()
+    );
+    sink.release(1, 11);
+    two.drained().await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(sink.ahead().is_empty(), "{:?}", sink.ahead());
+    assert_eq!(
+        sink.target.lock().unwrap().walked.as_deref(),
+        Some("0040"),
+        "the walk's checkpoint is kept and recorded"
+    );
+    running.abort();
+    assert_eq!(two.next_start_asks().await.as_deref(), Some("0040"));
+}
+
+/// A live `users` item of row `row` at `position`.
+fn live_users(row: i64, position: u64) -> LaneItem {
+    LaneItem::Batch(Batch {
+        key: Some(stream::ItemKey::new(position)),
+        position: Some(kernel::Position::new(position)),
+        envelopes: vec![Envelope::upsert(
+            users(),
+            row.to_string(),
+            GenericValue::Map(BTreeMap::new()),
+            Some(kernel::Position::new(position)),
+            chrono::Utc::now(),
+        )]
+        .into(),
+        ..Default::default()
+    })
+}
+
+/// R5 on the missing-target path (`main`'s own exposure, third review of
+/// #476): a live item finds `users`' target gone while a reindex control is
+/// pending; the inline reindex runs before any restage, cuts the first walk
+/// and asks again, and opens the lane without resetting its tracker. The
+/// first walk's pages taken meanwhile land in the new target, and their marks
+/// are never recorded there.
+#[tokio::test(start_paused = true)]
+async fn a_live_item_finding_its_target_gone_under_a_pending_reindex_records_no_old_mark() {
+    let sink = Arc::new(Generations::default().holding(1, 500).holding(2, 21));
+    let mut two = TwoLanes::new(Arc::clone(&sink), Duration::from_secs(60), 1);
+    two.engine.stage(Continuity::Resumed).await.unwrap();
+    let (_, first) = two.request().await;
+    let running = two.run_controlled();
+    two.page(1..=10, first).await;
+    two.drained().await;
+    two.lane.publish(live_users(500, 1)).await.unwrap();
+    let waiting = tokio::time::timeout(Duration::from_secs(60), async {
+        while !sink.is_waiting(1, 500) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(waiting.is_ok(), "the live write is in flight");
+    two.page(11..=20, first).await;
+    two.page(21..=30, first).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    two.control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    sink.delete();
+    sink.release(1, 500);
+    let (after, fresh) = two.request().await;
+    assert_eq!(after, None);
+    assert!(fresh > first);
+    two.land_late().await;
+    assert!(sink.ahead().is_empty(), "{:?}", sink.ahead());
+    running.abort();
+    assert_eq!(two.next_start_asks().await, None);
+}
+
+/// R5's `cut` half (third review of #476, 2): under `--skip-backfill` a
+/// reindex still asks for its walk (T1), its target is deleted mid-walk,
+/// and the restage creates a new one, cuts T1 and asks nothing: the lane
+/// reopens with T1 cut and no newer ticket. T1's later pages land in the new
+/// target, but no mark of T1 is recorded there, and T1's `SnapshotComplete`
+/// doesn't seed it.
+#[tokio::test(start_paused = true)]
+async fn a_walk_cut_with_nothing_asked_again_records_and_seeds_nothing() {
+    let sink = Arc::new(Generations::default().holding(2, 21));
+    let mut two = TwoLanes::build(Arc::clone(&sink), Duration::from_secs(1), 1, true);
+    two.engine.stage(Continuity::Resumed).await.unwrap();
+    let running = two.run_controlled();
+    two.control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    let (_, first) = two.request().await;
+    two.page(1..=10, first).await;
+    two.drained().await;
+    sink.delete();
+    two.page(11..=20, first).await;
+    two.page(21..=30, first).await;
+    two.land_late().await;
+    assert_eq!(sink.target.lock().unwrap().generation, 2, "staged again");
+    assert!(sink.ahead().is_empty(), "{:?}", sink.ahead());
+    assert_eq!(
+        sink.target.lock().unwrap().walked,
+        None,
+        "no mark of the cut walk"
+    );
+    two.lane
+        .publish(LaneItem::SnapshotComplete {
+            index: users(),
+            ticket: first,
+        })
+        .await
+        .unwrap();
+    two.drained().await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        sink.seeds().is_empty(),
+        "the cut walk seeds nothing: {:?}",
+        sink.seeds()
+    );
     running.abort();
 }

@@ -13,6 +13,7 @@ A **lane** is one index flowing into one sink. Open this page when any of these 
 - The log says `index held at max_waiting_per_index: exempt, …`, `exempt index frozen: …` or `reading stopped for every index: …`: an index is stuck and its changes are piling up. See [When one index is stuck beside others](#when-one-index-is-stuck-beside-others).
 - [`/status`](../reference/http.md#get-status) shows a lane whose `health` isn't `open`, or whose `stall_seconds` keeps climbing.
 - A lane reads `restaging` with a `reason` starting `the reindex could not stage`. See [A reindex that can't stage](#a-reindex-that-cant-stage).
+- A lane reads `restaging` with a `reason` starting `could not be ensured` or `not tried`. See [An index that can't be ensured after a restart](#an-index-that-cant-be-ensured-after-a-restart).
 - `pinned_by` names an index with `"sink": null` and keeps naming it: no lane is stuck, the index's backlog is. See [When an index's backlog holds the slot](#when-an-indexs-backlog-holds-the-slot).
 - The log says `the index's builder failed` or `the index's backfill failed`, or `/status` shows an index `"state": "down"` or its `backfill` `retrying`: one index's own work failed and restarts alone. See [When an index is down or its backfill keeps failing](#when-an-index-is-down-or-its-backfill-keeps-failing).
 
@@ -62,7 +63,7 @@ WARN the lane is parked: its item is written again alone after the backoff; the 
 | --- | --- | --- | --- |
 | `blocked` | OpenSearch refuses every write to the index for now: a write block, a closed index, or a role without write permission on it. | Holds the lane, writes its oldest batch again alone at `next_probe`. Quarantines nothing, whatever `on_error` says. | [Lift the block](#a-write-block), [open the index](#a-closed-index) or [grant the permission](#a-role-without-write-permission) |
 | `refused` | A document was refused under `on_error = "stop"`; `reason` names the ids. | Holds the lane, writes a [fresh build](../reference/index-and-on-error.md#a-refused-lanes-fresh-build) of the batch at `next_probe`. | [Fix the row](#a-document-refused-under-stop) |
-| `restaging` | The index's target was deleted while flusso ran, or a reindex couldn't create its new generation. | Stages that index again and backfills it, alone, retrying on its own. | [Nothing, usually](#a-deleted-index), or [lift what blocks the reindex](#a-reindex-that-cant-stage) |
+| `restaging` | The index's target was deleted while flusso ran, a reindex couldn't create its new generation, or a restart couldn't ensure the index. | Stages that index again, alone, retrying on its own. | [Nothing, usually](#a-deleted-index), [lift what blocks the reindex](#a-reindex-that-cant-stage), or [lift what refuses the index](#an-index-that-cant-be-ensured-after-a-restart) |
 | `open` | flusso writes the lane; something else stops it landing. | Restarts the sink with backoff. | [The sink itself](#the-sink-itself-health-open) |
 
 A `refused` or `blocked` lane is **parked**. While it is, the sink's other indexes keep being written. Each retry of the held lane is a **probe**, on the [`[backoff]`](../reference/config-toml.md#backoff) schedule: 1 s after it parked, then doubling to 60 s, by default. Another index landing never shortens the wait. `flusso_lane_probes_total{outcome}` counts the probes.
@@ -160,6 +161,17 @@ The item the lane was stuck on comes from the new generation's backfill instead 
 - **What to do.** Lift what `reason` names: often a block on the whole cluster, or a role that can't create indexes. The next retry completes the reindex.
 - **How to tell it worked.** The lane turns `open` and the log says `reindexed: the lane is open; …`. The index goes `backfilling`, then `seeded`.
 - **After a restart of flusso** the retry may be gone: ask for the reindex again if the lane is still stuck ([what a restart keeps](../reference/http.md#when-the-reindex-cant-stage)).
+
+#### An index that can't be ensured after a restart
+
+`reason` reads `could not be ensured: …` with OpenSearch's answer, or `not tried: 8 indexes in a row could not be ensured before it`. The log says `the index was not ensured; its lane is staged again on its own while the sink's other indexes go on`.
+
+- **What it means.** The sink's run restarted (a failed write, the cluster briefly unreachable), or flusso started with its replication slot kept, and this index couldn't be ensured while others could. OpenSearch refuses that index alone: say the role can't read its settings or create its generation, or a generation that must be created hits the cluster's shard limit. `not tried` means flusso didn't get to the index: the cluster stopped answering part way.
+- **Meanwhile.** The sink's other indexes keep being written. This lane writes nothing and holds the slot and its fences. `FlussoLaneParked` fires after 5 minutes (`why="restaging"`).
+- **What to do.** Lift what `reason` names; for `not tried`, check the cluster is answering. flusso retries on its own, at once and then on the [`[backoff]`](../reference/config-toml.md#backoff) schedule, with no restart. The log line `could not stage the index again; trying again later` carries each try's error.
+- **How to tell it worked.** The log says `the index is staged again; the lane is open`, `health` turns `open` and the lane catches up. A backfill that was running goes on from where it got (from the first row if the generation was recreated meanwhile).
+
+A cluster that is down still holds the whole sink, and a start with a new replication slot still waits for every index: [When a restart can't ensure an index](../reference/http.md#when-a-restart-cant-ensure-an-index) has what tells the two apart, and its limits.
 
 #### The sink itself (health `open`)
 

@@ -149,8 +149,8 @@ use super::flights::Flights;
 use super::health::{HeldForSeed, LaneState, supersedes};
 use super::walked::Walked;
 use super::{
-    Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, Reindexed, STAGING_AT_THE_STOP,
-    SinkControl, SinkEngine, shown_id, until,
+    Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, Reindexed, STAGE_CONCURRENCY,
+    STAGING_AT_THE_STOP, SinkControl, SinkEngine, shown_id, until,
 };
 use crate::error::{EngineError, Result};
 use crate::observer::{CommitStats, Stage, StageTiming, Work};
@@ -773,9 +773,10 @@ impl<'a> Run<'a> {
         }
     }
 
-    /// Stage again each lane whose target went missing, or retry the reindex
-    /// it is owed (X15), once nothing of it is in flight, as a flight holding
-    /// no write slot.
+    /// Stage again each lane whose target went missing, or that a staging
+    /// left out (#471, with ensure's rules), or retry the reindex it is owed
+    /// (X15), once nothing of it is in flight, as a flight holding no write
+    /// slot; at most [`STAGE_CONCURRENCY`] such flights at once.
     async fn start_restages(&mut self) -> Result<()> {
         let now = Instant::now();
         // Once stopping, no lane is staged again and no owed reindex retried:
@@ -792,13 +793,16 @@ impl<'a> Run<'a> {
                 })
             })
             .filter(|lane| !self.lane_in_flight(*lane))
+            .take(STAGE_CONCURRENCY.saturating_sub(self.restaging.len()))
             .collect();
         for lane in due {
-            let Some((index, owed)) = self
-                .lanes
-                .get(lane)
-                .map(|run| (run.key.index.clone(), run.health.reindex.is_some()))
-            else {
+            let Some((index, owed, unensured)) = self.lanes.get(lane).map(|run| {
+                (
+                    run.key.index.clone(),
+                    run.health.reindex.is_some(),
+                    run.health.unensured,
+                )
+            }) else {
                 continue;
             };
             let flight = self.next_flight;
@@ -809,6 +813,9 @@ impl<'a> Run<'a> {
                 let started = Instant::now();
                 let outcome = if owed {
                     Outcome::Reindex(engine.reindex_again(&index).await)
+                } else if unensured {
+                    tracing::info!(%index, sink = %engine.name, "staging the index again: it could not be ensured");
+                    Outcome::Restage(engine.ensure_again(&index).await)
                 } else {
                     tracing::info!(%index, sink = %engine.name, "staging the index again: its target is gone");
                     Outcome::Restage(engine.restage(&index).await)
@@ -880,8 +887,8 @@ impl<'a> Run<'a> {
 
     /// A lane's staging returned: staged, the lane opens and its items are
     /// written again; failed, it is tried again after its backoff. Either
-    /// way, how far the lane's walk got in the missing target means nothing
-    /// in the new one.
+    /// way, how far the lane's walk got in a missing target means nothing in
+    /// the new one; a lane a staging left out keeps its walk (#471).
     fn restage_returned(&mut self, flight: u64, result: Result<()>) {
         let Some(at) = self.restaging.iter().position(|(id, _)| *id == flight) else {
             return;
@@ -891,7 +898,9 @@ impl<'a> Run<'a> {
         let Some(run) = self.lanes.get_mut(lane) else {
             return;
         };
-        run.walked.reset();
+        if !run.health.unensured {
+            run.walked.reset();
+        }
         match result {
             // Once stopping the lane stays restaging, its items released
             // unapplied: the next start stages it (X19).
@@ -1136,7 +1145,7 @@ impl<'a> Run<'a> {
             } else {
                 None
             };
-            run.walked.received(seq, mark, Instant::now());
+            run.walked.received(seq, mark, batch.ticket, Instant::now());
         }
         if self.holding > 0
             && let Queue::Batch { batch, .. } = &item
@@ -2622,7 +2631,11 @@ impl<'a> Run<'a> {
     /// flight beside the writes, holding no slot. Like a write, it starts now,
     /// and one that completes on its first poll is handed back.
     fn record_walked(&mut self, lane: usize) -> Option<Landed> {
+        let engine = self.engine;
         let run = self.lanes.get_mut(lane)?;
+        // A mark is recorded only for the backfill it belongs to (walked.rs).
+        run.walked
+            .discard_unless(|ticket| engine.answers(&run.key.index, ticket));
         let mark = run.walked.due(Instant::now())?;
         let index = run.key.index.clone();
         let flight = self.next_flight;

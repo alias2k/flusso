@@ -239,6 +239,10 @@ pub(crate) struct LaneState {
     /// A reindex the lane is owed: its staging failed, and it is retried on
     /// the restage backoff (§15.3, X15). Cleared when the lane opens.
     pub(crate) reindex: Option<OwedReindex>,
+    /// A staging left the lane out: its index couldn't be ensured, its target
+    /// not known to be gone. It is staged again with ensure's rules, keeping
+    /// an intact target's backfill (#471). Cleared when the lane opens.
+    pub(crate) unensured: bool,
 }
 
 /// A reindex whose staging failed, waiting for its retry.
@@ -281,6 +285,7 @@ impl LaneState {
             held_for_seed: Vec::new(),
             parked_item: None,
             reindex: None,
+            unensured: false,
         }
     }
 
@@ -352,6 +357,18 @@ impl LaneState {
         true
     }
 
+    /// A lane a staging left out was left out again: its reason becomes the
+    /// latest error (#471). A lane restaging for another cause keeps its own,
+    /// and so does one owed a reindex: the reindex's reason wins (X17).
+    pub(crate) fn left_out_again(&mut self, reason: String) {
+        if self.unensured
+            && self.reindex.is_none()
+            && let LaneHealth::Restaging { reason: kept, .. } = &mut self.health
+        {
+            *kept = reason;
+        }
+    }
+
     /// The index is staged again: the lane opens, keeping its backoff until
     /// one of its writes lands. How long it was not open.
     pub(crate) fn reopen(&mut self, now: Instant) -> Option<Duration> {
@@ -362,6 +379,7 @@ impl LaneState {
         self.health = LaneHealth::Open;
         self.probes = 0;
         self.unproven = true;
+        self.unensured = false;
         Some(now.saturating_duration_since(since))
     }
 
@@ -466,6 +484,37 @@ impl LaneState {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// #471: a lane a staging left out is staged again with ensure's rules
+    /// only until it opens; once open, a target a write finds missing is
+    /// staged again as gone (`restage`, with its walk reset), never with
+    /// ensure's rules.
+    #[test]
+    fn a_left_out_lane_owed_a_reindex_keeps_the_reindex_reason() {
+        let now = Instant::now();
+        let mut state = on(10, 100);
+        assert!(state.restage("could not be ensured: first".to_owned(), now));
+        state.unensured = true;
+        state.reindex_failed("the reindex could not stage: refused".to_owned(), now);
+        state.left_out_again("could not be ensured: later".to_owned());
+        assert!(
+            matches!(&state.health, LaneHealth::Restaging { reason, .. } if reason.starts_with("the reindex could not stage")),
+            "{:?}",
+            state.health
+        );
+    }
+
+    #[test]
+    fn a_reopened_lane_is_no_longer_left_out() {
+        let now = Instant::now();
+        let mut state = on(10, 100);
+        assert!(state.restage("could not be ensured: refused".to_owned(), now));
+        state.unensured = true;
+        state.reopen(now);
+        assert!(!state.unensured, "reopened: no longer left out");
+        assert!(state.restage("the target is gone".to_owned(), now));
+        assert!(!state.unensured, "a missing target is not a left-out index");
+    }
 
     fn on(initial_ms: u64, max_ms: u64) -> LaneState {
         LaneState::new(
