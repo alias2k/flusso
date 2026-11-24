@@ -79,7 +79,7 @@ A refused connection ends in `tcp connect error: Connection refused` instead. Cr
 | --- | --- |
 | OpenSearch 2.x | The query side also speaks Elasticsearch 7.x. |
 | A reachable HTTP(S) endpoint | The `url`. |
-| A user that can create, alias, write, and delete flusso's indexes, and read their settings | Plus the small `{prefix}flusso_meta` index. Staging and seeding read each generation's `index.uuid` (`GET /{generation}/_settings/index.uuid`). |
+| A user that can create, alias, write, and delete flusso's indexes, and read their settings | Plus the small `{prefix}flusso_meta` index. Staging and seeding read each generation's `index.uuid` (`GET /{generation}/_settings/index.uuid`). Staging reads each index's [meta documents](#the-meta-documents) with `POST /{prefix}flusso_meta/_mget`, so the role needs `indices:data/read/mget` there (the `read` action group has it); without it the sink retries its staging and writes nothing. |
 | `analysis-icu` on every node | Only with `text_analysis = "icu"`. |
 | `action.auto_create_index` excluding flusso's generations | Recommended. Keep `{prefix}flusso_meta` allowed (it's created by its first write) and forbid `{prefix}{logical}_*` for each index, first match wins; [why](#why-forbid-auto-create). With no `prefix`: `+flusso_meta,-users_*,-orders_*,+*`. With `prefix = "staging_"`, every entry carries it: `+staging_flusso_meta,-staging_users_*,-staging_orders_*,+*` (an unprefixed entry never matches, and the trailing `+*` lets auto-create through). |
 
@@ -90,11 +90,28 @@ A refused connection ends in `tcp connect error: Connection refused` instead. Cr
 | `{prefix}{logical}_{hash}` | alias | The **hash alias**. What flusso and `flusso-query` address. The hash derives from the schema. |
 | `{prefix}{logical}_{hash}_{n}` | index | A **generation**: the concrete index holding data. `n` increments on reindex. |
 | `{prefix}{logical}` | alias | The **convenience alias** for humans and dashboards. Best-effort: if a real index already owns the name, flusso warns and carries on. |
-| `{prefix}flusso_meta` | index | One doc per index: its active generation, that generation's `uuid` (its `index.uuid`, see [Each generation's identity](#each-generations-identity)), its seeded state, and, while it is unseeded, how far its backfill got (`walked`: the source's own text and the generation it was recorded for), so a restart resumes after it. `walked` is written as a partial update, never creating a doc, and read only while the doc is unseeded and names the same generation. |
+| `{prefix}flusso_meta` | index | The [meta documents](#the-meta-documents). The **seed marker**, one per index: its active generation, that generation's `uuid` (its `index.uuid`, see [Each generation's identity](#each-generations-identity)), its seeded state, and, while it is unseeded, how far its backfill got (`walked`: the source's own text and the generation it was recorded for), so a restart resumes after it. `walked` is written as a partial update, never creating a doc, and read only while the doc is unseeded and names the same generation. |
 
 A structural schema change moves the hash, so the new shape gets a fresh alias and generation, re-seeded from scratch, rather than colliding with the old mapping. An on-demand reindex builds generation `n+1` behind the same hash alias while `n` keeps serving, then the alias flips atomically and `n` is dropped, along with any other `{logical}_{hash}_{n}` nothing serves. A reindex while the index is still unseeded does nothing: a rebuild from scratch is already pending. See [Reindex without downtime](../operate/reindex.md).
 
 Writes to a **seeded** index go through the hash alias, each bulk item flagged `require_alias`, so a write never creates an index under that name. Writes to an **unseeded** generation (first seed, or a rebuild while the alias still serves `n`) go to the generation by its concrete name.
+
+### The meta documents
+
+`{prefix}flusso_meta` holds up to three documents per index, all keyed by its hash alias:
+
+| `_id` | Holds |
+| --- | --- |
+| `{prefix}{logical}_{hash}` | The seed marker (see the table above). |
+| `detach:{prefix}{logical}_{hash}` | Reserved. No released flusso writes it. |
+| `stuck:{prefix}{logical}_{hash}` | Reserved. No released flusso writes it. |
+
+Every staging of an index (a start, a sink's restart, a reindex, and each of their retries) reads all three first, in one `POST /{prefix}flusso_meta/_mget`, before anything else touches the index:
+
+- **Nothing kept reads as empty**: the meta index missing (a `404` with OpenSearch's `index_not_found_exception`) or a document not found.
+- **Any other answer fails the staging**, and it's retried like any failed staging ([details](http.md#when-a-restart-cant-ensure-an-index)): a `403` (a role without `indices:data/read/mget`), a `404` that isn't OpenSearch's (a reverse proxy, a wrong path in the `url`), a timeout, a `5xx`. The error reads `write failed: reading the detach records failed: HTTP 403 Forbidden: …`.
+- **A `detach:` document found** is logged at error level, and the index is staged as before, as its seed marker says. A `stuck:` document is read and not acted on.
+- **The seed marker's `detaching_from` field** is reserved too, and no released flusso writes it. A marker carrying one with no `detach:` document beside it is put back as `detaching_from` says it was, conditionally on the marker read (logged at warn); one this version can't read is logged at error level and left as is.
 
 ## Mapping
 

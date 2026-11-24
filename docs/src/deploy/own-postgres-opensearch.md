@@ -45,7 +45,7 @@ You've run the [Quickstart](../start/quickstart.md) against the dev stack and no
 
    The option makes a partitioned table's changes arrive under its own name rather than each partition's; see [Capture](../reference/source-postgres.md#capture).
 
-5. **Prepare the OpenSearch user.** OpenSearch 2.x, reachable over HTTP(S), with a user that can create, alias, write, and delete flusso's indexes and the `flusso_meta` index. Verify the endpoint and credentials:
+5. **Prepare the OpenSearch user.** OpenSearch 2.x, reachable over HTTP(S), with a user that can create, alias, write, and delete flusso's indexes and the `flusso_meta` index, and read `flusso_meta` with `_mget` ([every requirement](../reference/sink-opensearch.md#cluster-requirements)). Verify the endpoint and credentials:
 
    ```sh
    curl -u flusso:"$OS_PASSWORD" https://search.internal:9200/

@@ -2,6 +2,10 @@
 
 0.19 keeps a failure of one index on that index. Each change below links to its section.
 
+**Check before upgrading**
+
+- **A cut-down OpenSearch role needs `indices:data/read/mget`** on `{prefix}flusso_meta`: staging now reads three meta documents per index in one `_mget`; a sink whose role can't, or whose proxy answers that request `404`, retries its staging and writes nothing: [Staging reads the meta documents with one request](#staging-reads-the-meta-documents-with-one-request).
+
 **Running flusso**
 
 - **An index that can't be written parks alone**; the sink's other indexes keep writing, and a write block or a closed index no longer drops documents under `on_error = "skip"` (#404): [One index's failure parks its own lane](#one-indexs-failure-parks-its-own-lane).
@@ -24,7 +28,24 @@
 
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`, the per-index ingest state in `Status`, `Observer::on_reader_wait`, and per-index restart (`IngestEngine::with_backoff`, `Observer::on_index_failed` and `on_index_restarted`)**: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`, the per-index ingest state in `Status`, `Observer::on_reader_wait`, per-index restart (`IngestEngine::with_backoff`, `Observer::on_index_failed` and `on_index_restarted`), and `Sink::detachment`**: [For code embedding the crates](#for-code-embedding-the-crates).
+
+## Staging reads the meta documents with one request
+
+**What changed.** Every staging of an index (a start, a sink's restart, a reindex, and their retries) first reads three documents of `{prefix}flusso_meta` in one `POST /{prefix}flusso_meta/_mget`: the index's seed marker and two reserved ones, `detach:{alias}` and `stuck:{alias}`. No released flusso writes the reserved ones. 0.18 read only the seed marker, with a `GET`. What is read, and which answers fail the staging: [The meta documents](../reference/sink-opensearch.md#the-meta-documents).
+
+**Who is affected.**
+
+- Deployments whose OpenSearch role is cut down to the calls 0.18 made, without `indices:data/read/mget` on `{prefix}flusso_meta`.
+- Deployments reaching OpenSearch through a reverse proxy or a path that answers this request with a `404` of its own: only OpenSearch's `index_not_found_exception` reads as "nothing kept".
+
+**What to do.**
+
+1. **Grant the role `indices:data/read/mget`** on `{prefix}flusso_meta`, if it is a cut-down one. The `read` action group has it.
+2. **Let `_mget` through to OpenSearch**, if a proxy sits in front of it.
+3. **Upgrade flusso.** Nothing is rebuilt and no content hash moves.
+
+**How it shows.** Every index of the sink fails its staging, so the whole sink waits and retries with backoff, and a start reads nothing meanwhile ([when the destination is down](../reference/http.md#when-a-restart-cant-ensure-an-index)). The log says `staging failed; retrying`, each index's error reading `reading the detach records failed: HTTP 403 Forbidden: …` (`HTTP 404 Not Found` behind the proxy). The same deployment started under 0.18.
 
 ## One index's failure parks its own lane
 
@@ -446,6 +467,7 @@ Every other failure with one index restarts the ingest engine, as in 0.18. The w
 - **Per-index restart.** `IngestEngine::with_backoff(Backoff)` sets the wait before one index restarts alone or retries its backfill (default 1 s doubling to 60 s; the daemon passes `[backoff]`). `Observer` gains `on_index_failed(index, kind, error, retry_in)` and `on_index_restarted(index, kind)`, `kind` an `engine::Work` (`Live` or `Backfill`), both with no-op defaults; an index's failure is not an `on_engine_error`. New in `daemon`: `IngestState` (`Running`, `Down`), `BackfillState` (`Walking`, `Retrying`, `Waiting`), `IndexFailure` (`message`, `at`), and `IndexErrors` and `IndexRestarts` (`live`, `backfill`); `IndexIngestSnapshot` carries `state`, `down_since`, `last_error` and `restarts`, and `BackfillSnapshot` carries `state`, `retry_at` and `sinks: Option<Vec<String>>`. The channel stream adapter now wakes a `recv` already waiting when a delivery is released (nacked, or dropped unacknowledged), so it is redelivered at once.
 - **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.
 - **Fresh builds.** `stream::Batch` gains `keys: Arc<[RowKey]>` (each envelope's root key, in envelope order; empty when unknown) and `build: Option<u64>` (the build's number on its index). `Request::Rebuild { index, sink, keys, ticket }` is new, with `Request::index()` and `Request::sink()`; code matching on `Request` must handle it. `Stream::substitutes(sink)` returns a `SubstituteLane` of `stream::Substitute` items; its default answers the new `QueueError::Unsupported`, and a parked lane over such a stream writes its own batch again. `RowKey` moved to `kernel`; `source` still re-exports it. `Consumer`'s contract now states the redelivery order, which an adapter must keep: items come in publication order, and a returned delivery (nacked, or dropped unacknowledged) comes back in its order among the returned ones, before any item not yet delivered.
+- **New: `Sink::detachment(&IndexMapping)`**, called at the start of every staging step, before `reindex` and `ensure_index`; its default keeps nothing. It returns a `sink::Detachment` (`record: Option<DetachRecord>`, `stuck: Option<StuckClock>`, `restored`, `unreadable_marker`), all new and `#[non_exhaustive]`. An `Err` fails the step. `SinkEngine::detachment(index)` returns what the last staging of the index read.
 
 ## Related
 
