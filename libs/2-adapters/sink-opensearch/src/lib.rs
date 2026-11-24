@@ -6,6 +6,7 @@
 
 mod bulk;
 mod config;
+mod detachment;
 mod generations;
 mod mapping;
 mod refresh;

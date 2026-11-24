@@ -312,6 +312,61 @@ pub enum Seeding {
     Unseeded { walked: Option<String> },
 }
 
+/// What a sink keeps about detaching an index from the slot's minimum (ADR
+/// 0012 stage 10), as [`Sink::detachment`] read it at staging. Nothing writes
+/// a record yet: staging reads one and logs it, so a record a later flusso
+/// left behind after a rollback is never half-acted on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Detachment {
+    /// The index's detach record, if the sink keeps one.
+    pub record: Option<DetachRecord>,
+    /// The index's stuck clock, if the sink keeps one.
+    pub stuck: Option<StuckClock>,
+    /// The seed marker named a generation a detach moved it to, with no
+    /// record beside it: the detach died between its two writes. The marker
+    /// was put back on this generation before anything else was staged.
+    pub restored: Option<u64>,
+}
+
+impl Detachment {
+    /// Nothing kept, and nothing put back.
+    pub fn is_empty(&self) -> bool {
+        self.record.is_none() && self.stuck.is_none() && self.restored.is_none()
+    }
+}
+
+/// An index's detach record, as staging read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DetachRecord {
+    /// The index is detached: reads are frozen at the detach and changes
+    /// since are not applied. `live_only`: the sink can't rebuild it.
+    Detached { live_only: bool },
+    /// The index is being rebuilt into a new generation.
+    Rebuilding { live_only: bool },
+    /// A record this version can't read: another state, or malformed.
+    Unreadable { reason: String },
+}
+
+/// An index's stuck clock, as staging read it: the times as the sink wrote
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StuckClock {
+    /// When the lane was first seen stuck.
+    pub since: Option<String>,
+    /// When the lane was last seen stuck.
+    pub seen_at: Option<String>,
+}
+
+impl StuckClock {
+    /// A clock read as `since` and `seen_at`.
+    pub fn new(since: Option<String>, seen_at: Option<String>) -> Self {
+        Self { since, seen_at }
+    }
+}
+
 /// A destination for built documents.
 ///
 /// A sink engine hands each lane item's envelopes to [`write`](Self::write),
@@ -485,6 +540,16 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// stale and calls [`reindex`](Self::reindex) on it.
     async fn is_seeded(&self, _: &IndexName) -> Result<bool> {
         Ok(false)
+    }
+
+    /// What this sink keeps about detaching `mapping`'s index, read at the
+    /// start of every staging step, before anything else touches the index.
+    /// A seed marker a detach left half moved, with no record beside it, is
+    /// put back first. Only "nothing kept" reads as empty: any other failure
+    /// to read is an `Err`, so a record is never missed. The default keeps
+    /// nothing.
+    async fn detachment(&self, _: &IndexMapping) -> Result<Detachment> {
+        Ok(Detachment::default())
     }
 
     /// What staging needs of `index`: seeded, or, when not, where its last

@@ -27,6 +27,13 @@
 //!   indexes: each index ends on its own generation, alone, seeded, and no
 //!   write is lost (ADR 0012, seeding the indexes of a sink concurrently).
 //!
+//! - **Staging reads the detach records first** (ADR 0012 stage 10, slice
+//!   1): one `_mget` of the seed marker and both records, a missing meta
+//!   index read as nothing kept and a refused read as an error, then exactly
+//!   the requests staging made before. A record written by hand is read and
+//!   left as it is by `ensure_index`. A marker a detach moved with no record
+//!   beside it is put back, and the old generation serves again.
+//!
 //! Requires Docker. Ignored by default; run with:
 //!
 //! ```text
@@ -1011,4 +1018,268 @@ async fn the_sink_says_when_reads_see_another_generation_than_it_writes() {
     write(&restarted, index, &[1]).await;
     restarted.mark_seeded(index).await.unwrap();
     assert!(!restarted.is_rebuilding(index).await.unwrap(), "swapped");
+}
+
+/// A fresh sink for `base_url` whose names all carry `prefix`.
+fn prefixed(base_url: &str, prefix: &str) -> Buffered {
+    let name = kernel::SinkName::try_new("test").unwrap();
+    let config = sink_opensearch::OpensearchConfig {
+        url: kernel::Secret::Value(base_url.to_owned()),
+        username: None,
+        password: None,
+        tls_verify: false,
+        ca_file: None,
+        batch_size: 1000,
+        max_bytes: 10 * 1024 * 1024,
+        timeout_secs: 30,
+        max_retries: 0,
+        pipeline: None,
+        number_of_shards: 1,
+        number_of_replicas: 0,
+        refresh_interval: "10s".to_owned(),
+        text_analysis: sink_opensearch::TextAnalysis::Builtin,
+        auto_subfields: true,
+        index_settings: Default::default(),
+    };
+    Buffered::new(
+        OpensearchSink::from_config(&name, &config)
+            .unwrap()
+            .with_index_prefix(prefix),
+    )
+}
+
+/// The requests seen, as lines, with `prefix` taken off every name.
+fn unprefixed(seen: &[Seen], prefix: &str) -> Vec<String> {
+    seen.iter()
+        .map(|seen| seen.line().replace(&format!("/{prefix}"), "/"))
+        .collect()
+}
+
+/// On a fresh cluster (no meta index yet), staging's read is one `_mget` and
+/// reads nothing kept. What staging then asks is exactly what it asked
+/// before the read existed: a deployment that never detached anything sees
+/// one more request and nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn staging_reads_the_records_in_one_request_then_asks_what_it_asked_before() {
+    let (_container, base) = start_opensearch().await;
+    let proxy = FaultProxy::start(&base).await;
+    let mapping = mapping("users", 1);
+
+    let reading = prefixed(&proxy.url, "a_");
+    let read = reading.detachment(&mapping).await.unwrap();
+    assert!(read.is_empty(), "nothing kept on a fresh cluster: {read:?}");
+    reading.ensure_index(&mapping).await.unwrap();
+    reading.seeding(&mapping.index).await.unwrap();
+    let with_read = proxy.take();
+
+    let before = prefixed(&proxy.url, "b_");
+    before.ensure_index(&mapping).await.unwrap();
+    before.seeding(&mapping.index).await.unwrap();
+    let without_read = proxy.take();
+
+    assert_eq!(with_read[0].line(), "POST /a_flusso_meta/_mget");
+    assert_eq!(
+        unprefixed(&with_read[1..], "a_"),
+        unprefixed(&without_read, "b_"),
+        "after the read, the same requests in the same order"
+    );
+
+    // Once the meta index exists, nothing kept still reads as nothing kept.
+    let again = prefixed(&base, "a_").detachment(&mapping).await.unwrap();
+    assert!(again.is_empty(), "{again:?}");
+}
+
+/// A record and a stuck clock written by hand (as a later flusso would) are
+/// read, and `ensure_index` and a seed leave both documents as they were: the
+/// seed marker is a document of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_record_written_by_hand_is_read_and_left_as_it_is() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let hash_alias = format!("users_{}", mapping.hash);
+
+    let first = sink(&base);
+    first.ensure_index(&mapping).await.unwrap();
+    write(&first, &index, &[1]).await;
+    first.mark_seeded(&index).await.unwrap();
+
+    let put = |id: String, body: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let status = client
+                .put(format!("{base}/flusso_meta/_doc/{id}?refresh=true"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert!(status.is_success(), "writing {id} returned {status}");
+        }
+    };
+    put(
+        format!("detach:{hash_alias}"),
+        serde_json::json!({ "state": "detached", "live_only": false, "serving": 1, "attempts": 1 }),
+    )
+    .await;
+    put(
+        format!("stuck:{hash_alias}"),
+        serde_json::json!({ "since": "2026-11-24T08:00:00Z", "seen_at": "2026-11-24T08:10:00Z" }),
+    )
+    .await;
+    let ids = [
+        format!("detach:{hash_alias}"),
+        format!("stuck:{hash_alias}"),
+    ];
+    let written = meta_documents(&client, &base, &ids).await;
+
+    let restart = sink(&base);
+    let read = restart.detachment(&mapping).await.unwrap();
+    assert_eq!(
+        read.record,
+        Some(sink::DetachRecord::Detached { live_only: false })
+    );
+    assert_eq!(
+        read.stuck,
+        Some(sink::StuckClock::new(
+            Some("2026-11-24T08:00:00Z".to_owned()),
+            Some("2026-11-24T08:10:00Z".to_owned())
+        ))
+    );
+    assert_eq!(read.restored, None);
+    restart.ensure_index(&mapping).await.unwrap();
+    assert!(restart.is_seeded(&index).await.unwrap(), "staged as before");
+    assert_eq!(
+        meta_documents(&client, &base, &ids).await,
+        written,
+        "ensure_index left both documents as they were"
+    );
+
+    put(
+        format!("detach:{hash_alias}"),
+        serde_json::json!({ "state": "frozen" }),
+    )
+    .await;
+    let read = sink(&base).detachment(&mapping).await.unwrap();
+    assert!(
+        matches!(&read.record, Some(sink::DetachRecord::Unreadable { reason }) if reason.contains("frozen")),
+        "{read:?}"
+    );
+}
+
+/// Each of `ids` in the meta index: its sequence number and source.
+async fn meta_documents(
+    client: &reqwest::Client,
+    base: &str,
+    ids: &[String],
+) -> Vec<(Value, Value)> {
+    let mut documents = Vec::new();
+    for id in ids {
+        let body: Value = client
+            .get(format!("{base}/flusso_meta/_doc/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        documents.push((body["_seq_no"].clone(), body["_source"].clone()));
+    }
+    documents
+}
+
+/// A refused read is an error, never "nothing kept" (H6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_refused_read_is_never_nothing_kept() {
+    let (_container, base) = start_opensearch().await;
+    let proxy = FaultProxy::start(&base).await;
+    let mapping = mapping("users", 1);
+    let first = sink(&base);
+    first.ensure_index(&mapping).await.unwrap();
+
+    proxy.refuse(|seen, _| seen.path.contains("_mget"));
+    let error = sink(&proxy.url)
+        .detachment(&mapping)
+        .await
+        .expect_err("a refused read fails");
+    assert!(error.to_string().contains("503"), "{error}");
+}
+
+/// A detach that died between moving the seed marker and writing its record
+/// leaves the marker on a generation nobody asked for. The next read puts it
+/// back on the generation it came from, seeded, with its uuid: staging then
+/// serves that generation as before, and no rebuild starts around it (H5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_half_detached_marker_is_put_back_and_the_old_generation_serves() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let hash_alias = format!("users_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+
+    let first = sink(&base);
+    first.ensure_index(&mapping).await.unwrap();
+    write(&first, &index, &[1, 2]).await;
+    first.mark_seeded(&index).await.unwrap();
+    let source: Value = client
+        .get(format!("{base}/flusso_meta/_doc/{hash_alias}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let uuid = source["_source"]["uuid"].clone();
+    assert!(uuid.is_string(), "{source}");
+
+    let status = client
+        .post(format!(
+            "{base}/flusso_meta/_update/{hash_alias}?refresh=true"
+        ))
+        .json(&serde_json::json!({ "doc": {
+            "active_generation": 2, "seeded": false, "walked": null, "uuid": null,
+            "detaching_from": { "generation": 1, "seeded": true, "uuid": uuid },
+        } }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "moving the marker returned {status}");
+
+    let restart = sink(&base);
+    let read = restart.detachment(&mapping).await.unwrap();
+    assert_eq!(read.restored, Some(1));
+    assert_eq!(marker(&client, &base, &hash_alias).await, (1, true));
+    let source: Value = client
+        .get(format!("{base}/flusso_meta/_doc/{hash_alias}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(source["_source"]["uuid"], uuid);
+    assert!(
+        source["_source"].get("detaching_from").is_none(),
+        "{source}"
+    );
+
+    restart.ensure_index(&mapping).await.unwrap();
+    assert!(restart.is_seeded(&index).await.unwrap());
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        [gen1.clone()]
+    );
+    assert_eq!(alias_targets(&client, &base, &hash_alias).await, [gen1]);
+    assert!(
+        restart.detachment(&mapping).await.unwrap().is_empty(),
+        "nothing is left to put back"
+    );
 }

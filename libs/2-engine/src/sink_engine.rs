@@ -285,6 +285,12 @@ impl SinkEngine {
             .map_or(LaneHealth::Open, |state| state.health.clone())
     }
 
+    /// What the last staging of `index` read of its detach records, when the
+    /// sink keeps any (ADR 0012 stage 10): `None` for nothing kept.
+    pub fn detachment(&self, _index: &IndexName) -> Option<sink::Detachment> {
+        None
+    }
+
     fn lock_health(
         &self,
     ) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<LaneKey, LaneState>> {
