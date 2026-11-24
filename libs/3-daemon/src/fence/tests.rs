@@ -90,6 +90,7 @@ impl ChangeCapture for NumberedSource {
             Landed::Through(last) => last.confirm_through,
             Landed::Idle if state.next_seq == 0 => state.horizon,
             Landed::Idle => 0,
+            Landed::Free => state.horizon,
         }))
     }
 

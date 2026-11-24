@@ -1048,6 +1048,47 @@ fn a_held_transaction_is_not_emitted_and_nothing_passes_it() {
     assert!(decode.readable.is_empty(), "an emitted xid is forgotten");
 }
 
+/// `Free` (no lane needs anything, ADR 0012 stage 10) answers the horizon,
+/// where `Idle` stays at the confirmed position once something was emitted.
+#[test]
+fn free_follows_the_horizon_where_idle_after_an_emit_stays_put() {
+    let (mut decode, ack) = state();
+    decode.open_txn.push(upsert());
+    handle(&mut decode, commit(100)).unwrap();
+    decode.next_change().unwrap();
+    assert_eq!(ack.reached(Landed::Idle), 0, "something was emitted");
+    assert_eq!(ack.reached(Landed::Free), 100);
+    handle(&mut decode, keepalive(500)).unwrap();
+    assert_eq!(
+        ack.reached(Landed::Free),
+        500,
+        "a keepalive moves the horizon"
+    );
+}
+
+/// Under `Free` a held transaction (#343) is still never passed: the horizon
+/// stops before its commit, so neither the slot nor a fence moves past it.
+#[test]
+fn free_never_passes_a_held_transaction() {
+    let (mut decode, ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    assert!(decode.next_change().is_none(), "held");
+    handle(&mut decode, keepalive(500)).unwrap();
+    handle(&mut decode, begin(8)).unwrap();
+    handle(&mut decode, commit(300)).unwrap();
+    ack.confirm(Landed::Free);
+    assert_eq!(released(&ack), 0, "nothing may be confirmed past it");
+    assert!(
+        ack.reached(Landed::Free) < 100,
+        "no fence may claim its commit"
+    );
+
+    decode.seen_by(&Snapshots::seeing(&[7]).snapshot_now());
+    decode.next_change().unwrap();
+    ack.confirm(Landed::Free);
+    assert!(released(&ack) >= 100, "once emitted, it may be passed");
+}
+
 /// A later transaction that is visible waits behind an earlier held one, and
 /// both come out in commit order once the earlier one is visible.
 #[test]

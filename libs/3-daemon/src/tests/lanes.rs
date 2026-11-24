@@ -61,6 +61,7 @@ impl ChangeCapture for Placed {
             Landed::Before(oldest) => oldest.seq,
             Landed::Through(last) => last.seq + 1,
             Landed::Idle => 0,
+            Landed::Free => u64::MAX,
         }))
     }
 }

@@ -1180,6 +1180,7 @@ fn bound(landed: Landed) -> (u64, u8) {
         Landed::Before(oldest) => (oldest.seq, 0),
         Landed::Through(last) => (last.seq.saturating_add(1), 1),
         Landed::Idle => (0, 0),
+        Landed::Free => (u64::MAX, 2),
     }
 }
 

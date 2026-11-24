@@ -19,6 +19,10 @@
 //!   holds back nothing.
 //! - flusso refuses to run as a synchronous standby of the server it reads,
 //!   whose commits would wait on flusso while flusso waits on them.
+//! - Spike S5 of ADR 0012 stage 10: with every lane detached the engine hands
+//!   the source `Landed::Free`; the slot then follows the horizon over unread
+//!   WAL, where `Idle` after a change stays put, and never passes a held
+//!   commit.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -430,6 +434,132 @@ async fn flusso_named_a_synchronous_standby_while_running_stops() {
         .await
         .expect("the commit returns once flusso is no longer a standby")
         .unwrap();
+}
+
+/// Spike S5 (ADR 0012 stage 10): what the source confirms when no lane needs
+/// anything. Driven at the capture alone, with no engine: the test hands the
+/// capture what a progress with every lane detached would.
+///
+/// - After a change was emitted, `Idle` confirms nothing more, so commits on a
+///   table no index reads leave the slot where it was: the hole `Free` closes.
+/// - `Free` follows the horizon: the slot moves past those commits.
+/// - While a commit on a read table is held (not visible, #343), `Free` never
+///   confirms past it, however much later WAL arrives.
+/// - Once it is visible and emitted, `Free` passes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn spike_s5_free_follows_the_horizon_and_never_passes_a_held_commit() {
+    use futures::StreamExt;
+    use source::cdc::Landed;
+
+    let scene = Scene::new(&[], "").await;
+    let spec = parents_with_kids_spec();
+    let capture = Arc::new(
+        WalChangeCapture::new(replication(scene.port), scene.url.clone())
+            .with_publication_management(spec.all_tables(), false),
+    );
+    capture.prepare().await.unwrap();
+    let mut live = capture.live().await.unwrap();
+    let (emitted, mut changes) = tokio::sync::mpsc::unbounded_channel();
+    let reading = tokio::spawn(async move {
+        while let Some(change) = live.next().await {
+            if emitted.send(change.map(|(position, _)| position)).is_err() {
+                return;
+            }
+        }
+    });
+    let confirming = |landed: Landed, capture: Arc<WalChangeCapture>| async move {
+        for _ in 0..10 {
+            capture.confirm(landed);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+
+    // A change emitted, then only commits on a table no index reads.
+    scene
+        .exec("UPDATE parents SET name = 'p1 seen' WHERE id = 1")
+        .await;
+    let first = tokio::time::timeout(Duration::from_secs(30), changes.recv())
+        .await
+        .expect("the change is emitted")
+        .unwrap()
+        .unwrap();
+    capture.confirm(Landed::Through(first));
+    scene.exec("INSERT INTO noise VALUES (1)").await;
+    let after_noise = scene.current_lsn().await;
+    sent_to(&scene.pool, "flusso").await;
+
+    confirming(Landed::Idle, Arc::clone(&capture)).await;
+    let idle = scene.confirmed_lsn().await;
+    assert!(
+        !scene.at_or_before(&after_noise, &idle).await,
+        "Idle after an emitted change confirms nothing more: {idle} stays before {after_noise}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        capture.confirm(Landed::Free);
+        let confirmed = scene.confirmed_lsn().await;
+        if scene.at_or_before(&after_noise, &confirmed).await {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Free never followed the horizon past {after_noise}: confirmed {confirmed}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // A commit held on a read table, then more unread WAL.
+    let sync = SyncRep::configure(&scene.pool).await;
+    let before_hold = scene.current_lsn().await;
+    let held = sync
+        .hold("UPDATE parents SET name = 'p2 held' WHERE id = 2")
+        .await;
+    for id in 2..20 {
+        scene
+            .exec(&format!("INSERT INTO noise VALUES ({id})"))
+            .await;
+    }
+    let after_more_noise = scene.current_lsn().await;
+    sent_to(&scene.pool, "flusso").await;
+    confirming(Landed::Free, Arc::clone(&capture)).await;
+    let confirmed = scene.confirmed_lsn().await;
+    assert!(
+        scene.at_or_before(&confirmed, &before_hold).await,
+        "Free confirmed {confirmed} past the held commit, which starts after {before_hold}"
+    );
+    assert!(
+        changes.try_recv().is_err(),
+        "the held commit is not emitted while it is not visible"
+    );
+
+    held.release().await;
+    let released = tokio::time::timeout(Duration::from_secs(30), changes.recv())
+        .await
+        .expect("the released commit is emitted")
+        .unwrap()
+        .unwrap();
+    assert!(released.seq > first.seq);
+    // A commit on an unread table once nothing is buffered moves the horizon
+    // past everything read before it.
+    scene.exec("INSERT INTO noise VALUES (100)").await;
+    let after_release = scene.current_lsn().await;
+    assert!(scene.at_or_before(&after_more_noise, &after_release).await);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        capture.confirm(Landed::Free);
+        let confirmed = scene.confirmed_lsn().await;
+        if scene.at_or_before(&after_release, &confirmed).await {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Free never passed the released commit: confirmed {confirmed}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    reading.abort();
 }
 
 /// One Postgres, its `flusso` slot and publication, and the engines over a

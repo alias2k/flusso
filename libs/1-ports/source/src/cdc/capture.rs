@@ -39,6 +39,11 @@ pub enum Landed {
     Through(Position),
     /// The engine has routed nothing yet.
     Idle,
+    /// No lane needs anything: every lane is detached (ADR 0012 stage 10).
+    /// Everything the mechanism has emitted may be confirmed, and the resume
+    /// point follows the source's own horizon, which never passes a change it
+    /// hasn't emitted.
+    Free,
 }
 
 impl Landed {
@@ -51,6 +56,7 @@ impl Landed {
             Landed::Before(oldest) => oldest.seq.checked_sub(1),
             Landed::Through(last) => Some(last.seq),
             Landed::Idle => None,
+            Landed::Free => Some(u64::MAX),
         }
     }
 }

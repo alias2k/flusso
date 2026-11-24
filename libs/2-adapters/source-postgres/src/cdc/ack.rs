@@ -24,6 +24,7 @@
 //! | `Through(p)`, a later change emitted | `p.confirm_through` | `p.confirm_through` |
 //! | `Idle`, nothing ever emitted | the horizon | the horizon |
 //! | `Idle`, something emitted | no move | the confirmed LSN |
+//! | `Free` (no lane needs anything) | the horizon | the horizon |
 //!
 //! The changes of one transaction share its commit LSN, so a transaction split
 //! across batches is neither confirmed nor fenced until its last change has
@@ -121,6 +122,7 @@ impl Inner {
             Landed::Through(last) => last.confirm_through,
             Landed::Idle if self.emitted_nothing() => live,
             Landed::Idle => self.confirmed_lsn,
+            Landed::Free => live,
         }
     }
 
@@ -133,6 +135,7 @@ impl Inner {
             Landed::Through(last) => last.confirm_through,
             Landed::Idle if self.emitted_nothing() => self.horizon,
             Landed::Idle => self.confirmed_lsn,
+            Landed::Free => self.horizon,
         }
     }
 }
