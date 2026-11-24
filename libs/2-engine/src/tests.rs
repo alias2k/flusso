@@ -1922,6 +1922,7 @@ mod refresh;
 mod resume;
 mod seeding;
 mod snapshot;
+mod spikes;
 mod staging;
 mod stop;
 mod timings;
