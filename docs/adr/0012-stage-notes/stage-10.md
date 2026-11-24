@@ -1,6 +1,6 @@
 # Stage 10 design: detach a stalled index, rebuild it later (#394)
 
-**Status:** decided by the owner on 2026-11-24. Every decision in §11 is taken, and the slice order in §10 is accepted. Nothing is built.
+**Status:** decided by the owner on 2026-11-24. Every decision in §11 is taken, and the slice order in §10 is accepted. Slice 1 (reading the records at staging) is built; slices 2 to 6 are not.
 
 **Three consequences the owner accepted knowingly** (§11):
 
@@ -423,13 +423,14 @@ The owner accepted this order on 2026-11-24. Each slice is safe if nothing after
 
 1. **Read the documents; never half-stage.**
    - `stuck` documents are ignored.
-   - A `detaching_from` with no record is restored.
+   - A `detaching_from` with no record is restored. One this version can't read (not an object, or naming no generation) is logged loudly and the index staged as before (O24), never failed for it: failing would restage the index until someone edits the marker.
+   - Each document of the `_mget` must answer for the id asked, found or not found; an entry saying neither, or naming another id, fails the read.
    - A `detached` or `rebuilding` record logs loudly and stages as today. That is a correct rebuild, since the marker moved first.
    - A `live_only` record logs loudly and stages as today: the log names the gap. Nothing restages forever (H3).
    - A malformed record is logged loudly and staged as today, like a record left by a newer flusso (O24).
    - What staging read is kept per lane in the sink engine, for slice 2 to act on. Nothing in `/status` changes yet; the record's fields there come with slice 2's observability. Corrected in slice 1: this line used to promise a `/status` flag here. No record can exist before a later slice writes one, so a rollback is the only way to meet one.
    - Cost: one `_mget` per index per staging step, restages and reindexes included. Only a `404` reads as none (H6). A read that fails fails that index's step: under `Resumed` the index is left restaging alone (#471); under `Fresh`, the staging fails as a whole, as any step failure does today.
-2. **Detach and rebuild, reachable only from tests,** with `enabled = false`: R1, R4–R9, R11–R14, the quiesce, `Request::Attach` and `Attached`, `Landed::Free`, `routed_ever`, the fence, the `/status` fields of §9. It starts from S5 and S6. It follows #479 (S2). Until slice 4 brings R10, a rebuilding lane that parks stays parked and holds the slot like any parked lane. That is harmless, since nothing in a deployment reaches slice 2's rebuild.
+2. **Detach and rebuild, reachable only from tests,** with `enabled = false`: R1, R4–R9, R11–R14, the quiesce, `Request::Attach` and `Attached`, `Landed::Free`, `routed_ever`, the fence, the `/status` fields of §9. It starts from S5 and S6. It follows #479 (S2). A failed read leaves the entry slice 1 keeps per lane (`SinkEngine::detachment`) as the last read left it, so nothing may act on kept state while the lane is restaging. Until slice 4 brings R10, a rebuilding lane that parks stays parked and holds the slot like any parked lane. That is harmless, since nothing in a deployment reaches slice 2's rebuild.
 3. **Spikes S1, S3, S4.**
 4. **Thresholds and the probe-gated rebuild,** with `enabled = true`: R2, R3, R10, the stuck clock, the probes, the schedule, the alert. Gated on slice 3.
 5. **Runbook split and manual pages;** a docs agent writes the user pages.
