@@ -1482,6 +1482,15 @@ struct TwoLanes {
 
 impl TwoLanes {
     fn new(sink: Arc<Generations>, backoff: Duration, writes: usize) -> Self {
+        Self::build(sink, backoff, writes, false)
+    }
+
+    fn build(
+        sink: Arc<Generations>,
+        backoff: Duration,
+        writes: usize,
+        skip_backfill: bool,
+    ) -> Self {
         let stream = Arc::new(ChannelStream::over(1024, [users(), orders()], [primary()]));
         let mapping_of = |index: IndexName| IndexMapping { index, ..mapping() };
         let engine = Arc::new(
@@ -1494,7 +1503,8 @@ impl TwoLanes {
             )
             .with_writes(writes)
             .with_write_documents(10)
-            .with_backoff(crate::Backoff::new(backoff, backoff).unwrap()),
+            .with_backoff(crate::Backoff::new(backoff, backoff).unwrap())
+            .skip_backfill(skip_backfill),
         );
         let (control, receiver) = tokio::sync::mpsc::channel::<SinkControl>(4);
         Self {
@@ -1825,4 +1835,114 @@ async fn an_intact_left_out_lane_keeps_its_walk_and_records_no_mark_past_a_page(
     );
     running.abort();
     assert_eq!(two.next_start_asks().await.as_deref(), Some("0040"));
+}
+
+/// A live `users` item of row `row` at `position`.
+fn live_users(row: i64, position: u64) -> LaneItem {
+    LaneItem::Batch(Batch {
+        key: Some(stream::ItemKey::new(position)),
+        position: Some(kernel::Position::new(position)),
+        envelopes: vec![Envelope::upsert(
+            users(),
+            row.to_string(),
+            GenericValue::Map(BTreeMap::new()),
+            Some(kernel::Position::new(position)),
+            chrono::Utc::now(),
+        )]
+        .into(),
+        ..Default::default()
+    })
+}
+
+/// R5 on the missing-target path (`main`'s own exposure, third review of
+/// #476): a live item finds `users`' target gone while a reindex control is
+/// pending; the inline reindex runs before any restage, cuts the first walk
+/// and asks again, and opens the lane without resetting its tracker. The
+/// first walk's pages taken meanwhile land in the new target, and their marks
+/// are never recorded there.
+#[tokio::test(start_paused = true)]
+async fn a_live_item_finding_its_target_gone_under_a_pending_reindex_records_no_old_mark() {
+    let sink = Arc::new(Generations::default().holding(1, 500).holding(2, 21));
+    let mut two = TwoLanes::new(Arc::clone(&sink), Duration::from_secs(60), 1);
+    two.engine.stage(Continuity::Resumed).await.unwrap();
+    let (_, first) = two.request().await;
+    let running = two.run_controlled();
+    two.page(1..=10, first).await;
+    two.drained().await;
+    two.lane.publish(live_users(500, 1)).await.unwrap();
+    let waiting = tokio::time::timeout(Duration::from_secs(60), async {
+        while !sink.is_waiting(1, 500) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(waiting.is_ok(), "the live write is in flight");
+    two.page(11..=20, first).await;
+    two.page(21..=30, first).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    two.control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    sink.delete();
+    sink.release(1, 500);
+    let (after, fresh) = two.request().await;
+    assert_eq!(after, None);
+    assert!(fresh > first);
+    two.land_late().await;
+    assert!(sink.ahead().is_empty(), "{:?}", sink.ahead());
+    running.abort();
+    assert_eq!(two.next_start_asks().await, None);
+}
+
+/// R5's `cut` half (third review of #476, 2): under `--skip-backfill` a
+/// reindex still asks for its walk (T1), its target is deleted mid-walk,
+/// and the restage creates a new one, cuts T1 and asks nothing: the lane
+/// reopens with T1 cut and no newer ticket. T1's later pages land in the new
+/// target, but no mark of T1 is recorded there, and T1's `SnapshotComplete`
+/// doesn't seed it.
+#[tokio::test(start_paused = true)]
+async fn a_walk_cut_with_nothing_asked_again_records_and_seeds_nothing() {
+    let sink = Arc::new(Generations::default().holding(2, 21));
+    let mut two = TwoLanes::build(Arc::clone(&sink), Duration::from_secs(1), 1, true);
+    two.engine.stage(Continuity::Resumed).await.unwrap();
+    let running = two.run_controlled();
+    two.control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    let (_, first) = two.request().await;
+    two.page(1..=10, first).await;
+    two.drained().await;
+    sink.delete();
+    two.page(11..=20, first).await;
+    two.page(21..=30, first).await;
+    two.land_late().await;
+    assert_eq!(sink.target.lock().unwrap().generation, 2, "staged again");
+    assert!(sink.ahead().is_empty(), "{:?}", sink.ahead());
+    assert_eq!(
+        sink.target.lock().unwrap().walked,
+        None,
+        "no mark of the cut walk"
+    );
+    two.lane
+        .publish(LaneItem::SnapshotComplete {
+            index: users(),
+            ticket: first,
+        })
+        .await
+        .unwrap();
+    two.drained().await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        sink.seeds().is_empty(),
+        "the cut walk seeds nothing: {:?}",
+        sink.seeds()
+    );
+    running.abort();
 }
