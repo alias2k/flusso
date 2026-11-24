@@ -1051,7 +1051,11 @@ fn prefixed(base_url: &str, prefix: &str) -> Buffered {
 /// The requests seen, as lines, with `prefix` taken off every name.
 fn unprefixed(seen: &[Seen], prefix: &str) -> Vec<String> {
     seen.iter()
-        .map(|seen| seen.line().replace(&format!("/{prefix}"), "/"))
+        .map(|seen| {
+            seen.line()
+                .replace(&format!("/{prefix}"), "/")
+                .replace(&format!(",{prefix}"), ",")
+        })
         .collect()
 }
 
