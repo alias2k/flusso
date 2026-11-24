@@ -358,9 +358,11 @@ impl LaneState {
     }
 
     /// A lane a staging left out was left out again: its reason becomes the
-    /// latest error (#471). A lane restaging for another cause keeps its own.
+    /// latest error (#471). A lane restaging for another cause keeps its own,
+    /// and so does one owed a reindex: the reindex's reason wins (X17).
     pub(crate) fn left_out_again(&mut self, reason: String) {
         if self.unensured
+            && self.reindex.is_none()
             && let LaneHealth::Restaging { reason: kept, .. } = &mut self.health
         {
             *kept = reason;
@@ -487,6 +489,21 @@ mod tests {
     /// only until it opens; once open, a target a write finds missing is
     /// staged again as gone (`restage`, with its walk reset), never with
     /// ensure's rules.
+    #[test]
+    fn a_left_out_lane_owed_a_reindex_keeps_the_reindex_reason() {
+        let now = Instant::now();
+        let mut state = on(10, 100);
+        assert!(state.restage("could not be ensured: first".to_owned(), now));
+        state.unensured = true;
+        state.reindex_failed("the reindex could not stage: refused".to_owned(), now);
+        state.left_out_again("could not be ensured: later".to_owned());
+        assert!(
+            matches!(&state.health, LaneHealth::Restaging { reason, .. } if reason.starts_with("the reindex could not stage")),
+            "{:?}",
+            state.health
+        );
+    }
+
     #[test]
     fn a_reopened_lane_is_no_longer_left_out() {
         let now = Instant::now();

@@ -33,7 +33,11 @@
 //!   again under a newer ticket, an older walk's mark is dropped, never
 //!   recorded in a target its walk didn't fill (#471, second review). A cut
 //!   never runs while a record of the lane is in flight, so nothing changes
-//!   between that check and the record.
+//!   between that check and the record, as the engine sees it: a record that
+//!   returned before the cut is cleared by the cut's `forget_walked`. The
+//!   remaining hole is the destination's: a record the client gave up on (a
+//!   timeout) can still be applied after the cut, and a checkpoint is tied to
+//!   the generation number, not the target's uuid (#477).
 //!
 //! ```text
 //! received  a1 a2 a3 a4         (lane order)

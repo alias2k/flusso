@@ -798,8 +798,10 @@ impl SinkEngine {
     }
 
     /// Run `step` for each of `mappings`, at most [`STAGE_CONCURRENCY`] at
-    /// once, and return each mapping with what staging learned of it
-    /// (unseeded with no checkpoint when not asked), in the order given.
+    /// once, and return each mapping staged with what staging learned of it
+    /// (unseeded with no checkpoint when not asked), in the order given. Every
+    /// mapping, unless a stop asked meanwhile left some not started: those
+    /// are missing from the answer.
     ///
     /// After a failure no further index is started: a destination that is
     /// down or never answers fails every index alike, and each wave would cost
@@ -1186,15 +1188,17 @@ impl SinkEngine {
                 .map(|(index, error)| (index, format!("the reindex could not stage: {error}")))
                 .collect(),
         };
-        reindexed
-            .failed
-            .extend(tried.not_started.into_iter().map(|index| {
-                (
-                    index,
-                    "the reindex could not stage: not started after another index failed"
-                        .to_owned(),
-                )
-            }));
+        let not_started = if self.stop.is_requested() {
+            "the reindex could not stage: not started, the stop came"
+        } else {
+            "the reindex could not stage: not started after another index failed"
+        };
+        reindexed.failed.extend(
+            tried
+                .not_started
+                .into_iter()
+                .map(|index| (index, not_started.to_owned())),
+        );
         for (mapping, staged) in tried.done {
             let index = mapping.index.clone();
             if self.stop.is_requested() {

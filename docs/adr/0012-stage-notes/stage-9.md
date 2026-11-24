@@ -1009,7 +1009,10 @@ connections fail at once, so the cost below is for a destination that takes conn
   in a row arrives still complete, so at most three waves, three request timeouts, whatever the number of
   indexes; the rest are left out, not tried.
 - *a stop during the staging:* no index is started after it; the staging returns once the calls in flight
-  return, at most one request timeout. **The limit that remains:** a sink whose first
+  return, at most one request timeout. A restart's staging that had ensured nothing when the stop came fails
+  instead, the daemon's `stage_until_ok` waits its backoff (it doesn't look at the stop), and
+  `stage_while_stopping` then runs one more wave: up to two request timeouts plus a backoff. The daemon is
+  unchanged here. **The limit that remains:** a sink whose first
 sixteen indexes in order are all refused while the rest are fine is still read as a destination that is down
 (no port change can tell an index's refusal from the destination's without a new `Sink` method).
 
@@ -1027,10 +1030,12 @@ check enforces it for every path that cuts or asks again (`ensure_again` on a ch
 missing one, a staged reindex, an owed retry, #428's `TargetChanged` at the seed) and every place such a page can
 be: the lane's walk tracker (`walked.rs`) keeps each page's ticket beside its mark, and before every record the
 run drops a reached mark whose ticket no longer `answers` the index's outstanding request
-(`Walked::discard_unless`). It is sufficient because a cut never runs while a record of that lane is in flight (a
-staging starts only once nothing of the lane is in flight, the inline reindex only with no flight at all), so
-nothing changes between the check and the record, and a record already landed before the cut is cleared by the
-cut's `forget_walked`. Resetting the tracker is not the rule: dropping pages of a walk that still answers lets
+(`Walked::discard_unless`). It is sufficient as the engine sees it because a cut never runs while a record of
+that lane is in flight (a staging starts only once nothing of the lane is in flight, the inline reindex only with
+no flight at all), so nothing changes between the check and the record, and a record that returned before the cut
+is cleared by the cut's `forget_walked`. "Returned" is the engine's view: the remaining hole is that a record the
+client gave up on (a timeout) can still be applied at the destination after the cut, and a checkpoint is tied to
+the generation number, not the target's uuid (#477). Resetting the tracker is not the rule: dropping pages of a walk that still answers lets
 later pages' marks run ahead of an unlanded one, so an intact target's lane keeps its tracker.
 
 **Resumed: per index (R2).** Every restart of a run stages with `Continuity::Resumed`, and so does a first staging
@@ -1068,7 +1073,7 @@ failed. (a) is the only sound one.
 | R1 | none ensured (after one more wave tried one at a time): the staging fails as a whole; some ensured: every index is tried and only those that failed are left out | `a_staging_none_of_whose_indexes_is_ensured_fails_as_a_whole`, `a_failing_index_anywhere_among_many_leaves_only_itself_out`, `a_refused_first_wave_with_healthy_indexes_after_it_goes_on`, `a_destination_down_is_tried_one_more_wave_one_at_a_time_then_fails` |
 | R1b | an index left out keeps an intact target's backfill; a changed target is cut and asked again | `gone::an_index_left_out_by_a_staging_keeps_its_backfill_when_its_target_is_intact`, `gone::an_index_left_out_by_a_staging_whose_target_changed_is_asked_again` |
 | R1c | at most `STAGE_CONCURRENCY` lanes are staged again at once | `many_lanes_due_at_once_are_staged_again_at_most_the_bound_at_a_time` |
-| R5 | a walk checkpoint is recorded only for the backfill it belongs to; an intact target's lane keeps its walk | `gone::a_cut_backfills_page_records_no_mark_in_the_new_target_through_ensure_again`, `…_through_a_reindex`, `a_cut_backfills_page_records_no_mark_after_a_missing_target`, `a_cut_backfills_page_in_flight_when_the_cut_is_asked_records_no_mark`, `an_intact_left_out_lane_keeps_its_walk_and_records_no_mark_past_a_page`; `health::tests::a_reopened_lane_is_no_longer_left_out` |
+| R5 | a walk checkpoint is recorded only for the backfill it belongs to (a newer ticket or a cut ends it); an intact target's lane keeps its walk | `gone::a_cut_backfills_page_records_no_mark_in_the_new_target_through_ensure_again`, `…_through_a_reindex`, `a_live_item_finding_its_target_gone_under_a_pending_reindex_records_no_old_mark` (`main`'s own exposure), `a_cut_backfills_page_records_no_mark_after_a_missing_target`, `a_cut_backfills_page_in_flight_when_the_cut_is_asked_records_no_mark`, `a_walk_cut_with_nothing_asked_again_records_and_seeds_nothing` (the `cut` half of `answers`), `an_intact_left_out_lane_keeps_its_walk_and_records_no_mark_past_a_page`; `health::tests::a_reopened_lane_is_no_longer_left_out`, `a_left_out_lane_owed_a_reindex_keeps_the_reindex_reason` |
 | R2 | a restarted run's staging leaves an index it can't ensure restaging, the others write, and it recovers on the restage path | `a_restart_goes_on_without_the_index_it_cannot_ensure` (the issue's own) |
 | R3 | `stage()` never reopens a lane whose index it couldn't ensure | the same |
 | R4 | a `Fresh` first staging still fails as a whole on one index | `a_fresh_staging_waits_for_every_index` |
