@@ -8,9 +8,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use crate::{OpensearchConfig, OpensearchSink, TextAnalysis};
 
 /// The hash alias of [`mapping`]'s index, and its two record ids.
-const ALIAS: &str = "users_1";
-const DETACH: &str = "detach:users_1";
-const STUCK: &str = "stuck:users_1";
+const ALIAS: &str = "users_00000001";
+const DETACH: &str = "detach:users_00000001";
+const STUCK: &str = "stuck:users_00000001";
 
 fn mapping() -> IndexMapping {
     IndexMapping {
@@ -449,6 +449,6 @@ async fn a_prefixed_sink_reads_its_own_meta_index() {
     assert_eq!(stub.lines(), ["POST /dev_flusso_meta/_mget"]);
     assert_eq!(
         stub.body(0),
-        json!({ "ids": ["dev_users_1", "detach:dev_users_1", "stuck:dev_users_1"] })
+        json!({ "ids": ["dev_users_00000001", "detach:dev_users_00000001", "stuck:dev_users_00000001"] })
     );
 }

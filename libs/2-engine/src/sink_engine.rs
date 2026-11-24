@@ -221,6 +221,9 @@ pub struct SinkEngine {
     /// engine blames every lane, since a previous process may have stopped
     /// on any.
     blame: Mutex<Blame>,
+    /// What the last staging of each index read of its detach records, when
+    /// the sink keeps any (ADR 0012 stage 10). Slice 1 only keeps it.
+    detachments: Mutex<BTreeMap<IndexName, sink::Detachment>>,
     /// Each lane's health (open, parked, restaging) and its probe backoff.
     /// Outlives a run: a run failing for another reason leaves a parked lane
     /// parked, on its schedule. A lane not in it is open.
@@ -252,6 +255,7 @@ impl SinkEngine {
             skip_backfill: false,
             outstanding: Mutex::new(BTreeMap::new()),
             tickets: AtomicU64::new(0),
+            detachments: Mutex::new(BTreeMap::new()),
             fences: Mutex::new(Fences::default()),
             progress,
             stop: Stop::new(),
@@ -287,8 +291,49 @@ impl SinkEngine {
 
     /// What the last staging of `index` read of its detach records, when the
     /// sink keeps any (ADR 0012 stage 10): `None` for nothing kept.
-    pub fn detachment(&self, _index: &IndexName) -> Option<sink::Detachment> {
-        None
+    pub fn detachment(&self, index: &IndexName) -> Option<sink::Detachment> {
+        self.detachments
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(index)
+            .cloned()
+    }
+
+    /// Keep what a staging read of `index`'s detach records, and say loudly
+    /// what this version does with a record it can't act on: stage the index
+    /// as before (O24).
+    fn read_detachment(&self, index: &IndexName, detachment: sink::Detachment) {
+        let sink = &self.name;
+        match &detachment.record {
+            None => {}
+            Some(
+                sink::DetachRecord::Detached { live_only: true }
+                | sink::DetachRecord::Rebuilding { live_only: true },
+            ) => {
+                tracing::error!(%index, %sink, "a newer flusso detached this index on a sink it can't rebuild (live only); this version can't act on that, so the index is staged as before: writes resume into the generation readers see, and changes made while it was detached stay missing until their rows change again");
+            }
+            Some(sink::DetachRecord::Detached { .. }) => {
+                tracing::error!(%index, %sink, "a newer flusso detached this index; this version can't act on that, so the index is staged as before: it is rebuilt into the generation its seed marker names, from the database");
+            }
+            Some(sink::DetachRecord::Rebuilding { .. }) => {
+                tracing::error!(%index, %sink, "a newer flusso was rebuilding this index after detaching it; this version can't act on that, so the index is staged as before: its rebuild goes on as an ordinary backfill");
+            }
+            Some(sink::DetachRecord::Unreadable { reason }) => {
+                tracing::error!(%index, %sink, %reason, "a detach record this version can't read; the index is staged as before");
+            }
+            Some(other) => {
+                tracing::error!(%index, %sink, record = ?other, "a detach record this version doesn't know; the index is staged as before");
+            }
+        }
+        let mut detachments = self
+            .detachments
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if detachment.is_empty() {
+            detachments.remove(index);
+        } else {
+            detachments.insert(index.clone(), detachment);
+        }
     }
 
     fn lock_health(
@@ -910,6 +955,10 @@ impl SinkEngine {
     /// is cut is decided right after `ensure_index`, before any step that can
     /// fail.
     async fn step(&self, step: Step, mapping: &IndexMapping) -> sink::Result<Staged> {
+        // Before anything else touches the index (ADR 0012 stage 10): a
+        // failed read fails the step, never reads as "no record".
+        let detachment = self.sink.detachment(mapping).await?;
+        self.read_detachment(&mapping.index, detachment);
         let (ask_seeded, restaged) = match step {
             Step::Ensure { ask_seeded } => (ask_seeded, false),
             Step::Restage => (self.options.backfill, true),

@@ -210,6 +210,7 @@ async fn the_records_are_read_before_anything_else_touches_the_index() {
                 "detachment",
                 "reindex",
                 "ensure",
+                "seeded?",
             ]
         } else {
             &["detachment", "ensure", "seeded?"]
