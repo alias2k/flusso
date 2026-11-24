@@ -186,7 +186,7 @@ Each `(index, sink)` lane is written unless something about that one index stops
 | `open` | Written as usual. | (absent) | |
 | `refused` | A document of the lane was refused under [`on_error = "stop"`](index-and-on-error.md#on_error). | `refused: id <ids> (<first reason>)`, a few ids at most | a probe lands |
 | `blocked` | The destination refuses every write to the index for now: a [write block](sink-opensearch.md#write-blocks), a closed index, a role without write permission on it. | `blocked: <OpenSearch's reason>`; for a closed index, `blocked: index [<generation>] is closed` | a probe lands |
-| `restaging` | The index's target was deleted while flusso ran, or a [reindex couldn't stage](#when-the-reindex-cant-stage) its new generation: it is staged again and backfilled, alone. | OpenSearch's reason; for a reindex, `the reindex could not stage: <error>` or `the reindex could not ask for its backfill: <error>` | staging succeeds |
+| `restaging` | The index's target was deleted while flusso ran, a [reindex couldn't stage](#when-the-reindex-cant-stage) its new generation, or a [restart couldn't ensure the index](#when-a-restart-cant-ensure-an-index): it is staged again, alone. | OpenSearch's reason; for a reindex, `the reindex could not stage: <error>` or `the reindex could not ask for its backfill: <error>`; after a restart, `could not be ensured: <error>` or `not tried: 8 indexes in a row could not be ensured before it` | staging succeeds |
 
 A `refused` or `blocked` lane is **parked**: flusso holds it and probes it, and the logs say `the lane is parked`. The metric [`flusso.lane.parked`](metrics.md) and the `FlussoLaneParked` alert cover every lane that isn't `open`, `restaging` included; their `why` label is the lane's `health`.
 
@@ -201,6 +201,31 @@ A **probe** writes a parked lane's oldest batch again, alone, on the [`[backoff]
   "reason": "blocked: index [users_1a2b3c4d_1] blocked by: [FORBIDDEN/8/index write (api)];"
 }
 ```
+
+#### When a restart can't ensure an index
+
+Each time a sink's run restarts, flusso **ensures** every index of the sink again: it checks the index's generation and its `flusso_meta` record, creating what's missing. When one index can't be ensured while the destination answers for others, only that index waits:
+
+- **The lane** turns `restaging`. Its `reason` is `could not be ensured: <error>`, with the destination's answer. An index flusso didn't get to, because the destination stopped answering part way, reads `not tried: 8 indexes in a row could not be ensured before it`. The log says `the index was not ensured; its lane is staged again on its own while the sink's other indexes go on`.
+- **The sink's other indexes** start and keep being written. The sink's `phase` is `live` (or `backfilling`), so `/readyz` isn't held by it.
+- **The retry.** The lane is tried again at once (a lane that had only just reopened waits its backoff first), then on the [`[backoff]`](config-toml.md#backoff) schedule. Each try logs `staging the index again: it could not be ensured`; a failed one logs `could not stage the index again; trying again later` with that try's error, while `reason` keeps the error of the staging that left the lane out. The try that succeeds opens the lane, with no restart: `the index is staged again; the lane is open`.
+- **Its backfill.** One that was running goes on from where it got. If the index's generation was recreated meanwhile, the backfill starts again from the first row. An unseeded index nobody asked a backfill for yet gets one.
+- **Meanwhile** the lane writes nothing, and holds the replication slot and its fences: a `/wait` that needs the index doesn't pass. `flusso_lane_parked{why="restaging"}` is `1`, so `FlussoLaneParked` fires after 5 minutes.
+
+The same holds at a start whose replication slot was kept. A start with a new slot (the first one, or after the slot was [dropped](../operate/dropped-slot.md)) doesn't go on without the index: flusso can't tell whether an index it couldn't reach needs a rebuild before it starts reading, so the start retries with backoff, nothing read meanwhile, and the log says `staging failed; retrying` with the error of each index that failed.
+
+**When the destination is down instead.** flusso can't tell one index's refusal from a destination that is down by the error alone, so it reads it from the indexes:
+
+- **Some index was ensured:** the destination answers, and only the indexes that failed wait, as above. Once 8 indexes in a row fail, flusso stops trying more (the destination stopped answering) and leaves the rest `not tried`.
+- **None of the first 8 was:** flusso tries up to 8 more, one at a time. The first that is ensured shows the destination answers.
+- **None of those either:** the destination is down. The whole sink waits and retries with backoff, as for any failed restart, and the log says `staging failed; retrying`. At a start, nothing is read until it answers.
+
+Two limits follow:
+
+- **Sixteen refusals read as down.** A sink whose first sixteen indexes, in index-name order, are all refused while the rest are fine waits as if the destination were down.
+- **A silent destination is slow to read as down.** Refused connections fail at once. A destination that accepts connections and never answers costs up to nine request timeouts before a restart reads it as down (the first 8 indexes at once, then 8 one at a time): 270 s at the OpenSearch sink's default [`timeout_secs`](sink-opensearch.md) of 30. A stop asked meanwhile starts no further try.
+
+A closed `{prefix}flusso_meta` is read by every index, so none is ensured: the whole sink waits ([Write blocks](sink-opensearch.md#write-blocks)).
 
 ## GET /metrics
 
