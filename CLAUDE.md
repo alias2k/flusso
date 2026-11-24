@@ -1805,7 +1805,16 @@ is the one concrete piece.
   `skip`: the sibling stays current, nothing quarantined, the lane pins the slot, lifted it catches up
   with no restart; a generation deleted mid-run staged again alone), and `flusso-cli`'s `shutdown`
   `a_stop_with_a_write_blocked_lane_gives_up_at_the_deadline_naming_the_lane_and_a_restart_converges`.
-  Detaching a lane stuck past a threshold and rebuilding its index (#394) is decided but not built: `docs/adr/0012-stage-notes/stage-10.md`.
+  Detaching a lane stuck past a threshold and rebuilding its index (#394) is decided in
+  `docs/adr/0012-stage-notes/stage-10.md`; only slice 1 is built. Every staging step reads the
+  detach records first (`Sink::detachment`, before `reindex` and `ensure_index`; OpenSearch:
+  `detachment.rs`, one `_mget` of the seed marker, `detach:{alias}` and `stuck:{alias}`). Only a
+  missing meta index or document reads as nothing kept; any other answer fails the step (the index
+  restaging alone under `Resumed`, the staging under `Fresh`). A record is logged and the index
+  staged as before (O24), kept in `SinkEngine::detachment`; a marker carrying `detaching_from` with
+  no record is put back, conditionally, and one this version can't read is logged and staged as
+  before. Each `_mget` entry must answer for the id asked, found or not found. Guards: `tests::records`, `detachment::tests`, and
+  `seeding`'s live cases (`staging_reads_the_records_in_one_request_then_asks_what_it_asked_before`).
 - **A document a script fails on is decided on the ingest side (issue #198).** A
   `DocumentBuilder` may return `Document::Failed { id, failure: BuildFailure }`; the ingest engine
   resolves the index's `FailurePolicies` (the same `on_error` the sink engines use, handed to it by
