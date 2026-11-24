@@ -1812,7 +1812,8 @@ is the one concrete piece.
   missing meta index or document reads as nothing kept; any other answer fails the step (the index
   restaging alone under `Resumed`, the staging under `Fresh`). A record is logged and the index
   staged as before (O24), kept in `SinkEngine::detachment`; a marker carrying `detaching_from` with
-  no record is put back, conditionally. Guards: `tests::records`, `detachment::tests`, and
+  no record is put back, conditionally, and one this version can't read is logged and staged as
+  before. Each `_mget` entry must answer for the id asked, found or not found. Guards: `tests::records`, `detachment::tests`, and
   `seeding`'s live cases (`staging_reads_the_records_in_one_request_then_asks_what_it_asked_before`).
 - **A document a script fails on is decided on the ingest side (issue #198).** A
   `DocumentBuilder` may return `Document::Failed { id, failure: BuildFailure }`; the ingest engine

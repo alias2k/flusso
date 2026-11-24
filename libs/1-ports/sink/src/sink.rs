@@ -313,9 +313,8 @@ pub enum Seeding {
 }
 
 /// What a sink keeps about detaching an index from the slot's minimum (ADR
-/// 0012 stage 10), as [`Sink::detachment`] read it at staging. Nothing writes
-/// a record yet: staging reads one and logs it, so a record a later flusso
-/// left behind after a rollback is never half-acted on.
+/// 0012 stage 10), as [`Sink::detachment`] read it at staging, before
+/// anything else touches the index.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Detachment {
@@ -383,9 +382,11 @@ impl StuckClock {
 /// and its position.
 ///
 /// **Staging is concurrent across indexes.** The sink engine stages a sink's
-/// indexes several at a time: [`ensure_index`](Self::ensure_index),
-/// [`is_seeded`](Self::is_seeded) and [`reindex`](Self::reindex) may run at
-/// once for *different* indexes, never two at once for the same index. They
+/// indexes several at a time: [`detachment`](Self::detachment) (which may
+/// write: it puts a half-moved seed marker back),
+/// [`ensure_index`](Self::ensure_index), [`is_seeded`](Self::is_seeded) and
+/// [`reindex`](Self::reindex) may run at once for *different* indexes, never
+/// two at once for the same index. They
 /// may run beside a [`write`](Self::write) or a
 /// [`mark_seeded`](Self::mark_seeded) of **other** indexes (an index whose
 /// target went missing is staged again while the others are written), never

@@ -486,7 +486,14 @@ async fn a_malformed_detaching_from_is_reported_and_put_back_nowhere() {
 /// A prefixed deployment reads its own meta index and ids.
 #[tokio::test]
 async fn a_prefixed_sink_reads_its_own_meta_index() {
-    let stub = Stub::start(|_, _| mget([missing("a"), missing("b"), missing("c")])).await;
+    let stub = Stub::start(|_, _| {
+        mget([
+            missing("dev_users_00000001"),
+            missing("detach:dev_users_00000001"),
+            missing("stuck:dev_users_00000001"),
+        ])
+    })
+    .await;
     let sink = stub.sink().with_index_prefix("dev_");
     sink.detachment(&mapping()).await.unwrap();
     assert_eq!(stub.lines(), ["POST /dev_flusso_meta/_mget"]);

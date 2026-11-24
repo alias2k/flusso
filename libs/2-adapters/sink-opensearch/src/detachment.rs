@@ -16,7 +16,11 @@
 //!   `detaching_from`), then writes its record. A marker carrying
 //!   `detaching_from` with no record beside it means the detach died between
 //!   the two: the marker is put back on the generation it came from, as it
-//!   was, conditionally on the marker read, so a write meanwhile wins.
+//!   was, conditionally on the marker read, so a write meanwhile wins. A
+//!   `detaching_from` this version can't read is reported and put back
+//!   nowhere: the index is staged as before, never failed for it (O24).
+//! - **Every document answers for the id asked**, found or not found; an
+//!   entry that says neither, or names another id, is an error.
 //!
 //! ```text
 //! POST {meta}/_mget  {"ids": [alias, "detach:" + alias, "stuck:" + alias]}
@@ -74,6 +78,7 @@ impl OpensearchSink {
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or_default();
+        let [marker_id, record_id, stuck_id] = &ids;
         let [marker, record, stuck] = docs else {
             return Err(SinkError::Write(format!(
                 "{context}: expected 3 documents, got {}: {text}",
@@ -81,9 +86,9 @@ impl OpensearchSink {
             )));
         };
         let (marker, record, stuck) = (
-            found(marker, context)?,
-            found(record, context)?,
-            found(stuck, context)?,
+            found(marker, marker_id, context)?,
+            found(record, record_id, context)?,
+            found(stuck, stuck_id, context)?,
         );
 
         let mut kept = Detachment::default();
@@ -102,19 +107,28 @@ impl OpensearchSink {
             && let Some(marker) = marker
             && let Some(from) = marker.source.get("detaching_from").filter(|v| !v.is_null())
         {
-            kept.restored = Some(self.put_back(&hash_alias, &marker, from).await?);
+            match generation_of(from) {
+                Ok(generation) => {
+                    kept.restored = Some(
+                        self.put_back(&hash_alias, &marker, from, generation)
+                            .await?,
+                    );
+                }
+                Err(why) => kept.unreadable_marker = Some(why),
+            }
         }
         Ok(kept)
     }
 
-    /// Put the seed marker back on the generation `from` names, as it was,
+    /// Put the seed marker back on `generation`, as `from` says it was,
     /// conditionally on `marker` as read: the generation put back.
-    async fn put_back(&self, hash_alias: &str, marker: &Found, from: &Value) -> Result<u64> {
-        let Some(generation) = from.get("generation").and_then(Value::as_u64) else {
-            return Err(SinkError::Write(format!(
-                "the seed marker of {hash_alias} names no generation in its detaching_from: {from}"
-            )));
-        };
+    async fn put_back(
+        &self,
+        hash_alias: &str,
+        marker: &Found,
+        from: &Value,
+        generation: u64,
+    ) -> Result<u64> {
         let (Some(seq_no), Some(primary_term)) = (marker.seq_no, marker.primary_term) else {
             return Err(SinkError::Write(format!(
                 "the seed marker of {hash_alias} was read without its sequence number"
@@ -149,6 +163,19 @@ impl OpensearchSink {
     }
 }
 
+/// The generation a marker's `detaching_from` names, or why this version
+/// can't read it.
+fn generation_of(from: &Value) -> std::result::Result<u64, String> {
+    if !from.is_object() {
+        return Err(format!(
+            "the seed marker's detaching_from is not an object: {from}"
+        ));
+    }
+    from.get("generation")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("the seed marker's detaching_from names no generation: {from}"))
+}
+
 /// Whether `text` is OpenSearch's answer for a missing index.
 fn is_index_not_found(text: &str) -> bool {
     serde_json::from_str::<Value>(text).is_ok_and(|body| is_missing_index(&body))
@@ -164,24 +191,38 @@ fn is_missing_index(answer: &Value) -> bool {
         == Some("index_not_found_exception")
 }
 
-/// One `_mget` document: found, not found (`None`), or an error, which only
-/// a missing meta index turns into "not found".
-fn found(doc: &Value, context: &str) -> Result<Option<Found>> {
-    if let Some(error) = doc.get("error") {
-        return if is_missing_index(doc) {
-            Ok(None)
-        } else {
-            Err(SinkError::Write(format!("{context}: {error}")))
-        };
+/// One `_mget` document, which must answer for `id`: found, not found
+/// (`None`), or an error, which only a missing meta index turns into "not
+/// found". Anything else is an error.
+fn found(doc: &Value, id: &str, context: &str) -> Result<Option<Found>> {
+    let found = if let Some(error) = doc.get("error") {
+        if !is_missing_index(doc) {
+            return Err(SinkError::Write(format!("{context}: {error}")));
+        }
+        None
+    } else {
+        match doc.get("found").and_then(Value::as_bool) {
+            Some(false) => None,
+            Some(true) => Some(Found {
+                source: doc.get("_source").cloned().unwrap_or(Value::Null),
+                seq_no: doc.get("_seq_no").and_then(Value::as_u64),
+                primary_term: doc.get("_primary_term").and_then(Value::as_u64),
+            }),
+            None => {
+                return Err(SinkError::Write(format!(
+                    "{context}: a document answered neither found nor an error: {doc}"
+                )));
+            }
+        }
+    };
+    let answered = doc.get("_id").and_then(Value::as_str);
+    if answered != Some(id) {
+        return Err(SinkError::Write(format!(
+            "{context}: asked for {id}, answered for {}: {doc}",
+            answered.unwrap_or("no id")
+        )));
     }
-    if doc.get("found").and_then(Value::as_bool) != Some(true) {
-        return Ok(None);
-    }
-    Ok(Some(Found {
-        source: doc.get("_source").cloned().unwrap_or(Value::Null),
-        seq_no: doc.get("_seq_no").and_then(Value::as_u64),
-        primary_term: doc.get("_primary_term").and_then(Value::as_u64),
-    }))
+    Ok(found)
 }
 
 /// A detach record as this version reads it.

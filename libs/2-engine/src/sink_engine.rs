@@ -310,13 +310,13 @@ impl SinkEngine {
                 sink::DetachRecord::Detached { live_only: true }
                 | sink::DetachRecord::Rebuilding { live_only: true },
             ) => {
-                tracing::error!(%index, %sink, "a newer flusso detached this index on a sink it can't rebuild (live only); this version can't act on that, so the index is staged as before: writes resume into the generation readers see, and changes made while it was detached stay missing until their rows change again");
+                tracing::error!(%index, %sink, "a detach record says a newer flusso detached this index on a sink it can't rebuild (live only); this version can't act on it and stages the index as before, as its seed marker says. Changes made while it was detached are missing from it until their rows change again");
             }
             Some(sink::DetachRecord::Detached { .. }) => {
-                tracing::error!(%index, %sink, "a newer flusso detached this index; this version can't act on that, so the index is staged as before: it is rebuilt into the generation its seed marker names, from the database");
+                tracing::error!(%index, %sink, "a detach record says a newer flusso detached this index; this version can't act on it and stages the index as before, as its seed marker says. Changes made while it was detached reach the index only through a backfill of it");
             }
             Some(sink::DetachRecord::Rebuilding { .. }) => {
-                tracing::error!(%index, %sink, "a newer flusso was rebuilding this index after detaching it; this version can't act on that, so the index is staged as before: its rebuild goes on as an ordinary backfill");
+                tracing::error!(%index, %sink, "a detach record says a newer flusso was rebuilding this index after detaching it; this version can't act on it and stages the index as before, as its seed marker says");
             }
             Some(sink::DetachRecord::Unreadable { reason }) => {
                 tracing::error!(%index, %sink, %reason, "a detach record this version can't read; the index is staged as before");
@@ -324,6 +324,9 @@ impl SinkEngine {
             Some(other) => {
                 tracing::error!(%index, %sink, record = ?other, "a detach record this version doesn't know; the index is staged as before");
             }
+        }
+        if let Some(reason) = &detachment.unreadable_marker {
+            tracing::error!(%index, %sink, %reason, "the seed marker carries a detach this version can't read; nothing was put back and the index is staged as before, as its seed marker says");
         }
         let mut detachments = self
             .detachments
