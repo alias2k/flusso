@@ -19,4 +19,21 @@ pub enum SinkError {
     /// recreated by anyone else, so it does not hold what was written to it.
     #[error("the index's target changed: {0}")]
     TargetChanged(String),
+
+    /// A seed found its new target built but couldn't retire the target it
+    /// replaces: the destination blocks that one (issue #479). Nothing was
+    /// swapped; the seed can be retried as is once the block is lifted or the
+    /// old target is gone.
+    #[error("{new} is built, but {old} can't be retired: {block}")]
+    RetireBlocked {
+        /// The target the seed was making the one readers see.
+        new: String,
+        /// The target it replaces, which the destination blocks.
+        old: String,
+        /// What the destination said of the block.
+        block: String,
+        /// The block lets the old target be deleted (a block that guards
+        /// disk space does), so deleting it is a way out beside lifting it.
+        deletable: bool,
+    },
 }

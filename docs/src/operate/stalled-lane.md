@@ -12,6 +12,7 @@ A **lane** is one index flowing into one sink. Open this page when any of these 
 - The log says `the lane is parked`, `the index's target is gone`, or `a lane has landed nothing for …s`.
 - The log says `index held at max_waiting_per_index: exempt, …`, `exempt index frozen: …` or `reading stopped for every index: …`: an index is stuck and its changes are piling up. See [When one index is stuck beside others](#when-one-index-is-stuck-beside-others).
 - [`/status`](../reference/http.md#get-status) shows a lane whose `health` isn't `open`, or whose `stall_seconds` keeps climbing.
+- A lane reads `blocked` with a `reason` starting `blocked: the new generation`. See [A seed that can't retire the old generation](#a-seed-that-cant-retire-the-old-generation).
 - A lane reads `restaging` with a `reason` starting `the reindex could not stage`. See [A reindex that can't stage](#a-reindex-that-cant-stage).
 - A lane reads `restaging` with a `reason` starting `could not be ensured` or `not tried`. See [An index that can't be ensured after a restart](#an-index-that-cant-be-ensured-after-a-restart).
 - `pinned_by` names an index with `"sink": null` and keeps naming it: no lane is stuck, the index's backlog is. See [When an index's backlog holds the slot](#when-an-indexs-backlog-holds-the-slot).
@@ -61,7 +62,7 @@ WARN the lane is parked: its item is written again alone after the backoff; the 
 
 | `health` | What happened | What flusso does | Fix |
 | --- | --- | --- | --- |
-| `blocked` | OpenSearch refuses every write to the index for now: a write block, a closed index, or a role without write permission on it. | Holds the lane, writes its oldest batch again alone at `next_probe`. Quarantines nothing, whatever `on_error` says. | [Lift the block](#a-write-block), [open the index](#a-closed-index) or [grant the permission](#a-role-without-write-permission) |
+| `blocked` | OpenSearch refuses every write to the index for now: a write block, a closed index, or a role without write permission on it. Or a rebuild's seed can't retire the blocked old generation. | Holds the lane, writes its oldest batch again alone (or tries the seed again) at `next_probe`. Quarantines nothing, whatever `on_error` says. | [Lift the block](#a-write-block), [open the index](#a-closed-index), [grant the permission](#a-role-without-write-permission) or [free the seed](#a-seed-that-cant-retire-the-old-generation) |
 | `refused` | A document was refused under `on_error = "stop"`; `reason` names the ids. | Holds the lane, writes a [fresh build](../reference/index-and-on-error.md#a-refused-lanes-fresh-build) of the batch at `next_probe`. | [Fix the row](#a-document-refused-under-stop) |
 | `restaging` | The index's target was deleted while flusso ran, a reindex couldn't create its new generation, or a restart couldn't ensure the index. | Stages that index again, alone, retrying on its own. | [Nothing, usually](#a-deleted-index), [lift what blocks the reindex](#a-reindex-that-cant-stage), or [lift what refuses the index](#an-index-that-cant-be-ensured-after-a-restart) |
 | `open` | flusso writes the lane; something else stops it landing. | Restarts the sink with backoff. | [The sink itself](#the-sink-itself-health-open) |
@@ -72,7 +73,7 @@ A `refused` or `blocked` lane is **parked**. While it is, the sink's other index
 
 #### A write block
 
-`reason` carries `cluster_block_exception` text such as `FORBIDDEN/8/index write (api)` (`index.blocks.write`), `FORBIDDEN/5/index read-only (api)` (`index.blocks.read_only`) or `FORBIDDEN/12/index read-only / allow delete (api)` (`index.blocks.read_only_allow_delete`, set by hand). See which block is set, on the generation `reason` names:
+`reason` carries `cluster_block_exception` text such as `FORBIDDEN/8/index write (api)` (`index.blocks.write`) or `FORBIDDEN/5/index read-only (api)` (`index.blocks.read_only`). See which block is set, on the generation `reason` names:
 
 ```sh
 curl -s 'localhost:9200/users_1a2b3c4d_1/_settings/index.blocks*?flat_settings=true'
@@ -107,7 +108,23 @@ A closed index doesn't stop flusso from starting: the sink starts and only that 
 
 #### A disk watermark
 
-The flood-stage block is not a `blocked` lane. OpenSearch answers it with `429`, which flusso treats as **busy**: it [resends](../reference/sink-opensearch.md#retries), and when the retries run out the whole sink restarts with backoff. The lanes stay `open` and the sink's `last_error` says `still refused as busy`. Free disk space (`curl -s 'localhost:9200/_cat/allocation?v'` shows usage per node); OpenSearch lifts the block once usage drops below the high watermark, and the sink's next restart writes.
+The flood-stage block, and `index.blocks.read_only_allow_delete` set by hand (the same block), is not a `blocked` lane, except [at a seed](#a-seed-that-cant-retire-the-old-generation). OpenSearch answers it with `429`, which flusso treats as **busy**: it [resends](../reference/sink-opensearch.md#retries), and when the retries run out the whole sink restarts with backoff. The lanes stay `open` and the sink's `last_error` says `still refused as busy`. Free disk space (`curl -s 'localhost:9200/_cat/allocation?v'` shows usage per node); OpenSearch lifts the block once usage drops below the high watermark, and the sink's next restart writes.
+
+#### A seed that can't retire the old generation
+
+`reason` reads `blocked: the new generation users_1a2b3c4d_2 is built, but the old generation users_1a2b3c4d_1 can't be retired: …`, then OpenSearch's words and the ways out.
+
+- **What it means.** A reindex (or the rebuild after a lost slot) finished its backfill, but the generation it replaces carries `index.blocks.read_only` or `read_only_allow_delete`, so OpenSearch refuses to move the aliases off it. The seed is the lane's probe, tried again on the backoff schedule ([details](../reference/sink-opensearch.md#an-old-generation-that-cant-be-retired)).
+- **Meanwhile.** Nothing restarts and `/readyz` stays ready. Readers stay on the old generation, the index stays `backfilling`, and the sink's other indexes keep being written. This lane holds the slot: its live changes wait behind the seed. `FlussoLaneParked` fires after 5 minutes, and `FlussoLaneStalled` can follow after 10.
+- **What to do.** Free the generation the reason names as old. The next probe seeds, with no restart:
+
+  | Block on the old generation | Way out |
+  | --- | --- |
+  | `index.blocks.read_only` | Lift it ([as above](#a-write-block)). OpenSearch refuses a delete too. |
+  | `index.blocks.read_only_allow_delete` | Free disk space, if disk usage set it: OpenSearch lifts the block once usage falls below the high watermark. Or lift it. Or, last, delete the old generation (`curl -s -X DELETE localhost:9200/users_1a2b3c4d_1`): both aliases go with it, so reads through them answer `404` until the next probe, at most one [`max_ms`](../reference/config-toml.md#backoff) later. |
+
+  A [reindex](#unstick-a-lane-with-a-reindex) doesn't help: it walks the backfill again into the same new generation and parks at the seed again.
+- **How to tell it worked.** The log says `the parked lane's probe landed; the lane is open`, the aliases name the new generation, the old one is gone, and the index reads `seeded`.
 
 #### A role without write permission
 
@@ -131,7 +148,7 @@ An index deleted **mid-backfill** is backfilled again from the first row, and st
 
 #### Unstick a lane with a reindex
 
-A [reindex](reindex.md) of the stuck index on that sink opens a `refused`, `blocked` or `restaging` lane as soon as it is staged:
+A [reindex](reindex.md) of the stuck index on that sink opens a `refused`, `blocked` or `restaging` lane as soon as it is staged, unless the lane is parked on its [seed](#a-seed-that-cant-retire-the-old-generation):
 
 ```sh
 flusso reindex users --sink primary --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
@@ -141,7 +158,9 @@ The item the lane was stuck on comes from the new generation's backfill instead 
 
 | The lane is stuck on | Reindex? |
 | --- | --- |
-| A write block on that index you can't or won't lift | Yes |
+| `index.blocks.write` on that index you can't or won't lift | Yes |
+| `index.blocks.read_only` on that index | No: the seed can't retire the blocked generation and parks. Lift the block |
+| A seed that can't retire the old generation | No: the backfill runs again and parks at the same seed. [Free the seed](#a-seed-that-cant-retire-the-old-generation) |
 | A closed index you won't open | Yes: the closed generation is dropped at the seed |
 | A mapping or settings changed by hand on the index | Yes |
 | A `restaging` lane whose staging keeps failing | Yes, unless the cause is the whole cluster |
@@ -328,7 +347,7 @@ curl -s localhost:9464/indexes/orders/status | jq '{state, down_since, last_erro
 - **`/readyz` stays ready.** A parked lane doesn't make flusso unready: the other indexes are written and served, and a restart wouldn't help. Alert on the lane, not on readiness.
 - **A slow lane isn't stalled.** A lane that lands, just slowly, fires neither alert; `flusso:backlog_drain_eta_seconds` shows how long it will take. flusso logs a warning once a lane passes 10 minutes without landing, and every 10 minutes after.
 - **A backfill that stops making progress** shows as the index staying `backfilling` in `/status` while `flusso.documents.built` stops moving. A live change queued behind it on the same lane does age, and alerts.
-- **A stop with a lane not open.** A parked lane is probed once more at once; one that still can't land holds the drain until `--shutdown-timeout-secs`, then flusso exits `1` naming it: `primary: 3 changes in flight, lane users blocked since 2026-11-19T12:03:11Z (blocked: …)`. A `restaging` lane, or one waiting on a reindex's backfill, doesn't hold the stop: its changes are left for the next start. Each case is in [Lanes flusso doesn't write at a stop](../reference/cli.md#lanes-flusso-doesnt-write-at-a-stop).
+- **A stop with a lane not open.** A parked lane is probed once more at once; one that still can't land holds the drain until `--shutdown-timeout-secs`, then flusso exits `1` naming it: `primary: 3 changes in flight, lane users blocked since 2026-11-19T12:03:11Z (blocked: …)`. A lane parked on its seed, a `restaging` lane, or one waiting on a reindex's backfill, doesn't hold the stop: its changes are left for the next start. Each case is in [Lanes flusso doesn't write at a stop](../reference/cli.md#lanes-flusso-doesnt-write-at-a-stop).
 - **A process restart resets the stall age.** The age is kept in memory, so a process that crash-loops never ages a lane into `FlussoLaneStalled`. Alert on the process too: `up{job="<flusso's scrape job>"} == 0` for a few minutes, or under Kubernetes `increase(kube_pod_container_status_restarts_total{container="flusso"}[15m]) > 2`.
 
 ## Related

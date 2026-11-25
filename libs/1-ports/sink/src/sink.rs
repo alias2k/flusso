@@ -613,6 +613,12 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// named (deleted, or recreated by anyone else) must not be seeded:
     /// answer [`SinkError::TargetChanged`](crate::SinkError::TargetChanged),
     /// and the engine stages the index again and backfills it in full.
+    ///
+    /// A new target that is built but can't take over because the destination
+    /// blocks retiring the old one answers
+    /// [`SinkError::RetireBlocked`](crate::SinkError::RetireBlocked) with
+    /// nothing applied: the engine parks the index's lane on it and calls this
+    /// again, as is, on the lane's probe, until it succeeds (#479).
     async fn mark_seeded(&self, _: &IndexName) -> Result<()> {
         Ok(())
     }

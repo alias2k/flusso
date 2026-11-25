@@ -288,7 +288,7 @@ With two or more enabled indexes, a failure of one index's own work restarts tha
 Each wait doubles, up to `max_ms`. One schedule times every retry flusso makes on its own:
 
 - **A failed engine's restart**, sink or ingest, and a restarted sink's staging when it fails. The wait goes back to `initial_ms` after a run that made progress.
-- **A parked lane's probe**: its oldest batch, or a [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build) of it, written alone, while the lane is `refused` or `blocked` ([lane health](http.md#lane-health)). Only that lane's probe landing resets the wait.
+- **A parked lane's probe**: its oldest batch, or a [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build) of it, written alone, while the lane is `refused` or `blocked`, or a seed refused by the old generation's block ([lane health](http.md#lane-health)). Only that lane's probe landing resets the wait.
 - **A restaging lane's next staging**, when staging the index again fails. A lane a restart [couldn't ensure](http.md#when-a-restart-cant-ensure-an-index) is tried again as soon as the run starts (after one wait, if the lane had only just reopened), then on this schedule.
 - **One index's restart**, with two or more indexes, after its live work failed. The wait goes back to `initial_ms` once the index hands a live batch to its sinks again ([A failing index](#a-failing-index)).
 - **One index's backfill retry**, after its backfill failed. The wait goes back to `initial_ms` once the backfill gets further than at its last failure.

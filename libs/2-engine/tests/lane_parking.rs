@@ -571,6 +571,106 @@ async fn a_reindex_moves_a_closed_index_to_a_new_generation() {
     live.task.abort();
 }
 
+/// #479: a reindex past a generation an operator made read-only. The new
+/// generation is backfilled, but its seed can't retire the old one while the
+/// block stands: the lane parks `blocked`, naming the new generation as built,
+/// the old one, its block and both ways out. The deployment never restarts
+/// and the sibling stays current. Lifting the block lets the lane's next
+/// probe seed it: the alias moves and the old generation is deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_reindex_past_a_read_only_generation_parks_its_seed_until_the_block_is_lifted() {
+    let pg = start_postgres("readonly").await;
+    let os = start_opensearch("readonly").await;
+    let live = deploy(
+        &pg,
+        &os,
+        &["frozen", "steady"],
+        FailurePolicies::new(FailurePolicy::Stop),
+    )
+    .await;
+    live.seeded(2).await;
+    let old = live.generation("frozen").await;
+    live.settings(&old, serde_json::json!({ "index.blocks.read_only": true }))
+        .await;
+    live.control
+        .send(SinkControl::Reindex {
+            indexes: vec![IndexName::try_new("frozen").unwrap()],
+        })
+        .await
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let reason = loop {
+        live.still_running();
+        if let LaneHealth::Parked { reason, .. } = live.health("frozen") {
+            break reason.to_string();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the seed never parked: {:?}",
+            live.health("frozen")
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(reason.starts_with("blocked: "), "{reason}");
+    for named in [
+        "is built, but the old generation".to_owned(),
+        old.clone(),
+        "read-only".to_owned(),
+        format!("lift the block on {old}"),
+    ] {
+        assert!(reason.contains(named.as_str()), "{named} in {reason}");
+    }
+    assert!(
+        !reason.contains("delete"),
+        "a read-only index can't be deleted: {reason}"
+    );
+    assert_eq!(
+        live.generation("frozen").await,
+        old,
+        "readers stay on the old generation"
+    );
+
+    exec(
+        &pg.pool,
+        "INSERT INTO steady (id, name) VALUES ('9', 'nine')",
+    )
+    .await;
+    assert!(
+        live.sees("steady", "9", "nine", Duration::from_secs(30))
+            .await,
+        "the sibling stays current"
+    );
+    live.still_running();
+
+    live.settings(&old, serde_json::json!({ "index.blocks.read_only": null }))
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while !live.health("frozen").is_open() || live.generation("frozen").await == old {
+        live.still_running();
+        assert!(
+            Instant::now() < deadline,
+            "the seed never finished once the block was lifted"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let gone = live
+        .http
+        .head(format!("{}/{old}", live.os))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(
+        gone,
+        reqwest::StatusCode::NOT_FOUND,
+        "the old generation is deleted"
+    );
+    live.still_running();
+    live.task.abort();
+}
+
 /// The write block on one index's generation, cured by a reindex of that
 /// index on that sink instead of lifting it (stage 9, slice 2): the lane opens
 /// at once, the new generation (no block) is backfilled and seeded, the rows

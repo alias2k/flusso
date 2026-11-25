@@ -258,6 +258,26 @@ struct Flight {
     substitute: Option<Box<Substituted>>,
 }
 
+/// Why a lane parked on a seed the sink refused because the generation it
+/// would retire is blocked (#479): the new one is built, the old one, the
+/// destination's block, and the ways out.
+fn retire_blocked_reason(new: &str, old: &str, block: &str, deletable: bool) -> String {
+    let exits = if deletable {
+        format!(
+            "the block clears when the disk has room again (if disk usage set it); or lift \
+             the block on {old}; or delete {old}, which this block allows but which takes \
+             reads of this index offline until the seed's next probe adds the aliases to {new}"
+        )
+    } else {
+        format!("lift the block on {old}")
+    };
+    let block = block.trim_end().trim_end_matches(';');
+    format!(
+        "the new generation {new} is built, but the old generation {old} can't be retired: \
+         {block}; {exits}. The seed then finishes on its own"
+    )
+}
+
 /// A held item to acknowledge: its handle, lane, receive order and build.
 type HeldAck = (Box<dyn AckHandle>, usize, u64, Option<u64>);
 
@@ -1241,13 +1261,25 @@ impl<'a> Run<'a> {
                     ..
                 }) = self.take_from_window(at)
                 {
-                    if let Some(run) = self.lanes.get_mut(lane) {
+                    // On a parked lane this is a refused seed's probe: its walk
+                    // ended at the first try, and nothing behind it landed since.
+                    if self.lane_open(lane)
+                        && let Some(run) = self.lanes.get_mut(lane)
+                    {
                         run.walked.ended(seq, Instant::now());
                     }
                     if self.engine.cut_short(&index) || self.engine.superseded(&index, ticket) {
                         self.acknowledge(handle, lane, seq, None, true, None)
                             .await?;
-                    } else if let Some(landed) = self.seed(index, ticket, handle, lane, seq) {
+                        continue;
+                    }
+                    if !self.lane_open(lane)
+                        && let Some(run) = self.lanes.get_mut(lane)
+                    {
+                        run.health.probes += 1;
+                        tracing::info!(lane = %run.key, probe = run.health.probes, "probing the parked lane: its seed, again");
+                    }
+                    if let Some(landed) = self.seed(index, ticket, handle, lane, seq) {
                         self.landed(landed).await?;
                     }
                 }
@@ -1387,6 +1419,7 @@ impl<'a> Run<'a> {
     /// The window index of a `SnapshotComplete` with nothing before it on its
     /// lane, waiting or in flight.
     fn runnable_complete(&self) -> Option<usize> {
+        let now = Instant::now();
         let mut seen: Vec<usize> = Vec::new();
         for (at, queued) in self.window.iter().enumerate() {
             if seen.contains(&queued.lane) {
@@ -1395,10 +1428,13 @@ impl<'a> Run<'a> {
             seen.push(queued.lane);
             // A lane being staged again holds its completion: the staging
             // decides whether the backfill it ends was cut. A parked lane's
-            // runs once nothing is in front of it, as any other lane's.
+            // runs once nothing is in front of it and its probe is due: a seed
+            // refused by a blocked old generation (#479) parks the lane on its
+            // completion, which is its probe.
             if matches!(queued.item, Queue::Complete { .. })
                 && !self.lane_restaging(queued.lane)
                 && !self.lane_in_flight(queued.lane)
+                && self.grantable(queued.lane, now)
             {
                 return Some(at);
             }
@@ -1738,12 +1774,43 @@ impl<'a> Run<'a> {
                 self.hold(lane, Held::Missing(reason), false);
                 return Ok(());
             }
+            // The new generation is built but the old one can't be retired
+            // (#479): the lane parks on its completion, whose seed is the
+            // probe. Once stopping it is acknowledged unseeded instead, as a
+            // cut backfill's is, so the drain ends and the next start seeds.
+            Err(sink::SinkError::RetireBlocked {
+                new,
+                old,
+                block,
+                deletable,
+            }) => {
+                let lane = seeding.lane;
+                if self.engine.stop.is_requested() {
+                    tracing::info!(index = %seeding.index, %old, "stopping: the seed is refused while the old generation is blocked; the index stays unseeded for the next start");
+                    self.engine.lock_skipped().insert(seeding.index.clone());
+                    let oldest = self.is_oldest(lane, seeding.seq);
+                    return self
+                        .acknowledge(seeding.handle, lane, seeding.seq, None, oldest, None)
+                        .await;
+                }
+                let probe = !self.lane_open(lane);
+                self.put_back_complete(seeding);
+                self.hold(
+                    lane,
+                    Held::Blocked(retire_blocked_reason(&new, &old, &block, deletable)),
+                    probe,
+                );
+                return Ok(());
+            }
             Err(error) => {
                 self.fail(error.into(), &[seeding.lane]);
                 return Ok(());
             }
         }
         self.engine.seeded(&seeding.index, seeding.ticket, took);
+        if !self.lane_open(seeding.lane) {
+            self.probed(seeding.lane, ProbeOutcome::Landed);
+        }
         if self.holding > 0 && !self.engine.is_outstanding(&seeding.index) {
             self.release_held(seeding.lane).await?;
         }

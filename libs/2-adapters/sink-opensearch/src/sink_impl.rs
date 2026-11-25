@@ -589,9 +589,24 @@ impl Sink for OpensearchSink {
         // moves alone; the convenience alias stays best-effort.
         let hash = (hash_alias.as_str(), serving.as_slice());
         let both = [hash, (convenience.as_str(), named.as_slice())];
-        if let Some(actions) = plan_seed_actions(generation, &both, &stale)
-            && let Err(error) = self.update_aliases(&actions).await
-        {
+        let retired: Vec<&String> = serving
+            .iter()
+            .chain(&stale)
+            .filter(|name| *name != generation)
+            .collect();
+        let first = match plan_seed_actions(generation, &both, &stale) {
+            Some(actions) => {
+                self.update_seed_aliases(&actions, generation, &retired)
+                    .await
+            }
+            None => Ok(()),
+        };
+        if let Err(error) = first {
+            // The old generation is blocked (#479): no other request form
+            // would pass; the engine parks the seed and retries it.
+            if matches!(error, SinkError::RetireBlocked { .. }) {
+                return Err(error);
+            }
             warn!(
                 index = logical,
                 %error,
@@ -605,7 +620,13 @@ impl Sink for OpensearchSink {
             if let Some(hash_only) =
                 plan_seed_actions(generation, std::slice::from_ref(&hash), &stale)
             {
-                self.update_aliases(&hash_only).await?;
+                let retired: Vec<&String> = serving
+                    .iter()
+                    .chain(&stale)
+                    .filter(|name| *name != generation)
+                    .collect();
+                self.update_seed_aliases(&hash_only, generation, &retired)
+                    .await?;
             }
             self.ensure_alias(&convenience, generation).await;
         }
@@ -805,3 +826,6 @@ impl std::fmt::Display for Steps {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -64,7 +64,7 @@ The live status document as JSON: the deployment, then one block per sink.
 | `sinks.<name>.lanes.<index>.wal_behind_bytes` | int, absent | Bytes of WAL the replication slot keeps behind this lane: the slot lag less how far the lane is ahead of whatever pins the slot (another lane, or an index's backlog). It counts WAL flusso hasn't read yet as well as what it read and hasn't landed (a stalled lane pins both), so a healthy catch-up shows a large value on lanes that land every second: read it with the stall age. It is computed from the slot lag, polled every `--lag-poll-secs` (15 s by default); a failed poll keeps the last value. Absent while the lane holds nothing itself (an index's backlog doesn't count), or before the first lag sample. |
 | `sinks.<name>.lanes.<index>.health` | `open` \| `refused` \| `blocked` \| `restaging` | Whether flusso writes the lane. See [Lane health](#lane-health). |
 | `sinks.<name>.lanes.<index>.parked_since` | string, absent | When the lane stopped being written (RFC 3339, UTC). Absent while `open`. |
-| `sinks.<name>.lanes.<index>.next_probe` | string, absent | When a `refused` or `blocked` lane next writes its oldest batch again (RFC 3339, UTC). A probe further ahead than any date shows as the latest date there is. Absent while `open` or `restaging`. |
+| `sinks.<name>.lanes.<index>.next_probe` | string, absent | When a `refused` or `blocked` lane next writes its oldest batch again, or tries its seed again (RFC 3339, UTC). A probe further ahead than any date shows as the latest date there is. Absent while `open` or `restaging`. |
 | `sinks.<name>.lanes.<index>.reason` | string, absent | Why the lane isn't written, in the destination's words. Absent while `open`. |
 | `sinks.<name>.lanes.<index>.backfill_checkpoints` | int, absent | Times this run recorded how far the lane's backfill got, so a restart resumes after it (about one every 10 s while a backfill lands); absent while 0. Staying absent through a long backfill means nothing lands. See [Postgres source](source-postgres.md), "An interrupted backfill resumes". |
 
@@ -185,12 +185,12 @@ Each `(index, sink)` lane is written unless something about that one index stops
 | --- | --- | --- | --- |
 | `open` | Written as usual. | (absent) | |
 | `refused` | A document of the lane was refused under [`on_error = "stop"`](index-and-on-error.md#on_error). | `refused: id <ids> (<first reason>)`, a few ids at most | a probe lands |
-| `blocked` | The destination refuses every write to the index for now: a [write block](sink-opensearch.md#write-blocks), a closed index, a role without write permission on it. | `blocked: <OpenSearch's reason>`; for a closed index, `blocked: index [<generation>] is closed` | a probe lands |
+| `blocked` | The destination refuses every write to the index for now: a [write block](sink-opensearch.md#write-blocks), a closed index, a role without write permission on it. Or a rebuild's seed can't [retire the old generation](sink-opensearch.md#an-old-generation-that-cant-be-retired), which is blocked. | `blocked: <OpenSearch's reason>`; for a closed index, `blocked: index [<generation>] is closed`; for a seed, `blocked: the new generation <new> is built, but the old generation <old> can't be retired: <OpenSearch's reason>; <the ways out>. The seed then finishes on its own` | a probe lands |
 | `restaging` | The index's target was deleted while flusso ran, a [reindex couldn't stage](#when-the-reindex-cant-stage) its new generation, or a [restart couldn't ensure the index](#when-a-restart-cant-ensure-an-index): it is staged again, alone. | OpenSearch's reason; for a reindex, `the reindex could not stage: <error>` or `the reindex could not ask for its backfill: <error>`; after a restart, `could not be ensured: <error>` or `not tried: 8 indexes in a row could not be ensured before it` | staging succeeds |
 
 A `refused` or `blocked` lane is **parked**: flusso holds it and probes it, and the logs say `the lane is parked`. The metric [`flusso.lane.parked`](metrics.md) and the `FlussoLaneParked` alert cover every lane that isn't `open`, `restaging` included; their `why` label is the lane's `health`.
 
-A **probe** writes a parked lane's oldest batch again, alone, on the [`[backoff]`](config-toml.md#backoff) schedule (1 s after it parked, doubling to 60 s, by default). A `refused` lane's probe writes a [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build) of that batch instead; while it waits for one, the lane stays `refused` and `next_probe` is the end of the wait. Another lane landing never shortens the wait; a stop probes at once. A failed staging of a `restaging` lane is retried on the same schedule. A [reindex](#a-reindex-of-a-lane-flusso-doesnt-write) of the index opens a lane in any of the three states. A lane flusso doesn't write:
+A **probe** writes a parked lane's oldest batch again, alone, on the [`[backoff]`](config-toml.md#backoff) schedule (1 s after it parked, doubling to 60 s, by default). A lane parked on its seed tries the seed again instead. A `refused` lane's probe writes a [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build) of that batch instead; while it waits for one, the lane stays `refused` and `next_probe` is the end of the wait. Another lane landing never shortens the wait; a stop probes at once. A failed staging of a `restaging` lane is retried on the same schedule. A [reindex](#a-reindex-of-a-lane-flusso-doesnt-write) of the index opens a lane in any of the three states, except one parked on its seed. A lane flusso doesn't write:
 
 ```json
 "users": {
@@ -319,6 +319,7 @@ A reindex is also the way out for a [lane](#lane-health) stuck on something that
 | --- | --- |
 | `open` | Stages a new generation and backfills it. If the index's backfill is still running, it does nothing: that backfill is already rebuilding. |
 | `refused` or `blocked` | Opens the lane. The item it was stuck on isn't written again: its documents come from the new generation's backfill, which reads every row after the reindex. Items behind it are written into the new generation. |
+| `blocked` on its seed | Stages nothing: the index is still unseeded. The backfill runs again into the same new generation, and the lane parks at the seed again while the old generation's block stands ([details](sink-opensearch.md#an-old-generation-that-cant-be-retired)). |
 | `restaging` | Opens the lane; the items it held are written into the new generation. |
 | not `open`, with the index's backfill still running | Cuts that backfill and starts it again from the first row. |
 
@@ -330,10 +331,11 @@ A reindex is also the way out for a [lane](#lane-health) stuck on something that
 
 At the seed the stuck item is acknowledged and the lane's positions move on. The log says `reindexed: the lane is open; its parked item waits for the new generation's backfill` when the lane opens.
 
-**What it cures.** The new generation comes from the same schema and mapping, so a reindex cures what lives in the index: a write block on that index, a closed index (the seed drops the closed generation), settings or a mapping changed by hand, an `index_settings` change picked up by a restart. It doesn't cure:
+**What it cures.** The new generation comes from the same schema and mapping, so a reindex cures what lives in the index: `index.blocks.write` on that index, a closed index (the seed drops the closed generation), settings or a mapping changed by hand, an `index_settings` change picked up by a restart. It doesn't cure:
 
 - **A row the mapping refuses.** The new backfill is refused at that row, the lane parks `refused` again, and the reindex completes once the row is fixed ([fresh build](index-and-on-error.md#a-refused-lanes-fresh-build)).
 - **A block on the whole cluster.** The new generation can't be created ([below](#when-the-reindex-cant-stage)).
+- **`index.blocks.read_only` or `read_only_allow_delete` on the old generation.** The seed can't retire it, so the lane parks `blocked` at the seed until the block is lifted ([details](sink-opensearch.md#an-old-generation-that-cant-be-retired)).
 
 ### When the reindex can't stage
 
