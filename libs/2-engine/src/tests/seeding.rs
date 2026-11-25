@@ -65,6 +65,8 @@ struct Gate {
     /// retire is blocked (#479), and how often each was tried.
     retire_blocked: Mutex<HashSet<String>>,
     seed_tries: Mutex<HashMap<String, usize>>,
+    /// When each refused seed was tried, by index.
+    refused_at: Mutex<HashMap<String, Vec<tokio::time::Instant>>>,
 }
 
 impl Gate {
@@ -183,6 +185,12 @@ impl Sink for Gate {
             .entry(index.to_string())
             .or_default() += 1;
         if self.retire_blocked.lock().unwrap().contains(index.as_ref()) {
+            self.refused_at
+                .lock()
+                .unwrap()
+                .entry(index.to_string())
+                .or_default()
+                .push(tokio::time::Instant::now());
             return Err(sink::SinkError::RetireBlocked {
                 new: format!("{index}_1_2"),
                 old: format!("{index}_1_1"),
@@ -660,8 +668,10 @@ async fn a_seed_refused_by_a_blocked_old_generation_parks_its_lane_until_a_probe
         "a_1_2 is built",
         "a_1_1 can't be retired",
         "read-only-allow-delete",
+        "the block clears when the disk has room again",
         "lift the block on a_1_1",
         "delete a_1_1",
+        "takes reads of this index offline until the seed's next probe",
         "finishes on its own",
     ] {
         assert!(reason.contains(named), "{named} in {reason}");
@@ -736,6 +746,37 @@ async fn a_reindex_while_parked_on_a_refused_seed_drops_that_seed() {
     );
     assert_eq!(rig.gate.seeded("a"), 0);
     assert!(!rig.finished());
+
+    // The reindex's own backfill: its completion seeds the index once the
+    // block is lifted, and the lane opens.
+    rig.gate.lift("a");
+    rig.backfill("a", "a1").await;
+    rig.complete("a").await;
+    until("the new backfill seeds a", || rig.gate.seeded("a") == 1).await;
+    until("a opens", || rig.health("a").is_open()).await;
+    until("everything acknowledged", || rig.stream.is_idle()).await;
+}
+
+/// The probes of a refused seed are spaced by the lane's backoff, which
+/// doubles after each refusal (stage 9's parking rules): 1 s, then 2 s, 4 s.
+#[tokio::test(start_paused = true)]
+async fn the_probes_of_a_refused_seed_back_off_doubling() {
+    let mut rig = Rig::new(Gate::default().retire_blocked(&["a"]), &["a"], 4);
+    rig.start();
+    rig.backfill("a", "a1").await;
+    rig.complete("a").await;
+    until("four tries", || rig.gate.seed_tries("a") >= 4).await;
+    let at = rig.gate.refused_at.lock().unwrap()["a"].clone();
+    let gaps: Vec<Duration> = at.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    assert_eq!(
+        gaps[..3],
+        [
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4)
+        ],
+        "probes at {at:?}"
+    );
 }
 
 /// A run that ends for another reason while a lane is parked on a refused

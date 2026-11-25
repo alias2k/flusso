@@ -818,3 +818,6 @@ impl std::fmt::Display for Steps {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1282,6 +1282,7 @@ mod backoff;
 mod budget;
 mod committed;
 mod lanes;
+mod seed_blocked;
 mod staging;
 mod stop;
 

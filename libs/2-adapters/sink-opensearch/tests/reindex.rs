@@ -1652,6 +1652,22 @@ async fn a_seed_past_a_read_only_allow_delete_generation_finishes_once_it_is_del
         status.is_success(),
         "the operator's DELETE returned {status}"
     );
+    // The aliases went with the old generation: until the seed's next probe
+    // adds them to the new one, reads through them find nothing.
+    for alias in [hash_alias.as_str(), LOGICAL] {
+        let status = client
+            .get(format!("{base}/{alias}/_search"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{alias} between the delete and the seed"
+        );
+    }
+    assert!(alias_targets(&client, &base, &hash_alias).await.is_empty());
     run2.mark_seeded(&index).await.unwrap();
     assert_eq!(
         alias_targets(&client, &base, &hash_alias).await,

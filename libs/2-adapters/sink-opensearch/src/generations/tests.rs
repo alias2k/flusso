@@ -314,3 +314,60 @@ fn any_other_alias_refusal_is_not_retire_blocked() {
         assert!(super::retire_blocked(&text, "users_00000001_2", &old).is_none(), "{text}");
     }
 }
+
+/// A `cluster_block_exception` names one `index [x] blocked by: [...];`
+/// segment per blocked index of the request. Each is read on its own: the
+/// refusal is `RetireBlocked` only when every index it names is one the seed
+/// retires (never the new generation), and a DELETE is offered only when
+/// every one of them allows it.
+#[test]
+fn a_refusal_naming_several_indexes_is_read_segment_by_segment() {
+    let retired = ["users_00000001_1".to_owned(), "users_00000001_3".to_owned()];
+    let retired: Vec<&String> = retired.iter().collect();
+    let refusal = |reason: &str| {
+        json!({ "error": { "type": "cluster_block_exception", "reason": reason } }).to_string()
+    };
+
+    let mixed = refusal(
+        "index [users_00000001_1] blocked by: [FORBIDDEN/5/index read-only (api)];\
+         index [users_00000001_3] blocked by: [TOO_MANY_REQUESTS/12/disk usage exceeded \
+         flood-stage watermark, index has read-only-allow-delete block];",
+    );
+    match super::retire_blocked(&mixed, "users_00000001_2", &retired) {
+        Some(sink::SinkError::RetireBlocked { old, deletable, .. }) => {
+            assert_eq!(old, "users_00000001_1, users_00000001_3");
+            assert!(!deletable, "one of them refuses a DELETE");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let both_deletable = refusal(
+        "index [users_00000001_1] blocked by: [FORBIDDEN/12/index read-only / allow delete (api)];\
+         index [users_00000001_3] blocked by: [FORBIDDEN/12/index read-only / allow delete (api)];",
+    );
+    assert!(matches!(
+        super::retire_blocked(&both_deletable, "users_00000001_2", &retired),
+        Some(sink::SinkError::RetireBlocked {
+            deletable: true,
+            ..
+        })
+    ));
+
+    let with_the_new = refusal(
+        "index [users_00000001_1] blocked by: [FORBIDDEN/12/index read-only / allow delete (api)];\
+         index [users_00000001_2] blocked by: [FORBIDDEN/5/index read-only (api)];",
+    );
+    assert!(
+        super::retire_blocked(&with_the_new, "users_00000001_2", &retired).is_none(),
+        "a block on the new generation is no retire block"
+    );
+
+    let with_retired_new = ["users_00000001_2".to_owned()];
+    let with_retired_new: Vec<&String> = with_retired_new.iter().collect();
+    let only_new =
+        refusal("index [users_00000001_2] blocked by: [FORBIDDEN/5/index read-only (api)];");
+    assert!(
+        super::retire_blocked(&only_new, "users_00000001_2", &with_retired_new).is_none(),
+        "the new generation is never retired, even if listed"
+    );
+}
