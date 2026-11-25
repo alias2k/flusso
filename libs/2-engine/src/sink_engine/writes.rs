@@ -271,6 +271,7 @@ fn retire_blocked_reason(new: &str, old: &str, block: &str, deletable: bool) -> 
     } else {
         format!("lift the block on {old}")
     };
+    let block = block.trim_end().trim_end_matches(';');
     format!(
         "the new generation {new} is built, but the old generation {old} can't be retired: \
          {block}; {exits}. The seed then finishes on its own"

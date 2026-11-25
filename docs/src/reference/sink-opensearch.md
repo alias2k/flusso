@@ -217,7 +217,7 @@ The seed then **parks the index's lane** `blocked`, instead of failing the sink:
 - **The reason** names the new generation, the old one (several when several are blocked), OpenSearch's words, and the ways out below, in order of harm ([lane health](http.md#lane-health)):
 
   ```text
-  blocked: the new generation users_1a2b3c4d_2 is built, but the old generation users_1a2b3c4d_1 can't be retired: index [users_1a2b3c4d_1] blocked by: [FORBIDDEN/5/index read-only (api)];; lift the block on users_1a2b3c4d_1. The seed then finishes on its own
+  blocked: the new generation users_1a2b3c4d_2 is built, but the old generation users_1a2b3c4d_1 can't be retired: index [users_1a2b3c4d_1] blocked by: [FORBIDDEN/5/index read-only (api)]; lift the block on users_1a2b3c4d_1. The seed then finishes on its own
   ```
 
 How it ends depends on the old generation's state:
