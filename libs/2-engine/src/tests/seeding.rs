@@ -61,6 +61,10 @@ struct Gate {
     seeded: Mutex<HashMap<String, usize>>,
     delays: Option<Mutex<Rng>>,
     ordered: bool,
+    /// Indexes whose seed the sink refuses because the generation it would
+    /// retire is blocked (#479), and how often each was tried.
+    retire_blocked: Mutex<HashSet<String>>,
+    seed_tries: Mutex<HashMap<String, usize>>,
 }
 
 impl Gate {
@@ -78,6 +82,29 @@ impl Gate {
             .unwrap()
             .extend(what.iter().map(|w| (*w).to_owned()));
         self
+    }
+
+    /// Refuse `indexes`' seeds as a blocked old generation would.
+    fn retire_blocked(self, indexes: &[&str]) -> Self {
+        self.retire_blocked
+            .lock()
+            .unwrap()
+            .extend(indexes.iter().map(|i| (*i).to_owned()));
+        self
+    }
+
+    /// Lift the block on `index`'s old generation.
+    fn lift(&self, index: &str) {
+        self.retire_blocked.lock().unwrap().remove(index);
+    }
+
+    fn seed_tries(&self, index: &str) -> usize {
+        self.seed_tries
+            .lock()
+            .unwrap()
+            .get(index)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn release(&self, what: &str) {
@@ -149,6 +176,19 @@ impl Sink for Gate {
     }
 
     async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
+        *self
+            .seed_tries
+            .lock()
+            .unwrap()
+            .entry(index.to_string())
+            .or_default() += 1;
+        if self.retire_blocked.lock().unwrap().contains(index.as_ref()) {
+            return Err(sink::SinkError::RetireBlocked {
+                new: format!("{index}_1_2"),
+                old: format!("{index}_1_1"),
+                block: "index [old] blocked by: [FORBIDDEN/5/index read-only (api)]".to_owned(),
+            });
+        }
         let now = self.seeds_now.fetch_add(1, Ordering::SeqCst) + 1;
         self.seeds_most.fetch_max(now, Ordering::SeqCst);
         let what = format!("seed {index}");
@@ -250,6 +290,19 @@ impl Rig {
 
     async fn ended(&mut self) -> Result<()> {
         self.running.take().unwrap().await.unwrap()
+    }
+
+    fn health(&self, lane: &str) -> crate::LaneHealth {
+        self.engine
+            .lane_health(&LaneKey::new(index(lane), sink_name("primary")))
+    }
+
+    /// What `lane` is parked for, as `/status` and the log show it.
+    fn parked_reason(&self, lane: &str) -> Option<String> {
+        match self.health(lane) {
+            crate::LaneHealth::Parked { reason, .. } => Some(reason.to_string()),
+            _ => None,
+        }
     }
 
     fn finished(&self) -> bool {
@@ -584,4 +637,115 @@ async fn one_schedule(seed: u64) -> bool {
         );
     }
     rig.gate.seeds_most.load(Ordering::SeqCst) >= 2
+}
+
+/// #479: a seed the sink refuses because the generation it would retire is
+/// blocked parks its lane `blocked`. The reason names the new generation as
+/// built, the old one and its block, and both ways out. The run goes on:
+/// another lane lands. The `SnapshotComplete` stays unacknowledged. Once the
+/// block is lifted, the lane's probe seeds the index and acknowledges it.
+#[tokio::test(start_paused = true)]
+async fn a_seed_refused_by_a_blocked_old_generation_parks_its_lane_until_a_probe_seeds_it() {
+    let mut rig = Rig::new(Gate::default().retire_blocked(&["a"]), &["a", "c"], 4);
+    rig.start();
+    rig.backfill("a", "a1").await;
+    rig.complete("a").await;
+    until("a parked blocked", || rig.health("a").kind() == "blocked").await;
+    let reason = rig.parked_reason("a").unwrap();
+    for named in ["blocked: ", "a_1_2", "a_1_1", "read-only", "lift", "delete"] {
+        assert!(reason.contains(named), "{named} in {reason}");
+    }
+
+    rig.live("c", "c1", 1).await;
+    until("c's write", || rig.gate.logged("end write c")).await;
+    settle().await;
+    assert!(!rig.finished(), "the run goes on");
+    assert_eq!(rig.gate.seeded("a"), 0);
+    assert!(!rig.stream.is_idle(), "the completion is not acknowledged");
+
+    rig.gate.lift("a");
+    until("a's probe seeds it", || rig.gate.seeded("a") == 1).await;
+    until("a opens", || rig.health("a").is_open()).await;
+    until("everything acknowledged", || rig.stream.is_idle()).await;
+    assert!(!rig.finished());
+}
+
+/// A stop while a lane is parked on a refused seed: its completion is
+/// acknowledged unseeded, so it doesn't hold the drain, and the index stays
+/// unseeded for the next start to finish.
+#[tokio::test(start_paused = true)]
+async fn a_stop_while_parked_on_a_refused_seed_leaves_the_index_unseeded() {
+    let mut rig = Rig::new(Gate::default().retire_blocked(&["a"]), &["a"], 4);
+    rig.start();
+    rig.backfill("a", "a1").await;
+    rig.complete("a").await;
+    until("a parked blocked", || rig.health("a").kind() == "blocked").await;
+    rig.stop.request();
+    until("the run ends", || rig.finished()).await;
+    rig.ended().await.unwrap();
+    assert_eq!(rig.gate.seeded("a"), 0);
+    assert!(rig.stream.is_idle(), "nothing holds the drain");
+}
+
+/// A reindex of the index while its lane is parked on a refused seed stages
+/// a new generation; the parked completion is acknowledged without seeding
+/// and its seed is not tried again.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_while_parked_on_a_refused_seed_drops_that_seed() {
+    let mut rig = Rig::new(Gate::default().retire_blocked(&["a"]), &["a"], 4);
+    rig.start();
+    rig.backfill("a", "a1").await;
+    rig.complete("a").await;
+    until("a parked blocked", || rig.health("a").kind() == "blocked").await;
+    let tries = rig.gate.seed_tries("a");
+    rig.control
+        .send(SinkControl::Reindex {
+            indexes: vec![index("a")],
+        })
+        .await
+        .unwrap();
+    until("the reindex", || rig.gate.logged("reindex a")).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    settle().await;
+    assert_eq!(
+        rig.gate.seed_tries("a"),
+        tries,
+        "the refused seed is dropped"
+    );
+    assert_eq!(rig.gate.seeded("a"), 0);
+    assert!(!rig.finished());
+}
+
+/// A run that ends for another reason while a lane is parked on a refused
+/// seed: the restarted run is redelivered the completion and parks on it
+/// again, without the run failing.
+#[tokio::test(start_paused = true)]
+async fn a_restarted_run_parks_on_a_refused_seed_again() {
+    let gate = Gate::default()
+        .retire_blocked(&["a"])
+        .failing_once(&["write c"]);
+    let mut rig = Rig::new(gate, &["a", "c"], 4);
+    rig.start();
+    rig.backfill("a", "a1").await;
+    rig.complete("a").await;
+    until("a parked blocked", || rig.health("a").kind() == "blocked").await;
+    rig.live("c", "c1", 1).await;
+    until("the run fails on c", || rig.finished()).await;
+    assert!(rig.ended().await.is_err());
+    let tries = rig.gate.seed_tries("a");
+
+    rig.start();
+    until("c lands", || {
+        rig.gate
+            .log()
+            .iter()
+            .filter(|l| *l == "end write c")
+            .count()
+            == 1
+    })
+    .await;
+    until("the seed tried again", || rig.gate.seed_tries("a") > tries).await;
+    until("a parked blocked", || rig.health("a").kind() == "blocked").await;
+    settle().await;
+    assert!(!rig.finished(), "a refused seed fails no run");
 }
