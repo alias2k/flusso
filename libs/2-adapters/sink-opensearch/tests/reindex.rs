@@ -1502,3 +1502,145 @@ async fn a_seed_past_a_read_only_allow_delete_generation_serves_the_new_one_and_
 async fn a_seed_past_a_closed_generation_serves_the_new_one_and_deletes_the_old() {
     a_seed_past_an_old_generation(OldGeneration::Closed).await;
 }
+
+/// One request of [`spike_b1_what_opensearch_answers_past_a_read_only_generation`]:
+/// its status and, refused, the error's type and reason.
+async fn answer(response: reqwest::Response) -> String {
+    let status = response.status().as_u16();
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+    match body.get("error") {
+        Some(error) => format!(
+            "{status} {} {}",
+            error["type"].as_str().unwrap_or("?"),
+            error["reason"].as_str().unwrap_or("?")
+        ),
+        None => format!("{status}"),
+    }
+}
+
+/// Spike B1 (#479): what OpenSearch answers, under each read-only block on an
+/// old generation, to each way of taking the aliases off it. Every case runs
+/// on fresh indexes: an old one holding the alias, blocked, and a new one.
+/// The table of answers is compared with the one expected, and printed whole
+/// when it differs, so a run shows what OpenSearch said.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn spike_b1_what_opensearch_answers_past_a_read_only_generation() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let status = client
+        .put(format!("{base}/_cluster/settings"))
+        .json(&serde_json::json!({
+            "persistent": { "cluster.routing.allocation.disk.threshold_enabled": false }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(
+        status.is_success(),
+        "turning the disk monitor off returned {status}"
+    );
+
+    let blocks = [
+        "index.blocks.read_only",
+        "index.blocks.read_only_allow_delete",
+    ];
+    let forms = ["remove alias + add", "add + remove_index", "DELETE"];
+    let mut seen = Vec::new();
+    for (b, block) in blocks.into_iter().enumerate() {
+        for (f, form) in forms.iter().enumerate() {
+            let old = format!("spike_{b}_{f}_old");
+            let new = format!("spike_{b}_{f}_new");
+            let alias = format!("spike_{b}_{f}");
+            for index in [&old, &new] {
+                let status = client
+                    .put(format!("{base}/{index}"))
+                    .json(&serde_json::json!({
+                        "settings": { "number_of_shards": 1, "number_of_replicas": 0 }
+                    }))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status();
+                assert!(status.is_success(), "creating {index} returned {status}");
+            }
+            let status = client
+                .post(format!("{base}/_aliases"))
+                .json(&serde_json::json!({ "actions": [{ "add": { "index": old, "alias": alias } }] }))
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert!(status.is_success(), "aliasing {old} returned {status}");
+            let status = client
+                .put(format!("{base}/{old}/_settings"))
+                .json(&serde_json::json!({ block: true }))
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert!(status.is_success(), "blocking {old} returned {status}");
+
+            let response = match *form {
+                "remove alias + add" => client
+                    .post(format!("{base}/_aliases"))
+                    .json(&serde_json::json!({ "actions": [
+                        { "remove": { "index": old, "alias": alias } },
+                        { "add": { "index": new, "alias": alias } },
+                    ] }))
+                    .send()
+                    .await
+                    .unwrap(),
+                "add + remove_index" => client
+                    .post(format!("{base}/_aliases"))
+                    .json(&serde_json::json!({ "actions": [
+                        { "add": { "index": new, "alias": alias } },
+                        { "remove_index": { "index": old } },
+                    ] }))
+                    .send()
+                    .await
+                    .unwrap(),
+                _ => client.delete(format!("{base}/{old}")).send().await.unwrap(),
+            };
+            let answered = answer(response).await;
+            let after = format!(
+                "old {}, alias on {:?}",
+                if index_exists(&client, &base, &old).await {
+                    "kept"
+                } else {
+                    "gone"
+                },
+                alias_targets(&client, &base, &alias).await
+            );
+            seen.push(format!("{block} | {form} | {answered} | {after}"));
+        }
+    }
+    let codes: Vec<String> = seen
+        .iter()
+        .map(|row| {
+            let mut cells = row.split(" | ");
+            let block = cells.next().unwrap_or_default();
+            let form = cells.next().unwrap_or_default();
+            let status = cells
+                .next()
+                .and_then(|answered| answered.split(' ').next())
+                .unwrap_or_default();
+            format!("{block} | {form} | {status}")
+        })
+        .collect();
+    let expected = [
+        "index.blocks.read_only | remove alias + add | 403",
+        "index.blocks.read_only | add + remove_index | 403",
+        "index.blocks.read_only | DELETE | 403",
+        "index.blocks.read_only_allow_delete | remove alias + add | 429",
+        "index.blocks.read_only_allow_delete | add + remove_index | 200",
+        "index.blocks.read_only_allow_delete | DELETE | 200",
+    ];
+    assert_eq!(
+        codes,
+        expected,
+        "what OpenSearch answered:\n{}",
+        seen.join("\n")
+    );
+}
