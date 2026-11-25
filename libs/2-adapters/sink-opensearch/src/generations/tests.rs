@@ -240,3 +240,77 @@ fn a_backfill_checkpoint_is_read_only_for_the_unseeded_active_generation() {
         "a legacy doc with no generation"
     );
 }
+
+/// #479: a seed's `_aliases` refusal naming an old generation's block is the
+/// typed `RetireBlocked`, under either read-only block and whatever status
+/// carried it (OpenSearch 2's answers, CI run 45715512518). A
+/// `read_only_allow_delete` block lets the old generation be deleted.
+#[test]
+fn a_seed_refused_by_an_old_generations_block_is_retire_blocked() {
+    let old = ["users_00000001_1".to_owned()];
+    let old: Vec<&String> = old.iter().collect();
+    let refusal = |reason: &str| {
+        json!({ "error": { "type": "cluster_block_exception", "reason": reason } }).to_string()
+    };
+    let read_only =
+        refusal("index [users_00000001_1] blocked by: [FORBIDDEN/5/index read-only (api)];");
+    match super::retire_blocked(&read_only, "users_00000001_2", &old) {
+        Some(sink::SinkError::RetireBlocked {
+            new,
+            old,
+            block,
+            deletable,
+        }) => {
+            assert_eq!(new, "users_00000001_2");
+            assert_eq!(old, "users_00000001_1");
+            assert!(
+                block.contains("FORBIDDEN/5/index read-only (api)"),
+                "{block}"
+            );
+            assert!(!deletable, "a read-only index can't be deleted");
+        }
+        other => panic!("{other:?}"),
+    }
+    let flood = refusal(
+        "index [users_00000001_1] blocked by: [TOO_MANY_REQUESTS/12/disk usage exceeded \
+         flood-stage watermark, index has read-only-allow-delete block];",
+    );
+    assert!(matches!(
+        super::retire_blocked(&flood, "users_00000001_2", &old),
+        Some(sink::SinkError::RetireBlocked {
+            deletable: true,
+            ..
+        })
+    ));
+    let by_hand = refusal(
+        "index [users_00000001_1] blocked by: [FORBIDDEN/12/index read-only / allow delete (api)];",
+    );
+    assert!(matches!(
+        super::retire_blocked(&by_hand, "users_00000001_2", &old),
+        Some(sink::SinkError::RetireBlocked {
+            deletable: true,
+            ..
+        })
+    ));
+}
+
+/// Anything else stays a plain refusal: a block on another index (the new
+/// generation, a cluster block), another error, a body that isn't JSON.
+#[test]
+fn any_other_alias_refusal_is_not_retire_blocked() {
+    let old = ["users_00000001_1".to_owned()];
+    let old: Vec<&String> = old.iter().collect();
+    for text in [
+        json!({ "error": { "type": "cluster_block_exception",
+            "reason": "index [users_00000001_2] blocked by: [FORBIDDEN/5/index read-only (api)];" } })
+        .to_string(),
+        json!({ "error": { "type": "cluster_block_exception",
+            "reason": "blocked by: [FORBIDDEN/6/cluster read-only (api)];" } })
+        .to_string(),
+        json!({ "error": { "type": "index_not_found_exception", "reason": "no such index [users_00000001_1]" } })
+            .to_string(),
+        "<html>busy</html>".to_owned(),
+    ] {
+        assert!(super::retire_blocked(&text, "users_00000001_2", &old).is_none(), "{text}");
+    }
+}

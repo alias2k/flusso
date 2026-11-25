@@ -614,9 +614,18 @@ async fn a_reindex_past_a_read_only_generation_parks_its_seed_until_the_block_is
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     assert!(reason.starts_with("blocked: "), "{reason}");
-    for named in [old.as_str(), "read-only", "lift", "delete"] {
-        assert!(reason.contains(named), "{named} in {reason}");
+    for named in [
+        "is built, but the old generation".to_owned(),
+        old.clone(),
+        "read-only".to_owned(),
+        format!("lift the block on {old}"),
+    ] {
+        assert!(reason.contains(named.as_str()), "{named} in {reason}");
     }
+    assert!(
+        !reason.contains("delete"),
+        "a read-only index can't be deleted: {reason}"
+    );
     assert_eq!(
         live.generation("frozen").await,
         old,

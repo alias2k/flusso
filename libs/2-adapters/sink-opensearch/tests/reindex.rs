@@ -1521,10 +1521,16 @@ async fn a_seed_past_a_read_only_generation_is_refused_until_the_block_is_lifted
     run2.flush(true).await.unwrap();
 
     match run2.mark_seeded(&index).await {
-        Err(sink::SinkError::RetireBlocked { new, old, block }) => {
+        Err(sink::SinkError::RetireBlocked {
+            new,
+            old,
+            block,
+            deletable,
+        }) => {
             assert_eq!(new, gen2);
             assert_eq!(old, gen1);
             assert!(block.contains("read-only"), "{block}");
+            assert!(!deletable, "a read-only index can't be deleted");
         }
         other => panic!("expected RetireBlocked, got {other:?}"),
     }
@@ -1563,10 +1569,109 @@ async fn a_seed_past_a_read_only_generation_is_refused_until_the_block_is_lifted
     assert_eq!(generations(&client, &base, &hash_alias).await, vec![gen2]);
 }
 
+/// Under `index.blocks.read_only_allow_delete` the old generation can't be
+/// taken off the aliases, by any `_aliases` form, but it can be deleted
+/// (spike B1). The seed is refused with `RetireBlocked`, marked deletable;
+/// nothing moves. Once an operator deletes the old generation, its aliases
+/// go with it, and the same seed (the parked lane's next probe) adds the
+/// aliases to the new generation alone and only then writes the marker.
+/// A restart stages nothing more.
+///
+/// Whether flusso deletes the old generation itself under this block (form
+/// (a) of #479) is the owner's call; until then this is the exit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
-async fn a_seed_past_a_read_only_allow_delete_generation_serves_the_new_one_and_deletes_the_old() {
-    a_seed_past_an_old_generation(OldGeneration::ReadOnlyAllowDelete).await;
+async fn a_seed_past_a_read_only_allow_delete_generation_finishes_once_it_is_deleted() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let status = client
+        .put(format!("{base}/_cluster/settings"))
+        .json(&serde_json::json!({
+            "persistent": { "cluster.routing.allocation.disk.threshold_enabled": false }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(
+        status.is_success(),
+        "turning the disk monitor off returned {status}"
+    );
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+    let gen2 = format!("{hash_alias}_2");
+
+    let run1 = sink(&base);
+    run1.ensure_index(&mapping).await.unwrap();
+    run1.apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
+    run1.flush(true).await.unwrap();
+    run1.mark_seeded(&index).await.unwrap();
+    OldGeneration::ReadOnlyAllowDelete
+        .apply(&client, &base, &gen1)
+        .await;
+
+    sink(&base).reindex(&mapping).await.unwrap();
+    let run2 = sink(&base);
+    run2.ensure_index(&mapping).await.unwrap();
+    run2.apply(&upsert(&index, "2", &document(2)))
+        .await
+        .unwrap();
+    run2.flush(true).await.unwrap();
+
+    match run2.mark_seeded(&index).await {
+        Err(sink::SinkError::RetireBlocked {
+            new,
+            old,
+            block,
+            deletable,
+        }) => {
+            assert_eq!(new, gen2);
+            assert_eq!(old, gen1);
+            assert!(block.contains("read-only-allow-delete"), "{block}");
+            assert!(deletable, "this block allows deleting the old generation");
+        }
+        other => panic!("expected RetireBlocked, got {other:?}"),
+    }
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen1.clone()]
+    );
+    assert!(!run2.is_seeded(&index).await.unwrap());
+
+    let status = client
+        .delete(format!("{base}/{gen1}"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(
+        status.is_success(),
+        "the operator's DELETE returned {status}"
+    );
+    run2.mark_seeded(&index).await.unwrap();
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen2.clone()]
+    );
+    assert_eq!(
+        alias_targets(&client, &base, LOGICAL).await,
+        vec![gen2.clone()]
+    );
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        vec![gen2.clone()]
+    );
+    assert!(run2.is_seeded(&index).await.unwrap());
+    assert!(doc_exists(&client, &base, &hash_alias, "2").await);
+
+    let restart = sink(&base);
+    restart.ensure_index(&mapping).await.unwrap();
+    assert!(restart.is_seeded(&index).await.unwrap());
+    assert_eq!(generations(&client, &base, &hash_alias).await, vec![gen2]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1593,8 +1698,11 @@ async fn answer(response: reqwest::Response) -> String {
 /// Spike B1 (#479): what OpenSearch answers, under each read-only block on an
 /// old generation, to each way of taking the aliases off it. Every case runs
 /// on fresh indexes: an old one holding the alias, blocked, and a new one.
-/// The table of answers is compared with the one expected, and printed whole
-/// when it differs, so a run shows what OpenSearch said.
+/// The table of answers is compared with the one recorded on OpenSearch 2 (CI
+/// run 45715512518), and printed whole when it differs: under `read_only` all
+/// three are refused (403); under `read_only_allow_delete` both `_aliases`
+/// forms are refused (429) and only a plain `DELETE` passes, which leaves the
+/// alias on nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
 async fn spike_b1_what_opensearch_answers_past_a_read_only_generation() {
@@ -1706,7 +1814,7 @@ async fn spike_b1_what_opensearch_answers_past_a_read_only_generation() {
         "index.blocks.read_only | add + remove_index | 403",
         "index.blocks.read_only | DELETE | 403",
         "index.blocks.read_only_allow_delete | remove alias + add | 429",
-        "index.blocks.read_only_allow_delete | add + remove_index | 200",
+        "index.blocks.read_only_allow_delete | add + remove_index | 429",
         "index.blocks.read_only_allow_delete | DELETE | 200",
     ];
     assert_eq!(

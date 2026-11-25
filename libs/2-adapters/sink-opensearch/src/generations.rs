@@ -8,7 +8,7 @@
 //! impl drives them from `ensure_index`/`mark_seeded`/`reindex`.
 
 use serde_json::{Value, json};
-use sink::Result;
+use sink::{Result, SinkError};
 use tracing::debug;
 
 use crate::OpensearchSink;
@@ -96,6 +96,38 @@ impl OpensearchSink {
             .await
             .map_err(|e| request_error("failed to parse alias response", e))?;
         Ok(holders_of(aliases, &body))
+    }
+
+    /// Apply a seed's `_aliases` body, as [`update_aliases`](Self::update_aliases).
+    /// A refusal because one of `old` (the generations the seed retires) is
+    /// blocked is the typed [`SinkError::RetireBlocked`] naming it and the
+    /// block, whatever status carried it (`403` for `read_only`, `429` for
+    /// `read_only_allow_delete`): never "busy", never retried.
+    pub(crate) async fn update_seed_aliases(
+        &self,
+        actions: &Value,
+        new: &str,
+        old: &[&String],
+    ) -> Result<()> {
+        let url = format!("{}/_aliases", self.base_url);
+        let context = "alias update failed";
+        let response = self
+            .maybe_auth(
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(actions),
+            )
+            .send()
+            .await
+            .map_err(|e| request_error(context, e))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = response.text().await.unwrap_or_default();
+        Err(retire_blocked(&text, new, old)
+            .unwrap_or_else(|| SinkError::Write(format!("{context}: HTTP {status}: {text}"))))
     }
 
     /// Apply an `_aliases` body: every action in one cluster-state update.
@@ -360,6 +392,27 @@ pub(crate) fn plan_seed_actions(
             .map(|index| json!({ "remove_index": { "index": index } })),
     );
     (!actions.is_empty()).then(|| json!({ "actions": actions }))
+}
+
+/// `text`, an `_aliases` refusal, as a seed that couldn't retire one of
+/// `old`: a `cluster_block_exception` whose reason names one of them.
+pub(crate) fn retire_blocked(text: &str, new: &str, old: &[&String]) -> Option<SinkError> {
+    let body: Value = serde_json::from_str(text).ok()?;
+    let error = body.get("error")?;
+    if error.get("type").and_then(Value::as_str) != Some("cluster_block_exception") {
+        return None;
+    }
+    let reason = error.get("reason").and_then(Value::as_str)?;
+    let blocked = old
+        .iter()
+        .find(|name| reason.contains(&format!("[{name}]")))?;
+    let lowered = reason.to_lowercase();
+    Some(SinkError::RetireBlocked {
+        new: new.to_owned(),
+        old: (*blocked).clone(),
+        block: reason.to_owned(),
+        deletable: lowered.contains("allow delete") || lowered.contains("allow-delete"),
+    })
 }
 
 /// The concrete index name for generation `gen` behind a hash alias — what the

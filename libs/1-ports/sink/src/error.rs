@@ -32,5 +32,8 @@ pub enum SinkError {
         old: String,
         /// What the destination said of the block.
         block: String,
+        /// The block lets the old target be deleted (a block that guards
+        /// disk space does), so deleting it is a way out beside lifting it.
+        deletable: bool,
     },
 }

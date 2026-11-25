@@ -186,7 +186,10 @@ impl Sink for Gate {
             return Err(sink::SinkError::RetireBlocked {
                 new: format!("{index}_1_2"),
                 old: format!("{index}_1_1"),
-                block: "index [old] blocked by: [FORBIDDEN/5/index read-only (api)]".to_owned(),
+                block: "index [old] blocked by: [TOO_MANY_REQUESTS/12/disk usage exceeded \
+                        flood-stage watermark, index has read-only-allow-delete block]"
+                    .to_owned(),
+                deletable: true,
             });
         }
         let now = self.seeds_now.fetch_add(1, Ordering::SeqCst) + 1;
@@ -652,7 +655,15 @@ async fn a_seed_refused_by_a_blocked_old_generation_parks_its_lane_until_a_probe
     rig.complete("a").await;
     until("a parked blocked", || rig.health("a").kind() == "blocked").await;
     let reason = rig.parked_reason("a").unwrap();
-    for named in ["blocked: ", "a_1_2", "a_1_1", "read-only", "lift", "delete"] {
+    for named in [
+        "blocked: ",
+        "a_1_2 is built",
+        "a_1_1 can't be retired",
+        "read-only-allow-delete",
+        "lift the block on a_1_1",
+        "delete a_1_1",
+        "finishes on its own",
+    ] {
         assert!(reason.contains(named), "{named} in {reason}");
     }
 
@@ -681,10 +692,12 @@ async fn a_stop_while_parked_on_a_refused_seed_leaves_the_index_unseeded() {
     rig.complete("a").await;
     until("a parked blocked", || rig.health("a").kind() == "blocked").await;
     rig.stop.request();
-    until("the run ends", || rig.finished()).await;
-    rig.ended().await.unwrap();
+    until("the lanes to drain", || rig.stream.is_idle()).await;
     assert_eq!(rig.gate.seeded("a"), 0);
-    assert!(rig.stream.is_idle(), "nothing holds the drain");
+    assert!(
+        rig.gate.seed_tries("a") >= 2,
+        "the stop probes the parked seed once more"
+    );
 }
 
 /// A reindex of the index while its lane is parked on a refused seed stages
@@ -695,7 +708,16 @@ async fn a_reindex_while_parked_on_a_refused_seed_drops_that_seed() {
     let mut rig = Rig::new(Gate::default().retire_blocked(&["a"]), &["a"], 4);
     rig.start();
     rig.backfill("a", "a1").await;
-    rig.complete("a").await;
+    // A completion asked for before the reindex, whose own request then
+    // carries a later ticket.
+    rig.publish(
+        "a",
+        LaneItem::SnapshotComplete {
+            index: index("a"),
+            ticket: stream::Ticket::default(),
+        },
+    )
+    .await;
     until("a parked blocked", || rig.health("a").kind() == "blocked").await;
     let tries = rig.gate.seed_tries("a");
     rig.control
