@@ -226,7 +226,7 @@ Rows are classified by whether the marker names `serving`:
 | r1c | the record says `rebuilding`, attempts + 1, `last_attempt` (durable) |
 | r2 | `ensure_index` creates the generation; the fence serves `Rebuilding`, keeping `through`; `Request::Attach { attempt }` is published |
 | r3 | the builder of `I` quiesces, attaches `L`, then publishes `Attached`, then acknowledges; the sink engine, with nothing of `L` unacknowledged, takes `Attached`: `L` is open and rebuilding, and it publishes `Backfill` under a new outstanding ticket |
-| r4 | `SnapshotComplete`: `mark_seeded` swaps the aliases, drops `serving`, `PUT`s the marker seeded (`detaching_from` goes with the whole-doc `PUT`), then deletes the record |
+| r4 | `SnapshotComplete`: `mark_seeded` swaps the aliases, drops `serving`, `PUT`s the marker seeded (`detaching_from` goes with the whole-doc `PUT`), then deletes the record. It follows #479's seed rule: a seed refused by a block on `serving` parks the lane `blocked`, naming the block, and its probe retries the seed; under `read_only_allow_delete` the seed finishes by deleting `serving` |
 
 **An end at each step, then a restart:**
 
@@ -296,14 +296,13 @@ A rebuilding lane is in one of three conditions, and each gets one answer:
    - Then r1b–r4 run as in §5. r1c counts the attempt, so the next automatic wait doubles from it.
 3. **Under `--skip-backfill`** the operator's reindex still rebuilds, as `stage_reindex` does today (R13). O26 then demotes it at the next start.
 
-**How an ignored reindex is answered.** *Open, for the owner.* Today `POST /indexes/{name}/reindex` answers `202` before the sink engine decides, so an ignored reindex is visible only in the log.
+**How an ignored reindex is answered.** *Decided by the owner on 2026-11-25.*
 
-| Option | What it means | For an operator |
-| --- | --- | --- |
-| (a) The daemon reads the lane from `Status` and refuses at the HTTP edge | `409` with `reason: "the index is being rebuilt"` (or `"…starting"`) for that sink. A reindex naming no sink goes on for the sinks where it applies and lists the ignored ones in its `202` body. The engine still ignores one that races past the check | the answer says what happened; `flusso reindex` exits non-zero with the reason |
-| (b) Keep `202`; the engine logs it, and `/status` shows `reindex: ignored, rebuilding` on the lane until the next control | nothing new at the HTTP edge | the operator learns only from the log or `/status` |
-
-Recommended: **(a)**. It is the same shape as the existing `503 stopping` refusal, and `Status` already holds each lane's health.
+- The daemon reads the lane from `Status` and refuses at the HTTP edge with `409`, `reason: "the index is being rebuilt"` (or `"…starting"` while it waits for `Attached`).
+- A reindex naming no sink goes on for the sinks where it applies, and its `202` body lists the lanes it skipped.
+- The engine still ignores, and logs, one that races past the check.
+- `flusso reindex` exits non-zero with the reason.
+- The rejected alternative, `202` with only a log line, would have left an operator learning from the log alone.
 
 ### `flusso reattach --accept-gap` (O16)
 
@@ -311,7 +310,7 @@ Recommended: **(a)**. It is the same shape as the existing `503 stopping` refusa
 
 - **CLI:** `flusso reattach <index> --sink <name> --accept-gap`, with the same `--server` and `--admin-password` as `flusso reindex`.
   - `--accept-gap` is required. Without it, the command refuses and prints what the gap means.
-  - `--sink` is required, because a reattach is one lane. *Open, for the owner:* whether to accept a missing `--sink` when exactly one `backfill = false` sink holds the index detached. Recommended: no, keep it explicit.
+  - `--sink` is always required, because a reattach is one lane. *Decided by the owner on 2026-11-25*, even when exactly one `backfill = false` sink holds the index detached.
 - **Private HTTP:** `POST /indexes/{name}/reattach?sink=<name>&accept_gap=true`, under the private surface's Basic auth.
 - **Daemon:** `DaemonControl::reattach(index, sink)`, which sends `SinkControl::Reattach { index }` to that sink's engine.
 - **Port:** no new `Sink` method. It uses `detachment`, `ensure_index` and `forget_detachment` (§8).
@@ -350,14 +349,11 @@ Why the record goes before the attach:
 - **Deleted first,** a crash anywhere after it still ends attached. The operator's decision sticks, and the only cost is a longer gap, which the decision already accepts.
 - **Deleted last,** a crash before the delete would bring the lane back detached after the operator accepted the gap, and it would stay so until they ask again.
 
-**The fence after a reattach.** *Open, for the owner.* The gap is permanent: changes between the detach and the reattach are missing until their rows change again.
+**The fence after a reattach.** *Decided by the owner on 2026-11-25.*
 
-| Option | What it means | For an operator |
-| --- | --- | --- |
-| (a) From `Attached` on, the lane serves `Writes`: a fence vouches for every position the lane reaches, gap included | the reattach declares the index current from now on | fenced reads pass again, though a row last changed in the gap reads stale |
-| (b) The fence never vouches past the position frozen at the detach | truthful | `/wait` naming that index on that sink fails for good, since a `backfill = false` sink can never be rebuilt |
-
-Recommended: **(a)**, with the gap named in the reattach's answer, the log, and the runbook. The operator accepted exactly this gap by name.
+- From `Attached` on, the lane serves `Writes`: a fence vouches normally for every position the lane reaches.
+- The gap is named in the reattach's answer, in the log and in the runbook. Its changes are missing until their rows change again, so a row last changed in the gap reads stale.
+- The rejected alternative, never vouching past the position frozen at the detach, would have failed `/wait` on that index and sink for good, since a `backfill = false` sink can never be rebuilt.
 
 **`/status` after a reattach:** the lane is `open`, and carries `reattached: { at, gap_since }` until the process restarts, so the gap is visible. This is not a decision.
 
