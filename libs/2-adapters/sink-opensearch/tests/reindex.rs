@@ -1485,10 +1485,82 @@ async fn a_seed_past_a_write_blocked_generation_serves_the_new_one_and_deletes_t
     a_seed_past_an_old_generation(OldGeneration::WriteBlocked).await;
 }
 
+/// Under `index.blocks.read_only` the old generation can be neither taken
+/// off the aliases nor deleted (#479). The seed is refused with the typed
+/// `RetireBlocked`, naming the new generation, the old one and the block;
+/// nothing moves: the aliases stay on the old generation, the new one is
+/// kept, the index reads unseeded. Once the block is lifted, the same seed
+/// serves the new generation and deletes the old one, and a restart stages
+/// nothing more.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
-async fn a_seed_past_a_read_only_generation_serves_the_new_one_and_deletes_the_old() {
-    a_seed_past_an_old_generation(OldGeneration::ReadOnly).await;
+async fn a_seed_past_a_read_only_generation_is_refused_until_the_block_is_lifted() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+    let gen2 = format!("{hash_alias}_2");
+
+    let run1 = sink(&base);
+    run1.ensure_index(&mapping).await.unwrap();
+    run1.apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
+    run1.flush(true).await.unwrap();
+    run1.mark_seeded(&index).await.unwrap();
+    OldGeneration::ReadOnly.apply(&client, &base, &gen1).await;
+
+    sink(&base).reindex(&mapping).await.unwrap();
+    let run2 = sink(&base);
+    run2.ensure_index(&mapping).await.unwrap();
+    run2.apply(&upsert(&index, "1", &document(1)))
+        .await
+        .unwrap();
+    run2.flush(true).await.unwrap();
+
+    match run2.mark_seeded(&index).await {
+        Err(sink::SinkError::RetireBlocked { new, old, block }) => {
+            assert_eq!(new, gen2);
+            assert_eq!(old, gen1);
+            assert!(block.contains("read-only"), "{block}");
+        }
+        other => panic!("expected RetireBlocked, got {other:?}"),
+    }
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen1.clone()]
+    );
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        vec![gen1.clone(), gen2.clone()]
+    );
+    assert!(!run2.is_seeded(&index).await.unwrap());
+
+    let status = client
+        .put(format!("{base}/{gen1}/_settings"))
+        .json(&serde_json::json!({ "index.blocks.read_only": null }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "lifting the block returned {status}");
+    run2.mark_seeded(&index).await.unwrap();
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen2.clone()]
+    );
+    assert_eq!(
+        generations(&client, &base, &hash_alias).await,
+        vec![gen2.clone()]
+    );
+    assert!(run2.is_seeded(&index).await.unwrap());
+
+    let restart = sink(&base);
+    restart.ensure_index(&mapping).await.unwrap();
+    assert!(restart.is_seeded(&index).await.unwrap());
+    assert_eq!(generations(&client, &base, &hash_alias).await, vec![gen2]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
