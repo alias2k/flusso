@@ -264,15 +264,16 @@ struct Flight {
 fn retire_blocked_reason(new: &str, old: &str, block: &str, deletable: bool) -> String {
     let exits = if deletable {
         format!(
-            "it clears once the block is lifted (a block set for disk space is, once there is \
-             room again): lift the block on {old}, or delete {old}, which this block allows"
+            "the block clears when the disk has room again (if disk usage set it); or lift \
+             the block on {old}; or delete {old}, which this block allows but which takes \
+             reads of this index offline until the seed's next probe adds the aliases to {new}"
         )
     } else {
         format!("lift the block on {old}")
     };
     format!(
         "the new generation {new} is built, but the old generation {old} can't be retired: \
-         {block}; {exits}, and the seed then finishes on its own"
+         {block}; {exits}. The seed then finishes on its own"
     )
 }
 
@@ -1259,7 +1260,11 @@ impl<'a> Run<'a> {
                     ..
                 }) = self.take_from_window(at)
                 {
-                    if let Some(run) = self.lanes.get_mut(lane) {
+                    // On a parked lane this is a refused seed's probe: its walk
+                    // ended at the first try, and nothing behind it landed since.
+                    if self.lane_open(lane)
+                        && let Some(run) = self.lanes.get_mut(lane)
+                    {
                         run.walked.ended(seq, Instant::now());
                     }
                     if self.engine.cut_short(&index) || self.engine.superseded(&index, ticket) {

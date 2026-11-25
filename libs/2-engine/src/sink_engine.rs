@@ -48,6 +48,10 @@
 //! `SnapshotComplete`, naming an older ticket, seeds nothing: only the fresh
 //! backfill's does. A seed the sink refuses because its target changed
 //! ([`sink::SinkError::TargetChanged`]) stages the lane again the same way.
+//! A seed refused because the old target can't be retired
+//! ([`sink::SinkError::RetireBlocked`], #479) parks the lane `blocked` on its
+//! `SnapshotComplete` instead: the seed, retried as is, is the lane's probe,
+//! on the lane's backoff, and the run goes on.
 //! Other lanes of the same snapshot (another sink, another index) answer
 //! their own tickets and are untouched.
 //!

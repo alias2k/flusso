@@ -1349,8 +1349,13 @@ is the one concrete piece.
   new generation is built but the old one can't leave the aliases: OpenSearch answers a
   `cluster_block_exception` naming it, `403` under `index.blocks.read_only`, `429` under
   `read_only_allow_delete` by any `_aliases` form; `generations.rs`'s `retire_blocked`, never busy,
-  never retried) puts the completion back and parks the lane `blocked` on it (`retire_blocked_reason`:
-  the new generation as built, the old one, the block, the exits). The completion is the lane's probe:
+  never retried; each `index [x] blocked by:` segment read on its own, only when every index named is
+  one the seed retires, never the new generation) puts the completion back and parks the lane `blocked`
+  on it (`retire_blocked_reason`: the new generation as built, the old one, the block, the exits in
+  order of harm; a delete is offered only when every named block allows it, and says it takes reads of
+  the index offline until the next probe, since the aliases go with the old generation). It covers a
+  block on the old generation only: a node-wide flood stage also blocks the new one, whose backfill
+  writes are refused as busy, so the sink restarts as on `main` before any seed. The completion is the lane's probe:
   `runnable_complete` runs a parked lane's only once its probe is due; a landed seed opens the lane. The
   run never fails for it; a stop probes it once more, then acknowledges it unseeded (`lock_skipped`).
   Under `read_only_allow_delete` an operator's `DELETE` of the old generation lets the next probe seed

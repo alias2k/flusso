@@ -589,7 +589,11 @@ impl Sink for OpensearchSink {
         // moves alone; the convenience alias stays best-effort.
         let hash = (hash_alias.as_str(), serving.as_slice());
         let both = [hash, (convenience.as_str(), named.as_slice())];
-        let retired: Vec<&String> = serving.iter().chain(&stale).collect();
+        let retired: Vec<&String> = serving
+            .iter()
+            .chain(&stale)
+            .filter(|name| *name != generation)
+            .collect();
         let first = match plan_seed_actions(generation, &both, &stale) {
             Some(actions) => {
                 self.update_seed_aliases(&actions, generation, &retired)
@@ -616,7 +620,11 @@ impl Sink for OpensearchSink {
             if let Some(hash_only) =
                 plan_seed_actions(generation, std::slice::from_ref(&hash), &stale)
             {
-                let retired: Vec<&String> = serving.iter().chain(&stale).collect();
+                let retired: Vec<&String> = serving
+                    .iter()
+                    .chain(&stale)
+                    .filter(|name| *name != generation)
+                    .collect();
                 self.update_seed_aliases(&hash_only, generation, &retired)
                     .await?;
             }

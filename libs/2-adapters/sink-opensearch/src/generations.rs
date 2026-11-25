@@ -394,8 +394,11 @@ pub(crate) fn plan_seed_actions(
     (!actions.is_empty()).then(|| json!({ "actions": actions }))
 }
 
-/// `text`, an `_aliases` refusal, as a seed that couldn't retire one of
-/// `old`: a `cluster_block_exception` whose reason names one of them.
+/// `text`, an `_aliases` refusal, as a seed that couldn't retire `old`: a
+/// `cluster_block_exception` whose reason names, one `index [x] blocked by:
+/// [...];` segment each, only generations the seed retires (never `new`).
+/// The old generations named are listed; a delete is offered only when every
+/// named block allows it.
 pub(crate) fn retire_blocked(text: &str, new: &str, old: &[&String]) -> Option<SinkError> {
     let body: Value = serde_json::from_str(text).ok()?;
     let error = body.get("error")?;
@@ -403,16 +406,36 @@ pub(crate) fn retire_blocked(text: &str, new: &str, old: &[&String]) -> Option<S
         return None;
     }
     let reason = error.get("reason").and_then(Value::as_str)?;
-    let blocked = old
-        .iter()
-        .find(|name| reason.contains(&format!("[{name}]")))?;
-    let lowered = reason.to_lowercase();
+    let segments = blocked_indexes(reason);
+    let retired = |name: &str| name != new && old.iter().any(|old| old.as_str() == name);
+    if segments.is_empty() || !segments.iter().all(|(name, _)| retired(name)) {
+        return None;
+    }
+    let deletable = segments.iter().all(|(_, blocks)| {
+        let blocks = blocks.to_lowercase();
+        blocks.contains("allow delete") || blocks.contains("allow-delete")
+    });
+    let names: Vec<&str> = segments.iter().map(|(name, _)| *name).collect();
     Some(SinkError::RetireBlocked {
         new: new.to_owned(),
-        old: (*blocked).clone(),
+        old: names.join(", "),
         block: reason.to_owned(),
-        deletable: lowered.contains("allow delete") || lowered.contains("allow-delete"),
+        deletable,
     })
+}
+
+/// Each `index [x] blocked by: [...]` segment of a block refusal's reason:
+/// the index and what blocks it.
+fn blocked_indexes(reason: &str) -> Vec<(&str, &str)> {
+    reason
+        .split("index [")
+        .skip(1)
+        .filter_map(|segment| {
+            let (name, rest) = segment.split_once(']')?;
+            let blocks = rest.trim_start().strip_prefix("blocked by:")?;
+            Some((name, blocks.split(';').next().unwrap_or(blocks)))
+        })
+        .collect()
 }
 
 /// The concrete index name for generation `gen` behind a hash alias — what the

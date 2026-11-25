@@ -942,7 +942,9 @@ OpenSearch e2e jobs and passed on `main` (`989c27ca`, run 45267683622). No new p
   blocked (`index.blocks.read_only`, `read_only_allow_delete`), `mark_seeded` is refused with
   `SinkError::RetireBlocked` and the lane parks `blocked` on its `SnapshotComplete`, which follows this note's
   parking rules with the completion as the lane's probe: retried on the lane's backoff, a landed seed opens the
-  lane, a stop probes it once more and then acknowledges it unseeded.
+  lane, a stop probes it once more and then acknowledges it unseeded. This covers a block on the old generation
+  only; a node-wide flood stage blocks the new one too, and its backfill's writes are refused as busy (a sink
+  restart, as before), so no seed is reached.
 - **It is deleted, not adopted.** The restage's `ensure_index` finds the live uuid differing from the recorded one
   on an unseeded generation, deletes the index, and creates a strict, empty generation under the same name with no
   checkpoint; the fresh backfill seeds it. A seeded generation with another uuid is a restore and is kept
