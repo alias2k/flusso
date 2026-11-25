@@ -1345,7 +1345,20 @@ is the one concrete piece.
   from the first key for the current target). The old snapshot's remaining pages are still written
   (each a build in lane order, so never a step back; the fresh walk repeats them). A seed the sink
   refuses with `SinkError::TargetChanged` puts its `SnapshotComplete` back and stages the lane again
-  (`Held::Missing`), which cuts. A
+  (`Held::Missing`), which cuts. A seed the sink refuses with `SinkError::RetireBlocked` (#479: the
+  new generation is built but the old one can't leave the aliases: OpenSearch answers a
+  `cluster_block_exception` naming it, `403` under `index.blocks.read_only`, `429` under
+  `read_only_allow_delete` by any `_aliases` form; `generations.rs`'s `retire_blocked`, never busy,
+  never retried) puts the completion back and parks the lane `blocked` on it (`retire_blocked_reason`:
+  the new generation as built, the old one, the block, the exits). The completion is the lane's probe:
+  `runnable_complete` runs a parked lane's only once its probe is due; a landed seed opens the lane. The
+  run never fails for it; a stop probes it once more, then acknowledges it unseeded (`lock_skipped`).
+  Under `read_only_allow_delete` an operator's `DELETE` of the old generation lets the next probe seed
+  (spike B1: only a plain `DELETE` passes that block); flusso deleting it itself is the owner's open
+  call. Guards: `tests::seeding`'s `a_seed_refused_by_a_blocked_old_generation_*` and siblings,
+  `generations::tests`' `a_seed_refused_by_an_old_generations_block_is_retire_blocked`, `reindex`'s
+  `spike_b1_*` and `a_seed_past_a_read_only_*` live cases, `lane_parking`'s
+  `a_reindex_past_a_read_only_generation_parks_its_seed_until_the_block_is_lifted`. A
   restage resets the lane's `Walked`; a walk ends at its `SnapshotComplete`'s lane order
   (`Walked::ended`, boundaries recorded at receive), keeping the next walk's items the run read ahead;
   a held walk keeps none of its items and tracks none that arrive (binary search by lane order), and
