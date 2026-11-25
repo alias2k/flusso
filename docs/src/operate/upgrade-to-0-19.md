@@ -13,6 +13,7 @@
 - **An index that can't be ensured no longer holds its sink after a restart**: only its lane waits, `restaging`, and it opens on its own once the index can be ensured; a start with a new replication slot still waits for every index: [One index that can't be ensured waits alone](#one-index-that-cant-be-ensured-waits-alone).
 - **`on_error = "stop"` no longer stops the sink**, and `/readyz` stays `200` while an index is parked; alert on the new `FlussoLaneParked` instead: [Alerting on a parked index](#alerting-on-a-parked-index).
 - **A reindex unsticks a stuck lane**: it opens a `refused`, `blocked` or `restaging` lane, and one that can't stage is retried on its own instead of dropped: [A reindex unsticks a lane](#a-reindex-unsticks-a-lane).
+- **A reindex past a read-only generation no longer restarts the sink**: its seed parks the index's lane `blocked` until the old generation is freed, and `/readyz` stays ready: [A seed parks on a read-only old generation](#a-seed-parks-on-a-read-only-old-generation).
 - **The retry wait is configurable**: `[backoff]` sets the first and the longest wait of every restart and probe: [Retry timing is configurable](#retry-timing-is-configurable).
 - **A generation deleted mid-backfill is backfilled again in full**, never seeded with rows missing; a cut-down OpenSearch role needs to read index settings (#428): [A generation deleted mid-backfill](#a-generation-deleted-mid-backfill).
 - **`pinned_by` can name an index alone**, with `sink` null in `/status` and no `sink` label on `flusso_slot_pinned_by`: [An index's backlog can pin the slot](#an-indexs-backlog-can-pin-the-slot).
@@ -54,11 +55,11 @@
 | What OpenSearch answers | 0.18 | 0.19 |
 | --- | --- | --- |
 | A document refused under `on_error = "stop"` | the sink stops and restarts with backoff | the lane is **refused** |
-| A write block (`index.blocks.write`, `read_only`, `read_only_allow_delete`: 403 `cluster_block_exception`) | an item-level rejection: **quarantined under `skip`** (documents lost), the sink stops under `stop` | the lane is **blocked**, whatever `on_error` says; nothing is quarantined |
+| A write block (`index.blocks.write`, `read_only`: 403 `cluster_block_exception`) | an item-level rejection: **quarantined under `skip`** (documents lost), the sink stops under `stop` | the lane is **blocked**, whatever `on_error` says; nothing is quarantined |
 | An item-level 403 `security_exception` (the role can't write that index) | an item-level rejection | the lane is **blocked** |
 | A closed index (`POST /<index>/_close`: 400 `index_closed_exception`) | an item-level rejection: **quarantined under `skip`**, the sink stops under `stop` | the lane is **blocked**, whatever `on_error` says; nothing is quarantined ([details](#a-closed-index-parks-its-lane)) |
 | The index's generation deleted while running (`index_not_found_exception`) | the sink stops; its restart recreates the generation | that index alone is **staged again** and backfilled |
-| The whole `_bulk` refused, credentials refused, the cluster unreachable, busy past `max_retries` | the sink stops and restarts | unchanged |
+| The whole `_bulk` refused, credentials refused, the cluster unreachable, busy past `max_retries` (`read_only_allow_delete` included: 429, busy) | the sink stops and restarts | unchanged |
 
 A refused or blocked lane is **parked**: it writes its oldest batch again alone (a **probe**) after 1 s, then with the wait doubling up to 60 s ([configurable](#retry-timing-is-configurable)). A refused lane's probe writes a [fresh build](../reference/index-and-on-error.md#a-refused-lanes-fresh-build) of that batch, built again from the database, so fixing or deleting the row lets it land. When a probe lands, the lane opens and the rest follows, with no restart. Meanwhile the lane holds the replication slot, as a stalled lane always has.
 
@@ -92,13 +93,13 @@ A refused or blocked lane is **parked**: it writes its oldest batch again alone 
 
 **What changed.** A [reindex](reindex.md) of an index whose lane is `refused`, `blocked` or `restaging` opens the lane as soon as it is staged. The item the lane was stuck on comes from the new generation's backfill instead of being written again. A reindex whose new generation can't be created is retried on the [`[backoff]`](#retry-timing-is-configurable) schedule, its lane `restaging` meanwhile, while the sink's other indexes keep writing.
 
-**Who is affected.** Anyone with a lane stuck on something in the index: a write block that won't be lifted, a mapping or settings changed by hand.
+**Who is affected.** Anyone with a lane stuck on something in the index: `index.blocks.write` that won't be lifted, a mapping or settings changed by hand.
 
 **What to do.** Nothing to configure. Reindex the index on that sink: [Unstick a lane with a reindex](stalled-lane.md#unstick-a-lane-with-a-reindex).
 
 **What to know.**
 
-- **Not every lane.** A row the mapping refuses is refused again by the new backfill: fix the row.
+- **Not every lane.** A row the mapping refuses is refused again by the new backfill: fix the row. `index.blocks.read_only` stops the new generation's seed: [lift it](#a-seed-parks-on-a-read-only-old-generation).
 - **The slot waits for the backfill.** Until the new generation is seeded, the lane reads `open` but holds the slot, so `FlussoLaneStalled` can fire on a long backfill.
 - **A waiting reindex lives in memory.** After a restart of flusso, ask again if the lane is still stuck ([what a restart keeps](../reference/http.md#when-the-reindex-cant-stage)).
 - **A stop doesn't wait for such a lane**: [Lanes flusso doesn't write at a stop](../reference/cli.md#lanes-flusso-doesnt-write-at-a-stop).
@@ -148,6 +149,29 @@ The waiting lane is tried again at once, then on the [`[backoff]`](#retry-timing
 
 - **How flusso tells one index from a cluster that is down.** If no index can be ensured, the cluster is down. A sink whose first sixteen indexes, in index-name order, are all refused while the rest are fine still waits as a whole ([details](../reference/http.md#when-a-restart-cant-ensure-an-index)).
 - **`flusso_indexes{sink}`** counts the indexes the sink's last staging ensured, so after a staging that left an index out it reads one lower, even once that lane opens, until the sink stages again.
+
+## A seed parks on a read-only old generation
+
+**What changed.** A rebuild (a reindex, or every seeded index after a lost slot) ends with a seed that moves the aliases to the new generation and deletes the old one, in one request. OpenSearch refuses that request when the old generation carries `index.blocks.read_only` or `read_only_allow_delete`:
+
+| | 0.18 | 0.19 |
+| --- | --- | --- |
+| The seed | fails the sink's run | parks the index's lane `blocked`, and is tried again on the `[backoff]` schedule |
+| The sink | restarts over and over with backoff, never seeding; `/readyz` answers `503` while it waits | keeps running, `/readyz` stays ready, the other indexes keep being written |
+| Once the old generation is freed | a later restart seeds | the next probe seeds, with no restart |
+
+`/status` shows the lane `blocked`, with `parked_since`, `next_probe` and a `reason` naming both generations, OpenSearch's block and the ways out: `blocked: the new generation <new> is built, but the old generation <old> can't be retired: …`. The index stays `backfilling`, readers stay on the old generation.
+
+**Who is affected.** Anyone who reindexes while the old generation is read-only: set by hand, or `read_only_allow_delete` from a full disk on its node.
+
+**What to do.** Nothing to configure. To finish the seed, lift the block on the old generation; under `read_only_allow_delete`, freeing disk space or deleting the old generation works too: [A seed that can't retire the old generation](stalled-lane.md#a-seed-that-cant-retire-the-old-generation).
+
+**What to know.**
+
+- **Alerts.** `FlussoLaneParked` fires after 5 minutes (`why="blocked"`); `FlussoLaneStalled` can follow, since the lane's live changes wait behind the seed and it holds the replication slot.
+- **A reindex doesn't help.** It runs the backfill again into the same new generation and parks at the same seed.
+- **A stop doesn't wait for it.** The seed is tried once more; still refused, the index is left unseeded and the next start resumes its backfill, then seeds or parks again.
+- **`index.blocks.write` and a closed old generation** never stopped the seed, and still don't.
 
 ## Retry timing is configurable
 

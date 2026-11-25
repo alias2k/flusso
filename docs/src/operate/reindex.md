@@ -4,7 +4,7 @@ Rebuild one index from scratch while the current copy keeps serving reads, then 
 
 ## When to use this
 
-Data in the index has drifted from the source (a bug, a manual edit, rows imported behind flusso's back), a column changed type and the documents built before it should follow (see [column type changes](../reference/source-postgres.md#capture)), a seeded generation was restored from a snapshot or recreated by hand (flusso keeps serving it as found, even empty), or you want a clean generation for its own sake. It is also the way out for a [lane stuck](stalled-lane.md#unstick-a-lane-with-a-reindex) on something that lives in the index, such as a write block that won't be lifted; not for a row the mapping refuses. A **schema change** does not need this: a structural change moves the hash and re-seeds into a new index on the next run by itself. So does the [upgrade to 0.17](upgrade-to-0-17.md) for indexes with a `map` field.
+Data in the index has drifted from the source (a bug, a manual edit, rows imported behind flusso's back), a column changed type and the documents built before it should follow (see [column type changes](../reference/source-postgres.md#capture)), a seeded generation was restored from a snapshot or recreated by hand (flusso keeps serving it as found, even empty), or you want a clean generation for its own sake. It is also the way out for a [lane stuck](stalled-lane.md#unstick-a-lane-with-a-reindex) on something that lives in the index, such as `index.blocks.write` that won't be lifted; not for a row the mapping refuses, nor for `index.blocks.read_only`, which also stops the swap below. A **schema change** does not need this: a structural change moves the hash and re-seeds into a new index on the next run by itself. So does the [upgrade to 0.17](upgrade-to-0-17.md) for indexes with a `map` field.
 
 ## Steps
 
@@ -22,7 +22,7 @@ Data in the index has drifted from the source (a bug, a manual edit, rows import
 
    The server answers `202` and the command prints `reindex of users on every sink queued`. Each sink engine stages generation `n+1` behind the same hash alias between two batches and requests a snapshot; the ingest engine serves it alongside live changes. Reads keep hitting generation `n` through the alias the whole time, nothing restarts, and the other sinks are untouched. Add `--sink primary` to rebuild on one sink only.
 
-3. **Watch it land.** In `/status`, `users` goes `backfilling`, then `seeded` under the sink. At that moment the alias flips to `n+1` and `n` is dropped.
+3. **Watch it land.** In `/status`, `users` goes `backfilling`, then `seeded` under the sink. At that moment the alias flips to `n+1` and `n` is dropped. If `n` carries `index.blocks.read_only` or `read_only_allow_delete`, the swap can't drop it: the lane parks `blocked` and `users` stays `backfilling` until `n` is freed ([A seed that can't retire the old generation](stalled-lane.md#a-seed-that-cant-retire-the-old-generation)).
 
    ```sh
    watch -n 5 'curl -s localhost:9464/status | jq .sinks.primary.indexes'

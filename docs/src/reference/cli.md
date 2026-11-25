@@ -119,15 +119,16 @@ The drain, in order:
 
 #### Lanes flusso doesn't write at a stop
 
-A [lane](http.md#lane-health) that isn't being written, or is waiting on a reindex, doesn't hold the drain, with one exception: a parked lane that still can't land.
+A [lane](http.md#lane-health) that isn't being written, or is waiting on a reindex, doesn't hold the drain, with one exception: a parked lane whose write still can't land.
 
 | The lane at the stop | What the stop does | Exit |
 | --- | --- | --- |
 | `refused` or `blocked` | Writes its oldest item once more, at once and as it was (no [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build)). If it lands, the lane opens and drains. If it is refused or blocked again (a block still set, an index still closed), it holds the drain until the deadline. | `1` at the deadline, naming the lane |
+| `blocked` on its seed: a rebuild's old generation [can't be retired](sink-opensearch.md#an-old-generation-that-cant-be-retired) | Tries the seed once more, at once. If it passes, the index is seeded. If it is refused again, the index is left unseeded and the drain goes on; the next start resumes the backfill, then seeds, or parks again. | `0` |
 | `restaging`: its target gone, a reindex [waiting to stage](http.md#when-the-reindex-cant-stage), or an index a restart [couldn't ensure](http.md#when-a-restart-cant-ensure-an-index) | Stages nothing, retries nothing, asks for no backfill. Its changes are let go unwritten and unconfirmed. | `0` |
 | `open`, its stuck item waiting for a [reindex's](http.md#a-reindex-of-a-lane-flusso-doesnt-write) backfill | Lets the stuck item go, unconfirmed; the items behind it are written as usual. The backfill is abandoned like any other. | `0` |
 
-A change let go was never confirmed to the slot, so the next start reads it again: it stages a `restaging` index, backfills an index left unseeded, and writes the change like any other. What it does about a reindex that was waiting: [A restart keeps or drops it](http.md#when-the-reindex-cant-stage).
+A change let go was never confirmed to the slot, so the next start reads it again: it stages a `restaging` index, backfills an index left unseeded (from its last checkpoint), and writes the change like any other. What it does about a reindex that was waiting: [A restart keeps or drops it](http.md#when-the-reindex-cant-stage).
 
 **A reindex at the stop.** A new one is refused with `503`. One queued and not staged yet is dropped, and the log says `stopping: the reindex is not staged; ask again after the restart`. A staging already under way finishes but opens no lane: the lane is left `restaging`, with the reason `the reindex was staging as the stop came; the next start picks it up`.
 

@@ -31,7 +31,7 @@ Some refusals are about an **index**, not its documents. The sink reports them p
 
 | OpenSearch answers each item | Cause | The lane |
 | --- | --- | --- |
-| `403 cluster_block_exception` | `index.blocks.write`, `index.blocks.read_only` or `index.blocks.read_only_allow_delete`, set by an operator | `blocked` |
+| `403 cluster_block_exception` | `index.blocks.write` or `index.blocks.read_only`, set by an operator | `blocked` |
 | `403 security_exception` | a role without write permission on that index | `blocked` |
 | `400 index_closed_exception` | the index closed with `POST /<index>/_close` (some versions answer `403 cluster_block_exception`, `FORBIDDEN/4/index closed`, instead) | `blocked` |
 | `404 index_not_found_exception` | the generation was deleted while flusso runs: see [Seeding](#seeding) | `restaging` |
@@ -47,7 +47,7 @@ A `blocked` lane writes its oldest batch again alone on the [`[backoff]`](config
 
 Two look alike and aren't index-wide:
 
-- **The flood-stage disk block** answers `429`, so it is [busy](#retries): resent inside the write, and a write still refused after `max_retries` fails and restarts the sink.
+- **The flood-stage disk block** answers `429`, so it is [busy](#retries): resent inside the write, and a write still refused after `max_retries` fails and restarts the sink. `index.blocks.read_only_allow_delete` set by hand is the same block (`TOO_MANY_REQUESTS/12/… read-only-allow-delete block`), so it is busy too.
 - **A request-level 403** (the whole `_bulk` refused: credentials, a role with no bulk permission at all) fails the write, and the sink restarts with backoff.
 
 ## TLS and transport errors
@@ -201,10 +201,40 @@ When a backfill completes, the sink seeds the index in this order:
 
 1. Check the generation is the one staging found: it exists and has the same `index.uuid` (see [Each generation's identity](#each-generations-identity)). If not, nothing is seeded: the index is staged again and backfilled in full.
 2. Refresh the generation, restore its `refresh_interval`, and read the alias holders and the other generations, all at once.
-3. Move both aliases onto the generation and drop every other generation of the hash alias, in one atomic `_aliases` call. On a rebuild, readers see the old generation or the new, refreshed one, never neither. On a first seed the aliases are already there, and nothing moves. If OpenSearch refuses that call, the hash alias is moved alone and the convenience alias stays best-effort.
+3. Move both aliases onto the generation and drop every other generation of the hash alias, in one atomic `_aliases` call. On a rebuild, readers see the old generation or the new, refreshed one, never neither. On a first seed the aliases are already there, and nothing moves. If OpenSearch refuses that call because an old generation is blocked, nothing moves and the lane parks: [An old generation that can't be retired](#an-old-generation-that-cant-be-retired). If it refuses it for another reason, the hash alias is moved alone and the convenience alias stays best-effort.
 4. Write the marker in `flusso_meta`, last. If anything before it fails, the index stays unseeded, and the next start runs the backfill again. The backfill is idempotent.
 
 Seeded state is recorded in `flusso_meta`, so a restart skips a completed backfill. A missing replication slot overrides every marker; see [Recover from a dropped slot](../operate/dropped-slot.md).
+
+### An old generation that can't be retired
+
+A rebuild behind the same hash alias (a [reindex](../operate/reindex.md), or every seeded index after a [lost slot](../operate/dropped-slot.md)) ends by retiring the old generation in step 3. When that generation carries a block, OpenSearch refuses the whole `_aliases` call with a `cluster_block_exception` naming it. The new generation is built and complete, but readers can't be moved onto it.
+
+The seed then **parks the index's lane** `blocked`, instead of failing the sink:
+
+- **The probe is the seed.** It is tried again, as is, on the [`[backoff]`](config-toml.md#backoff) schedule (1 s, doubling to 60 s, by default). The first try that passes moves the aliases, drops the old generation, writes the marker and opens the lane, with no restart.
+- **Meanwhile** nothing restarts: the sink's phase doesn't turn `failed` for it, `/readyz` stays ready, the sink's other indexes keep being written, and readers stay on the old generation. The index stays `backfilling` in [`/status`](http.md#get-status), and its live changes on that sink wait behind the seed, so the lane holds the replication slot, and a `/wait` that needs the index answers `503 rebuilding` at its timeout.
+- **The reason** names the new generation, the old one (several when several are blocked), OpenSearch's words, and the ways out below, in order of harm ([lane health](http.md#lane-health)):
+
+  ```text
+  blocked: the new generation users_1a2b3c4d_2 is built, but the old generation users_1a2b3c4d_1 can't be retired: index [users_1a2b3c4d_1] blocked by: [FORBIDDEN/5/index read-only (api)];; lift the block on users_1a2b3c4d_1. The seed then finishes on its own
+  ```
+
+How it ends depends on the old generation's state:
+
+| The old generation | The seed | Ways out the reason names |
+| --- | --- | --- |
+| `index.blocks.write`, or closed | passes, as before | none needed |
+| `index.blocks.read_only` | parks | lift the block. OpenSearch refuses a `DELETE` under it too |
+| `index.blocks.read_only_allow_delete` | parks | the block clears once disk usage falls below the high watermark, if disk usage set it; or lift the block; or delete the old generation |
+
+**Deleting the old generation costs reads.** Both aliases (`{logical}` and the hash alias) go with it, so reads through them answer `404` until the seed's next probe adds them to the new generation: at most one backoff wait, `max_ms` (60 s by default). Lifting the block costs nothing.
+
+**A reindex doesn't help.** The index is still unseeded, so a [reindex](http.md#a-reindex-of-a-lane-flusso-doesnt-write) stages no new generation: it walks the backfill again into the same new one and parks at the seed again while the block stands.
+
+**At a stop** the seed is tried once more. Still refused, the index is left unseeded and the stop doesn't wait for it ([lanes at a stop](cli.md#lanes-flusso-doesnt-write-at-a-stop)); the next start resumes the backfill from its last checkpoint, then seeds, or parks again.
+
+Only a block on the **old** generation parks the seed. A node past the flood stage blocks the new generation too: its backfill writes are refused as [busy](#retries) and the sink restarts with backoff, before any seed.
 
 ### Each generation's identity
 
