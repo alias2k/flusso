@@ -211,14 +211,12 @@ pub(crate) fn coverage(
     manage: bool,
 ) -> Result<()> {
     if report.satisfied {
-        return passed(
-            out,
-            pen,
-            &format!(
-                "publication covers all {} the indexes read",
-                count(report.present.len(), "table", "tables")
-            ),
-        );
+        let covered = match report.present.len() {
+            0 => "publication: the indexes read no table".to_owned(),
+            1 => "publication covers the one table the indexes read".to_owned(),
+            n => format!("publication covers all {n} tables the indexes read"),
+        };
+        return passed(out, pen, &covered);
     }
     if report.manageable && manage {
         return passed(
@@ -918,6 +916,37 @@ mod tests {
         );
         assert!(!out.contains("re-parenting"), "{out}");
         assert!(out.contains("ALTER TABLE logs"), "{out}");
+    }
+
+    #[test]
+    fn a_publication_line_reads_well_for_one_table_and_for_none() {
+        let line = |present: usize| {
+            let table = source::QualifiedTable::new(
+                config::DatabaseSchema::try_new("public").unwrap(),
+                config::TableName::try_new("users").unwrap(),
+            );
+            let report = source::CoverageReport {
+                satisfied: true,
+                present: vec![table; present],
+                missing: Vec::new(),
+                misrouted: Vec::new(),
+                manageable: true,
+                blockers: Vec::new(),
+                remediation: Vec::new(),
+            };
+            let mut out = Vec::new();
+            coverage(&mut out, Pen { color: false }, &report, true).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(
+            line(1),
+            "✓ publication covers the one table the indexes read\n"
+        );
+        assert_eq!(
+            line(3),
+            "✓ publication covers all 3 tables the indexes read\n"
+        );
+        assert_eq!(line(0), "✓ publication: the indexes read no table\n");
     }
 
     /// A gap the role could close is printed in full only while management is
