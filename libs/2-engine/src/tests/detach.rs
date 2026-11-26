@@ -93,6 +93,18 @@ struct Gate {
     gaps: Mutex<Vec<(String, sink::Gap)>>,
     /// The seed meets a block on the serving generation (#479).
     retire_blocked: Mutex<bool>,
+    /// Calls that fail from now on, by method name: the process died
+    /// before them.
+    dead: Mutex<BTreeSet<&'static str>>,
+}
+
+impl Gate {
+    fn dies_before(&self, call: &'static str) -> sink::Result<()> {
+        if self.dead.lock().unwrap().contains(call) {
+            return Err(SinkError::Write(format!("the process died before {call}")));
+        }
+        Ok(())
+    }
 }
 
 impl Gate {
@@ -124,6 +136,7 @@ impl Gate {
 #[async_trait]
 impl Sink for Gate {
     async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
+        self.dies_before("ensure_index")?;
         self.ensured.lock().unwrap().push(mapping.index.to_string());
         Ok(sink::Ensured::default())
     }
@@ -216,6 +229,7 @@ impl Sink for Gate {
     }
 
     async fn record_gap(&self, mapping: &IndexMapping, gap: &sink::Gap) -> sink::Result<()> {
+        self.dies_before("record_gap")?;
         self.gaps
             .lock()
             .unwrap()
@@ -331,6 +345,7 @@ impl Sink for Gate {
         mapping: &IndexMapping,
         version: &RecordVersion,
     ) -> sink::Result<()> {
+        self.dies_before("forget_detachment")?;
         self.forgotten
             .lock()
             .unwrap()
@@ -2272,4 +2287,72 @@ async fn a_reindex_of_a_rebuild_waiting_on_its_seeds_retire_block_is_refused() {
         }
     ));
     task.abort();
+}
+
+/// Review of step 4, S3: the reattach killed before each of its writes, and
+/// what the next start finds. Until the record is deleted the lane comes
+/// back detached (the fence frozen at the detach); from the delete on it
+/// comes back attached with the gap, never without it, so the fence never
+/// vouches inside it. The gap must be kept before the record goes.
+#[tokio::test(start_paused = true)]
+async fn a_reattach_killed_before_any_step_comes_back_with_its_gap_or_detached() {
+    // The call the process died before, and whether the next start finds
+    // the lane detached (else attached, carrying the open gap).
+    for (died_before, detached) in [
+        ("ensure_index", true),
+        ("record_gap", true),
+        ("forget_detachment", true),
+        ("attached", false),
+    ] {
+        let rig = Rig::new(64);
+        let (_engine, task, control) = detached_live_only(&rig).await;
+        if died_before != "attached" {
+            rig.sink.dead.lock().unwrap().insert(died_before);
+        }
+        control
+            .send(SinkControl::Reattach { index: users() })
+            .await
+            .unwrap();
+        if died_before == "attached" {
+            let _attach = next_request(&rig).await;
+        } else {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        task.abort();
+        let _ = task.await;
+
+        // The next start, before the slot is held, over what the sink kept.
+        let mut next = Rig::new(64);
+        next.sink = Arc::clone(&rig.sink);
+        next.sink.dead.lock().unwrap().clear();
+        next.positions
+            .down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let engine = next.live_only_engine();
+        engine.stage(Continuity::Resumed).await.unwrap();
+        let heard: Vec<sink::Gap> = next
+            .heard
+            .gaps
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, gap, _)| gap.clone())
+            .collect();
+        if detached {
+            assert!(
+                engine.lane_health(&lane(users())).is_detached(),
+                "{died_before}: the record still says detached"
+            );
+        } else {
+            assert!(
+                engine.lane_health(&lane(users())).is_open(),
+                "{died_before}: no record, the lane attached"
+            );
+            assert_eq!(
+                heard,
+                [gap(Some("1"), None)],
+                "{died_before}: the fence hears the open gap"
+            );
+        }
+    }
 }
