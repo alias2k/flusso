@@ -1990,7 +1990,7 @@ whatever the related rows hold — issue #313; pairs that compare across
 types, at any value, never stop the engine: a link no key can equal matches no parent — issue #312,
 `wal`'s `linked_by_a_value_no_key_equals!` cases; an `ids` `element_type` is checked against the
 related key's type by `validation/element.rs`'s `fit` (verdicts measured on OpenSearch 2):
-`IdsElementMismatch` when it holds no key, `IdsElementLossy` (a warning) when it holds only some or
+`IdsElementMismatch` when it holds no key, `IdsElementLossy` (an error since issue #485; it still starts) when it holds only some or
 changes them — issue #299; guards: `config_coverage`'s
 `validation_reports_a_link_postgres_cannot_compare_with_its_key` and
 `validation_checks_an_ids_element_type_against_the_related_key`; and "does *this* table exist": `validate_indexes` walks every
