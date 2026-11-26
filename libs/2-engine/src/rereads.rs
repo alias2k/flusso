@@ -283,9 +283,23 @@ mod tests {
     }
 
     /// Review of the second fix round, m-h: the one place outside tests that
-    /// opens a live stream does it through `Rereads::open`, so no caller can
-    /// open the window between a new stream answering and the sinks counting
-    /// as unread. A second caller fails here.
+    /// opens a live stream does it through `Rereads::open`, so nothing opens
+    /// the window between a new stream answering and the lanes counting as
+    /// unread. A second caller fails here.
+    ///
+    /// A tripwire, not a boundary (third re-check, m-1). A token only
+    /// `Rereads::open` can make would have to be a type the source port
+    /// (layer 1) names and only the engine (layer 2) constructs; Rust has no
+    /// visibility for "another crate above me", so any constructor the port
+    /// exposes is open to every caller, and the token would be a convention
+    /// too, at the cost of every capture's `live` signature. What it misses:
+    /// `live` passed as a function value without naming it on the line
+    /// (`.then(f)` where `f` was bound elsewhere), or a call built by a macro.
+    /// What trips it falsely: a capture decorator forwarding
+    /// `self.inner.live()`, or an inline `#[cfg(test)] mod` in a file not
+    /// named `tests.rs` (add the file to the walk's exclusions then).
+    /// Calls through the trait's path (`ChangeCapture::live(..)`, or
+    /// `ChangeCapture::live` as a value) are caught too.
     #[test]
     fn the_live_stream_is_opened_only_through_rereads_open() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -293,13 +307,17 @@ mod tests {
         for dir in ["libs", "apps", "sdk", "dev"] {
             sources(&root.join(dir), &mut files);
         }
-        // Spelled in two so this test doesn't find itself.
-        let call = [".live", "()"].concat();
+        // Spelled in parts so this test doesn't find itself.
+        let calls = [
+            [".live", "()"].concat(),
+            ["Capture::", "live"].concat(),
+        ];
         let mut callers = Vec::new();
         for file in files {
             let text = std::fs::read_to_string(&file).unwrap();
             for (at, line) in text.lines().enumerate() {
-                if line.contains(&call) {
+                let code = !line.trim_start().starts_with("//");
+                if code && calls.iter().any(|call| line.contains(call.as_str())) {
                     callers.push((file.clone(), at + 1, line.trim().to_owned()));
                 }
             }
