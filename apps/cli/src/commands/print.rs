@@ -18,6 +18,17 @@ use kernel::{OptionValue, Port, PortEntry};
 use crate::adapters;
 use source::{CoverageReport, Diagnostic, PreImageGap, PreImageReport, Severity};
 
+/// When a report is coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ColorChoice {
+    /// When the output is a terminal and `NO_COLOR` is unset.
+    Auto,
+    /// Always, even into a pipe or a file.
+    Always,
+    /// Never.
+    Never,
+}
+
 /// A palette that paints ANSI color only when enabled. Cheap to copy, so it is
 /// threaded by value through the render functions.
 #[derive(Clone, Copy)]
@@ -30,6 +41,21 @@ impl Pen {
     #[cfg(test)]
     pub(crate) fn plain() -> Self {
         Self { color: false }
+    }
+
+    /// Color always, for a test that reads the escapes.
+    #[cfg(test)]
+    pub(crate) fn coloured() -> Self {
+        Self { color: true }
+    }
+
+    /// Color as `choice` says, `auto` deciding on stdout.
+    pub(crate) fn for_stdout(choice: ColorChoice) -> Self {
+        match choice {
+            ColorChoice::Auto => Self::detect(),
+            ColorChoice::Always => Self { color: true },
+            ColorChoice::Never => Self { color: false },
+        }
     }
 
     /// Color when stdout is a terminal and `NO_COLOR` is not set.
@@ -453,8 +479,9 @@ pub(crate) fn resolved(out: &mut impl Write, pen: Pen, mappings: &[IndexMapping]
     Ok(())
 }
 
-/// The disagreements found checking the declared schema against the database.
-/// Errors are red, warnings yellow; an empty list prints a reassuring line.
+/// The disagreements found checking the declared schema against the database,
+/// warnings first and errors last, so what fails is at the bottom. Errors are
+/// red, warnings yellow; an empty list prints a reassuring line.
 pub(crate) fn diagnostics(
     out: &mut impl Write,
     pen: Pen,
@@ -468,8 +495,8 @@ pub(crate) fn diagnostics(
     diagnostic_lines(out, pen, diagnostics)
 }
 
-/// The disagreements found with no database (`check --offline`). Prints
-/// nothing when there are none.
+/// The disagreements found with no database (`check --offline`), warnings
+/// first and errors last. Prints nothing when there are none.
 pub(crate) fn offline_diagnostics(
     out: &mut impl Write,
     pen: Pen,
@@ -483,19 +510,72 @@ pub(crate) fn offline_diagnostics(
 }
 
 fn diagnostic_lines(out: &mut impl Write, pen: Pen, diagnostics: &[Diagnostic]) -> Result<()> {
-    for d in diagnostics {
+    let warnings = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Warning);
+    let errors = diagnostics.iter().filter(|d| d.severity == Severity::Error);
+    for d in warnings.chain(errors) {
         let (label, code) = match d.severity {
-            Severity::Error => ("error", "31"),
-            Severity::Warning => ("warning", "33"),
+            Severity::Error => ("error", "1;31"),
+            Severity::Warning => ("warning", "1;33"),
         };
         writeln!(
             out,
             "  {} {}  {}",
             pen.paint(code, &format!("[{label}]")),
             pen.bold(&format!("{}.{}", d.index, d.dotted_path())),
-            pen.dim(&d.message),
+            d.message,
         )?;
     }
+    Ok(())
+}
+
+/// The last line of a report: whether it passed, with the counts. `refused`
+/// is the source server refusal `flusso run` would stop with, which fails it
+/// too.
+pub(crate) fn summary(
+    out: &mut impl Write,
+    pen: Pen,
+    diagnostics: &[Diagnostic],
+    refused: Option<&str>,
+) -> Result<()> {
+    let count = |severity: Severity| {
+        diagnostics
+            .iter()
+            .filter(|d| d.severity == severity)
+            .count()
+    };
+    let plural = |n: usize, one: &str| {
+        if n == 1 {
+            format!("{n} {one}")
+        } else {
+            format!("{n} {one}s")
+        }
+    };
+    let errors = count(Severity::Error);
+    let warnings = count(Severity::Warning);
+    let counts = format!(
+        "{}, {}",
+        plural(errors, "error"),
+        plural(warnings, "warning")
+    );
+    let line = match (refused.is_some(), errors, warnings) {
+        (true, ..) => pen.paint(
+            "1;31",
+            &format!("✗ check failed: flusso run would refuse the source server; {counts}"),
+        ),
+        (false, 1.., _) => pen.paint("1;31", &format!("✗ check failed: {counts}")),
+        (false, 0, 0) => format!("{} {}", pen.green("✓"), pen.bold("check passed")),
+        (false, 0, _) => format!(
+            "{} {}",
+            pen.green("✓"),
+            pen.paint(
+                "1;33",
+                &format!("check passed with {}", plural(warnings, "warning"))
+            ),
+        ),
+    };
+    writeln!(out, "{line}")?;
     Ok(())
 }
 

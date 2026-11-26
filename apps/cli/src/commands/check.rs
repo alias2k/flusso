@@ -8,10 +8,13 @@
 //! `flusso run` runs the same database validation at start.
 
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, ensure};
 use clap::{Args, ValueEnum};
+use config::{Config, IndexMapping};
+use source::{CoverageReport, Diagnostic, PreImageReport, Severity};
 use source_postgres::PgDocumentBuilder;
 
 use crate::adapters;
@@ -52,6 +55,11 @@ pub(crate) struct CheckArgs {
     /// Output format: a human-readable report, or JSON for piping.
     #[arg(long, env = "FLUSSO_FORMAT", value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
+
+    /// When the human-readable report is coloured: `auto` colours it when
+    /// stdout is a terminal and `NO_COLOR` is unset.
+    #[arg(long, env = "FLUSSO_COLOR", value_enum, default_value_t = print::ColorChoice::Auto)]
+    color: print::ColorChoice,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -127,9 +135,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     };
     let refused = server.as_ref().and_then(Option::as_deref);
 
-    let has_errors = diagnostics
-        .iter()
-        .any(|d| d.severity == source::Severity::Error);
+    let has_errors = diagnostics.iter().any(|d| d.severity == Severity::Error);
 
     let mut out = std::io::stdout().lock();
     match args.format {
@@ -185,46 +191,26 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         }
         OutputFormat::Human => {
-            let pen = print::Pen::detect();
-            print::success(
+            let pen = print::Pen::for_stdout(args.color);
+            let online = match (&coverage, &pre_image) {
+                (Some(coverage), Some(pre_image)) => Some(Online {
+                    server: refused,
+                    coverage,
+                    pre_image,
+                    manage_publication: manage,
+                    manage_replica_identity: postgres.manage_replica_identity,
+                }),
+                _ => None,
+            };
+            human_report(
                 &mut out,
                 pen,
-                &format!("config valid: {}", args.config.display()),
+                &args.config,
+                &config,
+                &mappings,
+                &diagnostics,
+                online.as_ref(),
             )?;
-            print::config(&mut out, pen, &config)?;
-            print::resolved(&mut out, pen, &mappings)?;
-            if args.offline {
-                print::offline_diagnostics(&mut out, pen, &diagnostics)?;
-                print::warning(
-                    &mut out,
-                    pen,
-                    "offline",
-                    "skipped database validation — types and nullability not checked",
-                )?;
-            } else {
-                print::diagnostics(&mut out, pen, &diagnostics)?;
-                print::server(&mut out, pen, refused)?;
-                if let Some(coverage) = &coverage {
-                    print::coverage(&mut out, pen, coverage, manage)?;
-                }
-                if let Some(pre_image) = &pre_image {
-                    print::pre_image(&mut out, pen, pre_image, postgres.manage_replica_identity)?;
-                }
-                writeln!(out)?;
-                if refused.is_some() {
-                    print::warning(
-                        &mut out,
-                        pen,
-                        "failed",
-                        "flusso run would refuse this server",
-                    )?;
-                }
-                if has_errors {
-                    print::warning(&mut out, pen, "failed", "schema disagrees with database")?;
-                } else if refused.is_none() {
-                    print::success(&mut out, pen, "check passed")?;
-                }
-            }
         }
     }
 
@@ -240,4 +226,266 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         }
     );
     Ok(())
+}
+
+/// What an online check found beside the schema diagnostics.
+struct Online<'a> {
+    /// The refusal `flusso run` would stop with, if any.
+    server: Option<&'a str>,
+    coverage: &'a CoverageReport,
+    pre_image: &'a PreImageReport,
+    manage_publication: bool,
+    manage_replica_identity: bool,
+}
+
+/// The human-readable report: the deployment, every index's fields, what the
+/// source server, the publication and the replica identities say, then the
+/// schema diagnostics, warnings before errors, and a summary line. What
+/// failed is always on the last screen.
+fn human_report(
+    out: &mut impl Write,
+    pen: print::Pen,
+    path: &Path,
+    config: &Config,
+    mappings: &[IndexMapping],
+    diagnostics: &[Diagnostic],
+    online: Option<&Online<'_>>,
+) -> anyhow::Result<()> {
+    print::success(out, pen, &format!("config valid: {}", path.display()))?;
+    print::config(out, pen, config)?;
+    print::resolved(out, pen, mappings)?;
+    match online {
+        None => {
+            print::warning(
+                out,
+                pen,
+                "offline",
+                "skipped database validation — types and nullability not checked",
+            )?;
+            print::offline_diagnostics(out, pen, diagnostics)?;
+        }
+        Some(online) => {
+            print::coverage(out, pen, online.coverage, online.manage_publication)?;
+            print::pre_image(out, pen, online.pre_image, online.manage_replica_identity)?;
+            print::server(out, pen, online.server)?;
+            print::diagnostics(out, pen, diagnostics)?;
+        }
+    }
+    writeln!(out)?;
+    print::summary(
+        out,
+        pen,
+        diagnostics,
+        online.and_then(|online| online.server),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use config::ParseFrom;
+    use config::toml::ConfigToml;
+
+    use super::*;
+
+    fn config() -> Config {
+        let draft = ConfigToml::try_parse(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.out]
+            type = "stdout"
+            "#,
+        )
+        .unwrap();
+        Config::from(draft)
+    }
+
+    fn finding(kind: source::DiagnosticKind, field: &str) -> Diagnostic {
+        Diagnostic::new(
+            kernel::IndexName::try_new("products").unwrap(),
+            kernel::FieldName::try_new(field).unwrap(),
+            source::Anchor::Field,
+            kind,
+            format!("a {kind:?} finding"),
+        )
+    }
+
+    fn report(diagnostics: &[Diagnostic], online: Option<&Online<'_>>, pen: print::Pen) -> String {
+        let config = config();
+        let mut out = Vec::new();
+        human_report(
+            &mut out,
+            pen,
+            Path::new("flusso.toml"),
+            &config,
+            &config.resolve_mappings(),
+            diagnostics,
+            online,
+        )
+        .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn online<'a>(
+        coverage: &'a CoverageReport,
+        pre_image: &'a PreImageReport,
+        server: Option<&'a str>,
+    ) -> Online<'a> {
+        Online {
+            server,
+            coverage,
+            pre_image,
+            manage_publication: true,
+            manage_replica_identity: true,
+        }
+    }
+
+    fn satisfied() -> CoverageReport {
+        CoverageReport {
+            satisfied: true,
+            present: Vec::new(),
+            missing: Vec::new(),
+            misrouted: Vec::new(),
+            manageable: true,
+            blockers: Vec::new(),
+            remediation: Vec::new(),
+        }
+    }
+
+    /// Issue #485: errors are the last thing printed before the summary,
+    /// after every other section, and warnings sit just above them, whatever
+    /// order validation found them in.
+    #[test]
+    fn errors_come_last_after_every_other_section() {
+        let coverage = satisfied();
+        let pre_image = PreImageReport::default();
+        let printed = report(
+            &[
+                finding(source::DiagnosticKind::UndeclaredArrayColumn, "tags"),
+                finding(source::DiagnosticKind::IgnoredPrimaryKey, "team"),
+                finding(source::DiagnosticKind::Nullability, "name"),
+                finding(source::DiagnosticKind::CheckSkipped, "label"),
+            ],
+            Some(&online(&coverage, &pre_image, None)),
+            print::Pen::plain(),
+        );
+        let at = |text: &str| {
+            printed
+                .find(text)
+                .unwrap_or_else(|| panic!("{text} missing from:\n{printed}"))
+        };
+        let first_error = at("[error]");
+        for section in [
+            "\nSource\n",
+            "\nSinks\n",
+            "\nIndexes\n",
+            "\nPublication coverage\n",
+            "\nReplica identity\n",
+            "\nSource server\n",
+            "[warning] products.team",
+            "[warning] products.label",
+        ] {
+            assert!(
+                at(section) < first_error,
+                "{section:?} after an error:\n{printed}"
+            );
+        }
+        assert!(at("[error] products.tags") < at("[error] products.name"));
+        assert!(
+            printed.rfind("[warning]").unwrap() < first_error,
+            "{printed}"
+        );
+        let last = printed.trim_end().lines().last().unwrap();
+        assert_eq!(last, "✗ check failed: 2 errors, 2 warnings", "{printed}");
+    }
+
+    #[test]
+    fn a_clean_check_ends_on_its_summary() {
+        let coverage = satisfied();
+        let pre_image = PreImageReport::default();
+        let printed = report(
+            &[finding(source::DiagnosticKind::IgnoredPrimaryKey, "team")],
+            Some(&online(&coverage, &pre_image, None)),
+            print::Pen::plain(),
+        );
+        let last = printed.trim_end().lines().last().unwrap();
+        assert_eq!(last, "✓ check passed with 1 warning", "{printed}");
+    }
+
+    #[test]
+    fn a_refused_server_counts_in_the_summary() {
+        let coverage = satisfied();
+        let pre_image = PreImageReport::default();
+        let printed = report(
+            &[],
+            Some(&online(
+                &coverage,
+                &pre_image,
+                Some("a synchronous standby"),
+            )),
+            print::Pen::plain(),
+        );
+        let last = printed.trim_end().lines().last().unwrap();
+        assert_eq!(
+            last, "✗ check failed: flusso run would refuse the source server; 0 errors, 0 warnings",
+            "{printed}"
+        );
+        assert!(!printed.contains("check passed"), "{printed}");
+    }
+
+    #[test]
+    fn an_offline_report_lists_its_errors_after_the_offline_note() {
+        let printed = report(
+            &[
+                finding(
+                    source::DiagnosticKind::DuplicateFieldNameFailsToBuild,
+                    "tags",
+                ),
+                finding(source::DiagnosticKind::DuplicateFieldName, "name"),
+            ],
+            None,
+            print::Pen::plain(),
+        );
+        let offline = printed.find("[offline]").unwrap();
+        let warning = printed.find("[warning]").unwrap();
+        let error = printed.find("[error]").unwrap();
+        assert!(offline < warning && warning < error, "{printed}");
+        let last = printed.trim_end().lines().last().unwrap();
+        assert_eq!(last, "✗ check failed: 1 error, 1 warning", "{printed}");
+    }
+
+    #[test]
+    fn the_report_is_coloured_only_when_asked() {
+        let coverage = satisfied();
+        let pre_image = PreImageReport::default();
+        let findings = [
+            finding(source::DiagnosticKind::Nullability, "name"),
+            finding(source::DiagnosticKind::IgnoredPrimaryKey, "team"),
+        ];
+        let plain = report(
+            &findings,
+            Some(&online(&coverage, &pre_image, None)),
+            print::Pen::plain(),
+        );
+        assert!(!plain.contains('\x1b'), "{plain}");
+        let coloured = report(
+            &findings,
+            Some(&online(&coverage, &pre_image, None)),
+            print::Pen::coloured(),
+        );
+        for painted in [
+            "\x1b[1;31m[error]\x1b[0m",
+            "\x1b[1;33m[warning]\x1b[0m",
+            "\x1b[1;31m✗ check failed: 1 error, 1 warning\x1b[0m",
+            "\x1b[32m✓\x1b[0m",
+        ] {
+            assert!(
+                coloured.contains(painted),
+                "{painted:?} missing from:\n{coloured:?}"
+            );
+        }
+    }
 }
