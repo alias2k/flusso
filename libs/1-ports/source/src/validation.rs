@@ -380,11 +380,11 @@ impl DiagnosticKind {
             | Self::TimeOfDayAsDate
             | Self::Nullability
             | Self::UndeclaredArrayColumn
-            | Self::IdsElementLossy => Severity::Error,
-            Self::IgnoredPrimaryKey
-            | Self::DuplicateFieldName
-            | Self::TimestampFormat
-            | Self::CheckSkipped => Severity::Warning,
+            | Self::IdsElementLossy
+            | Self::TimestampFormat => Severity::Error,
+            Self::IgnoredPrimaryKey | Self::DuplicateFieldName | Self::CheckSkipped => {
+                Severity::Warning
+            }
         }
     }
 
@@ -2181,6 +2181,7 @@ mod tests {
             DiagnosticKind::UndeclaredArrayColumn,
             DiagnosticKind::Nullability,
             DiagnosticKind::IdsElementLossy,
+            DiagnosticKind::TimestampFormat,
         ] {
             assert_eq!(kind.severity(), Severity::Error, "{kind:?}");
         }
@@ -2936,7 +2937,7 @@ mod tests {
     const SPACE_ONLY: &str = "yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss";
 
     #[test]
-    fn a_timestamp_format_that_cannot_read_the_iso_form_is_a_warning_with_no_database() {
+    fn a_timestamp_format_that_cannot_read_the_iso_form_is_an_error_with_no_database() {
         assert_eq!(
             timestamp_formats(json!([
                 int_field("id"),

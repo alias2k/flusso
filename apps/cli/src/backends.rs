@@ -842,10 +842,10 @@ mod tests {
     }
 
     #[test]
-    fn a_timestamp_format_prints_and_starts() {
+    fn a_timestamp_format_is_an_error_and_starts() {
         let printed = starts(DiagnosticKind::TimestampFormat);
-        assert!(printed.contains("[warning]"), "{printed}");
-        assert!(!printed.contains("starting anyway"), "{printed}");
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
