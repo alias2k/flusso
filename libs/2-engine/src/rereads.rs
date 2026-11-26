@@ -37,6 +37,7 @@
 //!
 //! ```
 //! use engine::Rereads;
+//! use kernel::{IndexName, SinkName};
 //! use stream::LaneKey;
 //!
 //! # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
