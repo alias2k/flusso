@@ -287,6 +287,10 @@ struct Registered {
     /// The attempt it was last attached for (R8): an attach for it again
     /// publishes `Attached` again; an older one is stale.
     attempt: Option<u64>,
+    /// Attached, and its `Attached` not yet published: a builder publishes
+    /// it before anything else of the lane, in any run (review of step 3,
+    /// S1).
+    unannounced: bool,
 }
 
 /// How far one lane's sink engine has written, in lane order: the key's
@@ -388,7 +392,14 @@ impl Progress {
     /// attached for, counts in the minimum from here on, answering through
     /// the newest position routed in this process (H7) until something is
     /// registered on it. Called with nothing of its index granted and
-    /// unpublished (the builder's quiesce).
+    /// unpublished (the builder's quiesce). The lane stays unannounced
+    /// until its `Attached` is published ([`announced`](Self::announced)).
+    ///
+    /// The one writer of a lane's `newest` outside registration: an attached
+    /// lane answers through every change routed in this process, which it
+    /// never got. Sound only with what follows the attach covering them, a
+    /// rebuild's backfill, or with the gap accepted (`reattach`, O16), and
+    /// with the fence not vouching inside it (ADR 0012 stage 10, S3).
     pub fn attach(&self, lane: &LaneKey, attempt: u64) -> Attach {
         let mut registry = lock(&self.registry);
         let routed_ever = registry.routed_ever;
@@ -401,6 +412,7 @@ impl Progress {
                 *registered = Registered {
                     attempt: Some(attempt),
                     newest: routed_ever,
+                    unannounced: true,
                     ..Registered::default()
                 };
                 self.detached.fetch_sub(1, Ordering::AcqRel);
@@ -414,6 +426,33 @@ impl Progress {
             self.registered();
         }
         answer
+    }
+
+    /// Each of `lanes` attached and whose `Attached` is not published yet,
+    /// with its attempt: a run that died between the attach and `Attached`
+    /// left it so, and the next run's builder publishes it before any grant.
+    pub fn unannounced<'a>(
+        &self,
+        lanes: impl IntoIterator<Item = &'a LaneKey>,
+    ) -> Vec<(LaneKey, u64)> {
+        let registry = lock(&self.registry);
+        lanes
+            .into_iter()
+            .filter_map(|lane| {
+                let registered = registry.lanes.get(lane)?;
+                (registered.unannounced && !registered.detached)
+                    .then_some((lane.clone(), registered.attempt?))
+            })
+            .collect()
+    }
+
+    /// `lane`'s `Attached` of `attempt` is published.
+    pub fn announced(&self, lane: &LaneKey, attempt: u64) {
+        if let Some(registered) = lock(&self.registry).lanes.get_mut(lane)
+            && registered.attempt == Some(attempt)
+        {
+            registered.unannounced = false;
+        }
     }
 
     /// Whether some lane is detached: one atomic load, so the paths every

@@ -135,11 +135,69 @@ async fn a_run_dying_between_attach_and_attached_republishes_it() {
         .expect("the run ends");
     let sent = kinds(&deployment);
     assert_eq!(
-        sent.iter().filter(|kind| *kind == "attached 1").count(),
-        1,
-        "{sent:?}"
+        sent.first().map(String::as_str),
+        Some("attached 1"),
+        "nothing reaches the lane before its boundary: {sent:?}"
+    );
+    assert!(
+        sent.iter().any(|kind| kind == "item"),
+        "the change is published after it: {sent:?}"
     );
     assert!(deployment.stream.requests().unwrap().consumer.is_empty());
+}
+
+/// Review of step 3, S1: after a run died between the attach and
+/// `Attached`, the next run publishes `Attached` before anything else of the
+/// lane, whenever the request it left comes back: here only after changes
+/// were read and built. So no item precedes the boundary, none is discarded
+/// by the sink engine waiting for it, and none is left registered unwritten
+/// on the lane.
+#[tokio::test(start_paused = true)]
+async fn a_run_dying_between_attach_and_attached_publishes_nothing_before_it() {
+    let db = Database::new(
+        10,
+        vec![Change::upsert(1), Change::upsert(2), Change::upsert(3)],
+    );
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_secs(1)),
+        instant(&db),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| ingest.with_batch(batch(1)));
+    let progress = deployment.ingest.progress();
+    progress.detach(&lane());
+    assert_eq!(progress.attach(&lane(), 1), Attach::Attached);
+    let requests = deployment.stream.requests().unwrap();
+    let kinds_log = Arc::clone(&deployment.kinds);
+    let late_request = async {
+        eventually_items(&kinds_log).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        requests.producer.publish(attach(1)).await.unwrap();
+    };
+    let (ran, ()) = tokio::join!(
+        tokio::time::timeout(LIMIT, deployment.run_to_end(0)),
+        late_request
+    );
+    ran.expect("the run ends");
+    let sent = kinds(&deployment);
+    assert_eq!(
+        sent.first().map(String::as_str),
+        Some("attached 1"),
+        "{sent:?}"
+    );
+    assert_eq!(
+        sent.iter().filter(|kind| *kind == "item").count(),
+        3,
+        "every change after the boundary: {sent:?}"
+    );
+    assert!(
+        !matches!(
+            progress.lane(&lane(), crate::Level::Applied),
+            Some(source::cdc::Landed::Before(_))
+        ),
+        "nothing left registered unwritten on the lane"
+    );
+    assert!(requests.consumer.is_empty());
 }
 
 /// A request for an attempt the lane is past publishes nothing and is

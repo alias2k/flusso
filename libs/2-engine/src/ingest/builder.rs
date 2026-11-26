@@ -255,6 +255,9 @@ impl IngestEngine {
         // Where the last arm's work ended: every arm times its wait from here,
         // so the loop reads no clock of its own.
         let mut mark = Instant::now();
+        // `Attached` is the exact boundary of an attach (R8, review of step 3
+        // S1): one a dying run left unpublished goes out before any grant.
+        self.announce(lanes).await?;
         // A restart (slice 8) starts folding with its backlog waiting, which
         // no hand-over, landing or release would ask for: it asks once.
         if builds.folding() {
@@ -614,6 +617,7 @@ impl IngestEngine {
                             self.publish_to(key, producer.as_ref(), LaneItem::Attached { attempt })
                                 .await?;
                         }
+                        self.progress.announced(&lane, attempt);
                         tracing::info!(%lane, attempt, "the lane is attached again: it counts in the slot's minimum from here");
                     }
                     Attach::Stale => {
@@ -622,6 +626,22 @@ impl IngestEngine {
                 }
             }
             handle.ack().await?;
+        }
+        Ok(())
+    }
+
+    /// Publish `Attached` on each lane of this builder attached and not yet
+    /// announced (a run that died between the two), before anything else of
+    /// the lane: a change published before it would be discarded by the
+    /// sink engine waiting for it, and left registered unwritten.
+    async fn announce(&self, lanes: &Lanes) -> Result<()> {
+        for (lane, attempt) in self.progress.unannounced(lanes.keys()) {
+            if let Some((key, producer)) = lanes.get_key_value(&lane) {
+                self.publish_to(key, producer.as_ref(), LaneItem::Attached { attempt })
+                    .await?;
+                self.progress.announced(&lane, attempt);
+                tracing::info!(%lane, attempt, "the attach a run left unannounced is published first");
+            }
         }
         Ok(())
     }
