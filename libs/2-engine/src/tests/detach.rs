@@ -485,7 +485,13 @@ struct Heard {
     rebuilding: Mutex<Vec<IndexName>>,
     /// Each list of gaps heard, with how many lane healths were heard before.
     gaps: Mutex<Vec<(LaneKey, Vec<sink::Gap>, usize)>>,
+    /// How many probes were heard. A run that probes without yielding never
+    /// lets a paused-time test go on: past [`PROBES_WITHOUT_END`] it fails.
+    probes: Mutex<u64>,
 }
+
+/// More probes than any test makes, but for one that spins.
+const PROBES_WITHOUT_END: u64 = 10_000;
 
 impl Heard {
     fn kinds(&self, of: &LaneKey) -> Vec<&'static str> {
@@ -500,6 +506,15 @@ impl Heard {
 }
 
 impl Observer for Heard {
+    fn on_lane_probe(&self, _: &LaneKey, outcome: crate::ProbeOutcome) {
+        let mut probes = self.probes.lock().unwrap();
+        *probes += 1;
+        assert!(
+            *probes < PROBES_WITHOUT_END,
+            "{PROBES_WITHOUT_END} probes heard, the last {outcome:?}: the run probes without yielding"
+        );
+    }
+
     fn on_index_rebuilding(&self, _: &kernel::SinkName, index: &IndexName) {
         self.rebuilding.lock().unwrap().push(index.clone());
     }
@@ -4404,5 +4419,61 @@ async fn an_owed_rebuild_begins_at_once_when_the_slot_comes_back() {
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(*rig.sink.rebuilds.lock().unwrap(), ["users"]);
+    task.abort();
+}
+
+/// The seventh re-check, B-2: a seed refused for want of the slot is not a
+/// probe result. A lane parked on its seed (#479's blocked old generation)
+/// while no slot is held keeps its seed out of the grant until an opening:
+/// no spin, the sink's other lanes are written meanwhile, and the seed lands
+/// at the first probe after the opening.
+#[tokio::test(start_paused = true)]
+async fn a_parked_seed_without_the_slot_waits_without_spinning() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
+    *rig.sink.retire_blocked.lock().unwrap() = true;
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    eventually("parked on its seed", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked { .. }
+        )
+    })
+    .await;
+    rig.rereads.closed();
+    *rig.sink.retire_blocked.lock().unwrap() = false;
+    let before = *rig.heard.probes.lock().unwrap();
+    for n in 0..200u64 {
+        rig.live(&orders(), i64::try_from(n).unwrap() + 10, n + 10)
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let probes = *rig.heard.probes.lock().unwrap() - before;
+    assert!(probes <= 2, "{probes} probes while no slot is held");
+    eventually("every orders item written", || {
+        (10..210).all(|n| written(&rig).contains(&format!("orders/{n}")))
+    })
+    .await;
+    assert!(
+        rig.sink.seeded.lock().unwrap().is_empty(),
+        "nothing seeded unheld"
+    );
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("the seed lands once held", || {
+        rig.sink
+            .seeded
+            .lock()
+            .unwrap()
+            .contains(&"users".to_owned())
+    })
+    .await;
     task.abort();
 }
