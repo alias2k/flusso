@@ -3902,3 +3902,33 @@ async fn a_process_whose_stream_never_opened_deletes_no_record() {
     assert!(rig.sink.kept.lock().unwrap().get("users").is_some());
     task.abort();
 }
+
+/// The fifth re-check (second report, Part 2, M14): a read again that can't
+/// read a detached lane's records leaves it unread and detached; it never
+/// fails the sink's run, and the other lane writes on.
+#[tokio::test(start_paused = true)]
+async fn a_failed_read_of_a_detached_lane_never_fails_the_run() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task) = detached_on_a_block(&rig).await;
+    rig.sink
+        .unreadable
+        .lock()
+        .unwrap()
+        .insert("users".to_owned());
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.live(&orders(), 7, 7).await;
+    eventually("the other lane writes on", || {
+        rig.sink
+            .ids
+            .lock()
+            .unwrap()
+            .contains(&"orders/7".to_owned())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(!task.is_finished(), "the run goes on");
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    assert!(!rig.rereads.current(&lane(users())), "left unread");
+    task.abort();
+}

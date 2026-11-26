@@ -218,3 +218,21 @@ fn a_detached_lane_holds_confirmation_until_its_records_are_read_again() {
     assert!(progress.detach(&sink("b")));
     assert_eq!(progress.landed(), Landed::Free);
 }
+
+/// The fifth re-check (second report, S-2): with two lanes detached, one
+/// read under the current stream and one not, confirmation still holds: the
+/// unread one may stand for another process's rebuild.
+#[test]
+fn a_detached_lane_unread_holds_confirmation_while_another_detached_lane_was_read() {
+    let rereads = Arc::new(crate::Rereads::default());
+    let progress = Progress::new([sink("a"), sink("b"), sink("c")]);
+    progress.hold_while_unread(Arc::clone(&rereads));
+    assert!(progress.detach(&sink("a")));
+    assert!(progress.detach(&sink("c")));
+    publish(&progress, &[&sink("b")], 0, 0);
+    progress.applied(&sink("b"), ItemKey::new(0));
+    futures::executor::block_on(rereads.open(async { Ok::<(), ()>(()) })).unwrap();
+    rereads.read(&sink("b"), rereads.read_begins());
+    rereads.read(&sink("a"), rereads.read_begins());
+    assert_eq!(progress.landed(), Landed::Idle, "c unread: held");
+}

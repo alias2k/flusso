@@ -3197,24 +3197,7 @@ impl<'a> Run<'a> {
     /// enter the window or the held items, and its settling entries went at
     /// the detach; nothing of it is in flight once detached.
     async fn take_attached(&mut self) -> Result<()> {
-        // B-1: an attach opens its lane only once its records were read
-        // under the current stream; a rebuild the read drops opens nothing.
-        if self.attached.iter().any(|(lane, ..)| {
-            self.lanes
-                .get(*lane)
-                .is_some_and(|run| !self.engine.rereads.current(&run.key))
-        }) {
-            self.reread().await?;
-        }
         for (lane, seq, handle) in std::mem::take(&mut self.attached) {
-            if self
-                .lanes
-                .get(lane)
-                .is_some_and(|run| run.health.attaching.is_none())
-            {
-                self.acknowledged(handle, lane, Some(seq), false).await?;
-                continue;
-            }
             debug_assert!(
                 !self.discards.iter().any(|(_, of, _)| *of == lane)
                     && !self.window.iter().any(|queued| queued.lane == lane)
