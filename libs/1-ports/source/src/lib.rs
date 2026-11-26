@@ -6,7 +6,6 @@ mod introspection;
 mod provisioning;
 mod row_key;
 mod spec;
-mod timestamp_format;
 mod validation;
 
 pub mod cdc;
@@ -21,5 +20,4 @@ pub use introspection::*;
 pub use provisioning::*;
 pub use row_key::*;
 pub use spec::*;
-pub use timestamp_format::reads_iso_timestamps;
 pub use validation::*;

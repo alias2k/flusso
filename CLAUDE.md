@@ -236,8 +236,9 @@ after a live update; constants land as written), and `date_and_time_columns_are_
 (issue #304: `date`/`timestamp`/`timestamptz` and their arrays land as ISO 8601 a default `date`
 mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` and a sort over each;
 `sink::Json` writes a naive timestamp with a `T`) and `a_tuned_timestamp_mapping_meets_the_iso_form`
-(a space-only `format` rejects each document holding a value, `strict_date_optional_time` or
-`ignore_malformed` takes it, an `indexed: false` join stores the `T` form), and
+(a space-only `format` now indexes, since flusso appends `strict_date_optional_time`: a range in the
+user's form and in ISO both match, a date histogram's `key_as_string` prints the user's form; an
+`indexed: false` join stores the `T` form), and
 `a_numeric_keeps_every_digit_as_a_json_number` (issue #327: a `decimal` scalar, array element,
 `sum`/`max` and `map` value hold every digit as a JSON number, past `rust_decimal`'s range too, an
 exponent form as written, on backfill and live; asserted on `_source`'s raw text) and
@@ -2065,13 +2066,12 @@ by name, so a new option must be decided) — any state it doesn't model means n
 (`refused_only_by_a_mapping`);
 type, numeric, nullability (and `NullabilityUntracked`), ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementMismatch` (an empty
 `ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `DuplicateFieldNameWrong`, `RootPrimaryKey`
-and `TimestampFormat` (issue #304: a timestamp `options.format` no pattern of which reads the ISO
-form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) and `CheckSkipped` findings print and start, as they built or ran in 0.17), so a new kind forces a decision there. A kind
+and `CheckSkipped` findings print and start, as they built or ran in 0.17), so a new kind forces a decision there. A kind
 that stops a deployment the previous release started is a breaking change: allowed in a minor or major release when it is the correct behaviour, marked breaking, with an entry on that release's upgrade page (`docs/src/operate/upgrade-to-*.md`) saying what stops and how to fix it. `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
 `#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. **An index
 that starting flusso does not make work as its schema says is an `Error`, whatever the cause**
 (issue #485): `Nullability` (a null where the schema says never), `UndeclaredArrayColumn` (a list
-where it says one value), `IdsElementLossy` (other ids than the table's), `TimestampFormat` and
+where it says one value), `IdsElementLossy` (other ids than the table's) and
 `DuplicateFieldNameWrong` are errors that still start without `--strict`; `IgnoredPrimaryKey`,
 `CheckSkipped`, `DuplicateFieldName` and `NullabilityUntracked` stay warnings. A namesake pair's
 severity is decided in one place, `source::duplicate_is_wrong(same, Reach)` over `duplicate_outcome`:
@@ -2395,7 +2395,22 @@ and `a_schema_without_via_keeps_its_content_hash` pin it. `Column` and `Join` do
 renders it `{"type": "object", "enabled": false}` and `collect_enum_sorts`/`collect_map_templates`
 stop at it; descendants' mapping-only settings are accepted and ignored, `options` on the
 unindexed field itself is rejected. Guards: `a_schema_that_never_opts_out_keeps_its_content_hash`,
-`opting_out_of_subfields_or_indexing_changes_the_content_hash`. Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
+`opting_out_of_subfields_or_indexing_changes_the_content_hash`. **A date `format` reads what flusso
+writes** (issue #485's timestamp decision; it replaced the `timestamp_format` error): a date-typed field
+(`MappingType::Date` or `date_nanos`: a date/timestamp column or array, a `min`/`max`, a script, a
+`custom`) whose `options.format` holds no named pattern reading every form flusso writes
+(`strict_date_optional_time`/`date_optional_time` and `_nanos`, any camelCase spelling) resolves with
+`||strict_date_optional_time` appended last (`kernel::iso_date_format` over `with_iso`, in
+`config/date_format.rs`), applied in the projection, never written into the schema, so an older lock
+gets it too and `show mapping` (one note line per such field), the designer and the sink all see it;
+`Field`'s `Hash` adds `ISO_DATE_FORMAT_REVISION` for such a field only, so its index moves once and no
+other does. A year past 9999 or before 0 is still refused, as by the default mapping. Guards: the
+projection tests' `a_date_format_that_cannot_read_what_flusso_writes_gets_the_iso_pattern_last`,
+`every_date_mapping_with_a_refusing_format_resolves_with_the_iso_pattern`,
+`a_schema_whose_date_formats_read_what_flusso_writes_keeps_its_content_hash` /
+`a_schema_whose_date_format_gets_the_iso_pattern_moves_off_its_hash`, and `pipeline`'s
+`a_tuned_timestamp_mapping_meets_the_iso_form` (indexed, a range in either form, `key_as_string` in the
+user's). Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
 `json`/`jsonb` column — `FlussoType::Map { values }` → OS `object` with `dynamic: true`
 injected into options (so runtime keys are accepted); the resolved `Mapping.map_values` is
 the **full `Mapping` every key gets** (what a plain field of `values` resolves to, incl.

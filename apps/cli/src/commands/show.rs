@@ -166,6 +166,23 @@ fn mapping_to(
                     ),
                 )?;
             }
+            for mapping in &mappings {
+                let Some(entry) = config.indexes.get(&mapping.index) else {
+                    continue;
+                };
+                for path in completed_formats(&entry.schema.fields) {
+                    print::note(
+                        out,
+                        pen,
+                        &format!(
+                            "{}.{path}: flusso appends `{}` to its `format`, so the dates it \
+                             writes index; dates still print in the `format`'s first pattern",
+                            mapping.index,
+                            config::ISO_DATE_PATTERN
+                        ),
+                    )?;
+                }
+            }
             print::resolved(out, pen, &mappings)
         }
         Format::Json => {
@@ -173,6 +190,23 @@ fn mapping_to(
             Ok(())
         }
     }
+}
+
+/// The dotted path of every mapped field whose date `format` flusso appends
+/// the ISO pattern to ([`config::iso_date_format`]).
+fn completed_formats(fields: &[config::Field]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for field in fields.iter().filter(|field| field.emit) {
+        if config::iso_date_format(field).is_some() {
+            paths.push(field.field.to_string());
+        }
+        paths.extend(
+            completed_formats(field.children())
+                .into_iter()
+                .map(|path| format!("{}.{path}", field.field)),
+        );
+    }
+    paths
 }
 
 /// Every enabled index's mapping, or the one of `index`, disabled or not; an
@@ -391,6 +425,67 @@ mod tests {
             error,
             "no index `orders` in the config; the indexes are: archive (disabled), products, users"
         );
+    }
+
+    /// A date `format` flusso appends `strict_date_optional_time` to gets a
+    /// one-line note saying so and why; JSON carries the mapping alone, with
+    /// the format as the index gets it.
+    #[test]
+    fn show_mapping_notes_a_date_format_flusso_completed() {
+        let mut config = config();
+        let products = config
+            .indexes
+            .get_mut(&config::IndexName::try_new("products").unwrap())
+            .unwrap();
+        products.schema.fields.push(
+            serde_json::from_value(serde_json::json!({
+                "field": "placed",
+                "options": { "format": { "String": "yyyy-MM-dd HH:mm:ss" } },
+                "source": { "column": {
+                    "column": "placed_at", "ty": "timestamp", "nullable": true } },
+            }))
+            .unwrap(),
+        );
+        let human = printed(|out| {
+            mapping_to(
+                out,
+                print::Pen::plain(),
+                Format::Human,
+                &config,
+                Some("products"),
+            )
+        });
+        assert!(
+            human.contains(
+                "! products.placed: flusso appends `strict_date_optional_time` to its `format`, \
+                 so the dates it writes index; dates still print in the `format`'s first pattern"
+            ),
+            "{human}"
+        );
+        let json = printed(|out| {
+            mapping_to(
+                out,
+                print::Pen::plain(),
+                Format::Json,
+                &config,
+                Some("products"),
+            )
+        });
+        assert!(
+            json.contains("yyyy-MM-dd HH:mm:ss||strict_date_optional_time"),
+            "{json}"
+        );
+        assert!(!json.contains("flusso appends"), "{json}");
+        let users = printed(|out| {
+            mapping_to(
+                out,
+                print::Pen::plain(),
+                Format::Human,
+                &config,
+                Some("users"),
+            )
+        });
+        assert!(!users.contains("appends"), "{users}");
     }
 
     /// A disabled index is named as disabled, and its mapping still shows.

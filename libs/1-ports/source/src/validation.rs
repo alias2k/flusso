@@ -353,12 +353,6 @@ pub enum DiagnosticKind {
     /// [`DuplicateFieldNameWrong`](Self::DuplicateFieldNameWrong) (issue #485).
     /// A schema with one still loads, as earlier releases did.
     DuplicateFieldName,
-    /// A `timestamp` field, aggregate result or script output whose
-    /// `options.format` has no pattern that reads the ISO 8601 form the
-    /// value is written in (`2024-01-02T03:04:05.123456`): OpenSearch
-    /// rejects a document holding a timestamp. Only a format whose every
-    /// pattern is known to refuse that form is reported.
-    TimestampFormat,
     /// Two fields at one level share a name, and a document then holds
     /// something other than the index maps (see
     /// [`duplicate_is_wrong`](crate::duplicate_is_wrong)): a list where it
@@ -415,7 +409,6 @@ impl DiagnosticKind {
             | Self::Nullability
             | Self::UndeclaredArrayColumn
             | Self::IdsElementLossy
-            | Self::TimestampFormat
             | Self::DuplicateFieldNameWrong => Severity::Error,
             Self::IgnoredPrimaryKey
             | Self::DuplicateFieldName
@@ -447,7 +440,6 @@ impl DiagnosticKind {
             Self::IdsElementLossy => "ids_element_lossy",
             Self::DuplicateFieldName => "duplicate_field_name",
             Self::DuplicateFieldNameWrong => "duplicate_field_name_wrong",
-            Self::TimestampFormat => "timestamp_format",
             Self::DuplicateFieldNameFailsToBuild => "duplicate_field_name_fails_to_build",
             Self::DuplicateFieldNameRefused => "duplicate_field_name_refused",
             Self::TimeOfDayAsDate => "time_of_day_as_date",
@@ -604,17 +596,14 @@ async fn validate_index(
         &mut Vec::new(),
         &mut diagnostics,
     );
-    timestamp_formats(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
     Ok(diagnostics)
 }
 
 /// The checks that need no database: a `soft_delete` `field` that names no
 /// field, or whose first field of that name is not a column (such a marker
 /// reads nothing, so soft-deleted rows would stay indexed), and two fields of
-/// one name at one level ([`DiagnosticKind::DuplicateFieldName`]), and a
-/// timestamp `format` that refuses the form timestamps are written in
-/// ([`DiagnosticKind::TimestampFormat`]). [`validate_indexes`] reports these
-/// too.
+/// one name at one level ([`DiagnosticKind::DuplicateFieldName`]).
+/// [`validate_indexes`] reports these too.
 pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for (name, schema) in spec.indexes() {
@@ -636,7 +625,6 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
             &mut Vec::new(),
             &mut diagnostics,
         );
-        timestamp_formats(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
     }
     diagnostics
 }
@@ -775,75 +763,6 @@ fn duplicate_names(
     }
 }
 
-/// One [`DiagnosticKind::TimestampFormat`] per mapped field whose value is a
-/// timestamp and whose `options.format` refuses the ISO 8601 form it is
-/// written in ([`reads_iso_timestamps`](crate::reads_iso_timestamps)), at any
-/// depth. An input-only field and an `indexed: false` join are not mapped, so
-/// neither they nor what they hold are checked.
-fn timestamp_formats(
-    index: &IndexName,
-    fields: &[Field],
-    path: &mut Vec<(FieldName, Option<usize>)>,
-    out: &mut Vec<Diagnostic>,
-) {
-    for (at, field) in fields.iter().enumerate() {
-        let unindexed_join = matches!(
-            &field.source,
-            FieldSource::Relation(Relation::Join(join)) if !join.indexed
-        );
-        if !field.emit || unindexed_join {
-            continue;
-        }
-        path.push((field.field.clone(), position(fields, at)));
-        if writes_timestamps(&field.source)
-            && let Some(kernel::GenericValue::String(format)) = field.options.get("format")
-            && crate::reads_iso_timestamps(format) == Some(false)
-        {
-            out.push(Diagnostic {
-                index: index.clone(),
-                field: field.field.clone(),
-                path: path.iter().map(|(name, _)| name.clone()).collect(),
-                positions: path.iter().map(|(_, at)| *at).collect(),
-                anchor: Anchor::Field,
-                kind: DiagnosticKind::TimestampFormat,
-                severity: DiagnosticKind::TimestampFormat.severity(),
-                message: format!(
-                    "`format` `{format}` has no pattern that reads the ISO 8601 form a timestamp \
-                     is written in (`2024-01-02T03:04:05.123456`), so OpenSearch rejects a \
-                     document holding a timestamp. Add `strict_date_optional_time`: \
-                     `strict_date_optional_time||{format}`"
-                ),
-            });
-        }
-        timestamp_formats(index, field.children(), path, out);
-        path.pop();
-    }
-}
-
-/// Whether a field's value is written as a timestamp: a `timestamp` column or
-/// script, a `min`/`max` with a `timestamp` `value_type`, or `ids` of
-/// `timestamp`.
-fn writes_timestamps(source: &FieldSource) -> bool {
-    match source {
-        FieldSource::Column(column) => column.ty == FlussoType::Timestamp,
-        FieldSource::Script(script) => script.ty == FlussoType::Timestamp,
-        FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
-            AggregateOp::Min(_) | AggregateOp::Max(_) => {
-                aggregate.value_type == Some(FlussoType::Timestamp)
-            }
-            AggregateOp::Ids { element_type } => *element_type == FlussoType::Timestamp,
-            AggregateOp::Count
-            | AggregateOp::Sum(_)
-            | AggregateOp::Avg(_)
-            | AggregateOp::Exists => false,
-        },
-        FieldSource::Group(_)
-        | FieldSource::Geo(_)
-        | FieldSource::Relation(Relation::Join(_))
-        | FieldSource::Constant(_) => false,
-    }
-}
-
 /// Whether every document that carries `field`'s level carries its children
 /// too, as mapped: a plain object (emitted, no `options`). A join may have no
 /// related row; an input-only or unindexed field, or one with `options` (an
@@ -940,8 +859,7 @@ fn is_numeric(sql_type: &str) -> bool {
 }
 
 /// A `date` format that reads every `time` value (any number of fraction
-/// digits), led by the default pattern so the ISO form still reads
-/// ([`DiagnosticKind::TimestampFormat`] stays quiet).
+/// digits), led by the default pattern so the ISO form still reads.
 const TIME_FORMAT: &str =
     "strict_date_optional_time||HH:mm:ss[.SSSSSS][.SSSSS][.SSSS][.SSS][.SS][.S]";
 
@@ -2335,7 +2253,6 @@ mod tests {
             DiagnosticKind::UndeclaredArrayColumn,
             DiagnosticKind::Nullability,
             DiagnosticKind::IdsElementLossy,
-            DiagnosticKind::TimestampFormat,
         ] {
             assert_eq!(kind.severity(), Severity::Error, "{kind:?}");
         }
@@ -3195,27 +3112,11 @@ mod tests {
 
     const SPACE_ONLY: &str = "yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss";
 
+    /// A date `format` that can't read what flusso writes is no finding: the
+    /// mapping it resolves to gets `strict_date_optional_time` appended
+    /// (`kernel::iso_date_format`), so its documents index.
     #[test]
-    fn a_timestamp_format_that_cannot_read_the_iso_form_is_an_error_with_no_database() {
-        assert_eq!(
-            timestamp_formats(json!([
-                int_field("id"),
-                timestamp_field("seen", Some(SPACE_ONLY))
-            ])),
-            problems(&[(
-                "seen",
-                DiagnosticKind::TimestampFormat,
-                "`format` `yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss` has no pattern that \
-                 reads the ISO 8601 form a timestamp is written in (`2024-01-02T03:04:05.123456`), \
-                 so OpenSearch rejects a document holding a timestamp. Add \
-                 `strict_date_optional_time`: \
-                 `strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss`"
-            )]),
-        );
-    }
-
-    #[test]
-    fn every_timestamp_valued_field_kind_is_checked_at_any_depth() {
+    fn a_date_format_that_cannot_read_the_iso_form_is_no_finding() {
         let script = with_format(
             json!({ "field": "computed", "source": { "script": {
                 "source": "\"s\"", "ty": "timestamp", "nullable": true,
@@ -3229,77 +3130,16 @@ mod tests {
             } } } }),
             "yyyy-MM-dd HH:mm:ss",
         );
-        let stamps = with_format(
-            json!({ "field": "stamps", "source": { "relation": { "aggregate": {
-                "table": "orders", "op": { "ids": { "element_type": "timestamp" } },
-                "key": { "direct": "user_id" },
-            } } } }),
-            "epoch_second",
-        );
-        let found: Vec<(String, DiagnosticKind)> = timestamp_formats(json!([
-            int_field("id"),
-            script,
-            latest,
-            stamps,
-            group(
-                "account",
-                json!([timestamp_field("since", Some(SPACE_ONLY))])
-            ),
-            orders_join(
-                "orders",
-                json!([timestamp_field("placed", Some(SPACE_ONLY))])
-            ),
-        ]))
-        .into_iter()
-        .map(|(at, kind, _)| (at, kind))
-        .collect();
-        let want: Vec<(String, DiagnosticKind)> = [
-            "computed",
-            "latest",
-            "stamps",
-            "account.since",
-            "orders.placed",
-        ]
-        .into_iter()
-        .map(|at| (at.to_owned(), DiagnosticKind::TimestampFormat))
-        .collect();
-        assert_eq!(found, want);
-    }
-
-    #[test]
-    fn a_timestamp_format_that_reads_or_may_read_the_iso_form_is_not_reported() {
-        let date = json!({
-            "field": "born",
-            "options": { "format": { "String": "yyyy/MM/dd" } },
-            "source": { "column": { "column": "born", "ty": "date", "nullable": true } },
-        });
-        let input_only = {
-            let mut field = timestamp_field("hidden", Some(SPACE_ONLY));
-            field["emit"] = json!(false);
-            field
-        };
-        let unindexed = {
-            let mut join = orders_join(
-                "archive",
-                json!([timestamp_field("placed", Some(SPACE_ONLY))]),
-            );
-            join["source"]["relation"]["join"]["indexed"] = json!(false);
-            join
-        };
         assert_eq!(
             timestamp_formats(json!([
                 int_field("id"),
-                timestamp_field("plain", None),
-                timestamp_field(
-                    "strict",
-                    Some("strict_date_optional_time||yyyy-MM-dd HH:mm:ss")
+                timestamp_field("seen", Some(SPACE_ONLY)),
+                script,
+                latest,
+                orders_join(
+                    "orders",
+                    json!([timestamp_field("placed", Some(SPACE_ONLY))])
                 ),
-                timestamp_field("loose", Some("yyyy-MM-dd HH:mm:ss||date_optional_time")),
-                timestamp_field("literal", Some("yyyy-MM-dd'T'HH:mm:ss.SSSSSS")),
-                timestamp_field("unknown", Some("yyyy-MM-dd HH:mm:ss||date_hour_minute")),
-                date,
-                input_only,
-                unindexed,
             ])),
             problems(&[]),
         );
