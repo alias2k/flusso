@@ -216,20 +216,31 @@ impl Store {
         }
     }
 
-    /// O29, the rule since the fifth re-check: a record another process may
-    /// rely on is never erased, nor rewritten into anything but detached,
-    /// while this process holds no stream. `what` names the write (a seed, a
-    /// delete, a rebuild); a detach or a demotion only tightens a record.
+    /// O29, the rule since the fifth re-check: while this process holds no
+    /// stream, another process may hold the slot and rely on any record or
+    /// gap of `of`, whoever wrote it (it read them under its own stream), so
+    /// none is erased, rewritten or has the generations beside it deleted.
+    /// `what` names the request (a seed, a delete, a rebuild, a reindex, a
+    /// demotion, a detach). With neither there, nothing is relied on.
     fn touch(&self, of: &str, what: &str) {
         if self.holding.holds() {
             return;
         }
-        if let Some(kept) = self.kept.lock().unwrap().get(of)
-            && !kept.ours
-        {
+        let record = self
+            .kept
+            .lock()
+            .unwrap()
+            .get(of)
+            .map(|kept| kept.detachment.record.clone());
+        let gaps = self
+            .gaps
+            .lock()
+            .unwrap()
+            .get(of)
+            .is_some_and(|gaps| !gaps.is_empty());
+        if record.is_some() || gaps {
             self.violations.lock().unwrap().push(format!(
-                "{what} of {of} over another process's record ({:?}) with no stream held",
-                kept.detachment.record
+                "{what} of {of} over a record ({record:?}, gaps kept: {gaps}) with no stream held"
             ));
         }
     }
@@ -441,6 +452,7 @@ impl Sink for Store {
         mapping: &IndexMapping,
         detach: &sink::Detach,
     ) -> sink::Result<sink::Recorded> {
+        self.touch(mapping.index.as_ref(), "a detach");
         let marker = if self.live_only {
             MarkerAt::Serving { seeded: true }
         } else {
@@ -522,6 +534,7 @@ impl Sink for Store {
 
     async fn demote(&self, mapping: &IndexMapping, live_only: bool) -> sink::Result<()> {
         let of = mapping.index.as_ref();
+        self.touch(of, "a demotion");
         self.walked.lock().unwrap().remove(of);
         let held = self.held();
         if let Some(kept) = self.kept.lock().unwrap().get_mut(of) {
@@ -539,6 +552,7 @@ impl Sink for Store {
 
     async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
         let of = mapping.index.as_ref();
+        self.touch(of, "a reindex");
         self.next_generation(of);
         self.unseeded.lock().unwrap().insert(of.to_owned());
         self.walked.lock().unwrap().remove(of);
@@ -673,6 +687,47 @@ enum Event {
         searchable: bool,
         at: u64,
     },
+    /// This process's stream ends and another process drops `lane` (with
+    /// `rebuild`, begins its rebuild), then `then` happens with no stream
+    /// held: every gated request's unheld case, drawn often (the sixth
+    /// re-check, S-3). Expanded into the two before the run.
+    Unheld {
+        lane: usize,
+        rebuild: bool,
+        then: u8,
+    },
+}
+
+impl Event {
+    /// The events `self` stands for, in order.
+    fn expand(self) -> Vec<Event> {
+        let Event::Unheld {
+            lane,
+            rebuild,
+            then,
+        } = self
+        else {
+            return vec![self];
+        };
+        let ends = Event::StreamEnds {
+            jump: 10,
+            drop: Some(lane),
+            rebuild,
+        };
+        let index = lane % 2;
+        let then = match then {
+            0 => Event::Seed { lane },
+            1 => Event::Reattach { index },
+            2 => Event::Reindex { index },
+            3 => Event::Restart {
+                sink: lane / 2,
+                unreadable: 0,
+            },
+            4 => Event::Detach { lane, fails: false },
+            _ => Event::Unblock { lane },
+        };
+        vec![ends, then]
+    }
 }
 
 fn event() -> impl Strategy<Value = Event> {
@@ -703,6 +758,9 @@ fn event() -> impl Strategy<Value = Event> {
         1 => (0usize..2).prop_map(|index| Event::Reattach { index }),
         5 => (0usize..4, any::<bool>(), any::<bool>(), 0u64..140).prop_map(
             |(lane, whole_sink, searchable, at)| Event::Wait { lane, whole_sink, searchable, at }
+        ),
+        6 => (0usize..4, any::<bool>(), 0u8..6).prop_map(
+            |(lane, rebuild, then)| Event::Unheld { lane, rebuild, then }
         ),
     ]
 }
@@ -1228,6 +1286,7 @@ impl World {
 }
 
 async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
+    let events: Vec<Event> = events.into_iter().flat_map(Event::expand).collect();
     let mut world = World::new();
     for at in 0..2 {
         world.restart(at).await;
@@ -1334,6 +1393,7 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
                 },
             ),
             // `/wait` answers `503` until the process's source is live.
+            Event::Unheld { .. } => unreachable!("expanded before the run"),
             Event::Wait { .. } if !world.live => {}
             Event::Wait {
                 lane,
@@ -1473,8 +1533,16 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
     Ok(())
 }
 
+/// `PROPTEST_CASES` when set, else 1024.
+fn cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(1024)
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 1024, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
 
     #[test]
     fn every_lane_vouches_only_for_what_it_holds(
