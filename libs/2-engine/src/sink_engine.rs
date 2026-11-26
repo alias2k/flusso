@@ -23,16 +23,22 @@
 //!
 //! - **No record is erased, or loosened, without the slot.** This process
 //!   destroys or rewrites no record another process may rely on unless it
-//!   holds the slot ([`Rereads::may_erase_records`](crate::Rereads::may_erase_records)):
-//!   a seed (its marker erases any record), the failed-detach clear, a
-//!   reattach's delete, a reindex, a rebuild. Each waits, and is retried,
-//!   never failing the run: a seed's backfill is cut and asked again at the
-//!   next read while held, a clear and an owed rebuild wait for a turn that
-//!   may, a reindex is owed (its lane restaging), a reattach is refused with
-//!   the reason. Plain writes of what the lanes hold behave as on `main`.
+//!   holds the slot ([`Rereads::may_erase_records`](crate::Rereads::may_erase_records)),
+//!   checked immediately before each such request in one place (`slot`,
+//!   whose module docs hold the table of every record, marker and
+//!   generation write, gated or safe and why). Each waits, never failing
+//!   the run: a seed is owed (its documents written, only the marker
+//!   waiting) and lands once the slot is held and the records read again
+//!   show nothing written over the index, else its backfill is asked again;
+//!   a clear and an owed rebuild wait for a turn that may; a reindex waits,
+//!   its lane restaging; a demotion or a detach found by staging or a read
+//!   again takes the lane as detached, its read uncounted; a reattach is
+//!   refused with the reason. Plain writes of what the lanes hold behave as
+//!   on `main`.
 //! - **What the records say is read again once the slot is held.** After
-//!   every opening the run reads each lane's records (`Run::reread`, while
-//!   it holds the slot), deciding from them with the same function staging
+//!   every opening the run reads each lane's records (`Run::reread`; read
+//!   once the stream ended too, which only tightens: what may erase waits
+//!   for the slot), deciding from them with the same function staging
 //!   uses (`decide`, executed by `act_on_records`): another process's
 //!   rebuild is put back to detached before the lane drops anything; a lane
 //!   the records say detached is taken as detached. A lane stored open while
@@ -43,22 +49,7 @@
 //!   began under ([`Rereads::read_begins`](crate::Rereads::read_begins), taken
 //!   before the read).
 //!
-//! Every write of a record or marker, and why it is gated or not:
-//!
-//! | Write | Without the slot |
-//! | --- | --- |
-//! | a seed (`mark_seeded`) | gated: it writes the marker whole, erasing any record |
-//! | the failed-detach clear (`clear_failed_detach`) | gated: it deletes the `Detached` record it reads |
-//! | a reattach (`forget_detachment`, its gap) | gated: refused with the reason |
-//! | a reindex (`sink.reindex`) | gated: owed, the lane restaging |
-//! | a rebuild (`begin_rebuild`), from a reindex, an owed rebuild or O20's restart | gated: owed through `owe_rebuild` |
-//! | a detach (`detach`), staging's `DetachAgain` | safe: it only tightens a record (to detached) |
-//! | a demotion (`demote`), O26, R14 and another's rebuild | safe: rebuilding to detached, or detached to live only |
-//! | a finished rebuild's record deleted at staging (`forget_detachment`) | safe: on the version read, beside a newer seeded marker |
-//! | a gap added or its end moved later (`record_gaps`) | safe: a gap only grows; an unknown end is settled only while the slot is held |
-//! | a walk checkpoint written or forgotten (`record_walked`, `forget_walked`) | safe: it claims only this process's own pages, read only where no record stands against the index; forgetting one only makes a walk start earlier |
-//!
-//! //! The loop ([`SinkEngine::run`], in `writes`) writes each lane item with
+//! The loop ([`SinkEngine::run`], in `writes`) writes each lane item with
 //! one [`Sink::write`], several at once but never two holding the same
 //! document, decides item-level rejections by the failure policies, and
 //! acknowledges: write-then-ack is what makes delivery at-least-once, because

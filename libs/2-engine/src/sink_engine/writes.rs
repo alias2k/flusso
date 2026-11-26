@@ -3593,6 +3593,13 @@ impl<'a> Run<'a> {
     /// may have landed, delete a record found and put the marker back, as a
     /// flight holding no slot: the probe waits for it, so a lane that opens
     /// leaves nothing for the next staging to detach (§5).
+    ///
+    /// The delete waits for the slot (O29). So a stop while no slot is held
+    /// (a reconnect that keeps failing) can't clear such a lane, which stays
+    /// parked: the drain waits on it until the stop's deadline, and the
+    /// process exits 1 naming the sink. The next start reads the record and
+    /// detaches the lane, or finds none (the detach never landed) and opens
+    /// it (the sixth re-check, m-5).
     async fn start_clears(&mut self) -> Result<()> {
         let now = Instant::now();
         let due: Vec<usize> = (0..self.lanes.len())

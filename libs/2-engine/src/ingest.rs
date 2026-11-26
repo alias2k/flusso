@@ -781,6 +781,15 @@ impl From<SourceError> for EngineError {
 /// clean end also says the run finished
 /// ([`Rereads::finished`](crate::Rereads::finished)): the deployment ends
 /// after the lanes drain, with no restart another process could precede.
+///
+/// A clean end is `Ended::Stopped` or `Ended::LiveEnded`. The second is
+/// sound only because a source's live stream ends `Ok` only when the
+/// deployment is over: the Postgres stream does so only through a stop's
+/// `close_live`, once the final position is confirmed. A source whose
+/// stream could end `Ok` and be opened again, with another process holding
+/// the slot in between, would let what the lanes still hold seed over that
+/// process's records. `LiveEnded` stays clean because the daemon's tests
+/// end their mock sources so, with no stop.
 struct Held<'a> {
     rereads: &'a crate::Rereads,
     clean: bool,

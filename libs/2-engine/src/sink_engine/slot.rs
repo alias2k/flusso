@@ -12,13 +12,26 @@
 //! The sink's erasing methods are called nowhere else in the engine: a test
 //! here fails if one is (`erasing_requests_go_only_through_the_slot`).
 //!
-//! | Request | Here |
+//! Every request of the [`Sink`] trait that writes a record, the seed marker
+//! or a generation, from the OpenSearch adapter's requests, and why it is
+//! gated or not (`gated`: refused here with no slot held):
+//!
+//! | Request (OpenSearch requests) | Without the slot |
 //! | --- | --- |
-//! | `mark_seeded` | gated: its marker is written whole, erasing any record |
-//! | `forget_detachment` | gated (the failed-detach clear, a reattach); ungated only for a finished rebuild's record (`forget_finished`) |
-//! | `reindex` | gated; ungated only for a `Fresh` source's staging (`reindex_at_a_fresh_start`) |
-//! | `begin_rebuild` | gated |
-//! | `demote`, `detach` | gated: both delete every generation but the serving one, which may be another process's rebuild |
+//! | `mark_seeded` (aliases swapped, every other generation deleted, the marker written whole, a finished rebuild's record deleted) | gated: the marker erases any record and the gaps |
+//! | `forget_detachment` (`DELETE detach:…` on the version read): the failed-detach clear, a reattach | gated; a reattach also writes its gap first, which stays and is reused when asked again |
+//! | `forget_detachment` of a rebuild a newer seeded generation finished (`forget_finished`) | safe: the record is obsolete, and the delete is conditional on the version read, so any write since fails it |
+//! | `reindex` (the marker moved to a new generation) | gated: the reindex waits, its lane restaging |
+//! | `reindex` at a `Fresh` source's staging (`reindex_at_a_fresh_start`) | safe: it runs before `prepare` creates the slot (#120), so no slot exists for another process to hold |
+//! | `begin_rebuild` (every generation but the serving one deleted, the marker moved, the record rewritten) | gated: the rebuild is owed |
+//! | `demote` (every generation but the serving one deleted with its checkpoint, the marker and the record rewritten) | gated (the sixth re-check, S-2): what it deletes may be the rebuild the holder walks. Staging and the read again take the lane as detached and leave its read uncounted, so the read once the slot is held demotes |
+//! | `detach` (the marker moved, the record written, every generation but the serving one deleted), staging's `DetachAgain` | gated, as `demote`: a refused lane stays as it was, staging takes the lane as detached for the read once held |
+//! | `ensure_index` (the marker written whole, the generation created) | safe: the marker is written whole only when no marker names an existing generation. Nothing anyone holds is there: no rows, so neither a checkpoint nor a gap means anything; `detaching_from` matters only with no record, and losing it leaves an unseeded generation to backfill while reads stay on the serving one. As on `main` |
+//! | `ensure_index` deleting an unseeded generation whose `index.uuid` isn't the one recorded | safe: such a generation was recreated by a write under auto-create, not built by any process; a process writing to it restages. As on `main` |
+//! | `detachment`, the read, putting a half-moved marker back (`PUT` on the marker read) | safe: only where the marker carries `detaching_from` and no record stands, on the version read. A detach is gated, so one between its two writes is the holder's (or one in flight as its stream ended: #490). Its record landing after the put back still says detached, and the next read detaches again (`DetachAgain`) |
+//! | `record_gaps` (`_update` of the marker on the version read) | safe: a gap only grows; an unknown end is settled only while the slot is held (`known_gaps`) |
+//! | `record_walked`, `forget_walked` (`_update` of `walked`) | safe: a checkpoint claims only this process's own pages, read only where no record stands against the index; forgetting one only makes a walk start earlier |
+//! | `write`, `write_parts` (bulk) | plain writes of what the lanes hold: as on `main` |
 //!
 //! ```text
 //! caller: read records, ensure, write a gap …   (awaits; the stream may end)
