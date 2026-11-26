@@ -1623,3 +1623,26 @@ async fn the_answer_frozen_at_an_opening_is_taken_fresh_from_the_previous_stream
         reached("20")
     );
 }
+
+/// Review of the step-4 fixes, S-c: a detach record without a readable
+/// `through`, adopted by the read once the slot is held, freezes the lane at
+/// what this process applied under the previous stream (here nothing),
+/// never at the new stream's start, which lies past the changes another
+/// process dropped.
+#[tokio::test(start_paused = true)]
+async fn an_adopted_detach_without_its_through_vouches_for_nothing_new() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    opened(&rereads).await;
+    rig.source.idle_to(50);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    let started = Instant::now();
+    assert_eq!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        unserved("0", &[("users", "primary", Unserved::Detached)]),
+        "frozen where the previous stream stood (nothing applied), not at 50"
+    );
+    assert_eq!(started.elapsed(), Duration::ZERO, "at once");
+}

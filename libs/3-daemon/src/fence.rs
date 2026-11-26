@@ -494,8 +494,18 @@ impl Fence {
             Some(recorded) => at.map(|at| at.min(recorded)),
             None => at,
         };
+        // While the sink's records are unread since the slot opened (a read
+        // adopting a detach is one), what the lane reached may be the new
+        // stream's start: it freezes no further than what this process
+        // applied under the previous stream (review of the fixes, S-c).
+        let read = self
+            .inner
+            .rereads
+            .get()
+            .is_none_or(|rereads| rereads.current(&lane.sink));
         self.serve(lane, |furthest| Serving::Detached {
             through: match furthest.serving {
+                Serving::Writes if !read => (cap(furthest.at_open.0), cap(furthest.at_open.1)),
                 Serving::Writes => (cap(furthest.applied), cap(furthest.searchable)),
                 Serving::Rebuilding { through } | Serving::Detached { through } => through,
                 Serving::Pending | Serving::Backfilling => (None, None),
