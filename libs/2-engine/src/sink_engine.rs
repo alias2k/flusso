@@ -1038,9 +1038,14 @@ impl SinkEngine {
                 let why = "the detach record says detached while the seed marker is on the \
                            generation reads see; detached again at staging";
                 let detach = sink::Detach::new(why).live_only(!self.options.backfill);
-                if self.sink.detach(mapping, &detach).await? == sink::Recorded::Kept {
-                    return Ok(self.staged_detached(&mapping.index, why.to_owned()));
+                if self.sink.detach(mapping, &detach).await? != sink::Recorded::Kept {
+                    return Err(sink::SinkError::Write(format!(
+                        "{} reads detached, and the sink keeps no record of a detach again; \
+                         it is not staged attached over the changes the detach dropped",
+                        mapping.index
+                    )));
                 }
+                return Ok(self.staged_detached(&mapping.index, why.to_owned()));
             }
         }
         let (ask_seeded, restaged) = match step {

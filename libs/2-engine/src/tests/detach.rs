@@ -1026,3 +1026,33 @@ async fn a_record_that_landed_although_its_call_failed_goes_before_the_lane_open
     );
     assert!(!rig.progress.is_detached(&lane(users())));
 }
+
+/// A record that says detached beside a marker on serving is detached again
+/// at staging; a sink that answers it keeps no record fails the staging
+/// step, never staging the index attached over the gap (review m2).
+#[tokio::test(start_paused = true)]
+async fn a_detach_again_the_sink_keeps_no_record_of_fails_the_staging_step() {
+    let rig = Rig::new(64);
+    rig.sink.records.lock().unwrap().push_back(Record::NotKept);
+    rig.sink.kept.lock().unwrap().insert(
+        "users".to_owned(),
+        Detachment::recorded(
+            DetachRecord::Detached { live_only: false },
+            Some(MarkerAt::Serving { seeded: true }),
+            version(),
+        ),
+    );
+    let engine = rig.engine();
+    let error = engine.stage(Continuity::Fresh).await.unwrap_err();
+    assert!(error.to_string().contains("keeps no record"), "{error}");
+    assert!(
+        !rig.sink
+            .ensured
+            .lock()
+            .unwrap()
+            .contains(&"users".to_owned())
+    );
+    assert!(
+        !engine.lane_health(&lane(users())).is_open() || !rig.progress.is_detached(&lane(users()))
+    );
+}
