@@ -752,10 +752,10 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
             fragment,
             key,
             &format!(
-                "is declared `{rendered}`, but the schema field here is not an array — if its \
-                 column holds an array, declare the field `array: true` in the schema (without \
-                 the `Vec<…>` it fails to read every document that holds a list); otherwise \
-                 drop the `Vec<…>`"
+                "is declared `{rendered}`, but the schema field here is not an array — a column \
+                 that holds an array needs the field declared `array: true` in the schema \
+                 (without the `Vec<…>` it fails to read every document that holds a list); any \
+                 other field (an aggregate, a constant) holds one value: drop the `Vec<…>`"
             ),
         );
         let mut checks = quote_spanned! {span=>
@@ -829,9 +829,10 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
         key,
         &format!(
             "is `{rendered}`, a newtype over a `Vec<…>`, which reads an array, but the schema \
-             field here is not an array — if its column holds an array, declare the field \
+             field here is not an array — a column that holds an array needs the field declared \
              `array: true` in the schema (a type that reads one value fails to read every \
-             document that holds a list); otherwise declare a type that reads one"
+             document that holds a list); any other field (an aggregate, a constant) holds one \
+             value: declare a type that reads one"
         ),
     );
     let values_at_nested_msg = message(

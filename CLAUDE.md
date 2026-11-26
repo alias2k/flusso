@@ -2538,10 +2538,11 @@ declared type is still checked against the domain's own name. The designer's `ar
 `json_array_default` value slots refuse what the config conversion refuses, and `api::render_op`
 refuses a schema whose file would not load, so a save never writes one (a `FileOp` carries its
 content only as `schema`, written into `base`; there is no raw-text op). A type that reads an array
-at a single-valued field is refused leading with "declare the field `array: true`" wherever the
-schema can (`doc.rs`'s `single_value_message`; in a fragment `check::declares_array`: a leaf other
-than `geo_point`, or `json`), since the element type alone compiles and fails on every list (issue
-#485; `ui/vec_at_a_single_value.rs`). Query side: `check_type`'s
+at a single-valued field is refused leading with "a column that holds an array needs the field
+declared `array: true`", then "any other field (an aggregate, a constant) holds one value", since
+the element type alone compiles and fails on every list; the mapping doesn't say which a field is
+(`doc.rs`'s `single_value_message`; a fragment gives it where `check::declares_array`: a leaf other
+than `geo_point`, or `json`; issue #485; `ui/vec_at_a_single_value.rs`). Query side: `check_type`'s
 scalar arm also accepts a custom non-`Vec` type through const asserts (`OpaqueProbe::LEAF_ARRAY` +
 `accepts_kind`), and `#[derive(FlussoValue)]` on a newtype over `Vec<E>` emits only
 `FlussoValueMeta` (`E`'s kinds, `ARRAY`), no `FlussoValue<K>`. So `ARRAY` has **two

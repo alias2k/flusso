@@ -821,9 +821,10 @@ fn single_value_check(field: &DocField, inner: &Type, os: &str) -> TokenStream {
     }
 }
 
-/// Why a type that reads an array can't stand at a single-valued leaf. Where
-/// the schema can declare the field `array: true`, that is the fix it leads
-/// with: the element type alone compiles, then fails on every list.
+/// Why a type that reads an array can't stand at a single-valued leaf. A
+/// column that holds an array is fixed in the schema, so that leads: the
+/// element type alone compiles, then fails on every list. The mapping doesn't
+/// say whether the field reads a column, so both cases are named.
 fn single_value_message(field: &DocField, os: &str, inner: &Type) -> String {
     let key = &field.doc_key;
     let rendered = crate::fragment::render(inner);
@@ -834,10 +835,10 @@ fn single_value_message(field: &DocField, os: &str, inner: &Type) -> String {
         )
     } else {
         format!(
-            "field `{key}` is a single `{os}` in the schema, but `{rendered}` reads an array — if \
-             the column holds an array, declare the field `array: true` in the schema (the \
-             element type alone fails to read every document that holds a list); otherwise use \
-             its element type"
+            "field `{key}` is a single `{os}` in the schema, but `{rendered}` reads an array — \
+             a column that holds an array needs the field declared `array: true` in the schema \
+             (the element type alone fails to read every document that holds a list); any other \
+             field (an aggregate, a constant) holds one value: use the element type"
         )
     }
 }
