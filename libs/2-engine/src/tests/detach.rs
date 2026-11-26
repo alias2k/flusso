@@ -4459,7 +4459,8 @@ async fn a_parked_seed_without_the_slot_waits_without_spinning() {
     let probes = *rig.heard.probes.lock().unwrap() - before;
     assert!(probes <= 2, "{probes} probes while no slot is held");
     eventually("every orders item written", || {
-        (10..210).all(|n| written(&rig).contains(&format!("orders/{n}")))
+        let ids = rig.sink.ids.lock().unwrap();
+        (10..210).all(|n| ids.contains(&format!("orders/{n}")))
     })
     .await;
     assert!(

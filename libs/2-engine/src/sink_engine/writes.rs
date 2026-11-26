@@ -215,6 +215,10 @@ struct LaneRun {
     /// A reattach was asked for (O16): its steps run at the next turn, and
     /// its verdict goes to this reply.
     reattach_due: Option<super::Reply<super::ReattachVerdict>>,
+    /// The parked lane's probe is its seed, refused for want of the slot
+    /// (the seventh re-check, B-2): not granted again until this process
+    /// holds it, which an opening wakes the loop for. Not a probe result.
+    seed_waits_for_slot: bool,
 }
 
 impl LaneRun {
@@ -494,6 +498,7 @@ impl<'a> Run<'a> {
                     account,
                     detach_due: None,
                     detach_through: None,
+                    seed_waits_for_slot: false,
                     reattach_due: None,
                 }
             })
@@ -870,6 +875,7 @@ impl<'a> Run<'a> {
                 run.health.due <= now
                     && run.detach_due.is_none()
                     && !run.health.detach_unsure
+                    && !(run.seed_waits_for_slot && !self.engine.rereads.may_erase_records())
                     && !self.lane_in_flight(lane)
             }
             _ => false,
@@ -2093,10 +2099,15 @@ impl<'a> Run<'a> {
             return Ok(());
         };
         let (_, seeding) = self.seeding.swap_remove(at);
+        if let Some(run) = self.lanes.get_mut(seeding.lane) {
+            run.seed_waits_for_slot = false;
+        }
         // O29: a seed writes the marker whole, erasing whatever record
         // another process wrote since: refused while this process holds no
-        // slot (`slot`). A parked lane's seed is its probe, tried again on
-        // the lane's backoff; an open lane's is owed: its documents are
+        // slot (`slot`). A parked lane's seed is its probe: the refusal is no
+        // probe result, and the seed waits out of the grant until the slot is
+        // held (B-2: put back still due, it was granted again in the same
+        // poll, without end). An open lane's is owed: its documents are
         // written, and it lands once the slot is held (`land_owed_seeds`).
         let result = match result {
             Ok(result) => result,
@@ -2104,7 +2115,9 @@ impl<'a> Run<'a> {
                 let lane = seeding.lane;
                 if !self.lane_open(lane) {
                     self.put_back_complete(seeding);
-                    self.probed(lane, ProbeOutcome::Failed);
+                    if let Some(run) = self.lanes.get_mut(lane) {
+                        run.seed_waits_for_slot = true;
+                    }
                     return Ok(());
                 }
                 self.engine.owe_seed(&seeding.index, seeding.ticket);
