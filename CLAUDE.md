@@ -1918,19 +1918,32 @@ is the one concrete piece.
   leaves the minimum) and carries it on `LaneHealth::Detached`, where the fence freezes (S3: what is
   refused after a reattach starts where vouching stopped). The fence refuses a position in `(from,
   to]` of any gap at once (`FenceOutcome::InGap`, `/wait` `409` `reason: gap`, naming that gap),
-  vouches between gaps as usual; an unknown end stretches its gap; the seed clears them. Once the
-  source answers, a staging or read settles every gap end it can't read (`known_gaps`,
-  `SourcePositions::parses`): an unknown `to` becomes where the lane stands (nothing of it landed
-  since, so the gap still covers what was dropped), an unreadable `from` unknown (reaching back only
-  into the past). **O29**: `engine::Rereads` — the ingest engine calls
-  `live_opened` after `live()`, before publishing; a sink engine whose last full read began before
-  (`reread_due`, one atomic) reads every index's records again in `advance` before any grant
-  (`Run::reread`: adopts a lane the records say detached or rebuilding by another process, detaches
-  again on O30's rows, completes a gap); a staging counts as the read; the fence vouches for no lane
+  vouches between gaps as usual; an unknown end stretches its gap; the seed clears them. Only a read
+  while this process holds the slot (`Rereads::holding`) settles a gap end it can't read
+  (`known_gaps(.., settle)`, `SourcePositions::parses`; a staging hears the gap and flags it,
+  `gaps_unsettled`): an unknown `to` becomes where the lane stands (nothing of it landed since, so
+  the gap still covers what was dropped), an unreadable `from` unknown (reaching back only into the
+  past). `Sink::record_gaps` takes a decision over the list kept (`DecideGaps`); OpenSearch writes it
+  conditionally on the marker's `if_seq_no`/`if_primary_term`, reading again on a conflict. A gap
+  entry that can't be read is a gap with unknown ends, never no gap. A reattach reuses an open last
+  gap starting at its record's `through` (one gap per detach); a failed record delete is read again
+  (gone: the reattach goes on). **O29**: `engine::Rereads` — the ingest engine opens the stream
+  through `Rereads::open` (below), before publishing; a sink engine whose last full read counts for
+  an earlier opening (`reread_due`, one atomic, or an unsettled gap while the slot is held) reads
+  every index's records again in `advance` before any grant (`Run::reread`: adopts a lane the records
+  say detached or rebuilding by another process, detaches again on O30's rows, settles a gap end); a
+  staging begun once the opening returned counts as the read; the fence vouches for no lane
   of a sink not read since (`Rereads::current`) **only where it would serve its writes**: `Gap`,
   `Detached`, `Rebuilding`, `Backfilling` answer as themselves; an unread `Writes` lane vouches up to
-  what it had reached when the slot opened (`Furthest.at_open`) and answers `Unserved::Starting` past
-  it; a read wakes the fence (`Rereads::subscribe`). Every grant goes through `grant_once_read`.
+  `Furthest.at_open` (the fence's answer from the previous stream, taken fresh as the opening
+  begins) and answers `Unserved::Starting` past it; a read wakes the fence (`Rereads::subscribe`).
+  **B1': from the moment a new stream may answer until the sink has read its records, a lane vouches
+  for nothing past what this process applied under the previous stream**: the ingest engine opens
+  the stream only through `Rereads::open(source.live())`, which marks every sink unread and has the
+  fence freeze `at_open` (`Reread::Opening`) before the future runs; a read counts only when it began
+  once `open` returned Ok (`read_begins`); `Rereads::holding` is true while that stream is open (the
+  ingest run's `Held` guard calls `closed`). A detach adopted while its sink is unread freezes at
+  `at_open` (S-c). Every grant goes through `grant_once_read`.
   Nothing waits on a sink: one that is down holds the slot. The read puts a half-moved marker back
   as staging does; a record another process writes after is met by O30's row at the next read. **The attach** (R7, R8, step 3; nothing sends
   `SinkControl::Attach` yet): the sink engine numbers an attempt (`SinkEngine::attempts`), keeps it in

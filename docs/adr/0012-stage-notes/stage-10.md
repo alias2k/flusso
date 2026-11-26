@@ -525,7 +525,10 @@ The owner accepted this order on 2026-11-24. Each slice is safe if nothing after
    - Cost: one `_mget` per index per staging step, restages and reindexes included. Only a `404` reads as none (H6). A read that fails fails that index's step: under `Resumed` the index is left restaging alone (#471); under `Fresh`, the staging fails as a whole, as any step failure does today.
 2. **Detach and rebuild, reachable only from tests,** with `enabled = false`: R1, R4–R9, R11–R14, the quiesce, `Request::Attach` and `Attached`, `Landed::Free`, `routed_ever`, the fence, the `/status` fields of §9. It starts from S5 and S6. It follows #479 (S2). A failed read leaves the entry slice 1 keeps per lane (`SinkEngine::detachment`) as the last read left it, so nothing may act on kept state while the lane is restaging. Until slice 4 brings R10, a rebuilding lane that parks stays parked and holds the slot like any parked lane. That is harmless, since nothing in a deployment reaches slice 2's rebuild.
 3. **Spikes S1, S3, S4.**
-4. **Thresholds and the probe-gated rebuild,** with `enabled = true`: R2, R3, R10, the stuck clock, the probes, the schedule, the alert. Gated on slice 3.
+4. **Thresholds and the probe-gated rebuild,** with `enabled = true`: R2, R3, R10, the stuck clock, the probes, the schedule, the alert. Gated on slice 3. Carried in from the re-check of step 4's fix round (2026-11-26), to build here:
+   - **`SeedBlocked` in the counts.** R2's thresholds count a `ParkReason::SeedBlocked` park (O28 keeps it under R2). R10's `rebuild_grace` does not, and flood stage never counts toward R10. Every place that matches a park for R2 or R10 names `SeedBlocked` apart from `Blocked`; `kind()` and `label()` give both `blocked`, so only `/status`'s `seed_blocked` tells them apart.
+   - **`clear_failed_detach` deletes any `Detached` record it finds,** conditional only on the version it just read. In an overlap that can be another process's record: it needs the version this process's failed `detach` wrote, or a check that the record names this attempt.
+   - **Record operations between the first read again and the grant.** `start_restages`, `start_detaches`, `start_clears` and `ask_rebuilds` run after awaits that can span a reopening of the slot. `grant_once_read` covers the grants; these touch records and markers, so each is rechecked against a reopening (restaging reads the records itself; the clears are the one to recheck).
 5. **Runbook split and manual pages;** a docs agent writes the user pages.
 6. **O10,** later, if measured worth it.
 
@@ -1000,6 +1003,52 @@ The review (`target/review-482-step4/REPORT.md`) found one blocker, five should-
 - the B1 fix against CI's live `a_fence_holds_while_the_index_is_seeded_or_rebuilt` (no Docker locally; CI decides);
 - the verdict wait against a real sink engine under load;
 - `SeedBlocked` on a live OpenSearch.
+
+### After the re-check of step 4's fix round
+
+The re-check (`target/review-482-step4-fixes/REPORT.md`) found one blocker, three should-fix findings and five minors. Each got a test that fails without its fix (the reviewer's probes, turned into tests), then the fix:
+
+**B1'. The window at every opening, and what `at_open` is (`757a9292`, with m-a).**
+- **The invariant** (stated in `fence.rs`'s module doc). From the moment a new stream may answer until the sink has read its records, a lane vouches for nothing past what this process applied under the previous stream.
+- **One way to open.** The ingest engine opens the stream only through `Rereads::open(source.live())`. Before the future runs, every sink counts as unread and the fence hears `Reread::Opening`, while only the previous stream answers.
+- **`at_open`.** At `Opening` the fence takes each lane's answer from that previous stream, fresh, and freezes it as `at_open`. A cached answer lower than what the lane applied only vouches less (m-a).
+- **Which reads count.** A read counts only when it began once `open` returned Ok (`read_begins`, the `held` epoch). One begun during the opening does not. A failed opening counts no read until one succeeds.
+- **Guards:**
+  - `a_reached_answer_taken_before_the_opening_is_counted_never_vouches_past_the_old_stream`;
+  - `a_wait_between_the_stream_answering_and_the_opening_vouches_nothing_new`;
+  - `a_read_begun_during_the_opening_does_not_count`;
+  - `the_answer_frozen_at_an_opening_is_taken_fresh_from_the_previous_stream`.
+
+  The first two fail when the old order (open the stream, then mark unread) comes back.
+
+**S-a. A gap end is settled only while this process holds the slot (`18d9479c`, with S-b).**
+- **Who settles.** A staging needs no slot, so it never settles an end; it hears the gap as kept and flags it. Only a read made while `Rereads::holding()` settles one (the stream of the last opening is open; the ingest run's `Held` guard clears it when the run ends). Until then an unknown `to` refuses past `from`.
+- **The write.** `Sink::record_gaps` takes a decision over the list kept, not a list. The OpenSearch write is conditional on the marker's `if_seq_no` / `if_primary_term`, and reads again and decides again on a conflict, so another process's settled gap stands.
+- **Guards:**
+  - `a_staging_while_the_stream_is_closed_never_settles_a_gap_end`, which fails if the slot check is dropped;
+  - `a_gap_write_meeting_another_writer_reads_again_and_decides_again`, which fails if the write is unconditional.
+
+**S-b. One gap per detach, and the truth on a failed delete.**
+- **One gap.** A reattach reuses an open last gap that starts at its record's `through`, instead of adding a second.
+- **A failed delete is read again.** A record still there is `Failed`. One gone goes on as `Started`.
+- **What `Failed` says.** Nothing accepted is lost, and `/status` tells whether the reattach took effect.
+- **Guards:** `a_failed_forget_then_a_reattach_keeps_one_gap_and_completes_it`, `a_record_delete_that_landed_although_its_call_failed_goes_on`.
+
+**S-c. A detach adopted while its sink is unread freezes at `at_open`, never at the new stream's start (`42ba878b`).** Guard: `an_adopted_detach_without_its_through_vouches_for_nothing_new`.
+
+**Minors.**
+- **m-b (`3838f072`).** The edge's `Failed` and timeout answers are tested (`PrivateState.reattach_wait` lets a test shorten the 30 s).
+- **m-c (`df7eb7b7`).** A gap entry that can't be read reads as one with both ends unknown, logged loudly. It refuses every position until settled, and `/status` shows it.
+- **m-d (`b8463702`).** The kill matrix asserts the fence's freeze (detached rows: at `1`) or open gap (attached rows), and has a row for a death after `Attached` before the gap is saved.
+- **m-e.** The wording below and in `CLAUDE.md` and `pipeline.md`.
+
+**Corrected wording.**
+- **m4's reading** is "a read while this process holds the slot settles an unknown end where the lane stands". It is never "a start" or "a staging".
+- **B1's `at_open`** is the fence's answer from the previous stream taken as the opening begins.
+
+**Not proven.** As before, plus:
+- B1' and S-a live, with two overlapping processes;
+- the conditional `_update` against a real OpenSearch.
 
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
