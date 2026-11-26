@@ -253,10 +253,7 @@ mod tests {
     fn show_config_redacts_secrets() {
         let config = config();
         let human = printed(|out| config_to(out, print::Pen::plain(), Format::Human, &config));
-        assert!(
-            human.contains("postgres://flusso:***@db:5432/app"),
-            "{human}"
-        );
+        assert!(human.contains("connection_url=***"), "{human}");
         assert!(human.contains("password=***"), "{human}");
         assert!(human.contains("url=${SEARCH_URL}"), "{human}");
         assert!(human.contains("products"), "{human}");
@@ -266,13 +263,44 @@ mod tests {
             assert!(!json.contains(leaked), "{json}");
         }
         let document: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            document["source"]["connection_url"],
-            "postgres://flusso:***@db:5432/app"
-        );
+        assert_eq!(document["source"]["connection_url"], "***");
         assert_eq!(document["sinks"]["primary"]["password"], "***");
         assert_eq!(document["sinks"]["primary"]["url"]["env"], "SEARCH_URL");
         assert_eq!(document["sinks"]["primary"]["type"], "opensearch");
+    }
+
+    /// A literal secret is masked whole, whatever it holds: a password in a
+    /// URL's query string, a userinfo with no password, a token.
+    #[test]
+    fn show_config_redacts_a_password_in_the_query_string() {
+        let draft = ConfigToml::try_parse(
+            r#"
+            [source]
+            type = "postgres"
+            connection_url = "postgres://db:5432/app?user=flusso&password=hunter2"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "https://os:9200/?token=abc123"
+
+            [sinks.keyed]
+            type = "opensearch"
+            url = "https://apikey0451@os:9200"
+            "#,
+        )
+        .unwrap();
+        let config = Config::from(draft);
+        for format in [Format::Human, Format::Json] {
+            let out = printed(|out| config_to(out, print::Pen::plain(), format, &config));
+            for leaked in ["hunter2", "abc123", "apikey0451"] {
+                assert!(!out.contains(leaked), "{leaked} in {format:?}:\n{out}");
+            }
+        }
+        let json = printed(|out| config_to(out, print::Pen::plain(), Format::Json, &config));
+        let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(document["source"]["connection_url"], "***");
+        assert_eq!(document["sinks"]["primary"]["url"], "***");
+        assert_eq!(document["sinks"]["keyed"]["url"], "***");
     }
 
     #[test]

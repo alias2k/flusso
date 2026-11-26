@@ -740,8 +740,8 @@ fn print_rows(out: &mut impl Write, pen: Pen, rows: &[Row]) -> Result<()> {
 
 /// One port entry's options on a line, `key=value` pairs in key order, without
 /// interpreting them: the adapter's description says which fields are secrets,
-/// and those are shown as their variable name (`${VAR}`), as a URL with the
-/// password masked, or as `***`.
+/// and those are shown as their variable name (`${VAR}`), or, given
+/// literally, as `***` whole: a URL can carry a credential in any part.
 fn describe_entry(port: Port, entry: &PortEntry) -> String {
     let secrets: Vec<String> = adapters::description(port, &entry.kind)
         .map(|d| d.secrets.clone())
@@ -753,9 +753,9 @@ fn describe_entry(port: Port, entry: &PortEntry) -> String {
     parts.join(" ")
 }
 
-/// `config` as JSON, with every literal secret masked as the human listing
-/// masks it: a URL's password as `***`, any other literal as `***`. A secret
-/// read from the environment (`{ env = "VAR" }`) names its variable.
+/// `config` as JSON, with every literal secret masked whole as `***`, as the
+/// human listing masks it. A secret read from the environment
+/// (`{ env = "VAR" }`) names its variable.
 pub(crate) fn redacted_config(config: &Config) -> Result<serde_json::Value> {
     let mut document = serde_json::to_value(config)?;
     if let Some(source) = document.get_mut("source") {
@@ -787,11 +787,7 @@ fn mask_secrets(entry: &mut serde_json::Value, port: Port, kind: &str) {
         if let Some(value) = at
             && let serde_json::Value::String(text) = value
         {
-            *text = if text.contains("://") {
-                redact_url(text)
-            } else {
-                "***".to_owned()
-            };
+            *text = "***".to_owned();
         }
     }
 }
@@ -809,13 +805,7 @@ fn describe_value(value: &OptionValue, path: &str, secrets: &[String]) -> String
                 .collect();
             format!("{{{}}}", inner.join(" "))
         }
-        OptionValue::String(text) if secret => {
-            if text.contains("://") {
-                redact_url(text)
-            } else {
-                "***".to_owned()
-            }
-        }
+        OptionValue::String(_) if secret => "***".to_owned(),
         OptionValue::String(text) => text.clone(),
         OptionValue::Array(items) => format!(
             "[{}]",
@@ -836,21 +826,6 @@ fn describe_soft_delete(sd: &SoftDelete) -> String {
     match sd {
         SoftDelete::Column(c) => format!("column \"{}\"", c.column),
         SoftDelete::Field(f) => format!("field \"{}\"", f.field),
-    }
-}
-
-/// Mask the password in `scheme://user:password@host…` — the report shows the
-/// URL, never the secret.
-fn redact_url(url: &str) -> String {
-    let Some(after) = url.find("://").map(|i| i + 3) else {
-        return url.to_owned();
-    };
-    let Some(at) = url[after..].find('@').map(|i| after + i) else {
-        return url.to_owned();
-    };
-    match url[after..at].find(':') {
-        Some(colon) => format!("{}:***{}", &url[..after + colon], &url[at..]),
-        None => url.to_owned(),
     }
 }
 
