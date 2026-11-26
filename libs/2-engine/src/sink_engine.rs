@@ -460,6 +460,35 @@ impl SinkEngine {
     ) -> sink::Result<std::result::Result<Vec<sink::Gap>, String>> {
         let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
         let found = self.sink.detachment(mapping).await?;
+        // The lane is held detached in this process, yet the sink keeps no
+        // record: an earlier reattach's delete landed and nobody heard it
+        // (review of the second fix round, m-i). The in-memory state follows
+        // the records: the reattach is finished, with the gap that one kept
+        // open (or one with unknown ends).
+        if found.record.is_none() {
+            let from = found
+                .gaps
+                .last()
+                .filter(|gap| gap.to.is_none())
+                .and_then(|gap| gap.from.clone());
+            self.sink.ensure_index(mapping).await?;
+            let gaps = self
+                .sink
+                .record_gaps(mapping, &|kept| {
+                    let open = kept.last().is_some_and(|last| last.to.is_none());
+                    (!open).then(|| {
+                        let mut gaps = kept.to_vec();
+                        gaps.push(sink::Gap {
+                            from: from.clone(),
+                            to: None,
+                        });
+                        gaps
+                    })
+                })
+                .await?;
+            tracing::warn!(%lane, ?from, "no detach record is kept for a lane held detached: an earlier reattach's delete landed; finishing it");
+            return Ok(Ok(gaps));
+        }
         let restart = "restart flusso: a start on this backfill = false sink puts the \
                        records back to detached, live only, on the generation reads see; \
                        then reattach again";
@@ -517,8 +546,17 @@ impl SinkEngine {
         if let Err(error) = self.sink.forget_detachment(mapping, &version).await {
             // The delete may have landed although its call failed (S-b):
             // read again before saying anything.
-            if self.sink.detachment(mapping).await?.record.is_some() {
-                return Err(error);
+            match self.sink.detachment(mapping).await {
+                Ok(again) if again.record.is_some() => return Err(error),
+                Ok(_) => {}
+                Err(read) => {
+                    tracing::warn!(%lane, %error, %read, "the record's delete failed, and reading it again failed too");
+                    return Err(sink::SinkError::Write(format!(
+                        "the record's delete failed ({error}) and reading it again failed too \
+                         ({read}): whether the reattach took effect is unknown; ask again: a \
+                         reattach reads the records and finishes this one if the record is gone"
+                    )));
+                }
             }
             tracing::warn!(%lane, %error, "the record's delete failed, yet the record is gone: the reattach goes on");
         }

@@ -101,6 +101,11 @@ struct Gate {
     /// `forget_detachment` deletes the record, then fails (a timeout after
     /// the delete landed).
     forget_lands_then_fails: Mutex<bool>,
+    /// The next reads of the records that fail.
+    reads_fail: Mutex<usize>,
+    /// Reads of the records that fail once `forget_detachment` landed then
+    /// failed.
+    reads_fail_after_forget: Mutex<usize>,
 }
 
 impl Gate {
@@ -221,6 +226,13 @@ impl Sink for Gate {
     }
 
     async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
+        {
+            let mut fails = self.reads_fail.lock().unwrap();
+            if *fails > 0 {
+                *fails -= 1;
+                return Err(SinkError::Write("the meta index timed out".to_owned()));
+            }
+        }
         let mut kept = self
             .kept
             .lock()
@@ -377,6 +389,8 @@ impl Sink for Gate {
         self.dies_before("forget_detachment")?;
         if *self.forget_lands_then_fails.lock().unwrap() {
             self.kept.lock().unwrap().remove(mapping.index.as_ref());
+            *self.reads_fail.lock().unwrap() =
+                std::mem::take(&mut *self.reads_fail_after_forget.lock().unwrap());
             return Err(SinkError::Write("the delete timed out".to_owned()));
         }
         self.forgotten
@@ -2887,5 +2901,36 @@ async fn a_corrupt_gap_kept_before_a_reattach_is_settled_after_it() {
             == Some(&vec![gap(None, Some("3")), gap(Some("1"), Some("3"))])
     })
     .await;
+    task.abort();
+}
+
+/// Review of the second fix round, m-i: the record's delete landed though
+/// its call failed, and reading it again failed too. The operator hears
+/// both errors and that a reattach finds out; asked again, the reattach
+/// reads no record and finishes what the first began, with the one gap.
+#[tokio::test(start_paused = true)]
+async fn a_reattach_after_a_delete_that_landed_unseen_finishes_it() {
+    let rig = Rig::new(64);
+    let (_engine, task, control) = detached_live_only(&rig).await;
+    *rig.sink.forget_lands_then_fails.lock().unwrap() = true;
+    // The reattach's own read succeeds; the read after the failed delete
+    // doesn't.
+    *rig.sink.reads_fail_after_forget.lock().unwrap() = 1;
+    let crate::ReattachVerdict::Failed(why) = verdict(&control).await else {
+        panic!("both failed: Failed");
+    };
+    assert!(why.contains("reading it again failed too"), "{why}");
+    assert!(
+        rig.sink.kept.lock().unwrap().get("users").is_none(),
+        "the delete landed"
+    );
+    *rig.sink.forget_lands_then_fails.lock().unwrap() = false;
+    assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
+    assert_eq!(
+        rig.sink.marker_gaps.lock().unwrap().get("users"),
+        Some(&vec![gap(Some("1"), None)]),
+        "one gap"
+    );
+    let _attach = next_request(&rig).await;
     task.abort();
 }
