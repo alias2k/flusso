@@ -361,9 +361,10 @@ fn start_verdict(
 /// A type, numeric or nullability disagreement still builds, as it did before
 /// `run` validated, so it only prints. So does an `ids` `element_type` that
 /// holds no key, or only some: a document whose `ids` array is empty, or
-/// holds only keys that fit, indexes as before. So does a root table without a
-/// single-column primary key: its live changes are still indexed, so refusing
-/// would stop a deployment that runs.
+/// holds only keys that fit, indexes as before. So does a `[]` column without
+/// `array: true`. So does a root table without a single-column primary key:
+/// its live changes are still indexed, so refusing would stop a deployment
+/// that runs. Each of these is still an error `check` fails on.
 fn stops_the_start(kind: DiagnosticKind) -> bool {
     match kind {
         DiagnosticKind::UnknownTable
@@ -605,17 +606,17 @@ mod tests {
     }
 
     #[test]
-    fn an_ids_element_type_that_holds_only_some_keys_warns_and_starts() {
+    fn an_ids_element_type_that_holds_only_some_keys_is_an_error_and_starts() {
         let printed = starts(DiagnosticKind::IdsElementLossy);
-        assert!(printed.contains("[warning]"), "{printed}");
-        assert!(!printed.contains("starting anyway"), "{printed}");
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
-    fn an_undeclared_array_column_warns_and_starts() {
+    fn an_undeclared_array_column_is_an_error_and_starts() {
         let printed = starts(DiagnosticKind::UndeclaredArrayColumn);
-        assert!(printed.contains("[warning]"), "{printed}");
-        assert!(!printed.contains("starting anyway"), "{printed}");
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
@@ -640,10 +641,10 @@ mod tests {
     }
 
     #[test]
-    fn a_nullability_warning_prints_and_starts() {
+    fn a_nullability_error_prints_and_starts() {
         let printed = starts(DiagnosticKind::Nullability);
-        assert!(printed.contains("[warning]"), "{printed}");
-        assert!(!printed.contains("starting anyway"), "{printed}");
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
@@ -828,7 +829,7 @@ mod tests {
     #[test]
     fn one_refusing_kind_among_others_refuses_and_prints_them_all() {
         let (result, printed) = verdict(&[
-            diagnostic(DiagnosticKind::Nullability),
+            diagnostic(DiagnosticKind::IgnoredPrimaryKey),
             diagnostic(DiagnosticKind::TypeMismatch),
             diagnostic(DiagnosticKind::UnknownColumn),
         ]);

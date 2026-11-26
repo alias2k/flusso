@@ -2354,8 +2354,9 @@ async fn a_check_the_role_may_not_run_is_reported_as_skipped() {
 /// An `ids` aggregate's `element_type` against the related table's key type
 /// (issue #299). OpenSearch maps the array as the element type: one that can
 /// hold no value of the key's type rejects every document collecting a key,
-/// so it is an error; one that holds only some, or changes them, is a
-/// warning; one that holds them all is not reported.
+/// so it is an error; one that holds only some, or changes them, is an error
+/// too, since the index then holds other ids than the table (issue #485); one
+/// that holds them all is not reported.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn validation_checks_an_ids_element_type_against_the_related_key() {
@@ -2422,11 +2423,13 @@ async fn validation_checks_an_ids_element_type_against_the_related_key() {
         format!(
             "`element_type` `{element}` holds only some `{key}` keys of `{table}`: OpenSearch \
              rejects a document that collects another, or stores the key altered (a fraction \
-             truncated), so two keys can become equal"
+             truncated), so two keys can become equal{LOSSY_FIX}"
         )
     };
     let changes = |element: &str, key: &str, table: &str, how: &str| {
-        format!("`element_type` `{element}` changes the `{key}` keys of `{table}`: {how}")
+        format!(
+            "`element_type` `{element}` changes the `{key}` keys of `{table}`: {how}{LOSSY_FIX}"
+        )
     };
     assert_eq!(
         found,
@@ -2479,6 +2482,10 @@ async fn validation_checks_an_ids_element_type_against_the_related_key() {
         ]
     );
 }
+
+/// How an `ids_element_lossy` message ends: what is wrong, and the fix.
+const LOSSY_FIX: &str = "; the index holds other ids than the table: declare an `element_type` \
+                         that holds every key (`keyword` takes any key as its text)";
 
 /// A document keyed as a live change carries a value of a type the WAL
 /// decoder leaves as text.

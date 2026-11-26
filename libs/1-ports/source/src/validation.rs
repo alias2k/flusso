@@ -17,9 +17,12 @@
 //! once per relation, and the columns on it are not looked up.
 //!
 //! Every [`Diagnostic`] carries a [`DiagnosticKind`], which fixes its
-//! [`Severity`]. The kind says whether the document can be built as written:
-//! an unknown table or column, or a `soft_delete` marker that reads nothing,
-//! cannot; a type, numeric or nullability disagreement still builds. A join's
+//! [`Severity`]. An index that starting flusso does not make work is an
+//! error, whatever the cause: an unknown table or column, or a `soft_delete`
+//! marker that reads nothing (no document builds as written), and an index
+//! that does not hold what its schema says, such as a `[]` column without
+//! `array: true` or a `required` field over a nullable column. Whether an
+//! error stops `flusso run` is the caller's decision, by kind. A join's
 //! `primary_key` that names no column is only a warning
 //! ([`DiagnosticKind::IgnoredPrimaryKey`]): relations are keyed by the table's
 //! own primary key, which every relation table must have, on one column
@@ -241,11 +244,13 @@ pub trait Catalog: Send + Sync {
 /// How serious a [`Diagnostic`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
-    /// The declared schema and the database disagree in a way that will produce
-    /// a wrong or rejected mapping.
+    /// Starting flusso does not give a working index: documents fail to
+    /// build or are rejected, or the index does not hold what its schema
+    /// says (a list where it says one value, a null where it says never).
     Error,
-    /// A softer mismatch worth surfacing (e.g. a column declared non-null that
-    /// the database allows to be null).
+    /// Worth knowing, but the index is correct as far as is known (e.g. a
+    /// join `primary_key` that is ignored, or a check the store refused to
+    /// run).
     Warning,
 }
 
@@ -265,7 +270,8 @@ pub enum DiagnosticKind {
     TypeMismatch,
     /// A column an aggregate expression or a geo point reads is not numeric.
     NotNumeric,
-    /// A field declared non-null (`required`) over a column that allows null.
+    /// A field declared non-null (`required`) over a column that allows null:
+    /// a document can hold null where the schema says it never does.
     Nullability,
     /// A join's `primary_key` names no column. Nothing builds on it: the join
     /// is keyed by the table's own primary key.
@@ -294,8 +300,9 @@ pub enum DiagnosticKind {
     /// A field declares `array: true` over a column that holds no array:
     /// neither a `[]` type nor `json`/`jsonb`.
     NotAnArrayColumn,
-    /// A field over a `[]` column does not declare `array: true`. It indexes
-    /// as before, but the query side cannot read it back as an array.
+    /// A field over a `[]` column does not declare `array: true`: the schema
+    /// says one value while the index holds a list, so a consumer reading by
+    /// the schema fails on every document holding one.
     UndeclaredArrayColumn,
     /// A link column and the key it names are of types the store can't
     /// compare (e.g. a `text` foreign key against a `uuid` key): the document
@@ -308,8 +315,8 @@ pub enum DiagnosticKind {
     /// An `ids` aggregate's `element_type` holds only some values of the
     /// related table's key type (e.g. `integer` over a `bigint` key: another
     /// is rejected, or stored altered), or changes them (e.g. `date` over an
-    /// integer key, read as epoch milliseconds). Values that fit index as
-    /// before.
+    /// integer key, read as epoch milliseconds): the index holds other ids
+    /// than the table.
     IdsElementLossy,
     /// Two fields at one level of the document share a name (as
     /// [`FieldName`] reads it: trimmed, case kept). The index maps the last
@@ -370,11 +377,11 @@ impl DiagnosticKind {
             | Self::IdsElementMismatch
             | Self::DuplicateFieldNameFailsToBuild
             | Self::DuplicateFieldNameRefused
-            | Self::TimeOfDayAsDate => Severity::Error,
-            Self::Nullability
-            | Self::IgnoredPrimaryKey
+            | Self::TimeOfDayAsDate
+            | Self::Nullability
             | Self::UndeclaredArrayColumn
-            | Self::IdsElementLossy
+            | Self::IdsElementLossy => Severity::Error,
+            Self::IgnoredPrimaryKey
             | Self::DuplicateFieldName
             | Self::TimestampFormat
             | Self::CheckSkipped => Severity::Warning,
@@ -496,6 +503,11 @@ impl Diagnostic {
             .join(".")
     }
 }
+
+/// How an [`DiagnosticKind::IdsElementLossy`] message ends: what is wrong,
+/// and the fix.
+const LOSSY_FIX: &str = "; the index holds other ids than the table: declare an `element_type` \
+                         that holds every key (`keyword` takes any key as its text)";
 
 /// How many indexes [`validate_indexes`] checks at once. Each check is a run
 /// of small catalog lookups one after another; overlapping a few indexes hides
@@ -1363,14 +1375,15 @@ impl Checker<'_> {
                 format!(
                     "`element_type` `{element_name}` holds only some `{sql_type}` keys of \
                      `{table}`: OpenSearch rejects a document that collects another, or stores \
-                     the key altered (a fraction truncated), so two keys can become equal"
+                     the key altered (a fraction truncated), so two keys can become \
+                     equal{LOSSY_FIX}"
                 ),
             ),
             Fit::Changes(how) => self.report(
                 DiagnosticKind::IdsElementLossy,
                 format!(
                     "`element_type` `{element_name}` changes the `{sql_type}` keys of \
-                     `{table}`: {how}"
+                     `{table}`: {how}{LOSSY_FIX}"
                 ),
             ),
         }
@@ -1634,14 +1647,19 @@ impl Checker<'_> {
                         "map"
                     }
                 ),
-                _ => "declare `array: true` so the query side reads it back as one: that changes \
-                      the index's content hash, so the index is rebuilt, and turns on the array \
-                      clean-up (null elements dropped, a lone value wrapped)"
+                _ => "declare `array: true` (that changes the index's content hash, so the \
+                      index is rebuilt, and turns on the array clean-up: null elements dropped, \
+                      a lone value wrapped)"
                     .to_owned(),
             };
             self.report(
                 DiagnosticKind::UndeclaredArrayColumn,
-                format!("the column's database type {database_type} is an array; {advice}"),
+                format!(
+                    "the column's database type {database_type} is an array, but the field does \
+                     not declare `array: true`: the schema says one value while the index holds \
+                     a list, so a consumer reading by the schema fails on every document holding \
+                     one; {advice}"
+                ),
             );
         }
 
@@ -1705,7 +1723,11 @@ impl Checker<'_> {
         if !column.nullable && info.nullable && !forced_non_null {
             self.report(
                 DiagnosticKind::Nullability,
-                "declared non-null (`required`) but the database column allows null".to_owned(),
+                "declared non-null (`required: true`) but the database column allows null: a \
+                 document can hold null where the schema says it never does, so a consumer \
+                 reading by the schema fails on it; declare `required: false`, or make the \
+                 column `NOT NULL`, or give the field a `default`"
+                    .to_owned(),
             );
         }
         Ok(())
@@ -2145,8 +2167,29 @@ mod tests {
         assert_eq!(DiagnosticKind::NotAnArrayColumn.severity(), Severity::Error);
         assert_eq!(
             DiagnosticKind::UndeclaredArrayColumn.severity(),
-            Severity::Warning
+            Severity::Error
         );
+    }
+
+    /// An index that does not hold what its schema says is an error (issue
+    /// #485): a list where the schema says one value, a null where it says
+    /// never, other ids than the table's. A finding that leaves the index
+    /// correct, or knows nothing either way, stays a warning.
+    #[test]
+    fn an_index_that_differs_from_its_schema_is_an_error() {
+        for kind in [
+            DiagnosticKind::UndeclaredArrayColumn,
+            DiagnosticKind::Nullability,
+            DiagnosticKind::IdsElementLossy,
+        ] {
+            assert_eq!(kind.severity(), Severity::Error, "{kind:?}");
+        }
+        for kind in [
+            DiagnosticKind::IgnoredPrimaryKey,
+            DiagnosticKind::CheckSkipped,
+        ] {
+            assert_eq!(kind.severity(), Severity::Warning, "{kind:?}");
+        }
     }
 
     /// A domain is judged by the type it resolves to: one over `text[]` or
@@ -2192,8 +2235,16 @@ mod tests {
 
         assert!(
             finding.message.contains(
-                "`tags_domain` (a domain over `text[]`) is an array; declare `array: true`"
+                "`tags_domain` (a domain over `text[]`) is an array, but the field does not \
+                 declare `array: true`: the schema says one value while the index holds a list"
             ),
+            "{}",
+            finding.message
+        );
+        assert!(
+            finding
+                .message
+                .contains("declare `array: true` (that changes"),
             "{}",
             finding.message
         );
@@ -2244,8 +2295,24 @@ mod tests {
             IndexName::try_new("places").unwrap(),
             schema,
         )]));
-        let found: Vec<_> = futures::executor::block_on(validate_indexes(&spec, &Places))
-            .unwrap()
+        let diagnostics = futures::executor::block_on(validate_indexes(&spec, &Places)).unwrap();
+        let nullability = diagnostics
+            .iter()
+            .find(|d| d.kind == DiagnosticKind::Nullability)
+            .unwrap();
+        assert!(
+            nullability
+                .message
+                .contains("a document can hold null where the schema says it never does"),
+            "{}",
+            nullability.message
+        );
+        assert!(
+            nullability.message.contains("declare `required: false`"),
+            "{}",
+            nullability.message
+        );
+        let found: Vec<_> = diagnostics
             .into_iter()
             .map(|d| (d.dotted_path(), d.kind, d.severity))
             .collect();
@@ -2254,11 +2321,7 @@ mod tests {
             found,
             vec![
                 (path("label"), DiagnosticKind::TypeMismatch, Severity::Error),
-                (
-                    path("label"),
-                    DiagnosticKind::Nullability,
-                    Severity::Warning
-                ),
+                (path("label"), DiagnosticKind::Nullability, Severity::Error),
                 (path("email"), DiagnosticKind::TypeMismatch, Severity::Error),
                 (path("at"), DiagnosticKind::NotNumeric, Severity::Error),
             ]
