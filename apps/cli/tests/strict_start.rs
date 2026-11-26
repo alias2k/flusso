@@ -2,8 +2,9 @@
 //! Postgres: an error `flusso check` fails on but that does not stop a plain
 //! start (a `text[]` column read without `array: true`) refuses a strict
 //! start, from the config and from a `--locked` lock alike, with `check`'s
-//! report; a plain start goes on, logs the error at `error` with its index,
-//! kind and field, and sets `flusso.index.schema_errors`.
+//! report, before anything is staged (no slot, no publication, the replica
+//! identity untouched); a plain start goes on, logs the error at `error` with
+//! its index, kind and field, and sets `flusso.index.schema_errors`.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -27,7 +28,7 @@ INSERT INTO t VALUES (1, ARRAY['a', 'b'])";
 #[ignore = "requires docker"]
 async fn strict_refuses_an_error_a_plain_start_goes_on_with() {
     let (_postgres, url) = common::start_postgres(SETUP).await;
-    let dir = project(&url);
+    let dir = project(&url, "strict");
 
     let checked = flusso(&dir, &["check", "--config", "flusso.toml"], &[]);
     assert!(!checked.status.success(), "{}", text(&checked));
@@ -120,10 +121,11 @@ async fn strict_refuses_an_error_a_plain_start_goes_on_with() {
 }
 
 /// A project of one index over `t`, reading `tags` as one keyword, writing
-/// to stdout, with its lock built.
-fn project(url: &str) -> PathBuf {
+/// to stdout through slot `s_<name>` and publication `p_<name>`, with its
+/// lock built.
+fn project(url: &str, name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("flusso-strict-{}", std::process::id()));
+        .join(format!("flusso-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("t.schema.yml"),
@@ -133,8 +135,8 @@ fn project(url: &str) -> PathBuf {
     std::fs::write(
         dir.join("flusso.toml"),
         format!(
-            "[source]\ntype = \"postgres\"\nconnection_url = \"{url}\"\nslot = \"s_strict\"\n\
-             publication = \"p_strict\"\n\n[sinks.out]\ntype = \"stdout\"\n\n[[index]]\n\
+            "[source]\ntype = \"postgres\"\nconnection_url = \"{url}\"\nslot = \"s_{name}\"\n\
+             publication = \"p_{name}\"\n\n[sinks.out]\ntype = \"stdout\"\n\n[[index]]\n\
              name = \"t\"\nschema = \"t.schema.yml\"\nenabled = true\n"
         ),
     )
@@ -142,6 +144,48 @@ fn project(url: &str) -> PathBuf {
     let built = flusso(&dir, &["build", "--config", "flusso.toml"], &[]);
     assert!(built.status.success(), "{}", text(&built));
     dir
+}
+
+/// A strict refusal comes before anything is staged: no replication slot,
+/// no publication, and the table keeps its default replica identity, from a
+/// config and from a `--locked` lock alike.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_strict_refusal_creates_no_slot_or_publication() {
+    let (_postgres, url) = common::start_postgres(SETUP).await;
+    let dir = project(&url, "untouched");
+    for args in [
+        &["--config", "flusso.toml", "--strict"][..],
+        &["--locked", "--lock", "flusso.lock", "--strict"][..],
+    ] {
+        let ran = run(&dir, args, &[]).await;
+        assert!(!ran.status.success(), "{args:?}: {}", text(&ran));
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&url)
+            .await
+            .unwrap();
+        let slots: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 's_untouched'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let publications: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_publication WHERE pubname = 'p_untouched'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let identity: String =
+            sqlx::query_scalar("SELECT relreplident::text FROM pg_class WHERE oid = 't'::regclass")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(slots, 0, "{args:?}: a slot was created");
+        assert_eq!(publications, 0, "{args:?}: a publication was created");
+        assert_eq!(identity, "d", "{args:?}: the replica identity was changed");
+        pool.close().await;
+    }
 }
 
 /// `flusso run` with `args`, expected to exit on its own.
