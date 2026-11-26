@@ -3079,76 +3079,33 @@ impl<'a> Run<'a> {
                 }
                 Err(error) => return Err(failed(error)),
             };
-            let mut found = found;
-            // B-2: a rebuild another process began is put back to detached
-            // before its lane drops anything, or a later start would resume
-            // its walk over the changes this one drops. Whose it is, the
-            // attempts say: one this process runs counts the attempts it
-            // began or took over, and a rebuild begun since counts more. The
-            // demotion is conditional on what it read; what the records say
-            // after it is decided again.
-            let anothers = |found: &sink::Detachment| matches!(super::AtStaging::of(found), super::AtStaging::Rebuilding(attempts) if runs != Some(attempts));
-            if anothers(&found) {
-                self.engine
-                    .sink
-                    .demote(mapping, !self.engine.options.backfill)
-                    .await
-                    .map_err(failed)?;
-                tracing::warn!(%index, sink = %self.engine.name, "read again once the slot is held, the records say another process began a rebuild: put back to detached before anything of it is dropped (O29)");
-                found = self.engine.sink.detachment(mapping).await.map_err(failed)?;
-                if anothers(&found) {
-                    return Err(failed(sink::SinkError::Write(format!(
-                        "{index}: the records still say another process rebuilds it after the demotion"
-                    ))));
-                }
-            }
-            let through = found.through.clone();
-            match super::AtStaging::of(&found) {
-                super::AtStaging::AsBefore | super::AtStaging::Finished(_) => {
-                    if !detached && !found.gaps.is_empty() {
+            // The one decision staging takes too (`act_on_records`): another
+            // process's rebuild is put back to detached before the lane drops
+            // anything (B-2); a failed demotion fails the run.
+            match self
+                .engine
+                .act_on_records(mapping, found, false)
+                .await
+                .map_err(failed)?
+            {
+                super::Acted::AsBefore { gaps } => {
+                    if !detached && !gaps.is_empty() {
                         self.engine
-                            .known_gaps(mapping, found.gaps, true)
+                            .known_gaps(mapping, gaps, true)
                             .await
                             .map_err(failed)?;
                     }
                 }
-                // Demoted above unless this process runs it.
-                super::AtStaging::Rebuilding(_) => {}
-                // Held detached, the records say so too; a rebuild this
-                // process began was put back to detached by the process that
-                // held the slot meanwhile: it is dropped, and no attach of it
-                // opens the lane (B-1).
-                super::AtStaging::Detached(_) if detached => {
-                    if rebuilding {
-                        tracing::warn!(%index, sink = %self.engine.name, "read again once the slot is held, the rebuild this process began was put back to detached meanwhile: it is dropped, the lane stays detached (O29)");
+                super::Acted::Detached { why, through } => {
+                    tracing::warn!(%index, sink = %self.engine.name, %why, "read again once the slot is held, the records say the index is detached: taken as detached before anything of it is written (O29)");
+                    self.detached(lane, why, through).await?;
+                }
+                super::Acted::KeepDetached => {
+                    if rebuilding && self.engine.lane_state(&key).rebuilding.is_none() {
                         self.drop_rebuild(lane);
                     }
                 }
-                super::AtStaging::DetachAgain if detached => {}
-                super::AtStaging::Detached(why) => {
-                    tracing::warn!(%index, sink = %self.engine.name, "read again once the slot is held, the records say the index is detached: taken as detached before anything of it is written (O29)");
-                    self.detached(lane, why, through).await?;
-                }
-                super::AtStaging::DetachAgain => {
-                    let why = "read again once the slot is held, the detach records can't be acted \
-                               on as they stand: detached again (O29, O30)";
-                    let detach = sink::Detach::new(why)
-                        .live_only(!self.engine.options.backfill)
-                        .through(through.clone());
-                    if self
-                        .engine
-                        .sink
-                        .detach(mapping, &detach)
-                        .await
-                        .map_err(failed)?
-                        != sink::Recorded::Kept
-                    {
-                        return Err(failed(sink::SinkError::Write(format!(
-                            "{index} reads detached, and the sink keeps no record of a detach again"
-                        ))));
-                    }
-                    self.detached(lane, why.to_owned(), through).await?;
-                }
+                super::Acted::Ours | super::Acted::TookOver(_) => {}
             }
             // The lane's state now follows its records: its read counts.
             self.engine.rereads.read(&key, read_at);

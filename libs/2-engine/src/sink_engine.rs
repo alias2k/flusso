@@ -487,6 +487,116 @@ impl SinkEngine {
     /// at the detach), and the record deleted: the commit point, after which
     /// no staging detaches the lane again (S2). The records saying otherwise:
     /// `Err` with why, naming what works; nothing changed.
+    /// Act on what `index`'s detach records say (`found`, just read): the
+    /// one place staging and the read again decide from them ([`decide`]).
+    /// Another process's rebuild is put back to detached (conditional) and
+    /// the records read and decided again; one still there after it fails.
+    /// `start`: no stream was opened yet (a process's first staging).
+    async fn act_on_records(
+        &self,
+        mapping: &IndexMapping,
+        mut found: sink::Detachment,
+        start: bool,
+    ) -> sink::Result<Acted> {
+        let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
+        for round in 0..2 {
+            let through = found.through.clone();
+            let written_rebuildable = matches!(
+                found.record,
+                Some(sink::DetachRecord::Detached { live_only: false })
+            );
+            let state = self.lane_state(&lane);
+            let decided = decide(
+                &AtStaging::of(&found),
+                written_rebuildable,
+                &state,
+                self.options.backfill,
+                self.skip_backfill,
+                start,
+            );
+            match decided {
+                Decision::Demote { live_only } if round == 0 => {
+                    self.sink.demote(mapping, live_only).await?;
+                    tracing::warn!(%lane, skip_backfill = self.skip_backfill, "the records say another process began a rebuild: put back to detached before anything of the lane is dropped (O29)");
+                    found = self.sink.detachment(mapping).await?;
+                }
+                Decision::Demote { .. } => {
+                    return Err(sink::SinkError::Write(format!(
+                        "{}: the records still say another process rebuilds it after the demotion",
+                        mapping.index
+                    )));
+                }
+                Decision::AsBefore => {
+                    self.read_detachment(&mapping.index, found.clone());
+                    return Ok(Acted::AsBefore { gaps: found.gaps });
+                }
+                Decision::Forget(version) => {
+                    self.sink.forget_detachment(mapping, &version).await?;
+                    tracing::info!(%lane, "a detach record outlived the rebuild that finished it; deleted, and the index is staged as before");
+                    let gaps = found.gaps.clone();
+                    self.read_detachment(&mapping.index, found);
+                    return Ok(Acted::AsBefore { gaps });
+                }
+                Decision::Detach {
+                    why,
+                    live_only_first,
+                } => {
+                    if live_only_first {
+                        self.sink.demote(mapping, true).await?;
+                        tracing::warn!(%lane, "a detach record written while this sink could rebuild is put back to detached, live only: flusso reattach --accept-gap applies");
+                    }
+                    self.read_detachment(&mapping.index, found);
+                    return Ok(Acted::Detached { why, through });
+                }
+                Decision::KeepDetached { drop_ours } => {
+                    if drop_ours {
+                        let mut state = state;
+                        tracing::warn!(%lane, attempts = ?state.rebuilding, "the records no longer show the rebuild this process began: it is dropped, the lane stays detached (O29)");
+                        state.rebuilding = None;
+                        state.rebuild_target = None;
+                        state.attaching = None;
+                        self.store_lane(&lane, &state, true);
+                    }
+                    self.read_detachment(&mapping.index, found);
+                    return Ok(Acted::KeepDetached);
+                }
+                Decision::Ours => {
+                    self.read_detachment(&mapping.index, found);
+                    return Ok(Acted::Ours);
+                }
+                Decision::TakeOver(attempts) => {
+                    self.read_detachment(&mapping.index, found);
+                    return Ok(Acted::TookOver(attempts));
+                }
+                Decision::DetachAgain => {
+                    let why = "the detach records can't be acted on as they stand (detached or \
+                               rebuilding beside a seed marker on the generation reads see, or a \
+                               record this version can't read); detached again";
+                    let through = self.place(&lane).or(through);
+                    let detach = sink::Detach::new(why)
+                        .live_only(!self.options.backfill)
+                        .through(through.clone());
+                    if self.sink.detach(mapping, &detach).await? != sink::Recorded::Kept {
+                        return Err(sink::SinkError::Write(format!(
+                            "{} reads detached, and the sink keeps no record of a detach again; \
+                             it is not staged attached over the changes the detach dropped",
+                            mapping.index
+                        )));
+                    }
+                    self.read_detachment(&mapping.index, found);
+                    return Ok(Acted::Detached {
+                        why: why.to_owned(),
+                        through,
+                    });
+                }
+            }
+        }
+        Err(sink::SinkError::Write(format!(
+            "{}: the records kept changing while they were acted on",
+            mapping.index
+        )))
+    }
+
     pub(super) async fn reattach(
         &self,
         mapping: &IndexMapping,
@@ -1535,99 +1645,30 @@ impl SinkEngine {
         // Before anything else touches the index (ADR 0012 stage 10): a
         // failed read fails the step, never reads as "no record".
         let detachment = self.sink.detachment(mapping).await?;
-        let found = AtStaging::of(&detachment);
-        let through = detachment.through.clone();
-        let gaps = detachment.gaps.clone();
-        let written_rebuildable = matches!(
-            detachment.record,
-            Some(sink::DetachRecord::Detached { live_only: false })
-        );
-        self.read_detachment(&mapping.index, detachment);
-        // Inside a process the lane's own state decides (R8, H1): a lane
-        // held detached stays so whatever the records now say, and is
-        // neither ensured nor asked for. A rebuild it waits to attach for
-        // that the records no longer show (another process put it back to
-        // detached, or began its own) is dropped: its attach would open the
-        // lane onto a generation nobody rebuilds (O29).
         let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
-        let mut state = self.lane_state(&lane);
-        if state.health.is_detached() {
-            if let Some(ours) = state.rebuilding
-                && found != AtStaging::Rebuilding(ours)
-            {
-                tracing::warn!(%lane, attempts = ours, "the records no longer show the rebuild this process began: it is dropped, the lane stays detached (O29)");
-                state.rebuilding = None;
-                state.rebuild_target = None;
-                state.attaching = None;
-                self.store_lane(&lane, &state, true);
-            }
-            return Ok(Staged::Detached);
-        }
-        match found {
-            AtStaging::AsBefore => {
+        let start = self.rereads.opened() == 0;
+        match self.act_on_records(mapping, detachment, start).await? {
+            Acted::AsBefore { gaps } => {
                 if !gaps.is_empty() {
                     self.known_gaps(mapping, gaps, false).await?;
                 }
             }
-            AtStaging::Detached(why) => {
-                // R14 for a detached record: written while the sink could
-                // rebuild, found on one that can't, it is put back live only,
-                // its marker on the generation reads see, so a reattach
-                // applies (review of step 4, S4(b)).
-                if written_rebuildable && !self.options.backfill {
-                    self.sink.demote(mapping, true).await?;
-                    tracing::warn!(index = %mapping.index, sink = %self.name, "a detach record written while this sink could rebuild is put back to detached, live only: flusso reattach --accept-gap applies");
-                }
+            Acted::Detached { why, through } => {
                 return Ok(self.staged_detached(&mapping.index, why, through));
             }
-            AtStaging::Rebuilding(attempts) => {
-                // O26 demotes at a process's start only: a rebuild this
-                // process runs survives its sink's re-staging (review of
-                // step 4, S1). Whose it is, the attempts say.
-                let running_here = state.rebuilding == Some(attempts);
-                if !running_here && (!self.options.backfill || self.skip_backfill) {
-                    // O26 / R14: no backfill to finish it in this process.
-                    self.sink.demote(mapping, !self.options.backfill).await?;
-                    tracing::warn!(index = %mapping.index, sink = %self.name, skip_backfill = self.skip_backfill, "a rebuild under way is put back to detached: this start backfills nothing");
-                    return Ok(self.staged_detached(
-                        &mapping.index,
-                        "a rebuild under way, put back to detached at a start with no backfill"
-                            .to_owned(),
-                        through,
-                    ));
-                }
-                if !running_here {
-                    // O2: reads see the old generation until the seed; the
-                    // fence hears it before the backfill is asked (review of
-                    // step 4, m1).
-                    self.observer
-                        .on_index_rebuilding(&self.name, &mapping.index);
-                    state.rebuilding = Some(attempts);
-                    tracing::info!(%lane, attempts, "a rebuild under way: the lane is attached and its walk resumes");
-                    self.store_lane(&lane, &state, false);
-                }
-            }
-            AtStaging::Finished(version) => {
-                self.sink.forget_detachment(mapping, &version).await?;
-                tracing::info!(index = %mapping.index, sink = %self.name, "a detach record outlived the rebuild that finished it; deleted, and the index is staged as before");
-            }
-            AtStaging::DetachAgain => {
-                let why = "the detach records can't be acted on as they stand (detached or \
-                           rebuilding beside a seed marker on the generation reads see, or a \
-                           record this version can't read); detached again at staging";
-                let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
-                let through = self.place(&lane).or(through);
-                let detach = sink::Detach::new(why)
-                    .live_only(!self.options.backfill)
-                    .through(through.clone());
-                if self.sink.detach(mapping, &detach).await? != sink::Recorded::Kept {
-                    return Err(sink::SinkError::Write(format!(
-                        "{} reads detached, and the sink keeps no record of a detach again; \
-                         it is not staged attached over the changes the detach dropped",
-                        mapping.index
-                    )));
-                }
-                return Ok(self.staged_detached(&mapping.index, why.to_owned(), through));
+            Acted::KeepDetached => return Ok(Staged::Detached),
+            Acted::Ours if self.lane_health(&lane).is_detached() => return Ok(Staged::Detached),
+            Acted::Ours => {}
+            Acted::TookOver(attempts) => {
+                // O2: reads see the old generation until the seed; the fence
+                // hears it before the backfill is asked (review of step 4,
+                // m1).
+                self.observer
+                    .on_index_rebuilding(&self.name, &mapping.index);
+                let mut state = self.lane_state(&lane);
+                state.rebuilding = Some(attempts);
+                tracing::info!(%lane, attempts, "a rebuild under way: the lane is attached and its walk resumes");
+                self.store_lane(&lane, &state, false);
             }
         }
         let (ask_seeded, restaged) = match step {
@@ -2179,6 +2220,91 @@ impl AtStaging {
             }),
         }
     }
+}
+
+/// What this process does about an index, from what its detach records say
+/// and what it holds of the lane (ADR 0012 stage 10, O29): the one decision
+/// staging and the read again both take, so the two can't drift (the fifth
+/// re-check, B-3). Re-run after every opening (the read again).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Decision {
+    /// Nothing recorded against the lane: as before.
+    AsBefore,
+    /// A rebuild seeded a newer generation and its record outlived it:
+    /// deleted, on the version read.
+    Forget(sink::RecordVersion),
+    /// Detached by the records. `live_only_first`: written while the sink
+    /// could rebuild, found on one that can't, put back live only first
+    /// (R14).
+    Detach { why: String, live_only_first: bool },
+    /// The lane is held detached here and stays so. `drop_ours`: the rebuild
+    /// it waits to attach for is not the one the records show.
+    KeepDetached { drop_ours: bool },
+    /// The rebuild this process began or took over (the attempts match).
+    Ours,
+    /// Another process's rebuild, taken over: only at a start (no stream
+    /// opened yet), its lane not held detached, with backfill to finish it.
+    TakeOver(u64),
+    /// Another process's rebuild otherwise: put back to detached before the
+    /// lane drops anything (B-2), then decided again.
+    Demote { live_only: bool },
+    /// The records can't be acted on as they stand (O30): detached again.
+    DetachAgain,
+}
+
+/// [`Decision`] from what the records say (`found`, and whether a detached
+/// record was written while the sink could rebuild) and the lane this
+/// process holds.
+fn decide(
+    found: &AtStaging,
+    written_rebuildable: bool,
+    lane: &LaneState,
+    backfill: bool,
+    skip_backfill: bool,
+    start: bool,
+) -> Decision {
+    let held_detached = lane.health.is_detached();
+    match found {
+        AtStaging::Rebuilding(attempts) if lane.rebuilding == Some(*attempts) => Decision::Ours,
+        AtStaging::Rebuilding(attempts)
+            if start && !held_detached && backfill && !skip_backfill =>
+        {
+            Decision::TakeOver(*attempts)
+        }
+        AtStaging::Rebuilding(_) => Decision::Demote {
+            live_only: !backfill,
+        },
+        _ if held_detached => Decision::KeepDetached {
+            drop_ours: lane.rebuilding.is_some(),
+        },
+        AtStaging::AsBefore => Decision::AsBefore,
+        AtStaging::Finished(version) => Decision::Forget(version.clone()),
+        AtStaging::Detached(why) => Decision::Detach {
+            why: why.clone(),
+            live_only_first: written_rebuildable && !backfill,
+        },
+        AtStaging::DetachAgain => Decision::DetachAgain,
+    }
+}
+
+/// What [`SinkEngine::act_on_records`] did, for its caller to apply to the
+/// lane.
+#[derive(Debug)]
+enum Acted {
+    /// As before, with the gaps the records keep.
+    AsBefore { gaps: Vec<sink::Gap> },
+    /// The lane is to be taken as detached, for `why`, frozen at `through`.
+    Detached {
+        why: String,
+        through: Option<String>,
+    },
+    /// The lane is held detached and stays so (any rebuild of this process
+    /// the records no longer show is dropped).
+    KeepDetached,
+    /// The rebuild this process runs.
+    Ours,
+    /// Another process's rebuild, taken over under its attempts.
+    TookOver(u64),
 }
 
 /// A staging step of `index` failed with `error`.
