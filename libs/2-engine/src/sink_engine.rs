@@ -1025,18 +1025,20 @@ impl SinkEngine {
     /// go on (#471, `ensure_per_index`).
     #[tracing::instrument(name = "sink.stage", skip_all, fields(sink = %self.name, ?continuity))]
     pub async fn stage(&self, continuity: Continuity) -> Result<()> {
-        // A staging reads every index's records: once the slot is held, it is
-        // the read O29 asks for.
+        // A staging reads each index's records in its step, which counts that
+        // lane's read (O29, B1''').
         let read_at = self.rereads.read_begins();
         self.stage_inner(continuity).await?;
         self.records_read(read_at);
         Ok(())
     }
 
-    /// Every index's records were read, the read beginning at `read_at`.
+    /// A staging or a read again began at `read_at` and is done: the run
+    /// needn't read again until the next opening. Each lane read counted
+    /// itself (`Rereads::read`); one left out (restaging) is read by its own
+    /// restage path.
     pub(super) fn records_read(&self, read_at: u64) {
         self.read_at.fetch_max(read_at, Ordering::AcqRel);
-        self.rereads.read(&self.name, read_at);
     }
 
     /// Whether the slot opened since the last full read of the records.
@@ -1443,6 +1445,18 @@ impl SinkEngine {
     /// is cut is decided right after `ensure_index`, before any step that can
     /// fail.
     async fn step(&self, step: Step, mapping: &IndexMapping) -> sink::Result<Staged> {
+        // O29, B1''': the step reads the index's records first; only a step
+        // that got through counts as its lane's read, for when it began.
+        let read_at = self.rereads.read_begins();
+        let staged = self.step_inner(step, mapping).await?;
+        self.rereads.read(
+            &LaneKey::new(mapping.index.clone(), self.name.clone()),
+            read_at,
+        );
+        Ok(staged)
+    }
+
+    async fn step_inner(&self, step: Step, mapping: &IndexMapping) -> sink::Result<Staged> {
         // Before anything else touches the index (ADR 0012 stage 10): a
         // failed read fails the step, never reads as "no record".
         let detachment = self.sink.detachment(mapping).await?;

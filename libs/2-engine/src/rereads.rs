@@ -37,11 +37,14 @@
 //!
 //! ```
 //! use engine::Rereads;
-//! use kernel::SinkName;
+//! use stream::LaneKey;
 //!
 //! # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
 //! let rereads = Rereads::default();
-//! let primary = SinkName::try_new("primary").unwrap();
+//! let primary = LaneKey::new(
+//!     IndexName::try_new("users").unwrap(),
+//!     SinkName::try_new("primary").unwrap(),
+//! );
 //! assert!(rereads.current(&primary), "nothing opened yet");
 //! let read_at = rereads.read_begins();
 //! rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
@@ -61,8 +64,8 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use kernel::SinkName;
 use source::cdc::{ChangeCapture, Landed};
+use stream::LaneKey;
 
 /// How many times the live stream opened, and how far each sink read its
 /// detach records since. Shared by the ingest engine, the sink engines and
@@ -75,7 +78,7 @@ pub struct Rereads {
     held: AtomicU64,
     /// The stream of the last opening is open.
     holding: AtomicBool,
-    read: Mutex<BTreeMap<SinkName, u64>>,
+    read: Mutex<BTreeMap<LaneKey, u64>>,
     listeners: Mutex<Vec<RereadListener>>,
     /// The last opening that returned Ok, for sink engines to wake on: an
     /// unread lane vouches for nothing, so its read can't wait for traffic.
@@ -187,20 +190,22 @@ impl Rereads {
         self.read_begins() > read_at
     }
 
-    /// `sink` read every index's records, the read counting for `read_at`.
-    pub fn read(&self, sink: &SinkName, read_at: u64) {
+    /// `lane`'s records were read, the read counting for `read_at`. Reads
+    /// count per lane, never per sink: a sink whose read missed one index
+    /// leaves that lane unread (review of the third fix round, B1''').
+    pub fn read(&self, lane: &LaneKey, read_at: u64) {
         {
             let mut read = self.read.lock().unwrap_or_else(PoisonError::into_inner);
-            let at = read.entry(sink.clone()).or_default();
+            let at = read.entry(lane.clone()).or_default();
             *at = (*at).max(read_at);
         }
         self.tell(Reread::Read);
     }
 
-    /// Whether `sink` read its records since the last opening began, the
+    /// Whether `lane`'s records were read since the last opening began, the
     /// read begun once it returned. True before any opening: nothing
     /// vouches before then anyway.
-    pub fn current(&self, sink: &SinkName) -> bool {
+    pub fn current(&self, lane: &LaneKey) -> bool {
         let opened = self.opened.load(Ordering::Acquire);
         opened == 0
             || (self.read_begins() == opened
@@ -208,7 +213,7 @@ impl Rereads {
                     .read
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .get(sink)
+                    .get(lane)
                     .is_some_and(|at| *at >= opened))
     }
 }

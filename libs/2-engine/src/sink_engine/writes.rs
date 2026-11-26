@@ -3030,9 +3030,18 @@ impl<'a> Run<'a> {
             let Some(run) = self.lanes.get(lane) else {
                 continue;
             };
+            // A detached lane's state already answers (the fence's
+            // precedence); a restaging one is read by its restage path, so a
+            // bad index never fails the sink's run (#471). Neither is read
+            // here.
             if run.health.health.is_detached() {
+                self.engine.rereads.read(&run.key, read_at);
                 continue;
             }
+            if matches!(run.health.health, LaneHealth::Restaging { .. }) {
+                continue;
+            }
+            let key = run.key.clone();
             let rebuilding = run.health.rebuilding.is_some();
             let index = run.key.index.clone();
             let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
@@ -3082,6 +3091,8 @@ impl<'a> Run<'a> {
                     self.detached(lane, why.to_owned(), through).await?;
                 }
             }
+            // The lane's state now follows its records: its read counts.
+            self.engine.rereads.read(&key, read_at);
         }
         self.engine.records_read(read_at);
         Ok(())

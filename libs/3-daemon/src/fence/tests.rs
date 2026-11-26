@@ -1374,7 +1374,7 @@ async fn a_sink_that_has_not_read_its_records_since_the_slot_opened_vouches_for_
         fence.wait(&request("30", FenceLevel::Applied, None)).await,
         unserved("30", &[("users", "primary", Unserved::Starting)])
     );
-    rereads.read(&sink("primary"), rereads.read_begins());
+    rereads.read(&lane("primary"), rereads.read_begins());
     assert_eq!(
         fence.wait(&request("30", FenceLevel::Applied, None)).await,
         reached("30")
@@ -1398,7 +1398,7 @@ async fn a_read_of_the_records_during_a_wait_lets_it_through_at_once() {
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let started = Instant::now();
-    rereads.read(&sink("primary"), rereads.read_begins());
+    rereads.read(&lane("primary"), rereads.read_begins());
     assert_eq!(waiting.await.unwrap(), reached("20"));
     assert!(started.elapsed() < Duration::from_secs(1), "at once");
 }
@@ -1453,7 +1453,7 @@ async fn an_unread_lane_vouches_for_nothing_until_its_read() {
     let rereads = Arc::new(Rereads::default());
     let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
     opened(&rereads).await;
-    rereads.read(&sink("primary"), rereads.read_begins());
+    rereads.read(&lane("primary"), rereads.read_begins());
     let before = rig.source.emit(20);
     rig.route(before);
     rig.applied("primary", before);
@@ -1467,7 +1467,7 @@ async fn an_unread_lane_vouches_for_nothing_until_its_read() {
         unserved("20", &[("users", "primary", Unserved::Starting)]),
         "applied before the opening, still nothing until the read"
     );
-    rereads.read(&sink("primary"), rereads.read_begins());
+    rereads.read(&lane("primary"), rereads.read_begins());
     assert_eq!(
         fence.wait(&request("20", FenceLevel::Applied, None)).await,
         reached("20")
@@ -1551,7 +1551,7 @@ async fn a_wait_between_the_stream_answering_and_the_opening_vouches_nothing_new
     let rig = fence(&["primary"]);
     let rereads = Arc::new(Rereads::default());
     let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
-    rereads.read(&sink("primary"), rereads.read_begins());
+    rereads.read(&lane("primary"), rereads.read_begins());
     let (release, released) = tokio::sync::oneshot::channel::<()>();
     let opening = tokio::spawn({
         let rereads = Arc::clone(&rereads);
@@ -1579,7 +1579,7 @@ async fn a_wait_between_the_stream_answering_and_the_opening_vouches_nothing_new
 #[tokio::test(start_paused = true)]
 async fn a_read_begun_during_the_opening_does_not_count() {
     let rereads = Rereads::default();
-    let primary = sink("primary");
+    let primary = lane("primary");
     let mut during = None;
     rereads
         .open(async {
@@ -1701,7 +1701,7 @@ mod gate_property {
         rig.source.close();
         let rereads = Arc::new(Rereads::default());
         let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
-        let primary = sink("primary");
+        let primary = lane("primary");
         let mut model = Model::default();
         let mut horizon = 0u64;
         let mut began = None;
@@ -1878,5 +1878,35 @@ async fn a_failed_opening_before_the_read_keeps_what_the_first_froze() {
     assert_eq!(
         fence.wait(&request("40", FenceLevel::Applied, None)).await,
         unserved("50", &[("users", "primary", Unserved::Starting)])
+    );
+}
+
+/// The third re-check, item 1: reads count per lane. A lane whose records
+/// weren't read under the stream answers `starting`; its read sibling on the
+/// same sink vouches as usual, and a wait naming only the read lane passes.
+#[tokio::test(start_paused = true)]
+async fn an_unread_lane_never_holds_back_its_read_sibling() {
+    let rig = fence_over(&["orders", "users"], &["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    opened(&rereads).await;
+    let users = LaneKey::new(index("users"), sink("primary"));
+    let orders = LaneKey::new(index("orders"), sink("primary"));
+    rereads.read(&users, rereads.read_begins());
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied_on(&users, change);
+    rig.applied_on(&orders, change);
+    assert_eq!(
+        fence
+            .wait(&on_indexes("20", FenceLevel::Applied, &["users"]))
+            .await,
+        reached("20")
+    );
+    assert_eq!(
+        fence
+            .wait(&on_indexes("20", FenceLevel::Applied, &["orders"]))
+            .await,
+        unserved("20", &[("orders", "primary", Unserved::Starting)])
     );
 }

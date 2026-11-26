@@ -480,7 +480,7 @@ impl Fence {
             .inner
             .rereads
             .get()
-            .is_none_or(|rereads| rereads.current(&lane.sink));
+            .is_none_or(|rereads| rereads.current(lane));
         self.serve(lane, |furthest| Serving::Detached {
             through: match furthest.serving {
                 Serving::Writes if !read => (None, None),
@@ -575,7 +575,7 @@ impl Fence {
             .inner
             .rereads
             .get()
-            .is_none_or(|rereads| rereads.current(&lane.sink));
+            .is_none_or(|rereads| rereads.current(lane));
         let Some(furthest) = self.inner.lanes.get(lane) else {
             return (reached, None, Serving::Pending.unserved());
         };

@@ -103,6 +103,8 @@ struct Gate {
     forget_lands_then_fails: Mutex<bool>,
     /// The next reads of the records that fail.
     reads_fail: Mutex<usize>,
+    /// Indexes whose records can't be read.
+    unreadable: Mutex<BTreeSet<String>>,
     /// Reads of the records that fail once `forget_detachment` landed then
     /// failed.
     reads_fail_after_forget: Mutex<usize>,
@@ -232,6 +234,17 @@ impl Sink for Gate {
                 *fails -= 1;
                 return Err(SinkError::Write("the meta index timed out".to_owned()));
             }
+        }
+        if self
+            .unreadable
+            .lock()
+            .unwrap()
+            .contains(mapping.index.as_ref())
+        {
+            return Err(SinkError::Write(format!(
+                "the records of {} can't be read",
+                mapping.index
+            )));
         }
         let mut kept = self
             .kept
@@ -2165,7 +2178,7 @@ async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_
         .down
         .store(false, std::sync::atomic::Ordering::SeqCst);
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    assert!(!rig.rereads.current(&sink_name("primary")));
+    assert!(!read_all(&rig));
     let (task, _control) = spawn(&engine);
     eventually("the gap is completed and kept", || {
         rig.sink.gaps.lock().unwrap().as_slice()
@@ -2181,10 +2194,7 @@ async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_
             .map(|(_, gap, _)| gap.clone()),
         Some(vec![gap(Some("1"), Some("nothing"))])
     );
-    eventually("the records count as read", || {
-        rig.rereads.current(&sink_name("primary"))
-    })
-    .await;
+    eventually("the records count as read", || read_all(&rig)).await;
     task.abort();
 }
 
@@ -2211,7 +2221,7 @@ async fn a_lane_the_records_say_detached_once_the_slot_is_held_is_taken_as_detac
     assert!(rig.progress.is_detached(&lane(users())));
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(written(&rig).is_empty(), "nothing of it is written");
-    assert!(rig.rereads.current(&sink_name("primary")));
+    assert!(read_all(&rig));
     task.abort();
 }
 
@@ -2222,9 +2232,9 @@ async fn a_staging_once_the_slot_is_held_counts_as_the_read() {
     let rig = Rig::new(64);
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let engine = rig.engine();
-    assert!(!rig.rereads.current(&sink_name("primary")));
+    assert!(!read_all(&rig));
     engine.stage(Continuity::Resumed).await.unwrap();
-    assert!(rig.rereads.current(&sink_name("primary")));
+    assert!(read_all(&rig));
 }
 
 /// Review of step 4, the gap list: a lane reattached, detached again and
@@ -2833,9 +2843,8 @@ async fn a_failed_opening_counts_no_read_and_settles_nothing() {
     engine.stage(Continuity::Resumed).await.unwrap();
     assert!(rig.rereads.open(async { Err::<(), ()>(()) }).await.is_err());
     assert!(!rig.rereads.holding());
-    rig.rereads
-        .read(&sink_name("primary"), rig.rereads.read_begins());
-    assert!(!rig.rereads.current(&sink_name("primary")));
+    rig.rereads.read(&lane(users()), rig.rereads.read_begins());
+    assert!(!read_all(&rig));
     let (task, _control) = spawn(&engine);
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(rig.sink.gaps.lock().unwrap().is_empty(), "nothing settled");
@@ -2858,10 +2867,7 @@ async fn a_restaging_while_the_slot_is_held_settles_the_gap_without_a_new_openin
         .insert("users".to_owned(), vec![gap(Some("1"), None)]);
     let engine = rig.live_only_engine();
     engine.stage(Continuity::Resumed).await.unwrap();
-    assert!(
-        rig.rereads.current(&sink_name("primary")),
-        "the staging is the read"
-    );
+    assert!(read_all(&rig), "the staging is the read");
     assert!(
         rig.sink.gaps.lock().unwrap().is_empty(),
         "a staging never settles"
@@ -2948,7 +2954,7 @@ async fn an_opening_on_a_quiet_stream_is_read_at_once() {
     tokio::time::sleep(Duration::from_millis(250)).await;
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let opened = Instant::now();
-    while !rig.rereads.current(&sink_name("primary")) {
+    while !read_all(&rig) {
         assert!(
             opened.elapsed() < Duration::from_millis(50),
             "not read within 50 ms of the opening"
@@ -2956,4 +2962,66 @@ async fn an_opening_on_a_quiet_stream_is_read_at_once() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     task.abort();
+}
+
+/// The third re-check, item 1 (B1'''): a staging that couldn't read one
+/// index's records leaves it restaging (#471) and counts no read of it: its
+/// lane stays unread (it vouches for nothing) while the lane read goes on.
+#[tokio::test(start_paused = true)]
+async fn a_staging_that_left_an_index_unread_counts_no_read_of_it() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.sink
+        .unreadable
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(rig.rereads.current(&lane(users())), "read");
+    assert!(!rig.rereads.current(&lane(orders())), "never read");
+
+    // During a stop too.
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.sink
+        .unreadable
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let stop = crate::Stop::new();
+    stop.request();
+    let engine = rig.built("primary", Arc::clone(&rig.sink)).with_stop(stop);
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(
+        !rig.rereads.current(&lane(orders())),
+        "never read, stopping"
+    );
+}
+
+/// The third re-check, item 1: the run's read again counts each lane it
+/// read; one whose records can't be read stays unread (the run fails, and
+/// its restart stages again), never counted with its siblings.
+#[tokio::test(start_paused = true)]
+async fn a_read_again_that_missed_a_lane_counts_no_read_of_it() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.sink
+        .unreadable
+        .lock()
+        .unwrap()
+        .insert("users".to_owned());
+    let (task, _control) = spawn(&engine);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!rig.rereads.current(&lane(users())), "its read failed");
+    task.abort();
+}
+
+/// Whether every lane of `primary` counts as read.
+fn read_all(rig: &Rig) -> bool {
+    [orders(), users()]
+        .into_iter()
+        .all(|index| rig.rereads.current(&lane(index)))
 }
