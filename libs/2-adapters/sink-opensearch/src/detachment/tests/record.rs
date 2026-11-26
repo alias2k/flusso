@@ -780,3 +780,29 @@ async fn a_gap_write_meeting_another_writer_reads_again_and_decides_again() {
         json!([{ "from": "0/10", "to": "0/40" }])
     );
 }
+
+/// Review of the step-4 fixes, m-c: a `gaps` entry that can't be read is
+/// never "no gap": it reads as a gap with both ends unknown, which refuses
+/// every position until a read while the slot is held settles it.
+#[tokio::test]
+async fn a_gap_entry_that_cannot_be_read_is_a_gap_with_unknown_ends() {
+    let mut seeded = Store::seeded();
+    let mut kept = marker();
+    kept["gaps"] = json!([{ "from": "0/10", "to": "0/20" }, "garbled"]);
+    seeded.put(ALIAS, kept);
+    let store = Arc::new(Mutex::new(seeded));
+    let stub = serve(&store).await;
+    assert_eq!(
+        stub.sink().detachment(&mapping()).await.unwrap().gaps,
+        [
+            sink::Gap {
+                from: Some("0/10".to_owned()),
+                to: Some("0/20".to_owned()),
+            },
+            sink::Gap {
+                from: None,
+                to: None,
+            },
+        ]
+    );
+}

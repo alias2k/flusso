@@ -314,9 +314,15 @@ mod record;
 mod tests;
 
 /// The gaps a seed marker keeps: `gaps`, or a single `gap` as an earlier
-/// step 4 wrote it, read as a list of one.
+/// step 4 wrote it, read as a list of one. A gap that can't be read is
+/// never "no gap" (review of the step-4 fixes, m-c): it reads as one with
+/// both ends unknown, which refuses every position until a read while the
+/// slot is held settles it, and is logged loudly.
 fn read_gaps(marker: &Value) -> Vec<sink::Gap> {
     let one = |gap: &Value| {
+        if !gap.is_object() {
+            tracing::error!(%gap, "a gap the seed marker keeps can't be read: taken as a gap with both ends unknown, which refuses every position until it is settled");
+        }
         let text = |key: &str| gap.get(key).and_then(Value::as_str).map(str::to_owned);
         sink::Gap {
             from: text("from"),
@@ -324,11 +330,11 @@ fn read_gaps(marker: &Value) -> Vec<sink::Gap> {
         }
     };
     match (
-        marker.get("gaps").and_then(Value::as_array),
-        marker.get("gap"),
+        marker.get("gaps").filter(|gaps| !gaps.is_null()),
+        marker.get("gap").filter(|gap| !gap.is_null()),
     ) {
-        (Some(gaps), _) => gaps.iter().filter(|gap| gap.is_object()).map(one).collect(),
-        (None, Some(gap)) if gap.is_object() => vec![one(gap)],
-        _ => Vec::new(),
+        (Some(Value::Array(gaps)), _) => gaps.iter().map(one).collect(),
+        (Some(other), _) | (None, Some(other)) => vec![one(other)],
+        (None, None) => Vec::new(),
     }
 }
