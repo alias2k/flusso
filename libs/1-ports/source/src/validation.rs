@@ -585,6 +585,7 @@ async fn validate_index(
         catalog,
         tables: HashMap::new(),
         primary_keys: HashMap::new(),
+        nullability: HashMap::new(),
         path: Vec::new(),
         positions: Vec::new(),
         anchor: Anchor::Field,
@@ -908,6 +909,8 @@ struct Checker<'a> {
     catalog: &'a dyn Catalog,
     tables: HashMap<TableName, bool>,
     primary_keys: HashMap<TableName, Option<Vec<ColumnName>>>,
+    /// Whether each table records nullability, asked once per table.
+    nullability: HashMap<TableName, bool>,
     path: Vec<FieldName>,
     /// The [`position`] of each field segment of `path` (index-level keys,
     /// pushed after the fields, have none).
@@ -1845,11 +1848,7 @@ impl Checker<'_> {
         // a plain non-null declaration over a nullable column is worth flagging.
         let forced_non_null = primary_key == Some(&column.column) || column.default.is_some();
         if !column.nullable && info.nullable && !forced_non_null {
-            if !self
-                .catalog
-                .tracks_nullability(self.db_schema, table)
-                .await?
-            {
+            if !self.tracks_nullability(table).await? {
                 self.report(
                     DiagnosticKind::NullabilityUntracked,
                     format!(
@@ -1872,6 +1871,20 @@ impl Checker<'_> {
             );
         }
         Ok(())
+    }
+}
+
+impl Checker<'_> {
+    async fn tracks_nullability(&mut self, table: &TableName) -> Result<bool> {
+        if let Some(tracked) = self.nullability.get(table) {
+            return Ok(*tracked);
+        }
+        let tracked = self
+            .catalog
+            .tracks_nullability(self.db_schema, table)
+            .await?;
+        self.nullability.insert(table.clone(), tracked);
+        Ok(tracked)
     }
 }
 
@@ -2470,8 +2483,12 @@ mod tests {
         );
     }
 
-    /// `Places` read as a view: its columns record no nullability.
-    struct PlacesView;
+    /// `Places` read as a view: its columns record no nullability. Counts
+    /// how often it is asked.
+    #[derive(Default)]
+    struct PlacesView {
+        asked: std::sync::atomic::AtomicUsize,
+    }
 
     #[async_trait]
     impl Catalog for PlacesView {
@@ -2489,8 +2506,41 @@ mod tests {
         }
 
         async fn tracks_nullability(&self, _: &DatabaseSchema, _: &TableName) -> Result<bool> {
+            self.asked
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(false)
         }
+    }
+
+    /// Whether a table records nullability is asked once per table, however
+    /// many of its columns are declared `required`.
+    #[test]
+    fn nullability_tracking_is_asked_once_per_table() {
+        let required = |name: &str| {
+            json!({ "field": name, "source": { "column": {
+                "column": "label", "ty": "keyword", "nullable": false,
+            } } })
+        };
+        let schema: IndexSchema = serde_json::from_value(json!({
+            "version": 1, "table": "places", "db_schema": "public", "primary_key": "id",
+            "fields": [int_field("id"), required("a"), required("b"), required("c")],
+        }))
+        .unwrap();
+        let spec = SourceSpec::new(BTreeMap::from([(
+            IndexName::try_new("places").unwrap(),
+            schema,
+        )]));
+        let view = PlacesView::default();
+        let found = futures::executor::block_on(validate_indexes(&spec, &view)).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .filter(|d| d.kind == DiagnosticKind::NullabilityUntracked)
+                .count(),
+            3,
+            "{found:?}"
+        );
+        assert_eq!(view.asked.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     /// `required` over a view's column is only a warning (issue #485): the
@@ -2523,7 +2573,7 @@ mod tests {
             on_a_table.iter().map(|d| d.kind).collect::<Vec<_>>(),
             vec![DiagnosticKind::Nullability]
         );
-        let on_a_view = kinds(&PlacesView);
+        let on_a_view = kinds(&PlacesView::default());
         let [finding] = on_a_view.as_slice() else {
             panic!("one finding: {on_a_view:?}");
         };
