@@ -433,3 +433,25 @@ fn the_advice_for_a_stale_lock_runs_as_printed() {
         );
     }
 }
+
+/// `--fix` writes only once the config validates, as `flusso build` does: a
+/// misspelt sink option leaves the lock as it was (fourth review of #486).
+#[test]
+fn check_fix_writes_nothing_when_the_config_fails_to_validate() {
+    let dir = locked_project("fix-invalid");
+    std::fs::write(dir.join("flusso.lock"), b"format_version = 2\n").unwrap();
+    let config = std::fs::read_to_string(dir.join("flusso.toml")).unwrap();
+    std::fs::write(
+        dir.join("flusso.toml"),
+        config.replace("type = \"stdout\"", "type = \"stdout\"\nbogus = 1"),
+    )
+    .unwrap();
+    let fixed = flusso(&dir, &["check", "--offline", "--fix"]);
+    assert!(!fixed.status.success(), "{}", shown(&fixed));
+    assert_eq!(
+        std::fs::read(dir.join("flusso.lock")).unwrap(),
+        b"format_version = 2\n",
+        "{}",
+        shown(&fixed)
+    );
+}
