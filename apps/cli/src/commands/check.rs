@@ -272,6 +272,7 @@ fn human_report(
         out,
         pen,
         diagnostics,
+        online.is_none(),
         online.and_then(|online| online.server),
     )
 }
@@ -579,6 +580,29 @@ mod tests {
         assert!(offline < warning && warning < error, "{printed}");
         let last = printed.trim_end().lines().last().unwrap();
         assert_eq!(last, "✗ check failed: 1 error, 1 warning", "{printed}");
+    }
+
+    /// An offline check that passes doesn't end on an all-clear: the checks
+    /// against the database didn't run.
+    #[test]
+    fn an_offline_pass_says_the_database_was_not_checked() {
+        let clean = report(&[], None, print::Pen::plain());
+        assert_eq!(
+            clean.trim_end().lines().last(),
+            Some("✓ offline checks passed; database checks not run"),
+            "{clean}"
+        );
+        let warned = report(
+            &[finding(source::DiagnosticKind::DuplicateFieldName, "name")],
+            None,
+            print::Pen::plain(),
+        );
+        assert_eq!(
+            warned.trim_end().lines().last(),
+            Some("✓ offline checks passed with 1 warning; database checks not run"),
+            "{warned}"
+        );
+        assert!(!clean.contains("✓ check passed"), "{clean}");
     }
 
     #[test]

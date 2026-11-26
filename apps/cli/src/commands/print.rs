@@ -613,11 +613,12 @@ fn diagnostic_lines(out: &mut impl Write, pen: Pen, diagnostics: &[Diagnostic]) 
 
 /// The last line of a report: whether it passed, with the counts. `refused`
 /// is the source server refusal `flusso run` would stop with, which fails it
-/// too.
+/// too. An `offline` pass says the database checks didn't run.
 pub(crate) fn summary(
     out: &mut impl Write,
     pen: Pen,
     diagnostics: &[Diagnostic],
+    offline: bool,
     refused: Option<&str>,
 ) -> Result<()> {
     let count = |severity: Severity| {
@@ -646,15 +647,34 @@ pub(crate) fn summary(
             &format!("✗ check failed: flusso run would refuse the source server; {counts}"),
         ),
         (false, 1.., _) => pen.paint("1;31", &format!("✗ check failed: {counts}")),
-        (false, 0, 0) => format!("{} {}", pen.green("✓"), pen.bold("check passed")),
-        (false, 0, _) => format!(
-            "{} {}",
-            pen.green("✓"),
-            pen.paint(
-                "1;33",
-                &format!("check passed with {}", plural(warnings, "warning"))
-            ),
-        ),
+        (false, 0, warnings) => {
+            let passed = if offline {
+                "offline checks passed"
+            } else {
+                "check passed"
+            };
+            let not_run = if offline {
+                "; database checks not run"
+            } else {
+                ""
+            };
+            if warnings == 0 {
+                format!(
+                    "{} {}",
+                    pen.green("✓"),
+                    pen.bold(&format!("{passed}{not_run}"))
+                )
+            } else {
+                format!(
+                    "{} {}",
+                    pen.green("✓"),
+                    pen.paint(
+                        "1;33",
+                        &format!("{passed} with {}{not_run}", plural(warnings, "warning"))
+                    ),
+                )
+            }
+        }
     };
     writeln!(out, "{line}")?;
     Ok(())
