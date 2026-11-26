@@ -13,14 +13,15 @@ story — the two config files, the pipeline, deploying — see the
 
 ## Subcommands
 
-The first four run locally/offline; the last two are HTTP clients to a *running*
+All but the last two run locally; the last two are HTTP clients to a *running*
 server's private control surface.
 
 | Command | What it does |
 | --- | --- |
 | `flusso build` | Compile a `flusso.toml` + its schemas into one portable `flusso.lock`. No database, no secrets baked in (`{ env = "VAR" }` refs are carried through). |
 | `flusso run` | Stream Postgres changes through the engine to the configured sink(s). |
-| `flusso check` | Validate the config + every schema and print the fully-typed mapping. With a database (drop `--offline`), it also confirms declared types/nullability match the live DB. |
+| `flusso check` | Validate the config + every schema. With a database (drop `--offline`), it also confirms declared types/nullability match the live DB, and reports the source server, publication and replica identities. Passing sections are one line; errors print last; exits non-zero on any error. |
+| `flusso show config\|mapping [index]` | Print the deployment (secrets redacted) or the fully-typed mapping. No database. |
 | `flusso schema config\|index` | Print the embedded editor-assist JSON Schema for `flusso.toml` or `*.schema.yml`. |
 | `flusso indexes` | List a running server's indexes and their lifecycle state. |
 | `flusso reindex <name>` | Trigger a from-scratch rebuild of one index on a running server (reads stay on the old copy until the rebuild swaps in). |
@@ -43,6 +44,7 @@ Common `run` flags:
 | `--slot` | `FLUSSO_SLOT` | `[source] slot`, else `flusso` | Replication slot name. |
 | `--publication` | `FLUSSO_PUBLICATION` | `[source] publication`, else `flusso` | Publication name. |
 | `--skip-backfill` | `FLUSSO_SKIP_BACKFILL` | off | Resume live capture only. |
+| `--strict` | `FLUSSO_STRICT` | off | Refuse to start on any error `flusso check` reports. |
 | `--public-address` | `FLUSSO_PUBLIC_ADDRESS` | — | Bind the public HTTP surface. |
 | `--private-address` | `FLUSSO_PRIVATE_ADDRESS` | — | Bind the private control surface. |
 | `--index-prefix` | `FLUSSO_INDEX_PREFIX` | — | Prefix every owned index name. |
@@ -55,6 +57,7 @@ flusso --help
 flusso build  --config flusso.toml -o flusso.lock   # build the portable artifact
 flusso check  --config flusso.toml                  # validate (+ check vs database)
 flusso check  --config flusso.toml --offline        # validate without a database
+flusso show   mapping --config flusso.toml          # print the typed mapping
 flusso run                                          # run the compiled flusso.lock
 flusso run    --config flusso.toml                  # compile from source and run
 flusso run    --skip-backfill                       # resume live capture only

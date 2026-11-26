@@ -46,8 +46,9 @@ this project.
 Validate before declaring done:
 
 ```sh
-flusso check --config flusso.toml            # validates + prints the typed mapping
+flusso check --config flusso.toml            # validates; errors last, one summary line
 flusso check --config flusso.toml --offline  # skip the DB; format and rules only
+flusso show mapping --config flusso.toml     # prints the typed mapping (no DB)
 ```
 
 Against a live DB this also confirms each declared type and nullability against the real columns.
@@ -100,7 +101,7 @@ If you use any join or aggregate, you **must** set `primary_key` — reverse res
 
 Scalar/`geo` siblings: `required`, `column` (source column, defaults to the document key), `transforms` (`lowercase`, `trim`), `default`, `options` (extra OpenSearch mapping props). `subfields: false` (only `text`/`keyword`/`uuid`) maps that field without the sink's auto subfields — owned meaning: the [Field types reference](https://alias2k.github.io/flusso/main/reference/field-types.html#subfields).
 
-**A column holding an array** (`text[]`, `integer[]`, a `jsonb` array) takes `array: true` on its scalar, `enum`, `custom` or `json` field. The mapping stays the element type; the document drops null elements and wraps a lone value; `transforms` apply to each element; `default` is a list (`default: [general]`). Without it a `[]` column still indexes, but `flusso check` warns and the query side can't read it as a `Vec`. Not on `geo`/`map`/`object`/`constant`/joins/aggregates. Owned meaning: the [array reference](https://alias2k.github.io/flusso/main/reference/field-types.html#array).
+**A column holding an array** (`text[]`, `integer[]`, a `jsonb` array) takes `array: true` on its scalar, `enum`, `custom` or `json` field. The mapping stays the element type; the document drops null elements and wraps a lone value; `transforms` apply to each element; `default` is a list (`default: [general]`). Without it the schema says one value while the index holds a list, so a consumer reading by the schema fails on it: `flusso check` reports it as an error (`flusso run` still starts, `--strict` refuses). Not on `geo`/`map`/`object`/`constant`/joins/aggregates. Owned meaning: the [array reference](https://alias2k.github.io/flusso/main/reference/field-types.html#array).
 
 An `enum` takes an optional `variants:` list — its values in rank order (`variants: [low, medium, high]`). Given it, the field sorts by that order instead of alphabetically (the rank is prebaked into the index; the query side's `Enum` handle `.asc()`/`.desc()` uses it automatically). Omit it for a plain keyword-like enum. Variants must be unique and free of `=>`/newlines; a stored value not in the list sorts after the declared ones. Changing the list rotates the index like any schema change. (Read-side: a Rust enum may cover the list partially; `#[flusso(keyword, exhaustive)]` on it demands full coverage — see the flusso-query skill.)
 

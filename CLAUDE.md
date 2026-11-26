@@ -551,12 +551,16 @@ and the container at once (same replication slot).
 
 `default-members = ["apps/cli"]`, so bare `cargo run` is the `flusso` binary. CLI
 subcommands: `build` (compile config+schemas → portable `flusso.lock`, no DB, no secrets
-baked in), `check` (validate + print typed mapping; `--offline` skips the DB), `run`
+baked in), `check` (validate only; `--offline` skips the DB; a passing section is one line, a
+failing one prints in full with its SQL, then warnings, errors last, and a summary line; `--color
+auto|always|never`; `--format json` stays complete), `show config|mapping [index]` (the deployment,
+secrets redacted, or the typed mapping; no DB; reads `--config` or the `--lock`; `--format json`;
+`commands/show.rs`, reusing `print::config`/`print::resolved`), `run`
 (cargo-style: when a `flusso.toml` is present — the default path, or `--config` — it
 recompiles and **rewrites the `flusso.lock`** (skipped when byte-identical) then runs that,
 so the committed lock stays current; with no config it loads the existing `--lock`;
 `--locked` runs the lock as-is with no recompile; a lock-write failure is fatal;
-`--skip-backfill` resumes live only — see
+`--skip-backfill` resumes live only; `--strict` refuses to start on any error `check` reports — see
 `resolve_config`/`plan_config` in `apps/cli/src/commands/run.rs`), `schema` (print an embedded
 editor-assist JSON Schema: `schema config` or `schema index`; no DB), `script run` (build one
 document — `--id`, the first row, or `--input` JSON with no DB — run its index's scripts, print input,
@@ -2042,8 +2046,9 @@ junctions. Postgres backs it over `pg_catalog`/`information_schema`; the visual 
 (`apps/design`) is its first consumer. **`run` validates at start** (issue #211):
 `backends.rs`'s `build_documents` runs `validate_indexes` on the document builder's own connection
 inside `Backends::source`, before anything is staged (`--locked` included; an unreachable database
-still fails as `connecting to Postgres`), prints every diagnostic to stderr with `check`'s printer,
-and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
+still fails as `connecting to Postgres`), prints every diagnostic to stderr with `check`'s printer
+(warnings above errors), and refuses to start only on a kind that cannot work as written (under
+`--strict` / `FLUSSO_STRICT`, on any `Error`; issue #485): `stops_the_start` matches
 `DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
 `RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`UnsupportedKeyType`/
 `NotAnArrayColumn`/`LinkTypeMismatch`/`DuplicateFieldNameFailsToBuild`/`DuplicateFieldNameRefused`/`TimeOfDayAsDate`
@@ -2057,13 +2062,24 @@ type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `IdsEl
 and `TimestampFormat` (issue #304: a timestamp `options.format` no pattern of which reads the ISO
 form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) and `CheckSkipped` findings print and start, as they built or ran in 0.17), so a new kind forces a decision there. A kind
 that stops a deployment the previous release started is a breaking change: allowed in a minor or major release when it is the correct behaviour, marked breaking, with an entry on that release's upgrade page (`docs/src/operate/upgrade-to-*.md`) saying what stops and how to fix it. `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
-`#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. No opt-out
+`#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. **An index
+that starting flusso does not make work as its schema says is an `Error`, whatever the cause**
+(issue #485): `Nullability` (a null where the schema says never), `UndeclaredArrayColumn` (a list
+where it says one value) and `IdsElementLossy` (other ids than the table's) are errors that still
+start without `--strict`; `IgnoredPrimaryKey`, `CheckSkipped`, `DuplicateFieldName` and
+`TimestampFormat` stay warnings. Each `Error` the start goes on with is a `tracing::error!` event
+(`index`, `kind`, `field`, the message) at every start and a value of the
+`flusso.index.schema_errors{index,kind}` gauge (`telemetry/schema_errors.rs`). No opt-out
 flag. The stopping kinds apply only where every document carries the value, mapped as declared:
 the root and plain objects (`validation.rs`'s `carries`: a `Group`, emitted, no `options`); a pair
 elsewhere is the plain `DuplicateFieldName`. `TimeOfDayAsDate` (issue #309): a `time`/`timetz`
 column under a `timestamp`/`date` field there (`Checker.date_mapped`: no namesake, no `options`
 at all); not a `min`/`max` or a field in a join (a parent with no related row indexes). Guards:
-`backends::tests` (one per kind, plus `only_an_opensearch_sink_that_maps_the_value_as_written_refuses_it`),
+`backends::tests` (one per kind, the `strict_*` cases, plus `only_an_opensearch_sink_that_maps_the_value_as_written_refuses_it`),
+`validation::tests`' `an_index_that_differs_from_its_schema_is_an_error`, `schema_errors::tests`,
+`check::tests` and `apps/cli/tests/check_report.rs` (the report's order, one-line sections and colour,
+no Docker), `apps/cli/tests/strict_start.rs` (live Postgres: `--strict` refuses from the config and
+from a `--locked` lock, a plain start logs the event and sets the gauge),
 `config_coverage`'s `an_enum_or_domain_column_is_a_type_mismatch_that_still_builds` and
 `a_time_of_day_under_a_date_mapping_is_reported`, `apps/cli/tests/time_columns.rs` (live Postgres
 + OpenSearch: reported only where no document indexes; the workarounds index and leave `check`
@@ -2521,7 +2537,11 @@ takes `element: bool` (Postgres probes the `[]` base type, `text` for `json`/`js
 declared type is still checked against the domain's own name. The designer's `array_default` /
 `json_array_default` value slots refuse what the config conversion refuses, and `api::render_op`
 refuses a schema whose file would not load, so a save never writes one (a `FileOp` carries its
-content only as `schema`, written into `base`; there is no raw-text op). Query side: `check_type`'s
+content only as `schema`, written into `base`; there is no raw-text op). A type that reads an array
+at a single-valued field is refused leading with "declare the field `array: true`" wherever the
+schema can (`doc.rs`'s `single_value_message`; in a fragment `check::declares_array`: a leaf other
+than `geo_point`, or `json`), since the element type alone compiles and fails on every list (issue
+#485; `ui/vec_at_a_single_value.rs`). Query side: `check_type`'s
 scalar arm also accepts a custom non-`Vec` type through const asserts (`OpaqueProbe::LEAF_ARRAY` +
 `accepts_kind`), and `#[derive(FlussoValue)]` on a newtype over `Vec<E>` emits only
 `FlussoValueMeta` (`E`'s kinds, `ARRAY`), no `FlussoValue<K>`. So `ARRAY` has **two
@@ -3068,7 +3088,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
 | Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
-| CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
+| CLI subcommands (`build`/`run`/`check`/`show`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs` (the report: `human_report`), `show.rs` (`show config`/`show mapping`), `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport (`telemetry/schema_errors.rs`: the schema errors a start goes on with), `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /indexes/{name}/reindex?sink=`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
 | Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position; `rules/`: read-time fields — `condition.rs` the two-sided tests, `date.rs`, `handles.rs` the rule handles, `list.rs` `Rules`/`Plan`, `field.rs` `RuleField`, `computation.rs`) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `read_time.rs` (what `context`/`rules`/`computed` generate, and which stored fields get a rule handle), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
