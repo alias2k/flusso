@@ -79,17 +79,37 @@ pub struct Rereads {
 }
 
 /// What a [`Rereads`] listener hears.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reread {
+#[derive(Debug, Clone, Copy)]
+pub enum Reread<'a> {
     /// An opening begins: the previous stream still answers, the new one
-    /// not yet; every sink's records are unread from here.
-    Opening,
+    /// not yet; every sink's records are unread from here. `read` says which
+    /// sinks counted as read during the stream being left: only their
+    /// answers then were given while read.
+    Opening { read: &'a ReadBefore },
     /// A sink read its records.
     Read,
 }
 
+/// Which sinks counted as read just before an opening moved the count.
+#[derive(Debug, Clone)]
+pub struct ReadBefore {
+    opened: u64,
+    held: u64,
+    read: BTreeMap<SinkName, u64>,
+}
+
+impl ReadBefore {
+    /// Whether `sink` counted as read during the stream being left (any
+    /// sink, before the first opening: nothing could vouch then).
+    pub fn read(&self, sink: &SinkName) -> bool {
+        self.opened == 0
+            || (self.held == self.opened
+                && self.read.get(sink).is_some_and(|at| *at >= self.opened))
+    }
+}
+
 /// Called on each [`Reread`]: cheap, it only wakes or notes something.
-pub type RereadListener = Arc<dyn Fn(Reread) + Send + Sync>;
+pub type RereadListener = Arc<dyn Fn(Reread<'_>) + Send + Sync>;
 
 impl std::fmt::Debug for Rereads {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -109,9 +129,20 @@ impl Rereads {
     /// answer; once it returns Ok, a read begun from then counts. Failed,
     /// nothing counts as read until an opening succeeds.
     pub async fn open<T, E>(&self, opening: impl Future<Output = Result<T, E>>) -> Result<T, E> {
+        // Which sinks read during the stream being left, taken before the
+        // count moves (once it has, none counts as read).
+        let before = ReadBefore {
+            opened: self.opened.load(Ordering::Acquire),
+            held: self.held.load(Ordering::Acquire),
+            read: self
+                .read
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        };
         let epoch = self.opened.fetch_add(1, Ordering::AcqRel) + 1;
         self.holding.store(false, Ordering::Release);
-        self.tell(Reread::Opening);
+        self.tell(Reread::Opening { read: &before });
         let opened = opening.await;
         if opened.is_ok() {
             self.held.store(epoch, Ordering::Release);
@@ -140,7 +171,7 @@ impl Rereads {
             .push(listener);
     }
 
-    fn tell(&self, event: Reread) {
+    fn tell(&self, event: Reread<'_>) {
         let listeners = self
             .listeners
             .lock()

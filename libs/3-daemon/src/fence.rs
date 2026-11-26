@@ -26,12 +26,16 @@
 //! unless the seed lands first. The sink engines' events set the state
 //! ([`FenceObserver`]); they are a few per index per run.
 //!
-//! **A slot opened again vouches nothing new until it is read (ADR 0012
-//! stage 10, O29, B1').** From the moment a new stream may answer until the
-//! sink has read its records, a lane vouches for nothing past what this
-//! process applied under the previous stream: [`Rereads::open`] marks every
-//! sink unread and has the fence freeze that answer before it opens the
-//! stream, the one way the ingest engine opens it.
+//! **A lane of an unread sink vouches only for what it covered while read
+//! (ADR 0012 stage 10, O29, B1', B1'').** The rule is inductive: what a lane
+//! may vouch for while its sink is unread only ever comes from answers the
+//! fence gave while that sink counted as read. [`Rereads::open`] (the one
+//! place the ingest engine opens its stream) hands the fence, before the
+//! new stream can answer and before the count moves, which sinks read
+//! during the stream being left; only their lanes' frozen answer
+//! (`at_open`) advances, taken fresh from that stream. Every other lane
+//! keeps what it froze before: nothing, for a sink that never read. Guard:
+//! the property test `gate_property`.
 //!
 //! The daemon owns the wait; putting it on a wire is the transport's job
 //! (the CLI serves it as `GET /wait`).
@@ -306,11 +310,11 @@ struct Furthest {
     /// once; one between two gaps is vouched as usual. An end that is `None`
     /// is unknown and stretches its gap that way. Gone at the seed.
     gaps: Vec<(Option<SourcePosition>, Option<SourcePosition>)>,
-    /// The fence's answer for the lane, (applied, searchable), taken from
-    /// the previous stream as an opening begins (O29): what this process saw
-    /// the lane apply under it, never more (an answer cached lower only
-    /// vouches less). While its sink's records are unread, a lane serving
-    /// its writes vouches no further.
+    /// What the lane may vouch for while its sink's records are unread
+    /// (O29): the fence's answer from the previous stream, taken fresh as an
+    /// opening begins, but only when the sink read during that stream;
+    /// otherwise it keeps what it held (B1''). A lane serving its writes
+    /// while unread vouches no further.
     at_open: (Option<SourcePosition>, Option<SourcePosition>),
 }
 
@@ -424,12 +428,17 @@ impl Fence {
             let Some(inner) = listener.upgrade() else {
                 return;
             };
-            if event == Reread::Opening {
-                // Only the previous stream answers here: what each lane
-                // applied under it, taken fresh, is all it vouches for until
-                // its sink reads its records again (B1').
+            if let Reread::Opening { read } = event {
+                // Only the previous stream answers here. A lane whose sink
+                // read during it freezes that answer, taken fresh (B1'); any
+                // other keeps what it froze before (B1''): what an unread
+                // lane vouches for only ever comes from answers given while
+                // its sink counted as read.
                 let fence = Fence { inner };
                 for lane in fence.inner.lanes.keys() {
+                    if !read.read(&lane.sink) {
+                        continue;
+                    }
                     fence.reached(lane, FenceLevel::Searchable);
                     if let Some(furthest) = fence.inner.lanes.get(lane) {
                         let mut furthest = lock(furthest);

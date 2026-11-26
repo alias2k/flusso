@@ -1646,3 +1646,259 @@ async fn an_adopted_detach_without_its_through_vouches_for_nothing_new() {
     );
     assert_eq!(started.elapsed(), Duration::ZERO, "at once");
 }
+
+/// Review of the second fix round, B1'': the property over the fence and
+/// the O29 gate. Random sequences of what one sink and one lane go through
+/// run against a small model whose only rule is that a wait for `p` passes
+/// only if, at some moment while the sink counted as read and the lane was
+/// attached, the source answered that the lane had covered `p`.
+mod gate_property {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    enum Event {
+        /// The live stream opens; the new stream starts `jump` past where
+        /// the source stood. A jump past what this process applied is
+        /// another process confirming changes it dropped for the lane (it
+        /// had detached it), which the records then say.
+        OpenOk { jump: u64 },
+        /// An opening fails, the new stream having answered `jump` past.
+        OpenFailed { jump: u64 },
+        /// The sink engine begins reading its records.
+        ReadBegins,
+        /// That read ends: it counts for when it began.
+        ReadEnds,
+        /// The lane applies a change (only while the sink counts as read and
+        /// the lane is attached: the engine writes nothing else).
+        Apply,
+        /// The source reads on with nothing to deliver (idle WAL).
+        Horizon { by: u64 },
+        /// A `/status` read: every lane's answer taken.
+        Status,
+        /// A client waits for `at`.
+        Wait { at: u64 },
+    }
+
+    fn event() -> impl Strategy<Value = Event> {
+        prop_oneof![
+            (0u64..3).prop_map(|jump| Event::OpenOk { jump: jump * 10 }),
+            (0u64..3).prop_map(|jump| Event::OpenFailed { jump: jump * 10 }),
+            Just(Event::ReadBegins),
+            Just(Event::ReadEnds),
+            Just(Event::Apply),
+            (1u64..10).prop_map(|by| Event::Horizon { by }),
+            Just(Event::Status),
+            (0u64..120).prop_map(|at| Event::Wait { at }),
+        ]
+    }
+
+    /// The model: its own count of openings and reads, and what the lane
+    /// covered while read.
+    #[derive(Debug, Default)]
+    struct Model {
+        opened: u64,
+        held: u64,
+        holding: bool,
+        began: Option<u64>,
+        read: u64,
+        /// The highest position covered while read and attached.
+        covered: Option<u64>,
+        /// An opening jumped past what this process covered: the records
+        /// say the lane is detached, and the next read adopts it.
+        dropped: bool,
+        detached: bool,
+    }
+
+    impl Model {
+        fn current(&self) -> bool {
+            self.opened == 0 || (self.held == self.opened && self.read >= self.opened)
+        }
+    }
+
+    async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
+        let rig = fence(&["primary"]);
+        // A fresh process: nothing answers before the first opening.
+        rig.source.close();
+        let rereads = Arc::new(Rereads::default());
+        let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+        let primary = sink("primary");
+        let mut model = Model::default();
+        let mut horizon = 0u64;
+        let mut began = None;
+        for event in events {
+            match event {
+                Event::OpenOk { jump } | Event::OpenFailed { jump } => {
+                    let ok = matches!(event, Event::OpenOk { .. });
+                    let start = horizon + jump;
+                    if model.covered.is_none_or(|covered| start > covered) && jump > 0 {
+                        model.dropped = true;
+                    }
+                    model.opened += 1;
+                    model.holding = false;
+                    let opened = rereads
+                        .open(async {
+                            rig.source.closed.store(false, Ordering::SeqCst);
+                            rig.source.idle_to(start);
+                            if ok { Ok(()) } else { Err(()) }
+                        })
+                        .await;
+                    horizon = start;
+                    prop_assert_eq!(opened.is_ok(), ok);
+                    if ok {
+                        model.held = model.opened;
+                        model.holding = true;
+                    }
+                }
+                Event::ReadBegins => {
+                    began = Some(rereads.read_begins());
+                    model.began = Some(model.held);
+                }
+                Event::ReadEnds => {
+                    let (Some(at), Some(model_at)) = (began.take(), model.began.take()) else {
+                        continue;
+                    };
+                    // What the sink engine's read does: adopt a detach the
+                    // records hold, then count the read.
+                    if model.dropped && model_at == model.opened && model.held == model.opened {
+                        if !model.detached {
+                            rig.observer.on_lane_health(&lane("primary"), &detached());
+                            rig.progress.detach(&lane("primary"));
+                        }
+                        model.detached = true;
+                    }
+                    rereads.read(&primary, at);
+                    model.read = model.read.max(model_at);
+                }
+                Event::Apply => {
+                    if !model.current() || model.detached || !model.holding {
+                        continue;
+                    }
+                    horizon += 5;
+                    let change = rig.source.emit(horizon);
+                    rig.route(change);
+                    rig.applied("primary", change);
+                }
+                Event::Horizon { by } => {
+                    if !model.holding {
+                        continue;
+                    }
+                    horizon += by;
+                    rig.source.idle_to(horizon);
+                }
+                Event::Status => {
+                    let _ = fence.positions();
+                }
+                Event::Wait { at } => {
+                    let outcome = fence
+                        .wait(&FenceRequest {
+                            timeout: Duration::from_millis(10),
+                            ..request(&at.to_string(), FenceLevel::Applied, None)
+                        })
+                        .await;
+                    if let Ok(FenceOutcome::Reached { .. }) = outcome {
+                        prop_assert!(
+                            model.covered.is_some_and(|covered| at <= covered),
+                            "the fence passed a wait for {at}; the model covered {:?}: {model:?}",
+                            model.covered
+                        );
+                    }
+                }
+            }
+            // What the lane covers while read and attached.
+            if model.current() && !model.detached && model.opened > 0 {
+                let reached = rig
+                    .progress
+                    .lane(&lane("primary"), Level::Applied)
+                    .and_then(|landed| rig.source.reached(landed));
+                if let Some(SourcePosition(at)) = reached {
+                    model.covered = Some(model.covered.map_or(at, |covered| covered.max(at)));
+                }
+            }
+        }
+        // Liveness: read once the slot is held, attached, a change applied
+        // is vouched for.
+        if !model.detached {
+            if !model.holding || model.held != model.opened {
+                rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+                rig.source.closed.store(false, Ordering::SeqCst);
+            }
+            rereads.read(&primary, rereads.read_begins());
+            let change = rig.source.emit(horizon + 5);
+            rig.route(change);
+            rig.applied("primary", change);
+            let at = (horizon + 5).to_string();
+            prop_assert_eq!(
+                fence.wait(&request(&at, FenceLevel::Applied, None)).await,
+                reached(&at),
+                "read and attached, an applied change is vouched for"
+            );
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+
+        #[test]
+        fn a_lane_vouches_only_for_what_it_covered_while_its_sink_was_read(
+            events in prop::collection::vec(event(), 1..40)
+        ) {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap()
+                .block_on(run(events))?;
+        }
+    }
+}
+
+/// A fence over the rig whose source answers nothing until its first
+/// opening, which starts the stream at `start` (the slot's confirmed
+/// position, past changes another process dropped).
+async fn first_stream_at(rig: &Rig, start: u64) -> (Fence, Arc<Rereads>) {
+    rig.source.close();
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    rereads
+        .open(async {
+            rig.source.closed.store(false, Ordering::SeqCst);
+            rig.source.idle_to(start);
+            Ok::<(), ()>(())
+        })
+        .await
+        .unwrap();
+    (fence, rereads)
+}
+
+/// Review of the second fix round, B1'': the stream ends before the sink
+/// read its records and opens again. What the first opening froze (nothing)
+/// stays: the first stream's answer was its start, never vouched while read.
+#[tokio::test(start_paused = true)]
+async fn a_second_opening_before_the_read_keeps_what_the_first_froze() {
+    let rig = fence(&["primary"]);
+    let (fence, rereads) = first_stream_at(&rig, 50).await;
+    opened(&rereads).await;
+    assert_eq!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        unserved("50", &[("users", "primary", Unserved::Starting)])
+    );
+}
+
+/// Review of the second fix round, B1'': openings that fail before the
+/// sink read its records keep what the first froze too.
+#[tokio::test(start_paused = true)]
+async fn a_failed_opening_before_the_read_keeps_what_the_first_froze() {
+    let rig = fence(&["primary"]);
+    let (fence, rereads) = first_stream_at(&rig, 50).await;
+    for _ in 0..2 {
+        let failed = rereads.open(async { Err::<(), ()>(()) }).await;
+        assert!(failed.is_err());
+    }
+    assert_eq!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        unserved("50", &[("users", "primary", Unserved::Starting)])
+    );
+}
