@@ -1307,10 +1307,16 @@ impl SinkEngine {
     }
 
     /// Whether the slot opened since the last full read of the records.
+    ///
+    /// Due with no slot held too: a read erases nothing, every request
+    /// that may is checked at the slot (`slot::Erasing`), a gap end is
+    /// settled only while the slot is held (`known_gaps`), and what such a
+    /// read does on its own only tightens (a lane taken as detached). An
+    /// unsettled gap alone is due only while the slot is held, which is
+    /// when it can be settled.
     pub(super) fn reread_due(&self) -> bool {
-        (self.rereads.may_erase_records()
-            && (self.rereads.is_due(self.read_at.load(Ordering::Acquire))
-                || self.opened_unread.load(Ordering::Acquire)))
+        self.rereads.is_due(self.read_at.load(Ordering::Acquire))
+            || self.opened_unread.load(Ordering::Acquire)
             || (self.gaps_unsettled.load(Ordering::Acquire) && self.rereads.holding())
     }
 

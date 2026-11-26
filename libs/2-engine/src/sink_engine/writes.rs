@@ -3173,13 +3173,9 @@ impl<'a> Run<'a> {
     /// failed demotion fails the run. A reattach's gap is heard, and
     /// completed when it is still open. A failed read fails the run (its
     /// restart stages, which reads), except on a detached lane, which stays
-    /// detached and unread.
+    /// detached and unread. Run with no slot held too: what the records ask
+    /// that may erase waits for it (`Acted::Unheld`).
     async fn reread(&mut self) -> Result<()> {
-        // It may demote or detach (record writes): only while the slot is
-        // held. Until then plain writes go on, as on `main`.
-        if !self.engine.rereads.may_erase_records() {
-            return Ok(());
-        }
         let read_at = self.engine.rereads.read_begins();
         self.engine.settling_gaps();
         for lane in 0..self.lanes.len() {
@@ -3694,8 +3690,10 @@ impl<'a> Run<'a> {
     /// would: between batches, nothing of the lane in flight (it is
     /// detached). Not while stopping: the next start's reindex asks again.
     async fn retry_rebuilds(&mut self) -> Result<()> {
-        // O29: `begin_rebuild` rewrites the detach record, which may be
-        // another process's while this one holds no slot: tried once it does.
+        // O29: `begin_rebuild` is refused at the slot while this process
+        // holds none. Tried anyway, each refusal would double the staging
+        // backoff, and the rebuild would begin up to a minute late once the
+        // slot is back (`an_owed_rebuild_begins_at_once_when_the_slot_comes_back`).
         if !self.rebuilds_owed
             || self.engine.stop.is_requested()
             || !self.engine.rereads.may_erase_records()

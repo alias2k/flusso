@@ -4369,3 +4369,40 @@ async fn a_detach_with_no_slot_held_waits_for_the_slot() {
     .await;
     task.abort();
 }
+
+/// The sixth re-check, Part 5: an owed rebuild isn't tried while the slot
+/// is another's (`retry_rebuilds`' gate). Tried, each refusal would double
+/// the staging backoff; kept back, it begins as soon as an opening gets
+/// through, however long the slot was away.
+#[tokio::test(start_paused = true)]
+async fn an_owed_rebuild_begins_at_once_when_the_slot_comes_back() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task) = detached_on_a_block(&rig).await;
+    rig.sink.block(&users(), false);
+    task.abort();
+    let _ = task.await;
+    rig.sink.dead.lock().unwrap().insert("begin_rebuild");
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    eventually("the rebuild is owed", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Detached { ref reason, .. } if reason.contains("the rebuild could not begin")
+        )
+    })
+    .await;
+    rig.rereads.closed();
+    rig.sink.dead.lock().unwrap().clear();
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert!(rig.sink.rebuilds.lock().unwrap().is_empty());
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(*rig.sink.rebuilds.lock().unwrap(), ["users"]);
+    task.abort();
+}
