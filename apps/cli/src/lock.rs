@@ -445,4 +445,23 @@ mod tests {
             "deploy/flusso.lock not found; `flusso build --out deploy/flusso.lock` writes it"
         );
     }
+
+    /// A lock whose config differs by a value of the same length is stale:
+    /// the bytes are compared, not their count.
+    #[test]
+    fn a_lock_differing_by_a_value_of_the_same_length_is_stale() {
+        let dir = project("same-length", &["users"], "out");
+        config::write(&compiled(&dir), dir.join("flusso.lock")).unwrap();
+        let before = std::fs::read(dir.join("flusso.lock")).unwrap();
+        let now = project("same-length", &["users"], "abc");
+        let after = config::to_bytes(&compiled(&now)).unwrap();
+        assert_eq!(before.len(), after.len());
+        let state = LockState::of(&compiled(&now), &now.join("flusso.lock"));
+        assert_eq!(
+            state,
+            LockState::Stale {
+                differs: vec!["the deployment settings `sinks`".to_owned()],
+            }
+        );
+    }
 }
