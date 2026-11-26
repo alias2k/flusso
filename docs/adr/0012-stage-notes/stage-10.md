@@ -560,6 +560,10 @@ Written at the start of slice 2's implementation, after #479 (PR #483) merged. S
 
 - **As written:** the rebuild fails after `rebuild_grace` (10 min), and a complete generation is deleted. An operator who forces `reindex` past a read-only `serving` pays a full rebuild per attempt.
 - **Exempt:** the lane stays parked with the new generation complete until the block on `serving` goes, and holds the slot for `L`'s live items behind the seed meanwhile. R2 still applies: at `stuck_for`, or the WAL half, slice 4 detaches the lane again, and that detach deletes the generation anyway.
+- **The step 2 review agrees with exempting it,** with two additions:
+  - `/status` and the log name this park apart from a write refusal: the seed waits for the block on the serving generation;
+  - flood stage (`read_only_allow_delete`, O19) never counts toward R10, even under a forced `reindex`.
+- **Recommended:** exempt from R10, under R2, with both additions.
 
 ### What S5, S6 and slice 1 changed
 
@@ -630,6 +634,77 @@ Written at the start of slice 2's implementation, after #479 (PR #483) merged. S
   - a restarted run, which writes nothing of the lane;
   - every staging row.
 - **Not proven:** the kill matrix against a live OpenSearch (stand-in only), and a detach meeting a running backfill walk of the index on the ingest side (R7 is step 3's).
+
+### After the review of step 2
+
+The independent review (`target/review-482-step2/REPORT.md`) found the core sound: the lane leaves the minimum only after the record is durable, every write is conditional, and `Free` comes only with every lane detached. What it asked, and what was done:
+
+- **B1, a detached lane drained one item per wake-up.** A discard taken at the end of a run turn left its lane out of the run's wait. `drain_detached` now acknowledges and takes again until no discard is pending, at most `LOOKAHEAD` rounds a call. Two tests fail every time on the old code: a thousand items through a lane of two, and a healthy second sink of the same index, each within 100 ms of paused time.
+- **S1, a record can land although its call failed.** The lane then keeps `LaneState.detach_unsure`. Before its next probe, the sink engine deletes a `detached` record found, on the version read, and reads again, which puts the moved marker back (§5). The probe waits for this, so a lane that opens leaves nothing for the next staging to detach. A failed clear re-parks the lane on its doubled backoff.
+- **S2, a live-only record read as a finished rebuild.** `MarkerAt` gains `Newer`: the marker is on a generation past the record's `serving`. `Elsewhere` now means an older generation, or no known `serving`. `Finished` needs `Newer { seeded: true }` and a record that is not live only (O16).
+- **S4, the fence-first order was unguarded.** A test observer checks that each detach is heard before the lane leaves the minimum, in a run and at staging. Swapping either order fails it.
+- **S5:** the stand-in's `"docs"` key is in `NOT_READS`.
+- **m1:** `detaching_from` keeps the marker's `walked`, and the put-back restores it, so the marker comes back byte for byte.
+- **m2:** a detach run again at staging that the sink keeps no record of fails the staging step, instead of staging the index attached.
+- **m4:** a staging during a run says itself that it found the index detached (`Outcome::Restage(Ok(true))`, `Reindexed.detached`). The run no longer reads the shared lane state, which it may have overwritten meanwhile.
+- **m5:** a lane held detached in the process stays detached at any later staging (`step` returns `Staged::Detached`: `Progress` decides inside a process). A backfill ask no longer turns its fence from `detached` to backfilling.
+- **m6, not fixed, for step 3.** `Landed::Free.covered_seq()` is `Some(u64::MAX)`. While every lane is detached, `IngestEngine::confirm`'s `furthest.reached` moves to the horizon. After the attach, `advances` stays put until the attached lane reaches past it, which delays the supervisor's backoff reset.
+  - **The failing test to write first:** one lane; detach it; confirm at horizon `H`; attach; publish and land an item; assert `advances` moved. It fails today.
+  - **Step 3 either** resets `furthest.reached` at an attach, or counts an advance when the landed answer itself moves.
+- **m7, for step 4:** `/status`'s `committed` lists the detached lanes it leaves out (O21), with the other §9 fields.
+- **m8, m9:** `SinkControl` is `#[non_exhaustive]`; two doc lines fixed.
+- **Mutation tests added.**
+  - Turning off `adopt_detached` fails `a_restage_during_a_run_that_finds_the_index_detached_detaches_the_lane` and `a_reindex_whose_staging_finds_the_index_detached_detaches_the_lane`.
+  - Acknowledging the parked item when the detach starts, before the record, fails `a_sink_without_records_never_detaches`, which now checks that very item lands once the block lifts.
+
+**The bench.** CI's one run showed `live_drain_held/sinks2/1` at +6.0% and `/256` at +4.8%. With nothing detached, the per-item additions are:
+
+- a `detached > 0` check in `queue`, `acknowledge` and `lane_wants_more`;
+- one bool in `register` and `least_of`, under the lock they already take;
+- an empty check on the discard list;
+- two more empty lists in `lane_in_flight` and `writing`.
+
+None of these can be taken out without the feature. Measured locally (base `efc49673` against head `40bd03cb`, pinned to CPUs 0–3 and 12–15, three alternating rounds, criterion medians):
+
+| Bench | Base, ms | Head, ms |
+| --- | --- | --- |
+| `sinks2/1` | 81.4, 81.6, 81.8 | 81.2, 81.4, 81.6 |
+| `sinks2/64` | 64.1, 63.8, 64.2 | 64.1, 63.9, 63.9 |
+| `sinks2/256` | 67.3, 68.5, 69.1 | 67.4, 67.6, 68.6 |
+
+`sinks1` is within ±1% at every size. The CI numbers read as one run's noise. CI's gate on this branch is the authoritative answer.
+
+### Open, for the owner, from the review of step 2
+
+**O29: can a process that staged before another one's detach keep the lane attached? (S3)**
+
+- **The case.** Two processes overlap (a manual run or compose, not Helm's `Recreate`). B stages while A still holds the slot. A then detaches `L`, and the slot passes `L`'s changes under a durable record. When A exits, B takes the slot and runs `L` attached, with a fence vouching for it. A variant: B's staging read lands between A's d2b and d2a, and B's put-back (slice 1) undoes A's marker move.
+- **Why it happens.** A busy slot fails B's `live` (`ensure_slot_free`), and the supervisor retries the ingest engine without staging again.
+- **The coordinator's recommendation, checked against the code: not sound as stated.**
+  - *Re-staging every sink before each retry of a refused `prepare`* leaves a window. The staging before the try that succeeds runs while A still holds the slot, and A can detach, and write its record, until it lets go. The order "B stages, A writes the record, A exits, B's stream opens" stays possible.
+  - Re-staging also means stopping each sink engine's run first, since staging never runs beside writes. That is new supervisor work, and it costs one staging round per index at every retry (the backoff is 1 s doubling to 60 s).
+  - *Skipping the put-back while another process holds the slot* avoids undoing A's d2b. But B then stages as before over a moved marker: `ensure_index` creates the marker's new generation and backfills into it, which A's d2c may delete. It also needs the slot's holder known on the sink side, which the layering keeps from it (the daemon would hand it a flag).
+- **What would be sound.** Read every index's detach records again once B's live stream holds the slot: after `ensure_slot_free` passed and `START_REPLICATION` opened, before the first item is published. Detach (adopt) any lane those records say is detached, and do slice 1's put-back only at that read. A cannot write a record that matters after it lost the slot:
+  - A's `Progress` no longer confirms anything;
+  - a late record of A's is the self-healing row of §4, one spurious detach and a rebuild.
+  - **Cost:** one `_mget` per index per sink at every live start, and an adopt path between staging and the stream.
+- **Options:**
+  - (a) the read after the slot is held, as above;
+  - (b) the coordinator's re-staging per retry, with the window named;
+  - (c) document overlapping processes as unsupported, since they can now lose changes, not only write twice.
+- **Recommended:** (a). Nothing reaches this before slice 4, since only tests detach.
+
+**O30: what does an unreadable record stage as? (S6)**
+
+- **As built (O24):** an `Unreadable` record is staged as before. That is safe only when the marker moved first: staging then rebuilds into the moved, unseeded generation.
+- **Not safe otherwise.** With the marker still on the seeded serving generation (a live-only detach, or a record a hand or a newer flusso left beside a restored marker), staging as before reads the lane as attached and current over changes that were dropped, and only the log says so.
+- **The reviewer's proposal:** split the row.
+  - An unreadable record whose marker is `Newer { seeded: false }` stages as before, a rebuild.
+  - Any other unreadable record runs `Sink::detach` again: the marker on serving, seeded or not, or `serving` unknown.
+  - A `rebuilding` record with the marker on serving does the same (§4 says so; today it stages as before).
+  - Nothing is lost either way. A detach again costs a rebuild, or, for live only, keeps the gap visible until an operator reattaches.
+- **Options:** (a) keep O24 as built; (b) the split.
+- **Recommended:** (b). It narrows O24, which was decided for slice 1, when this version couldn't detach.
 
 ## 11. Decisions
 

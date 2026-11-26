@@ -1855,9 +1855,13 @@ is the one concrete piece.
   no record is put back, conditionally, and one this version can't read is logged and staged as
   before. Each `_mget` entry must answer for the id asked, found or not found. What a record means
   is `sink_engine.rs`'s `AtStaging`: `detached` → `Staged::Detached` (not ensured, not backfilled,
-  the lane detached); a seeded marker elsewhere → the record is deleted (`forget_detachment`, on the
-  version read) and staged as before; `detached` with the marker on serving → `Sink::detach` again;
-  `rebuilding` and unreadable → kept and staged as before (O24) until step 4. **The detach** (R4–R6):
+  the lane detached); a seeded marker on a generation newer than the record's `serving`
+  (`MarkerAt::Newer`), on a record that isn't live only → the record is deleted (`forget_detachment`,
+  on the version read) and staged as before; `detached` with the marker on serving → `Sink::detach`
+  again (one the sink keeps no record of fails the step); `rebuilding` and unreadable → kept and
+  staged as before (O24) until step 4. A lane the process holds detached stays so at any later
+  staging; a staging during a run says itself it found the index detached (`Outcome::Restage(Ok(true))`,
+  `Reindexed.detached`) and the run adopts the lane. **The detach** (R4–R6):
   `SinkControl::Detach` sets `LaneState.detach_asked`; the lane detaches at its next probe the
   destination refuses (`hold` with `probe`) or, restaging, when its staging comes due instead of
   staging; a landed probe or staging drops the ask. Once nothing of the lane is in flight
@@ -1870,13 +1874,16 @@ is the one concrete piece.
   minimum, its backlog too; registrations ignored; kept by `forget_all`; with no attached lane
   `landed()` is `Landed::Free`), then `forget_detached` (sink `Fences::forget_lane`, a pending
   reindex of it, its outstanding backfill cut), then every item of it in the window or held is
-  acknowledged unwritten, and each later delivery is too, one at a time (`discards`, acknowledged at
-  the top of `advance` before the next is taken). `NotKept` (the default) drops the ask; an error
-  keeps it. A fence past `through` answers `Unserved::Detached` at once, never "not following";
+  acknowledged unwritten, and each later delivery is too, one at a time (`discards`; `drain_detached`
+  acknowledges and takes again until none is pending, so no discard waits for the run's next wake-up).
+  `NotKept` (the default) drops the ask; an error keeps it and sets `detach_unsure`: before the lane's
+  next probe a `detached` record found is deleted and the marker put back (`clear_failed_detach`). A fence past `through` answers `Unserved::Detached` at once, never "not following";
   `/status` shows the lane `detached`, not counted in `flusso.lane.parked`. A reindex of a detached
   index is ignored until step 4. Guards: `tests::records`, `tests::detach` (a refused probe, the
-  drain, a restaging lane, a landed probe dropping the ask, `NotKept`, a failed record, a run dying
-  mid-record, a restarted run, a reindex, every staging pair), `progress::tests::detach`,
+  drain and a healthy sibling sink within 100 ms, a restaging lane, a landed probe dropping the ask,
+  `NotKept` with the parked item still written, a failed record, one that landed although its call
+  failed, a run dying mid-record, a restarted run, a reindex, every staging pair, a staging during a
+  run, the fence heard before the minimum is left), `progress::tests::detach`,
   `detachment::tests` and `detachment::tests::record` (the kill matrix over a stand-in meta store:
   killed before each write, the next staging reads nothing kept, the marker put back, or detached),
   the daemon's `fence::tests::a_detached_lane_answers_at_once` /
