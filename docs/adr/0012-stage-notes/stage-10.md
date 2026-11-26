@@ -898,7 +898,7 @@ Every item of the design above is built: the rebuild to the seed, the process-st
 
 At `Attached`, `to` is set, the fence hears the whole gap (`Observer::on_lane_gap`) before the lane opens, and the sink keeps it. A failure there fails the run, and the restage completes the gap at the same `to`, since nothing of the lane landed.
 
-- **A second reattach** keeps the first gap's `from`. The marker holds one gap, which then spans both and also refuses what lies between them. That is sound but not exact; see the report's options.
+- **A second reattach** adds a gap to the list the marker keeps (`gaps`, after the review of step 4). Each gap is exact, and positions between them are vouched as usual.
 - **The fence answers a gap with `FenceOutcome::InGap`, and `/wait` with `409`, `reason: "gap"`,** each lane naming its gap. It is not `503`, since no retry helps. The query SDK already refuses a `409` at once (`FenceRefused`) with the body, so it needs no change.
 - **An unknown `to`** refuses everything past `from`, and an unknown `from` everything up to `to`. The seed clears the gap.
 
@@ -912,7 +912,7 @@ At `Attached`, `to` is set, the fence hears the whole gap (`Observer::on_lane_ga
   - completes a gap.
 - **Staging counts as the read** (`records_read`).
 - **The fence** vouches for no lane of a sink that hasn't read since (`Rereads::current`), and answers `Unserved::Starting` meanwhile. A sink that is down holds the slot and vouches for nothing until it reads; the others go on.
-- **The put-back stays at staging.** `Sink::detachment` takes no `put_back` argument. Undoing another process's half-moved marker is healed by this read: that process's record, written after, sits beside a marker on serving, and O30's row detaches again.
+- **The put-back stays at staging.** `Sink::detachment` takes no `put_back` argument, and this read calls the same `Sink::detachment`, so it puts a half-moved marker back too. If that undoes another process's move and its record lands after, the record sits beside a marker on serving. The next read or staging then meets O30's row and detaches again. Nothing is lost meanwhile, since this process holds the slot.
 
 **The edge.**
 
@@ -922,10 +922,10 @@ At `Attached`, `to` is set, the fence hears the whole gap (`Observer::on_lane_ga
 
 **Tests**, beyond those the design listed:
 
-- the engine's `a_reattach_keeps_the_gap_deletes_the_record_and_attaches_the_lane`, `a_reattach_is_refused_where_it_does_not_apply`, `a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_is_held`, `a_second_reattach_keeps_the_first_gaps_start`, `a_lane_the_records_say_detached_once_the_slot_is_held_is_taken_as_detached` and `a_staging_once_the_slot_is_held_counts_as_the_read`;
+- the engine's `a_reattach_keeps_the_gap_deletes_the_record_and_attaches_the_lane`, `a_reattach_is_refused_where_it_does_not_apply`, `a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_is_held`, `a_second_reattach_keeps_both_gaps_exactly`, `a_lane_the_records_say_detached_once_the_slot_is_held_is_taken_as_detached` and `a_staging_once_the_slot_is_held_counts_as_the_read`;
 - the fence's `a_reattached_lane_vouches_only_from_its_attach` (in the process and after a restart), `an_open_gap_refuses_everything_past_its_start_and_a_seed_ends_it`, `a_detach_freezes_where_the_sink_recorded_it` and `a_sink_that_has_not_read_its_records_since_the_slot_opened_vouches_for_nothing`;
 - the OpenSearch sink's `a_reattach_keeps_its_gap_with_the_seed_marker`;
-- the CLI's `a_wait_inside_a_reattachs_gap_is_refused_with_409`, `a_reattach_is_refused_unless_it_applies_and_queued_when_it_does`, `status_shows_a_lanes_gap_until_a_seed` and `a_reattach_without_accept_gap_is_refused_before_any_request`.
+- the CLI's `a_wait_inside_a_reattachs_gap_is_refused_with_409`, `a_reattach_is_refused_unless_it_applies_and_queued_when_it_does`, `status_shows_a_lanes_gaps_until_a_seed` and `a_reattach_without_accept_gap_is_refused_before_any_request`.
 
 **Not proven:**
 
@@ -933,6 +933,73 @@ At `Attached`, `to` is set, the fence hears the whole gap (`Observer::on_lane_ga
 - The restart's `to` relies on the Postgres capture seeding its horizon from `confirmed_flush_lsn` at the stream's start, and on the read happening before the lane lands anything. Both are argued above and tested only with stand-ins.
 - The second read-again check, before the grant after `fill`, has no test that fails without it: the first check catches every case the tests make.
 - A `record_gap` failure at `Attached`, and a gap end that doesn't parse (read as unknown), are untested.
+
+### After the review of step 4
+
+The review (`target/review-482-step4/REPORT.md`) found one blocker, five should-fix findings and seven minors. Every item has a test that fails without its fix, then the fix, then a commit:
+
+**B1. The O29 gate masks only `Writes`, and a read wakes the fence.**
+- **Precedence.** Gap first, then `Detached`, `Rebuilding` and `Backfilling` as themselves, then `Starting`, then `Writes`. The middle three vouch only for what this process saw applied, or for nothing, and another process's detach can't take that back.
+- **What `Starting` still vouches for.** An unread lane that serves its writes still vouches for what it had reached when the slot last opened (`Furthest.at_open`, frozen on `Reread::Opened`). Those writes are in the index, and no detach removes them.
+- **The wake.** `Rereads::subscribe` lets the fence freeze `at_open` at each opening and wake its waiters at each read.
+- **A sink whose destination is down** therefore answers `starting` only for positions past what it applied before the reopening. Earlier ones pass, as on `main`.
+
+**S1.** O26 demotes only at a process's start: a rebuild running in this process (`LaneState.rebuilding` set) survives its sink's re-staging under `--skip-backfill`.
+
+**S2.**
+- **The new park reason.** A rebuild whose seed meets #479's retire block parks with `ParkReason::SeedBlocked` (kind `blocked`, as before).
+- **The engine** ignores a reindex of it.
+- **The edge** answers `409`, quoting the block and its exits (`Status::reindex_refusal`, now a `String`).
+- **Why.** The complete new generation waits for the block instead of being deleted and rebuilt into the same block (O28's cost).
+
+**S3.** `a_reattach_killed_before_any_step_comes_back_with_its_gap_or_detached`. It fails when the record is deleted before the gap is kept.
+
+**S4.**
+- **(a) The operator hears the engine's verdict.**
+  - `SinkControl::Reattach` carries a `Reply<ReattachVerdict>`, and `DaemonControl::reattach` returns its receiver.
+  - The endpoint waits for it, at most `REATTACH_VERDICT` (30 s), and answers:
+    - `Started`: `202` with `started: true`;
+    - `Refused(why)`: `409` with the reason, which names what works instead;
+    - `Failed`: `503`;
+    - a run that ended first (a stop, or a failure): `503`, "ask again";
+    - no verdict in time: `503`, "may still start".
+  - This also covers m6: a stop between the request and the reattach's start answers `503`, not a blind `202`.
+- **(b) A `detached` record that isn't live only, found by a start on a `backfill = false` sink,** is put back live only with `Sink::demote(mapping, true)` (R14 for a detached record): its marker returns to the serving generation, so a reattach applies.
+- **The refusals name the command that works:**
+  - a reindex of a detached index on a live-only sink: `409`, "flusso reattach … --accept-gap";
+  - a reattach on a sink that can rebuild: `409`, "flusso reindex … --sink …".
+
+**S5.**
+- Every grant now goes through `grant_once_read`, so the records are read before any grant after the slot opened again, the ordered sink's first `fill` included.
+- `a_slot_reopened_while_a_reindex_stages_is_read_before_the_items_it_brought` fails without the check.
+
+**The gap list.**
+- **Where it lives.** The marker keeps `gaps: [{from, to}, …]` (`Sink::record_gaps` writes the whole list, replacing an older single `gap`; `read_gaps` reads either form), and so do `Detachment.gaps`, `Observer::on_lane_gaps`, the fence and `/status`.
+- **What a reattach writes.** It adds its gap; at `Attached` it completes the last one.
+- **What the fence answers.** A position inside any gap is refused with `reason: gap`, naming that gap; one between two gaps is vouched as usual.
+- **What clears it.** A seed or a reindex.
+
+**Minors.**
+- **m1.** A rebuild resumed at a start calls `on_index_rebuilding` before its backfill is asked, so it serves `rebuilding`.
+- **m2.** Built as §6a designs it:
+  - a rebuild that can't begin is owed (`LaneState.rebuild_owed`) and tried again on the staging backoff (`retry_rebuilds`; `lane_wake` wakes for it);
+  - the detached lane's reason says why and when it is next tried.
+- **m3.** `a_lane_another_process_began_rebuilding_is_taken_as_detached_once_the_slot_is_held`.
+- **m4. A start settles every gap end the source can't read** (`known_gaps`, `SourcePositions::parses`), logged loudly, and keeps the list again:
+  - **`to`:** unknown, or one that doesn't parse, becomes where the lane stands at that start. That is sound because everything after it reaches the lane, which has landed nothing since, so the gap still covers what was dropped. It may over-refuse up to that point.
+  - **`from`:** one that doesn't parse becomes unknown. The gap then reaches back from its `to`, refusing only past positions.
+  - So nothing refuses forever.
+- **m5.**
+  - **Stopping first:** a reindex or reattach while stopping is `503 stopping`, before any other refusal.
+  - **`reason`:** the "can rebuild" `409` carries one.
+  - **`reattach --sink`:** given on the command line only, with no `FLUSSO_SINK`. This is an exception to the every-flag-reads-env rule, since an env var shouldn't pick the lane a reattach drops changes on.
+- **m6.** Covered by S4(a).
+- **m7.** The put-back wording is corrected above.
+
+**Not proven.** Unchanged from step 4, plus:
+- the B1 fix against CI's live `a_fence_holds_while_the_index_is_seeded_or_rebuilt` (no Docker locally; CI decides);
+- the verdict wait against a real sink engine under load;
+- `SeedBlocked` on a live OpenSearch.
 
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
