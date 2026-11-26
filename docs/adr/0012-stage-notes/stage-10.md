@@ -527,8 +527,8 @@ The owner accepted this order on 2026-11-24. Each slice is safe if nothing after
 3. **Spikes S1, S3, S4.**
 4. **Thresholds and the probe-gated rebuild,** with `enabled = true`: R2, R3, R10, the stuck clock, the probes, the schedule, the alert. Gated on slice 3. Carried in from the re-check of step 4's fix round (2026-11-26), to build here:
    - **`SeedBlocked` in the counts.** R2's thresholds count a `ParkReason::SeedBlocked` park (O28 keeps it under R2). R10's `rebuild_grace` does not, and flood stage never counts toward R10. Every place that matches a park for R2 or R10 names `SeedBlocked` apart from `Blocked`; `kind()` and `label()` give both `blocked`, so only `/status`'s `seed_blocked` tells them apart.
-   - **`clear_failed_detach` deletes any `Detached` record it finds,** conditional only on the version it just read. In an overlap that can be another process's record: it needs the version this process's failed `detach` wrote, or a check that the record names this attempt.
-   - **Record operations between the first read again and the grant.** `start_restages`, `start_detaches`, `start_clears` and `ask_rebuilds` run after awaits that can span a reopening of the slot. `grant_once_read` covers the grants; these touch records and markers, so each is rechecked against a reopening (restaging reads the records itself; the clears are the one to recheck).
+   - **`clear_failed_detach` deletes any `Detached` record it finds,** conditional only on the version it just read. Since the fifth re-check it runs only while this process holds the slot, so no other process can have written one meanwhile; naming the attempt in the record would still make it exact.
+   - **Record operations between the first read again and the grant.** Settled by the fifth re-check's narrowing: every record write is gated on the slot or safe without it (§10a, "After the fifth re-check", the table).
    - **m-3: a lane held detached in memory never learns that another process reattached or rebuilt it** (the fourth re-check). It is safe and conservative: B keeps the lane detached until it restarts or acts. B's `reattach` then finishes "with no record kept" and refuses the whole past. B's reindex calls `begin_rebuild` on an index whose record is gone, which is unverified against OpenSearch's `write_rebuild` (the stand-in refuses it, which would leave the rebuild owed and retried on backoff). On the live checklist below.
    - **m-4: `check` and `--strict` (#486) read no index state.** A detached index shows in `flusso indexes`. For the docs agent, on the manual's `check` page once this slice makes detach reachable: "`check` doesn't read index state; a detached index shows in `flusso indexes`."
 
@@ -543,6 +543,9 @@ The owner accepted this order on 2026-11-24. Each slice is safe if nothing after
    - [ ] **O29 with a reattach in between.** A reattaches while B waits. B reads the gap and refuses inside it.
    - [ ] **B-2 live.** A process dies mid-rebuild, another takes the slot, then a third starts. With B-2's fix, no seed lands over dropped changes.
    - [ ] **B-1 live.** A restaging index (its target deleted) whose restage is in flight across a replication reconnect (drop the walsender with `pg_terminate_backend`) gets its records read before it writes. After the reconnect, every healthy lane passes `/wait` within a few seconds.
+   - [ ] **No seed without the slot** (the fifth re-check). A backfill whose stream ends before its `SnapshotComplete` (drop the walsender mid-backfill): no seed is written until the slot is held again, then the backfill is asked again and seeds. Another process's detach record written meanwhile survives.
+   - [ ] **A stop during a failed reconnect** (the old walsender still holds the slot until `wal_sender_timeout`): the stop drains the lanes' backlog and exits at once, not at its deadline.
+   - [ ] **A process that can't reach Postgres at its start** while another holds the slot: a `reattach` is refused, a `reindex` waits (restaging, with the reason), and no record changes.
    - [ ] **A reconnect on a quiet database.** After `pg_terminate_backend` of the walsender, `/wait` for an already-applied position passes within about 1 s of the reopen (the wake), at both levels.
    - [ ] **Meta index unreadable for one index** (blocked or closed) across a reconnect. That lane answers `starting`, its siblings pass, and it recovers when readable.
    - [ ] **Server-side slot release.** The slot taken by another process after B's walsender is killed: B's `Held` guard drops `holding`, and no gap end is settled while it isn't held.
@@ -1276,6 +1279,88 @@ The re-check (`target/review-482-fix-round-4/REPORT.md`) found two blocking hole
   - A process that keeps writing after another one took the slot, with no failed opening of its own in between, isn't modelled: that is fencing across processes, outside O29.
 - **Live checks.** Still no live run of overlapping processes, a rebuild, a reattach or the conditional gap write. §10's checklist lists them.
 
+### After the fifth re-check
+
+Two independent reviews (`target/review-482-fix-round-5/`, `target/review-482-fix-round-5b/`) found holes in one family: what a process may do while another may hold the slot. Both recommended the same change of design, and **the owner decided it on 2026-11-26: narrow the overlapping-process guard (O29).**
+
+**The rule.** This process destroys or rewrites no record another process may rely on unless it holds the slot. Plain writes behave as on `main`. Two halves:
+- **No record is erased, or loosened, without the slot** (`Rereads::may_erase_records`). The slot counts as held while this process's stream is open, or once its run ended cleanly (the source finished its stream, or a stop drained and confirmed: the deployment ends after the drain). A sink engine with no ingest engine beside it (nothing to open a stream, as in tests) has no slot to hold and behaves as on `main`. An ingest engine wired to a `Rereads` marks it (`will_open`), so a process whose `prepare` keeps failing holds no slot from the start.
+- **What the records say is read again once the slot is held,** as before: after every opening, before any grant, and decided by the same function staging uses (`decide`, run by `act_on_records`). The fence side is unchanged.
+
+**Every write of a record or marker.**
+
+| Write | Without the slot | Why, and what retries it |
+| --- | --- | --- |
+| a seed (`mark_seeded`) | gated | its marker is written whole, erasing any record. The `SnapshotComplete` is acknowledged unseeded and its backfill cut; the next read while the slot is held asks for it again (idempotent) |
+| the failed-detach clear (`clear_failed_detach`) | gated | it deletes the `Detached` record it reads, which may be another process's. The lane stays parked with its record (a conservative detach); every turn tries again |
+| a reattach (its gap, then `forget_detachment`) | gated | it deletes the record. Refused with the reason; the operator asks again |
+| a reindex (`sink.reindex`) | gated | it moves the index to a new generation. Owed, the lane restaging with the reason, retried on the restage backoff; the other lanes write on |
+| a rebuild (`begin_rebuild`), from a reindex, an owed rebuild or O20's restart | gated | it rewrites the detach record into `rebuilding`. Owed through `owe_rebuild`, retried by `retry_rebuilds` once the slot is held |
+| a detach (`detach`), and staging's `DetachAgain` | safe | it only tightens a record, to detached |
+| a demotion (`demote`): O26, R14, another process's rebuild | safe | `rebuilding` to detached, or detached to live only: tighter. Staging at a process's start does them before any stream, by design (#120) |
+| a finished rebuild's record deleted at staging (`forget_detachment`) | safe | on the version read, and only beside a newer seeded marker: the record is obsolete |
+| a gap added, or its end moved later (`record_gaps`) | safe | a gap only grows; an unknown end is settled only while the slot is held (S-a) |
+| a walk checkpoint written or forgotten (`record_walked`, `forget_walked`) | safe | it claims only this process's own pages, and a walk resumes from it only where no record stands against the index; forgetting one only makes a walk start earlier |
+
+No path hangs or fails the run because a gated action was skipped: each is retried as the table says.
+
+**Per finding.**
+- **First report, B-1 (`6907c928` test, `df9a5192` fix):** the write gate of the last round (`Rereads::opening_outstanding` in `grant` and the substitute arm) is gone; the seed is gated instead. `a_stream_that_ended_seeds_nothing_over_a_detach_written_since`, `a_failed_opening_seeds_nothing_and_asks_the_backfill_again_once_held`.
+- **First report, S-1:** a stop after a failed opening drains its lanes again: `a_stop_while_an_opening_failed_still_drains_the_lanes`.
+- **Second report, B-2 (`21f28210` tests, `cb501209` fix):** the clear waits for the slot. `a_clear_waits_while_no_stream_is_held`, `a_clear_waits_after_the_stream_ended`.
+- **The audit (`6406f7d5`):** a reattach, a reindex and a rebuild wait for the slot. `a_reattach_is_refused_while_no_stream_is_held`, `a_reindex_waits_for_the_slot_before_it_rewrites_a_record`, `a_reindex_of_an_open_index_is_owed_while_no_stream_is_held`.
+- **First report, B-3 (`6d3e9ce1` tests, `d3edbe47` fix): one decision.** Staging and the read again both call `act_on_records`, which reads `decide`:
+  - another process's rebuild is put back to detached (conditional, read again and decided again) before the lane drops anything, whatever the lane's state;
+  - it is taken over only at a process's first staging (no stream opened yet), its lane not held detached, with backfill to finish it;
+  - a rebuild this process began that the records no longer show is dropped.
+
+  Tests: `a_staging_of_a_lane_held_detached_demotes_anothers_rebuild`, `a_staging_demotes_a_rebuild_begun_since_ours`.
+- **Found by the world this round (`c662dd41`):** before its first opening, a process whose ingest engine will open holds no slot either. `a_process_whose_stream_never_opened_deletes_no_record`.
+- **CI red (`19881617`): a stand-in error, not a product hole.**
+  - Each process in the world now has its own capture: it starts closed at the slot's confirmed position, stays closed after a failed opening, and answers `Landed::Idle` as Postgres does. CI's seed is kept.
+  - The port states what the engine relies on: `reached` answers `Idle` at or past where the current stream started, so at or past anything an earlier holder of the slot dropped. `idle_is_never_answered_below_the_streams_start` pins the Postgres half.
+  - `known_gaps` debug-asserts that a settled end is not below its start (m-4). It caught the engine tests' `Seqs` stand-in breaking the contract the same way, now fixed.
+- **The world's write oracle (`19881617`, `0352ca5b`).**
+  - It no longer restates the code's gate. The world keeps its own record of whether this process holds a stream.
+  - It judges writes only while one is held. With none held, plain writes behave as on `main`.
+  - It states the narrowed rule: no record of another process is erased, nor rewritten into anything but detached, while this process holds no stream.
+  - New events: the stream ends and another process acts before the next opening begins; this process detaches a lane itself, its detach sometimes failing after the record lands.
+  - Reverting a gate, three fresh-seed runs each: the seed 3/3, the clear 1/3 (its unit tests catch it every time), the reattach 3/3, the rebuild 3/3, `will_open` 3/3.
+- **The six unguarded paths (second report, Part 2).**
+  - `any` against `all` in the confirmation hold: `a_detached_lane_unread_holds_confirmation_while_another_detached_lane_was_read` (`b347fbb7`).
+  - The read again in `substituted`: `a_substitute_arriving_with_an_opening_is_written_only_once_read` (`6a36a66f`). It runs 16 times, since the run's `select!` takes either arm first; without the read again it fails 3 runs of 3.
+  - `take_attached`'s own read again first, and its skip of an `Attached` for a dropped rebuild: **removed** (`b347fbb7`). Both were redundant:
+    - the attach opens its lane through `store_lane`, which makes the read due before any grant;
+    - an `Attached` for an attempt the lane no longer waits for is already discarded where it is received.
+
+    Every engine and daemon test passes without them.
+  - The staging half of `acf2328a`: now B-3's decision, `a_staging_demotes_a_rebuild_begun_since_ours`.
+  - A failed read of a detached lane never fails the run: `a_failed_read_of_a_detached_lane_never_fails_the_run`.
+- **Minors.**
+  - **m-1 and m-2 (`504acbc3`):** `readable_wait` and `streams_opened` each have their own doc again. `streams_opened` says it fails open for a capture that wraps another and doesn't forward it: a backstop beside the tripwire.
+  - **m-3, equal attempt counts:** not changed. Two processes can each read a `rebuilding` record under the same attempt count as their own. With the narrowed rule only the one holding the slot can seed, demote or rebuild over it, so the ambiguity no longer loses changes.
+
+**Removed by the narrowing.**
+- `Rereads::opening_outstanding`, and its gates in `grant` and the substitute arm.
+- `take_attached`'s read again, and its skip.
+- The world's write rules built on the code's own counters (`attempts`).
+- The test that a failed opening writes nothing, replaced by one that it seeds nothing.
+
+**The window that stays open, for the docs agent.** Postgres may already have dropped this process's walsender while the process hasn't noticed: about a status interval on a reset connection, up to a TCP timeout on a silent partition. In that window the process may still make late plain writes into an index another process detached. That is the same as `main`. Real fencing of two processes (an owner lease in the sink's meta index) is a separate issue the coordinator files. One process per slot (Helm's `Recreate`) stays the supported shape.
+
+**What changes for a user.**
+- **Writes during a reconnect or a stop:** as on `main`. The lanes' backlog is written while the stream reopens, and a stop during a failed reconnect drains at once.
+- **A backfill that completes while the slot isn't held seeds nothing.** It is asked for again once the slot is held, so an index stays backfilling a little longer after a reconnect that came mid-backfill.
+- **A reattach while the slot isn't held** is refused, with the reason; ask again once flusso holds the slot.
+- **A reindex while the slot isn't held** waits, and the index shows restaging with the reason. A rebuild, and the clear of a failed detach, wait the same way.
+- **A process that can't reach Postgres at its start** (its `prepare` failing) makes none of these record changes until its stream opens.
+- **Unchanged:** the fence (a lane answers `starting` from each opening until its own records are read), the read again after every opening, and the confirmation hold while a detached lane is unread.
+
+**Not proven.**
+- **The world is a model.** The ingest engine isn't in it: changes are published by the test, and confirmation is the source's answer for the real `Progress`.
+- **Stops and `--skip-backfill`** aren't events.
+- **Live runs:** none, still. §10's checklist lists them.
+
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
 **O29: can a process that staged before another one's detach keep the lane attached? (S3)**
@@ -1342,7 +1427,7 @@ Decided by the owner on 2026-11-24. Each row gives the decision and one line on 
 | O26 | `--skip-backfill` at a start that finds a running rebuild | demote it, with a loud log: the rebuild and its partial are dropped, the lane is detached | keep it attached and paused: pins the slot for the whole run |
 | O27 | The rebuild's walk while another sink's walk of the index runs | it waits for that walk, with the lane attached and live meanwhile, so reads stay on the old generation for up to that walk's length | cut the other walk: costs the other sink its progress since its last mark |
 | O28 | A rebuild whose seed parks on `RetireBlocked` (decided 2026-11-26) | exempt from R10's `rebuild_grace`, kept under R2's detach thresholds; `/status` and the log name this park apart (the seed waits for the block on the serving generation); flood stage never counts toward R10, even under a forced `reindex` | under R10: deletes a complete generation after 10 minutes, and each forced `reindex` past a read-only `serving` pays a full rebuild |
-| O29 | A process that staged before another process's detach (decided 2026-11-26) | once this process's live stream holds the slot, before the first item is published, read every index's detach records again, adopt any lane they say is detached, and do slice 1's put-back only at that read; one `_mget` per index per sink per live start | re-staging before each retry: a window remains, since the other process can write its record until it lets go of the slot. Documenting overlap as unsupported: an overlap would lose changes |
+| O29 | A process that staged before another process's detach (decided 2026-11-26; **narrowed by the owner on 2026-11-26**, after the fifth re-check) | once this process's live stream holds the slot, before the first item is published, read every index's detach records again and decide from them with the function staging uses (adopt any lane they say is detached, put another process's rebuild back to detached); one `_mget` per index per sink per live start. **Narrowed:** this process erases or loosens no record unless it holds the slot (a seed, the failed-detach clear, a reattach, a reindex, a rebuild wait and are retried); plain writes behave as on `main`. A late plain write from a process whose walsender Postgres dropped before it noticed stays possible, as on `main`: real fencing (a lease) is its own issue | re-staging before each retry: a window remains, since the other process can write its record until it lets go of the slot. Documenting overlap as unsupported: an overlap would lose changes. Gating every write while no stream is current (the fourth re-check's round): covered half the window, stalled stops and reconnects for every deployment, and kept finding siblings |
 | O30 | An unreadable record at staging (decided 2026-11-26) | stages as today only when the marker is on a newer, unseeded generation (a rebuild); any other unreadable record, and a `rebuilding` record with the marker on serving, runs `Sink::detach` again | as today for every unreadable record: one beside a seeded marker on serving reads as attached and current over dropped changes |
 
 ## 12. Not verified

@@ -1931,59 +1931,46 @@ is the one concrete piece.
   unknown); after an attach, kept gaps with such an end are settled at the next turn while held. A reattach reuses an open last
   gap starting at its record's `through` (one gap per detach); a failed record delete is read again
   (gone: the reattach goes on); a reattach on a lane held detached with no record kept finishes the
-  earlier one whose delete landed unseen. **O29, the rule in one line: a lane answers `starting` from the moment a new stream may answer
-  until its own records were read under that stream; `gap`, `detached`, `rebuilding` and
-  `backfilling` take precedence as themselves. Sink-engine side: a lane is written, and opened again
-  after any staging, restage, reindex or attach, only if its records were read under the current
-  stream; with no stream current (an opening in flight or failed) nothing is written or seeded.** An
-  unread lane vouches for nothing (no frozen answer: three of four holes were in one).
-  `engine::Rereads`: the ingest engine opens the stream only through `Rereads::open(source.live())`
-  (the one place outside tests; `the_live_stream_is_opened_only_through_rereads_open` is the
-  tripwire, catching `.live()` and `ChangeCapture::live`; `ChangeCapture::streams_opened`, counted by
-  Postgres, makes the fence read every lane as unread while the source opened more streams than
-  `Rereads::opened`), which marks every lane unread before the future runs; a read counts only when
-  it began once `open` returned Ok (`read_begins`, taken before the read); **reads count per lane,
-  never per sink** (`Rereads::read(&LaneKey, at)`, `current(&LaneKey)`): `SinkEngine::step` counts its
-  lane only when the step got through, `Run::reread` counts each lane it read (a detached lane too, a
-  read failing there leaves it unread; a restaging lane is left to its restage path, so a bad index
-  never fails the sink's run, #471). **Two checks, every path through one** (the sink engine's module
-  doc lists each path): opening a lane goes through `store_lane`, which makes the run's read due
-  (`opened_unread`) for a lane stored open while not current; writing goes through `grant` /
-  `grant_once_read` (reads first while due; grants nothing while `Rereads::opening_outstanding`) or
-  `substituted` (a substitute written past `grant` reads first). `take_attached` reads first when its
-  lane isn't current. **Whose rebuild a `rebuilding` record is, its attempts say**: the read again
-  demotes any other (`Sink::demote`, conditional; read again and decided again; a failed demotion
-  fails the run) before the lane drops anything (B-2), drops a waiting rebuild the records show
-  detached (`drop_rebuild`), and staging drops one a lane held detached waits for, so its attach opens
-  nothing. `Progress::hold_while_unread` (wired by the daemon): `landed` answers `Idle`, which keeps the
-  confirmed position, while a detached lane's records are unread under the current stream, so the
-  slot never passes changes a later start could resume another process's rebuild walk over. The fence
-  keeps a rebuild under way across a detach heard again; only `on_lane_rebuild` with none ends it. An
-  opening wakes every sink engine's run (`Rereads::openings`, a watch); `reread_due` (the engine's
-  `read_at` behind the last held opening, a lane opened unread, or an unsettled gap while the slot is
-  held) drives the run's read; `Rereads::holding` is true while that stream is open (the ingest run's
-  `Held` guard calls `closed`). A detach or a rebuild begun while the lane is unread freezes at
-  nothing. Guards: `fence::tests::gate_property` (one sink, the fence's gate) and
-  `fence::tests::gate_world::every_lane_vouches_only_for_what_it_holds` (the real sink engines write
-  to a stand-in that judges each write as made: no stream current, a lane last read under an earlier
-  stream, a detach record; held reads and `ensure_index`, missing targets, seeds only at a `Seed`,
-  another process's drop or drop-and-rebuild, a new process redelivered from what the slot confirmed;
-  waits judged from what the test did, never the engine's gaps or counts; liveness on every lane;
-  1024 cases; the mutations it finds are in the stage-10 note §10a); `tests::detach`'s
-  `*_that_spans_an_opening_*`, `*_across_an_opening_*`,
-  `a_rebuild_another_process_began_is_demoted_before_its_lane_drops_anything`,
-  `a_step_whose_read_spans_an_opening_counts_no_read_for_it`,
-  `a_failed_opening_writes_nothing_until_one_gets_through`,
-  `a_rebuild_another_process_began_since_ours_is_demoted`,
-  `a_staging_drops_a_rebuild_the_records_no_longer_show`; `progress::tests::detach`'s
-  `a_detached_lane_holds_confirmation_until_its_records_are_read_again`; `fence::tests`'
+  earlier one whose delete landed unseen. **O29 (narrowed by the owner on 2026-11-26): this process destroys or rewrites no record
+  another process may rely on unless it holds the slot; plain writes behave as on `main`. The
+  fence: a lane answers `starting` from the moment a new stream may answer until its own records
+  were read under that stream; `gap`, `detached`, `rebuilding` and `backfilling` take precedence as
+  themselves.** `engine::Rereads`: the ingest engine opens the stream only through
+  `Rereads::open(source.live())` (tripwire `the_live_stream_is_opened_only_through_rereads_open`;
+  `ChangeCapture::streams_opened`, counted by Postgres, makes the fence read every lane as unread
+  while the source opened more streams than `Rereads::opened`); reads count per lane, for the
+  stream they began under (`read_begins`). **Record writes:** `Rereads::may_erase_records` (the
+  stream held, or the run ended cleanly: `Held`/`finished`; with no ingest engine wired, `will_open`
+  unset and nothing opened, as on `main`) gates a seed (its `SnapshotComplete` is acknowledged
+  unseeded and its backfill cut, asked again at the next read while held), the failed-detach clear,
+  a reattach (refused with the reason), a reindex (owed, restaging) and a rebuild (owed); detaches,
+  demotions, a finished rebuild's record, gap writes and walk checkpoints are safe without it (the
+  table is in the sink engine's module doc and the stage-10 note §10a). **The read again:** after
+  every opening, while the slot is held, `Run::reread` reads each lane's records and decides with
+  the function staging uses (`decide`/`act_on_records`): another process's rebuild is put back to
+  detached before the lane drops anything; it is taken over only at a process's first staging. A
+  lane stored open while unread (`store_lane`, `opened_unread`) is read before any grant
+  (`grant_once_read`, `substituted`). `Progress::hold_while_unread` holds confirmation while a
+  detached lane is unread under the current stream. The fence keeps a rebuild across a detach heard
+  again; `on_lane_rebuild` with none ends it. Still open, as on `main`: a late plain write from a
+  process whose walsender Postgres dropped before it noticed (real fencing is its own issue).
+  Guards: `fence::tests::gate_property`; `fence::tests::gate_world::every_lane_vouches_only_for_what_it_holds`
+  (real sink engines over a stand-in that judges each write; one capture per process; the world's
+  own record of whether this process holds a stream; streams ending, another process's drop or
+  rebuild, this process's own failed detach, new processes; its mutation results are in the note's
+  §10a); `tests::detach`'s `a_stream_that_ended_seeds_nothing_over_a_detach_written_since`,
+  `a_stop_while_an_opening_failed_still_drains_the_lanes`, `a_clear_waits_*`,
+  `a_reattach_is_refused_while_no_stream_is_held`, `a_reindex_*_while_no_stream_is_held` /
+  `a_reindex_waits_for_the_slot_before_it_rewrites_a_record`,
+  `a_process_whose_stream_never_opened_deletes_no_record`, `a_staging_*_demotes_*`,
+  `*_that_spans_an_opening_*`, `a_failed_read_of_a_detached_lane_never_fails_the_run`;
+  `tests::parking::a_substitute_arriving_with_an_opening_is_written_only_once_read`;
+  `progress::tests::detach`'s `a_detached_lane_*holds_confirmation*`; `fence::tests`'
   `a_detach_heard_again_during_a_rebuild_keeps_it_a_rebuild`,
-  `a_stream_opened_past_the_counted_openings_vouches_for_nothing`;
-  `a_staging_that_left_an_index_unread_counts_no_read_of_it`,
-  `a_read_again_that_missed_a_lane_counts_no_read_of_it`, `an_opening_on_a_quiet_stream_is_read_at_once`,
-  `an_unread_lane_never_holds_back_its_read_sibling`, `a_rebuild_begun_while_unread_vouches_for_nothing`.
-  Nothing waits on a sink: one that is down holds the slot. The read puts a half-moved marker back
-  as staging does; a record another process writes after is met by O30's row at the next read. **The attach** (R7, R8, step 3; nothing sends
+  `a_stream_opened_past_the_counted_openings_vouches_for_nothing`; source-postgres's
+  `idle_is_never_answered_below_the_streams_start` (`Landed::Idle`'s contract, which a settled gap
+  end relies on: `known_gaps` debug-asserts it). Nothing waits on a sink: one that is down holds the
+  slot. A record another process writes after is met by O30's row at the next read. **The attach** (R7, R8, step 3; nothing sends
   `SinkControl::Attach` yet): the sink engine numbers an attempt (`SinkEngine::attempts`), keeps it in
   `LaneState.attaching` and sends `Request::Attach { index, sink, attempt }` (again after a run
   restart); the dispatcher routes it on the builder's third channel (`Route.attaches`, read while a
