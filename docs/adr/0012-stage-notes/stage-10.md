@@ -674,6 +674,53 @@ None of these can be taken out without the feature. Measured locally (base `efc4
 
 `sinks1` is within ±1% at every size. The CI numbers read as one run's noise. CI's gate on this branch is the authoritative answer.
 
+### Step 3: the attach, as designed before the code
+
+**What asks for an attach in step 3.** Only a test: `SinkControl::Attach { index }`. Nothing in a deployment sends it until step 4 wires the rebuild (r2) and `reattach` (O16) to the same path. In step 3 an attached lane opens as an ordinary open lane, with no backfill: what O16's reattach does.
+
+**Attempts.** The sink engine numbers its attach attempts from one counter, increasing for its life. `LaneState.attaching: Option<u64>` is the attempt it waits for, and `LaneState.attached: Option<u64>` the attempt it last opened on. Both outlive a run, so a run restarted while it waits sends the same request again. In step 4 the attempt becomes the record's (§4), which is durable and increasing.
+
+**The ingest side.**
+
+- **The route.** `Request::Attach { index, sink, attempt }` goes on a third channel of the builder's route, beside `Rebuild`. It is read while a walk runs, so an attach never waits behind the inbox gate (W1).
+- **The quiesce.** A builder with an attach pending grants nothing (`Builds::pause`): no live batch, no backfill batch, no fresh build. It publishes what is ready as before. Once nothing of its index is granted and unpublished (no slot, no running build), it acts on every pending request:
+  - `Progress::attach(lane, attempt)`, under the registry lock;
+  - then `LaneItem::Attached { attempt }` is published on the lane;
+  - then the request is acknowledged, and granting resumes.
+- **Progress decides the attempt (H2).**
+  - A detached lane is attached for an attempt above the one it last attached for. Its `newest` becomes `routed_ever`, the newest position routed in this process, which `forget_all` keeps (H7).
+  - A lane already attached for the request's attempt answers `Again`: `Attached` is published again.
+  - Anything else is stale and acknowledged with nothing published: an older attempt, or the attempt the lane was attached for and then detached again.
+- **R7.** With a lane detached (`Progress::any_detached`, one atomic load, so nothing is looked up otherwise):
+  - `publish_live` registers a skip on it and puts no item there;
+  - `publish_backfill` and the snapshot's end publish nothing to it;
+  - a `Backfill` request for it is acknowledged unserved when its snapshot starts;
+  - a running walk whose every requesting lane is detached is cut, and its requests acknowledged.
+
+**The sink side (R6).**
+
+- A detached lane keeps taking its deliveries and acknowledging them unwritten.
+- An `Attached` naming the attempt the lane waits for is held at the lane's front until nothing of the lane is unacknowledged: the discards acknowledged, nothing in flight. Then the lane opens, `attached` becomes that attempt, and `Attached` is acknowledged, in the run loop.
+- Any other `Attached` is acknowledged and discarded: an older attempt, or one that arrives while no attach is awaited.
+- On a lane already open with `attached` equal to the attempt, a redelivered `Attached` is a no-op (H2, H3).
+
+**Tests first.**
+
+- `progress::tests::attach`: attach after a detach, `newest` from `routed_ever` after `forget_all`, `Again` for the same attempt, stale attempts, `any_detached`.
+- `ingest` level:
+  - the quiesce publishes nothing of the index during the attach and grants after it;
+  - R7 for live items, a walk, a `Backfill` request and a cut walk;
+  - a lone builder quiesces and keeps its batching (W2);
+  - S6's two follow-ups:
+    - `a_run_dying_between_attach_and_attached_republishes_it`;
+    - `a_run_restart_after_attached_never_writes_a_redelivered_earlier_item`.
+- `tests::detach` (the sink engine):
+  - items before `Attached` are discarded and those after it written;
+  - an older attempt's `Attached` is discarded;
+  - a second `Attached` of the same attempt discards nothing;
+  - the attach waits for the discards.
+- m6's failing test, then its fix.
+
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
 **O29: can a process that staged before another one's detach keep the lane attached? (S3)**
