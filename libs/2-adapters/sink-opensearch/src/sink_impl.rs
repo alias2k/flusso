@@ -502,6 +502,14 @@ impl Sink for OpensearchSink {
         self.delete_detach(mapping, version).await
     }
 
+    async fn begin_rebuild(&self, mapping: &IndexMapping) -> Result<u64> {
+        self.write_rebuild(mapping).await
+    }
+
+    async fn demote(&self, mapping: &IndexMapping, live_only: bool) -> Result<()> {
+        self.write_demotion(mapping, live_only).await
+    }
+
     async fn seeding(&self, index: &IndexName) -> Result<Seeding> {
         let Some(target) = self.target(index.as_ref()) else {
             return Ok(Seeding::Unseeded { walked: None });
@@ -651,6 +659,12 @@ impl Sink for OpensearchSink {
         self.write_index_meta(hash_alias, active, true, live.as_deref())
             .await?;
         steps.mark("marker");
+        // A rebuild after a detach is finished with the seed (r4): its record
+        // goes, after the marker. One left by a failure here is found
+        // finished by the next staging and deleted then.
+        if let Err(error) = self.forget_finished_rebuild(hash_alias).await {
+            warn!(index = logical, %error, "could not delete the finished rebuild's detach record; the next staging does");
+        }
         debug!(index = logical, %generation, steps = %steps, "marked seeded");
         self.set_target(
             logical,

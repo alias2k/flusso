@@ -484,3 +484,142 @@ async fn forgetting_a_record_deletes_only_the_version_read() {
     assert!(store.lock().unwrap().doc(DETACH).is_none());
     sink.forget_detachment(&mapping(), &version).await.unwrap();
 }
+
+/// A store with `users` detached as a detach leaves it: the marker moved to
+/// generation 5 keeping where it was, the record `detached`, serving 3, and
+/// a partial generation 5 a failed attempt left.
+fn detached_store() -> Store {
+    let mut store = Store::seeded();
+    store.put(
+        ALIAS,
+        json!({ "active_generation": 5, "seeded": false, "walked": { "generation": 5, "mark": "old" },
+                "uuid": "u5", "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3" } }),
+    );
+    store.put(
+        DETACH,
+        json!({ "state": "detached", "live_only": false, "serving": 3, "attempts": 1, "since": "then" }),
+    );
+    store.generations = ["users_00000001_3", "users_00000001_5"]
+        .map(str::to_owned)
+        .into();
+    store
+}
+
+/// r1: every generation but serving goes first, the marker moves past every
+/// generation (no checkpoint, no uuid, `detaching_from` kept), then the
+/// record says `rebuilding` with one more attempt, which is returned.
+#[tokio::test]
+async fn a_rebuild_begins_by_clearing_partials_moving_the_marker_and_counting_an_attempt() {
+    let store = Arc::new(Mutex::new(detached_store()));
+    let stub = serve(&store).await;
+    assert_eq!(stub.sink().begin_rebuild(&mapping()).await.unwrap(), 2);
+    let store = store.lock().unwrap();
+    assert_eq!(store.generations, ["users_00000001_3".to_owned()].into());
+    assert_eq!(
+        store.doc(ALIAS).unwrap(),
+        json!({ "active_generation": 4, "seeded": false, "walked": null, "uuid": null,
+                "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3" } }),
+        "past every generation left: the partial is gone, its checkpoint with it"
+    );
+    let record = store.doc(DETACH).unwrap();
+    assert_eq!(record["state"], "rebuilding");
+    assert_eq!(record["attempts"], 2);
+    assert_eq!(record["serving"], 3);
+    assert!(record["last_attempt"].as_str().is_some());
+}
+
+/// A rebuild killed before each of its writes: the record says `rebuilding`
+/// only once the partial is gone and the marker moved, so a restart finding
+/// `rebuilding` rebuilds into an empty generation; before that it finds
+/// `detached` and starts over (the kill walk's r1).
+#[tokio::test]
+async fn a_rebuild_killed_after_any_step_comes_back_correct() {
+    // Writes in order: the partial's delete, the marker, the record.
+    for killed_at in 1..=4 {
+        let store = Arc::new(Mutex::new(detached_store()));
+        store.lock().unwrap().killed_at = Some(killed_at);
+        let dying = serve(&store).await;
+        let begun = dying.sink().begin_rebuild(&mapping()).await;
+        let done = killed_at - 1;
+        assert_eq!(begun.is_ok(), done == 3, "after {done} writes: {begun:?}");
+        store.lock().unwrap().killed_at = None;
+        let next = serve(&store).await;
+        let read = next.sink().detachment(&mapping()).await.unwrap();
+        let store = store.lock().unwrap();
+        assert!(
+            store.generations.contains("users_00000001_3"),
+            "serving kept"
+        );
+        match done {
+            0 => assert_eq!(
+                read.record,
+                Some(DetachRecord::Detached { live_only: false })
+            ),
+            1 | 2 => {
+                assert_eq!(
+                    read.record,
+                    Some(DetachRecord::Detached { live_only: false })
+                );
+                assert!(!store.generations.contains("users_00000001_5"));
+            }
+            _ => {
+                assert_eq!(
+                    read.record,
+                    Some(DetachRecord::Rebuilding { live_only: false })
+                );
+                assert_eq!(read.attempts, Some(2));
+                assert_eq!(read.marker, Some(MarkerAt::Newer { seeded: false }));
+            }
+        }
+    }
+}
+
+/// O26: a rebuild put back to detached drops the partial and its checkpoint
+/// and moves the marker past every generation; R14 (live only) puts the
+/// marker back on serving as it was.
+#[tokio::test]
+async fn a_demotion_puts_a_rebuild_back_to_detached() {
+    for live_only in [false, true] {
+        let store = Arc::new(Mutex::new(detached_store()));
+        let stub = serve(&store).await;
+        stub.sink().begin_rebuild(&mapping()).await.unwrap();
+        store
+            .lock()
+            .unwrap()
+            .generations
+            .insert("users_00000001_4".to_owned());
+        stub.sink().demote(&mapping(), live_only).await.unwrap();
+        let read = stub.sink().detachment(&mapping()).await.unwrap();
+        let store = store.lock().unwrap();
+        assert_eq!(
+            read.record,
+            Some(DetachRecord::Detached { live_only }),
+            "{live_only}"
+        );
+        assert!(
+            !store.generations.contains("users_00000001_4"),
+            "{live_only}: partial gone"
+        );
+        if live_only {
+            assert_eq!(read.marker, Some(MarkerAt::Serving { seeded: true }));
+            assert_eq!(
+                store.doc(ALIAS).unwrap(),
+                json!({ "active_generation": 3, "seeded": true, "uuid": "u3" })
+            );
+        } else {
+            assert_eq!(read.marker, Some(MarkerAt::Newer { seeded: false }));
+            assert_eq!(store.doc(ALIAS).unwrap()["walked"], Value::Null);
+        }
+    }
+}
+
+/// r4's last write: the seed deletes the finished rebuild's record on the
+/// version it reads; with none, nothing is asked.
+#[tokio::test]
+async fn the_seed_deletes_the_finished_rebuilds_record() {
+    let store = Arc::new(Mutex::new(detached_store()));
+    let stub = serve(&store).await;
+    stub.sink().forget_finished_rebuild(ALIAS).await.unwrap();
+    assert!(store.lock().unwrap().doc(DETACH).is_none());
+    stub.sink().forget_finished_rebuild(ALIAS).await.unwrap();
+}

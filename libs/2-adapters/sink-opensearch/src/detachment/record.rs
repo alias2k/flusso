@@ -236,3 +236,189 @@ fn parse_version(version: &RecordVersion) -> Option<(u64, u64)> {
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
+
+impl OpensearchSink {
+    /// r1 of a rebuild (see [`Sink::begin_rebuild`](sink::Sink::begin_rebuild)):
+    /// delete every generation but the record's `serving`, move the marker
+    /// past every existing generation (keeping `detaching_from`), and write
+    /// the record `rebuilding` with one more attempt. The new attempt.
+    pub(crate) async fn write_rebuild(&self, mapping: &IndexMapping) -> Result<u64> {
+        let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
+        let record_id = format!("detach:{hash_alias}");
+        for _ in 0..CONFLICT_ROUNDS {
+            let Kept { marker, record, .. } = self.read_kept(&hash_alias).await?;
+            let Some(record) = record else {
+                return Err(SinkError::Write(format!(
+                    "{hash_alias} has no detach record to rebuild from"
+                )));
+            };
+            let serving = record.source.get("serving").and_then(Value::as_u64);
+            self.delete_all_but(&hash_alias, serving).await?;
+            if let Written::Conflict = self.move_marker_past(&hash_alias, marker.as_ref()).await? {
+                continue;
+            }
+            let attempts = record
+                .source
+                .get("attempts")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + 1;
+            let mut body = record.source.clone();
+            if let Some(fields) = body.as_object_mut() {
+                fields.insert("state".to_owned(), Value::from("rebuilding"));
+                fields.insert("attempts".to_owned(), Value::from(attempts));
+                fields.insert("last_attempt".to_owned(), Value::from(now()));
+            }
+            if let Written::Conflict = self.put_if(&record_id, &body, Some(&record)).await? {
+                continue;
+            }
+            tracing::info!(
+                index = mapping.index.as_ref(),
+                hash_alias,
+                attempts,
+                "rebuild started: the record says rebuilding"
+            );
+            return Ok(attempts);
+        }
+        Err(SinkError::Write(format!(
+            "the detach records of {hash_alias} kept changing under the rebuild; it is tried again"
+        )))
+    }
+
+    /// A rebuild put back to detached (O26, R14): the partial generation and
+    /// its checkpoint go, the record says `detached` again; the marker moves
+    /// past every generation, or, `live_only`, back on `serving` as it was.
+    pub(crate) async fn write_demotion(
+        &self,
+        mapping: &IndexMapping,
+        live_only: bool,
+    ) -> Result<()> {
+        let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
+        let record_id = format!("detach:{hash_alias}");
+        for _ in 0..CONFLICT_ROUNDS {
+            let Kept { marker, record, .. } = self.read_kept(&hash_alias).await?;
+            let Some(record) = record else {
+                return Ok(());
+            };
+            let serving = record.source.get("serving").and_then(Value::as_u64);
+            if serving.is_some() {
+                self.delete_all_but(&hash_alias, serving).await?;
+            }
+            let moved = if live_only {
+                self.restore_marker(&hash_alias, marker.as_ref(), serving)
+                    .await?
+            } else {
+                self.move_marker_past(&hash_alias, marker.as_ref()).await?
+            };
+            if let Written::Conflict = moved {
+                continue;
+            }
+            let mut body = record.source.clone();
+            if let Some(fields) = body.as_object_mut() {
+                fields.insert("state".to_owned(), Value::from("detached"));
+                if live_only {
+                    fields.insert("live_only".to_owned(), Value::from(true));
+                }
+            }
+            if let Written::Conflict = self.put_if(&record_id, &body, Some(&record)).await? {
+                continue;
+            }
+            tracing::warn!(
+                index = mapping.index.as_ref(),
+                hash_alias,
+                live_only,
+                "the rebuild is put back to detached"
+            );
+            return Ok(());
+        }
+        Err(SinkError::Write(format!(
+            "the detach records of {hash_alias} kept changing under the demotion"
+        )))
+    }
+
+    /// The record of a rebuild the seed just finished, deleted on the version
+    /// read; none is fine.
+    pub(crate) async fn forget_finished_rebuild(&self, hash_alias: &str) -> Result<()> {
+        let Kept { record, .. } = self.read_kept(hash_alias).await?;
+        let Some((seq_no, primary_term)) = record.as_ref().and_then(Found::version) else {
+            return Ok(());
+        };
+        let url = format!(
+            "{}/{}/_doc/detach:{hash_alias}?if_seq_no={seq_no}&if_primary_term={primary_term}",
+            self.base_url,
+            self.meta_index()
+        );
+        let response = self
+            .maybe_auth(self.client.delete(&url))
+            .send()
+            .await
+            .map_err(|e| request_error("deleting the finished rebuild's record failed", e))?;
+        let status = response.status();
+        if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        let text = response.text().await.unwrap_or_default();
+        Err(SinkError::Write(format!(
+            "deleting the finished rebuild's record failed: HTTP {status}: {text}"
+        )))
+    }
+
+    /// Delete every generation of `hash_alias` but `keep`; a refused delete is
+    /// an error (r1a: nothing is read while a partial stays).
+    async fn delete_all_but(&self, hash_alias: &str, keep: Option<u64>) -> Result<()> {
+        for generation in self.list_generations(hash_alias).await? {
+            let Some(number) = parse_generation(hash_alias, &generation) else {
+                continue;
+            };
+            if Some(number) != keep {
+                self.delete_index(&generation).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The marker moved past every existing generation, unseeded, with no
+    /// checkpoint and no uuid, keeping its `detaching_from`: the explicit move
+    /// of a rebuild or a demotion (never R4's d2b, which leaves a moved marker
+    /// as it is).
+    async fn move_marker_past(&self, hash_alias: &str, marker: Option<&Found>) -> Result<Written> {
+        let next = next_generation(&self.list_generations(hash_alias).await?, hash_alias);
+        let detaching_from = marker
+            .and_then(|found| found.source.get("detaching_from"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let moved = json!({
+            "active_generation": next,
+            "seeded": false,
+            "walked": null,
+            "uuid": null,
+            "detaching_from": detaching_from,
+        });
+        self.put_if(hash_alias, &moved, marker).await
+    }
+
+    /// The marker back on `serving` as `detaching_from` says it was (R14).
+    async fn restore_marker(
+        &self,
+        hash_alias: &str,
+        marker: Option<&Found>,
+        serving: Option<u64>,
+    ) -> Result<Written> {
+        let from = marker.and_then(|found| found.source.get("detaching_from"));
+        let Some(generation) = serving else {
+            return Ok(Written::Done);
+        };
+        let mut restored = json!({
+            "active_generation": generation,
+            "seeded": from.and_then(|from| from.get("seeded")).and_then(Value::as_bool).unwrap_or(true),
+        });
+        if let (Some(uuid), Some(fields)) = (
+            from.and_then(|from| from.get("uuid"))
+                .and_then(Value::as_str),
+            restored.as_object_mut(),
+        ) {
+            fields.insert("uuid".to_owned(), Value::from(uuid));
+        }
+        self.put_if(hash_alias, &restored, marker).await
+    }
+}

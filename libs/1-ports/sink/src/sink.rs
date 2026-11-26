@@ -335,6 +335,8 @@ pub struct Detachment {
     /// The record's version as read, for a write conditional on it
     /// ([`Sink::forget_detachment`]): `None` with no record.
     pub version: Option<RecordVersion>,
+    /// The rebuilds the record counts as started: the attempt of the last.
+    pub attempts: Option<u64>,
 }
 
 impl Detachment {
@@ -680,6 +682,29 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// again. A record already gone is not an error. The default has nothing
     /// to delete.
     async fn forget_detachment(&self, _: &IndexMapping, _: &RecordVersion) -> Result<()> {
+        Ok(())
+    }
+
+    /// Begin a rebuild of `mapping`'s detached index (ADR 0012 stage 10,
+    /// r1): delete every copy but the one serving reads (a refused delete
+    /// fails the attempt), move the seed marker past every existing copy,
+    /// unseeded, and record the rebuild as started, counting one more
+    /// attempt, each write conditional on what was read. Returns the
+    /// attempt, the one the attach names. The default keeps no records and
+    /// refuses: a sink without records never detaches.
+    async fn begin_rebuild(&self, mapping: &IndexMapping) -> Result<u64> {
+        Err(crate::SinkError::Write(format!(
+            "{} keeps no detach records to rebuild from",
+            mapping.index
+        )))
+    }
+
+    /// Put a rebuild of `mapping`'s index back to detached (ADR 0012 stage
+    /// 10, O26, R14): the record says `detached` again, the partial copy and
+    /// its checkpoint go. `live_only`: the sink can't rebuild any more, so
+    /// the marker goes back on the serving copy as it was; otherwise it
+    /// moves past every existing copy. The default keeps nothing to change.
+    async fn demote(&self, _: &IndexMapping, _live_only: bool) -> Result<()> {
         Ok(())
     }
 

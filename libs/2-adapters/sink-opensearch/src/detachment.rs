@@ -75,6 +75,7 @@ impl OpensearchSink {
             kept.version = record
                 .version()
                 .map(|(seq_no, term)| RecordVersion::new(format!("{seq_no}:{term}")));
+            kept.attempts = record.source.get("attempts").and_then(Value::as_u64);
         }
         kept.record = record.map(|record| read_record(&record.source));
         kept.stuck = stuck.map(|stuck| {
