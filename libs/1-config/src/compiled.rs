@@ -235,7 +235,35 @@ mod tests {
                 "unknown field `pw`, expected `type`",
                 "unknown field `…`, expected `type`",
             ),
+            (
+                "invalid type: integer `48151623`, expected a string",
+                "invalid type: integer `…`, expected a string",
+            ),
+            (
+                "invalid type: floating point `3.14`, expected a string",
+                "invalid type: floating point `…`, expected a string",
+            ),
+            (
+                "invalid value: character `x`, expected a digit",
+                "invalid value: character `…`, expected a digit",
+            ),
+            (
+                "invalid type: string \"Sek`ret\", expected a map",
+                "invalid type: string \"…\", expected a map",
+            ),
             ("expected `=`", "expected `=`"),
+            (
+                "invalid basic string, expected `\"`",
+                "invalid basic string, expected `\"`",
+            ),
+            (
+                "missing escaped value, expected `b`, `e`, `f`, `n`, `r`, `\\`, `\"`, `u`, `U`",
+                "missing escaped value, expected `b`, `e`, `f`, `n`, `r`, `\\`, `\"`, `u`, `U`",
+            ),
+            (
+                "invalid type: sequence, expected a string",
+                "invalid type: sequence, expected a string",
+            ),
         ] {
             assert_eq!(unquoted(message), said, "{message}");
         }
@@ -471,23 +499,18 @@ fn decode_error(text: &str, error: &toml::de::Error) -> CompileError {
     }
 }
 
-/// A parser's message without the values it quotes from the lock: a string
-/// of the wrong type (`invalid type: string "…"`), an unknown variant or
-/// field name. What was expected stays.
+/// A parser's message without the values it quotes from the lock: the value
+/// serde names after `invalid type: ` or `invalid value: ` (a string, an
+/// integer, a float, a character), an unknown variant or field name. What
+/// was expected stays, and the parser's own syntax messages stay whole.
 fn unquoted(message: &str) -> String {
-    let mut out = String::with_capacity(message.len());
-    let mut chars = message.chars();
-    while let Some(c) = chars.next() {
-        out.push(c);
-        if c == '"' {
-            let mut escaped = false;
-            for inner in chars.by_ref() {
-                if inner == '"' && !escaped {
-                    break;
-                }
-                escaped = inner == '\\' && !escaped;
-            }
-            out.push_str("…\"");
+    let mut out = message.to_owned();
+    for lead in ["invalid type: ", "invalid value: "] {
+        if let Some(at) = out.find(lead).map(|at| at + lead.len())
+            && let Some((head, rest)) = out.split_at_checked(at)
+            && let Some(scrubbed) = without_value(rest)
+        {
+            out = format!("{head}{scrubbed}");
         }
     }
     for lead in ["unknown variant `", "unknown field `"] {
@@ -498,6 +521,27 @@ fn unquoted(message: &str) -> String {
         }
     }
     out
+}
+
+/// `rest`, which starts with what serde found, with that value replaced by
+/// `…`; `None` when it names a kind with no value (`sequence`, `map`).
+fn without_value(rest: &str) -> Option<String> {
+    if let Some(quoted) = rest.strip_prefix("string \"") {
+        let mut escaped = false;
+        let end = quoted.char_indices().find_map(|(at, c)| {
+            let closes = c == '"' && !escaped;
+            escaped = c == '\\' && !escaped;
+            closes.then_some(at + 1)
+        })?;
+        return Some(format!("string \"…\"{}", quoted.get(end..)?));
+    }
+    ["integer `", "floating point `", "character `"]
+        .into_iter()
+        .find_map(|kind| {
+            let value = rest.strip_prefix(kind)?;
+            let end = value.find('`')?;
+            Some(format!("{kind}…{}", value.get(end..)?))
+        })
 }
 
 /// Just the version line of a lock, read ahead of the body.
