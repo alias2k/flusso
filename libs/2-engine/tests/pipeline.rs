@@ -1324,9 +1324,12 @@ fn timestamp_with(options: &[(&str, GenericValue)]) -> Field {
 /// What a timestamp written in ISO 8601 (issue #304) does to the mappings a
 /// deployment may have tuned for the space form flusso wrote before 0.18:
 ///
-/// - a `format` with only space patterns refuses it: each document holding a
-///   value is an item-level rejection (`skip` here), the rest land;
-/// - adding `strict_date_optional_time` to that `format` takes it;
+/// - a `format` with only space patterns takes it, since flusso appends
+///   `strict_date_optional_time` to it (issue #485): every document indexes,
+///   a range in the user's form and one in ISO both find it, and a date
+///   histogram prints its keys in the user's form;
+/// - a `format` the user led with `strict_date_optional_time` takes it as
+///   written;
 /// - `ignore_malformed: true` takes it and `_source` holds the `T` form;
 /// - an `indexed: false` join (`has_many`, `belongs_to`, plain and
 ///   `array: true`) stores the `T` form.
@@ -1420,18 +1423,7 @@ async fn a_tuned_timestamp_mapping_meets_the_iso_form() {
                 .map_or("absent".to_owned(), ToString::to_string),
         ]
     };
-    let assert_rejected_beside = async |index: &str, rejected: &str, landed: &str| {
-        live.assert_eventually(index, landed, Some(landed_name(landed)))
-            .await
-            .unwrap_or_else(|got| panic!("{index}/{landed} did not land, saw {got}"));
-        assert_eq!(
-            live.fetch_source(index, rejected).await,
-            None,
-            "{index}/{rejected}: a space-only format refuses the ISO form"
-        );
-    };
-    assert_rejected_beside("spaced", "1", "2").await;
-    for index in ["widened", "lenient"] {
+    for index in ["spaced", "widened", "lenient"] {
         live.assert_doc_eventually(index, "1", &ts, &["\"2024-01-02T03:04:05.123\""])
             .await;
         live.assert_doc_eventually(index, "2", &ts, &["null"]).await;
@@ -1461,9 +1453,58 @@ async fn a_tuned_timestamp_mapping_meets_the_iso_form() {
         "INSERT INTO stamps VALUES (3, 'live', '2024-01-03 00:00:00'), (4, 'live blank', NULL)",
     )
     .await;
-    assert_rejected_beside("spaced", "3", "4").await;
-    live.assert_doc_eventually("widened", "3", &ts, &["\"2024-01-03T00:00:00\""])
+    for index in ["spaced", "widened"] {
+        live.assert_doc_eventually(index, "3", &ts, &["\"2024-01-03T00:00:00\""])
+            .await;
+        live.assert_doc_eventually(index, "4", &ts, &["null"]).await;
+    }
+    for (form, range) in [
+        (
+            "the user's",
+            serde_json::json!({ "gte": "2024-01-02 03:04:05.000", "lte": "2024-01-02 03:04:05.999" }),
+        ),
+        (
+            "ISO",
+            serde_json::json!({ "gte": "2024-01-02T03:04:05", "lt": "2024-01-02T03:04:06" }),
+        ),
+    ] {
+        let found = search(
+            &live,
+            "spaced",
+            serde_json::json!({ "query": { "range": { "ts": range } } }),
+        )
         .await;
+        let ids: Vec<&str> = found
+            .pointer("/hits/hits")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("a range in {form} form failed: {found}"))
+            .iter()
+            .filter_map(|hit| hit.get("_id").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(ids, ["1"], "a range in {form} form: {found}");
+    }
+    let days = search(
+        &live,
+        "spaced",
+        serde_json::json!({
+            "size": 0,
+            "aggs": { "days": { "date_histogram": { "field": "ts", "calendar_interval": "day" } } }
+        }),
+    )
+    .await;
+    let keys: Vec<&str> = days
+        .pointer("/aggregations/days/buckets")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("the histogram failed: {days}"))
+        .iter()
+        .filter(|bucket| bucket["doc_count"].as_u64() > Some(0))
+        .filter_map(|bucket| bucket["key_as_string"].as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        ["2024-01-02 00:00:00.000", "2024-01-03 00:00:00.000"],
+        "dates print in the format's first pattern, the user's: {days}"
+    );
     exec(
         &pg.pool,
         "UPDATE events SET at = '2024-01-04 05:06:07' WHERE id = 1",
@@ -1485,13 +1526,22 @@ async fn a_tuned_timestamp_mapping_meets_the_iso_form() {
     live.shutdown();
 }
 
-/// The `name` the `stamps` rows of [`a_tuned_timestamp_mapping_meets_the_iso_form`] hold.
-fn landed_name(id: &str) -> &'static str {
-    match id {
-        "2" => "blank",
-        "4" => "live blank",
-        _ => "?",
-    }
+/// What `body` finds in `index`, after a refresh.
+async fn search(live: &Pipeline, index: &str, body: serde_json::Value) -> serde_json::Value {
+    live.http
+        .post(format!("{}/{index}/_refresh", live.os_url))
+        .send()
+        .await
+        .unwrap();
+    live.http
+        .post(format!("{}/{index}/_search", live.os_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
 }
 
 /// The sorted `label`s of a nested array, empty when absent.
