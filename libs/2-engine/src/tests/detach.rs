@@ -4478,3 +4478,102 @@ async fn a_parked_seed_without_the_slot_waits_without_spinning() {
     .await;
     task.abort();
 }
+
+/// Stage a run of `engine` that read its records under a stream, then end
+/// that stream and stage again over `record`, another process's, with no
+/// slot held: what the records ask (a demotion or a detach) waits for it.
+async fn staged_over_without_the_slot(rig: &Rig, engine: &Arc<SinkEngine>, record: Detachment) {
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(engine);
+    eventually("read under the stream", || read_all(rig)).await;
+    task.abort();
+    let _ = task.await;
+    rig.rereads.closed();
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), record);
+    engine.stage(Continuity::Resumed).await.unwrap();
+}
+
+/// The seventh re-check, B-1 (probe P1): a lane whose records ask for a
+/// demotion while no slot is held stands in for it without dropping
+/// anything. The holder then finishes its rebuild (its seed deletes the
+/// record): read once this process holds the slot, the records say nothing,
+/// and the lane opens with nothing lost and no record written.
+#[tokio::test(start_paused = true)]
+async fn a_lane_taken_detached_without_the_slot_never_drops_unrecorded_after_the_holder_finishes() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    let mut record = Detachment::recorded(
+        DetachRecord::Rebuilding { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    );
+    record.attempts = Some(1);
+    staged_over_without_the_slot(&rig, &engine, record).await;
+    rig.sink.kept.lock().unwrap().remove("users");
+    let (task, _control) = spawn(&engine);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.live(&users(), 5, 5).await;
+    eventually("users/5 is written", || {
+        written(&rig).contains(&"users/5".to_owned())
+    })
+    .await;
+    assert!(engine.lane_health(&lane(users())).is_open());
+    assert!(rig.sink.detaches().is_empty(), "nothing recorded");
+    assert!(rig.sink.demoted.lock().unwrap().is_empty());
+    task.abort();
+}
+
+/// B-1's reattach twin: on a sink with `backfill = false`, the holder
+/// reattaches instead (the record deleted, its gap kept with the marker).
+/// Read once held, the lane opens over that gap, with nothing of its own
+/// dropped.
+#[tokio::test(start_paused = true)]
+async fn a_lane_taken_detached_without_the_slot_opens_after_the_holder_reattaches() {
+    let rig = Rig::new(64);
+    let engine = rig.live_only_engine();
+    staged_over_without_the_slot(&rig, &engine, detached_record()).await;
+    rig.sink.kept.lock().unwrap().remove("users");
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), vec![gap(Some("1"), Some("2"))]);
+    let (task, _control) = spawn(&engine);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.live(&users(), 5, 5).await;
+    eventually("users/5 is written", || {
+        written(&rig).contains(&"users/5".to_owned())
+    })
+    .await;
+    assert!(engine.lane_health(&lane(users())).is_open());
+    assert!(rig.sink.detaches().is_empty(), "nothing recorded");
+    task.abort();
+}
+
+/// B-1 for a lane this process truly detached (round 4's m-3): it dropped
+/// changes under its record. Another process then removes the record (a
+/// reattach, or a rebuild it finished). Read once this process holds the
+/// slot again, the lane is recorded detached again before its read counts,
+/// so what it drops is never unrecorded.
+#[tokio::test(start_paused = true)]
+async fn a_lane_held_detached_whose_record_another_process_removed_is_recorded_again() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task) = detached_on_a_block(&rig).await;
+    task.abort();
+    let _ = task.await;
+    assert_eq!(rig.sink.detaches().len(), 1);
+    rig.rereads.closed();
+    rig.sink.kept.lock().unwrap().remove("users");
+    let (task, _control) = spawn(&engine);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("recorded detached again", || rig.sink.detaches().len() == 2).await;
+    assert!(rig.sink.kept.lock().unwrap().contains_key("users"));
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    task.abort();
+}
