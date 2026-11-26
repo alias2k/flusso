@@ -447,16 +447,24 @@ impl SinkEngine {
     /// Keep `lane`'s state for the runs to come, and tell the observers when
     /// its health `changed`.
     pub(super) fn store_lane(&self, lane: &LaneKey, state: &LaneState, changed: bool) {
-        {
+        let rebuild = (state.rebuilding, state.attaching);
+        let before = {
             let mut health = self.lock_health();
+            let before = health
+                .get(lane)
+                .map_or((None, None), |kept| (kept.rebuilding, kept.attaching));
             if !state.is_kept() {
                 health.remove(lane);
             } else {
                 health.insert(lane.clone(), state.clone());
             }
-        }
+            before
+        };
         if changed {
             self.observer.on_lane_health(lane, &state.health);
+        }
+        if before != rebuild {
+            self.observer.on_lane_rebuild(lane, rebuild.0, rebuild.1);
         }
     }
 

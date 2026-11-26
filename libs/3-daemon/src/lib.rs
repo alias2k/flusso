@@ -18,7 +18,7 @@ pub use fence::{
 pub use observer::StatusObserver;
 pub use stall::{BACKLOG_SPAN, LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};
 pub use status::{
-    BackfillSnapshot, BackfillState, Exemption, IndexErrors, IndexFailure, IndexHold,
+    BackfillSnapshot, BackfillState, DetachedLane, Exemption, IndexErrors, IndexFailure, IndexHold,
     IndexIngestSnapshot, IndexRestarts, IndexState, IngestSnapshot, IngestState, LaneHealthState,
     LaneHealthView, LaneSnapshot, LastScriptFailure, Phase, PinnedBy, ScriptFailures, SinkPhase,
     SinkSnapshot, Status, StatusSnapshot,

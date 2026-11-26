@@ -79,6 +79,15 @@ impl Observer for StatusObserver {
         self.status.set_lane_health(lane, health);
     }
 
+    fn on_lane_rebuild(
+        &self,
+        lane: &stream::LaneKey,
+        rebuilding: Option<u64>,
+        attaching: Option<u64>,
+    ) {
+        self.status.set_lane_rebuild(lane, rebuilding, attaching);
+    }
+
     fn on_engine_error(&self, engine: &EngineId, error: &str) {
         self.status.record_error(error);
         match engine {

@@ -622,3 +622,75 @@ async fn a_disabled_index_has_no_index_routes() {
         "unchanged: {whole}"
     );
 }
+
+/// ADR 0012 stage 10, O20: a reindex of an index whose rebuild is starting
+/// (waiting for its attach) or running with its lane open is refused with
+/// `409` and why, for a named sink and for every sink; once the rebuilding
+/// lane is parked, the reindex is taken: it starts the rebuild again.
+#[tokio::test]
+async fn a_reindex_of_a_rebuild_starting_or_running_is_refused_with_409() {
+    use daemon::Observer;
+    let (status, _) = indexed_status();
+    let observer = daemon::StatusObserver::new(Arc::clone(&status));
+    let users = LaneKey::new(index("users"), SinkName::try_new("primary").unwrap());
+    let (base, _receivers, _stop) = serve_private(Arc::clone(&status)).await;
+
+    observer.on_lane_rebuild(&users, Some(1), Some(4));
+    for path in [
+        "/indexes/users/reindex?sink=primary",
+        "/indexes/users/reindex",
+    ] {
+        let (code, body) = post_reindex(&base, path).await;
+        assert_eq!(code, 409, "{path}: {body}");
+        assert!(
+            body.contains("the index is being rebuilt (starting)"),
+            "{body}"
+        );
+    }
+
+    observer.on_lane_rebuild(&users, Some(1), None);
+    let (code, body) = post_reindex(&base, "/indexes/users/reindex?sink=primary").await;
+    assert_eq!(code, 409, "{body}");
+    assert!(body.contains("\"the index is being rebuilt\""), "{body}");
+
+    observer.on_lane_health(
+        &users,
+        &daemon::LaneHealth::Parked {
+            reason: daemon::ParkReason::Blocked {
+                reason: "index write (api)".to_owned(),
+            },
+            since: tokio::time::Instant::now(),
+            next_probe: tokio::time::Instant::now(),
+        },
+    );
+    let (code, body) = post_reindex(&base, "/indexes/users/reindex?sink=primary").await;
+    assert_eq!(code, 202, "a parked rebuild starts again: {body}");
+}
+
+/// ADR 0012 stage 10, §9 and O21: `/status` names a detached lane at the top
+/// level and beside its sink's committed count, and shows a lane's rebuild.
+#[tokio::test]
+async fn status_lists_detached_lanes_and_rebuilds() {
+    use daemon::Observer;
+    let (status, _) = indexed_status();
+    let observer = daemon::StatusObserver::new(Arc::clone(&status));
+    let users = LaneKey::new(index("users"), SinkName::try_new("primary").unwrap());
+    observer.on_lane_health(
+        &users,
+        &daemon::LaneHealth::Detached {
+            since: tokio::time::Instant::now(),
+            reason: "blocked: index write (api)".to_owned(),
+        },
+    );
+    let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+    assert_eq!(
+        snapshot["detached"],
+        serde_json::json!([{ "index": "users", "sink": "primary" }])
+    );
+    assert_eq!(
+        snapshot["sinks"]["primary"]["detached_lanes"],
+        serde_json::json!(["users"])
+    );
+    observer.on_lane_rebuild(&users, Some(2), Some(5));
+    assert!(status.reindex_refusal(&users).is_some());
+}

@@ -524,9 +524,11 @@ async fn index_status(State(state): State<PublicState>, Path(name): Path<String>
 /// sink or, without `sink`, on every sink. Validates the names, then hands
 /// the operation to the daemon; the targeted sink engines stage a fresh
 /// generation and request their snapshot, no restart involved. `202`
-/// `{"index", "sink" (null: every sink), "queued": true}`; `400` an invalid
-/// index or sink name; `404` an unknown index or sink; `503` while stopping
-/// or with the engine not running.
+/// `{"index", "sink" (null: every sink), "queued": true}`, with `skipped`
+/// naming each sink whose rebuild of the index is starting or running (ADR
+/// 0012 stage 10, O20) when no sink is named; `409` when the named sink's (or
+/// every sink's) is; `400` an invalid index or sink name; `404` an unknown
+/// index or sink; `503` while stopping or with the engine not running.
 async fn reindex(
     State(state): State<PrivateState>,
     Path(name): Path<String>,
@@ -549,16 +551,70 @@ async fn reindex(
             }
         },
     };
-    match state.control.reindex(index.clone(), sink.as_ref()) {
-        Ok(()) => (
-            StatusCode::ACCEPTED,
+    // O20: a rebuild starting, or running with its lane open, takes no
+    // reindex. Named, the sink refuses with `409`; unnamed, the reindex goes
+    // on where it applies and lists the lanes it skipped.
+    let targets: Vec<SinkName> = match &sink {
+        Some(sink) => vec![sink.clone()],
+        None => state.control.sinks().cloned().collect(),
+    };
+    let skipped: Vec<(SinkName, &'static str)> = targets
+        .iter()
+        .filter_map(|target| {
+            state
+                .status
+                .reindex_refusal(&LaneKey::new(index.clone(), target.clone()))
+                .map(|reason| (target.clone(), reason))
+        })
+        .collect();
+    let refuse = |reason: &str| {
+        (
+            StatusCode::CONFLICT,
             Json(json!({
+                "error": reason,
+                "reason": reason,
+                "index": index.as_ref(),
+                "skipped": skipped
+                    .iter()
+                    .map(|(sink, reason)| json!({ "sink": sink.as_ref(), "reason": reason }))
+                    .collect::<Vec<_>>(),
+            })),
+        )
+            .into_response()
+    };
+    if let Some((_, reason)) = skipped.first()
+        && (sink.is_some() || skipped.len() == targets.len())
+    {
+        return refuse(reason);
+    }
+    let queued = if skipped.is_empty() {
+        state.control.reindex(index.clone(), sink.as_ref())
+    } else {
+        targets
+            .iter()
+            .filter(|target| !skipped.iter().any(|(sink, _)| sink == *target))
+            .try_for_each(|target| state.control.reindex(index.clone(), Some(target)))
+    };
+    match queued {
+        Ok(()) => {
+            let mut body = json!({
                 "index": index.as_ref(),
                 "sink": sink.as_ref().map(|sink| sink.as_ref()),
                 "queued": true,
-            })),
-        )
-            .into_response(),
+            });
+            if !skipped.is_empty()
+                && let Some(fields) = body.as_object_mut()
+            {
+                fields.insert(
+                    "skipped".to_owned(),
+                    skipped
+                        .iter()
+                        .map(|(sink, reason)| json!({ "sink": sink.as_ref(), "reason": reason }))
+                        .collect(),
+                );
+            }
+            (StatusCode::ACCEPTED, Json(body)).into_response()
+        }
         Err(ControlError::UnknownSink(name)) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("unknown sink {name}") })),

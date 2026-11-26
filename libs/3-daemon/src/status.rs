@@ -103,6 +103,9 @@ pub struct Status {
     /// The lanes that are not open (refused, blocked, restaging); an open
     /// lane has no entry.
     lane_health: Mutex<BTreeMap<stream::LaneKey, LaneHealthView>>,
+    /// Each lane's rebuild after a detach, when one is under way or an
+    /// attach is awaited: the rebuilds its record counts, and the attempt.
+    lane_rebuild: Mutex<BTreeMap<stream::LaneKey, LaneRebuild>>,
     /// What the ingest engine knows of each index (slice 7), attached once
     /// the engine exists; until then the section shows nothing held.
     index_states: OnceLock<Arc<IndexStates>>,
@@ -300,6 +303,8 @@ impl SinkStatus {
                             parked_since: None,
                             next_probe: None,
                             reason: None,
+                            rebuilding: None,
+                            attaching: false,
                         },
                     )
                 })
@@ -315,6 +320,7 @@ impl SinkStatus {
             batches: self.batches.load(Ordering::Relaxed),
             documents_quarantined: self.documents_quarantined.load(Ordering::Relaxed),
             last_flush_micros: self.last_flush_micros.load(Ordering::Relaxed),
+            detached_lanes: Vec::new(),
         }
     }
 }
@@ -350,6 +356,7 @@ impl Status {
             budget: None,
             stalls: None,
             lane_health: Mutex::new(BTreeMap::new()),
+            lane_rebuild: Mutex::new(BTreeMap::new()),
             index_states: OnceLock::new(),
             index_failures: Mutex::new(BTreeMap::new()),
         }
@@ -547,6 +554,43 @@ impl Status {
                 lanes.remove(lane);
             }
         }
+    }
+
+    /// Record a lane's rebuild after a detach (ADR 0012 stage 10).
+    pub(crate) fn set_lane_rebuild(
+        &self,
+        lane: &stream::LaneKey,
+        rebuilding: Option<u64>,
+        attaching: Option<u64>,
+    ) {
+        let mut lanes = lock(&self.lane_rebuild);
+        if rebuilding.is_none() && attaching.is_none() {
+            lanes.remove(lane);
+        } else {
+            lanes.insert(lane.clone(), (rebuilding, attaching));
+        }
+    }
+
+    /// Why a reindex of `lane` is not taken now (O20): its rebuild is
+    /// starting (waiting for its attach) or running with the lane open.
+    /// `None` when a reindex applies, a rebuild parked or restaging
+    /// included (it starts again).
+    pub fn reindex_refusal(&self, lane: &stream::LaneKey) -> Option<&'static str> {
+        let (rebuilding, attaching) = lock(&self.lane_rebuild).get(lane).copied()?;
+        if attaching.is_some() {
+            return Some("the index is being rebuilt (starting)");
+        }
+        let open = !lock(&self.lane_health).contains_key(lane);
+        (rebuilding.is_some() && open).then_some("the index is being rebuilt")
+    }
+
+    /// Every lane detached from the slot's minimum (ADR 0012 stage 10).
+    pub fn detached_lanes(&self) -> Vec<stream::LaneKey> {
+        lock(&self.lane_health)
+            .iter()
+            .filter(|(_, view)| view.state == LaneHealthState::Detached)
+            .map(|(lane, _)| lane.clone())
+            .collect()
     }
 
     /// Every lane that is not open: parked, blocked, being staged again, or
@@ -957,6 +1001,18 @@ impl Status {
                         entry.next_probe = view.next_probe.map(rfc3339);
                         entry.reason = Some(view.reason.clone());
                     }
+                    if view.state == LaneHealthState::Detached {
+                        snapshot.detached_lanes.push(lane.index.as_ref().to_owned());
+                    }
+                }
+                for (lane, (rebuilding, attaching)) in lock(&self.lane_rebuild)
+                    .iter()
+                    .filter(|(lane, _)| &lane.sink == name)
+                {
+                    if let Some(entry) = snapshot.lanes.get_mut(lane.index.as_ref()) {
+                        entry.rebuilding = *rebuilding;
+                        entry.attaching = attaching.is_some();
+                    }
                 }
                 if let Some(stalls) = &self.stalls {
                     for (index, lane) in &mut snapshot.lanes {
@@ -1013,6 +1069,14 @@ impl Status {
             visibility_wait_seconds: self.visibility_wait().map(|waited| waited.as_secs_f64()),
             applied_position: positions.applied,
             searchable_position: positions.searchable,
+            detached: self
+                .detached_lanes()
+                .into_iter()
+                .map(|lane| DetachedLane {
+                    index: lane.index.as_ref().to_owned(),
+                    sink: lane.sink.as_ref().to_owned(),
+                })
+                .collect(),
             errors: self.errors.load(Ordering::Relaxed),
             last_error: lock(&self.last_error).clone(),
             script_failures: lock(&self.script_failures)
@@ -1263,6 +1327,10 @@ pub struct StatusSnapshot {
     /// The source position every sink can search: a search sees every commit
     /// at or before it.
     pub searchable_position: Option<String>,
+    /// Every lane detached from the slot's minimum (ADR 0012 stage 10, §9):
+    /// reads of its index on its sink are frozen. Absent while none is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub detached: Vec<DetachedLane>,
     /// Engine errors, ingest and sink.
     pub errors: u64,
     /// The most recent engine error.
@@ -1340,6 +1408,21 @@ pub struct SinkSnapshot {
     /// status has no fence.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub lanes: BTreeMap<String, LaneSnapshot>,
+    /// The indexes whose lanes are detached: `changes_committed` counts
+    /// without them (O21).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub detached_lanes: Vec<String>,
+}
+
+/// A lane's rebuild after a detach: the rebuilds its record counts, and the
+/// attach attempt it waits for.
+type LaneRebuild = (Option<u64>, Option<u64>);
+
+/// A detached lane in `/status`'s top-level list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DetachedLane {
+    pub index: String,
+    pub sink: String,
 }
 
 /// One `(index, sink)` lane in `/status`.
@@ -1379,6 +1462,13 @@ pub struct LaneSnapshot {
     /// Why it is not written, in the destination's words; absent while open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// A rebuild after a detach is under way (ADR 0012 stage 10): the
+    /// rebuilds its record counts as started. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebuilding: Option<u64>,
+    /// The lane waits for its attach (a rebuild starting, or a reattach).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub attaching: bool,
 }
 
 /// The most bytes of an error a per-index `last_error` keeps (slice 8-2):
