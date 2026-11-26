@@ -18,6 +18,34 @@
 //! failure seen, and the daemon retries the whole stage (each step is
 //! idempotent), which starts the rest.
 //!
+//! **Read under the current stream (O29).** A lane is written, and opened
+//! again after any staging, restage, reindex or attach, only if its records
+//! were read under the current stream ([`crate::Rereads`]): by a read that
+//! *began* after the last opening returned (its epoch,
+//! [`Rereads::read_begins`](crate::Rereads::read_begins), taken before the
+//! read starts). Two checks enforce it, and every path goes through one:
+//!
+//! - **Opening a lane** goes through `store_lane`: a lane stored open while
+//!   [`Rereads::current`](crate::Rereads::current) is false makes the run's
+//!   read due (`opened_unread`) before anything is granted.
+//! - **Writing** goes through `grant_once_read` (or, for a substitute,
+//!   `substituted`), which reads the records again first while the read is
+//!   due ([`Rereads::is_due`](crate::Rereads::is_due), `opened_unread`, an
+//!   unsettled gap). The run's turn reads too, and an opening wakes it.
+//!
+//! Each path, and the check it uses:
+//!
+//! | Path | Its check |
+//! | --- | --- |
+//! | Staging (`stage`, each index's `step`) | the epoch is taken before the step; its read counts only when the step returns `Ok` |
+//! | Restage return (`restage_returned`) | reopens through `store_lane`: read again first when the step's read counts for an earlier stream |
+//! | Reindex return (`settle_reindex`) | staged inline on the run: an opening meanwhile makes the read due; the lane opens through `store_lane` |
+//! | Rebuild attach and reattach (`take_attached`) | read again before the attach takes effect when the lane isn't current; a rebuild the read finds put back to detached opens nothing |
+//! | The run's read again (`Run::reread`) | the epoch is taken before the first read; each lane read counts, a detached one too; a read failing on a detached lane leaves it unread |
+//! | An ordered sink's fill, and every grant | `grant_once_read` |
+//! | A substitute written as its lane's probe (`substituted`) | reads first when due, since it is written past `grant` |
+//! | A stop | stages nothing that opens a lane: a restaging lane stays restaging, an owed reindex is the next start's |
+//!
 //! The loop ([`SinkEngine::run`], in `writes`) writes each lane item with
 //! one [`Sink::write`], several at once but never two holding the same
 //! document, decides item-level rejections by the failure policies, and
@@ -322,6 +350,10 @@ pub struct SinkEngine {
     /// A staging heard a gap end it may not settle (no slot held for it):
     /// the next read while the slot is held settles it (S-a).
     gaps_unsettled: AtomicBool,
+    /// A lane opened whose records weren't read under the current stream (a
+    /// restage, reindex or attach whose read counted for an earlier one):
+    /// the run reads again before any grant (fourth re-check, B-1).
+    opened_unread: AtomicBool,
 }
 
 impl SinkEngine {
@@ -365,6 +397,7 @@ impl SinkEngine {
             rereads: Arc::new(crate::Rereads::default()),
             read_at: AtomicU64::new(0),
             gaps_unsettled: AtomicBool::new(false),
+            opened_unread: AtomicBool::new(false),
         }
     }
 
@@ -778,6 +811,12 @@ impl SinkEngine {
         if changed {
             self.observer.on_lane_health(lane, &state.health);
         }
+        // The one place a lane opens (O29, B-1): opened while its records
+        // count as read only for an earlier stream, it is read again before
+        // anything of it is written.
+        if state.is_open() && !self.rereads.current(lane) {
+            self.opened_unread.store(true, Ordering::Release);
+        }
         if before != rebuild {
             self.observer.on_lane_rebuild(lane, rebuild.0, rebuild.1);
         }
@@ -1048,6 +1087,7 @@ impl SinkEngine {
     /// Whether the slot opened since the last full read of the records.
     pub(super) fn reread_due(&self) -> bool {
         self.rereads.is_due(self.read_at.load(Ordering::Acquire))
+            || self.opened_unread.load(Ordering::Acquire)
             || (self.gaps_unsettled.load(Ordering::Acquire) && self.rereads.holding())
     }
 
@@ -1074,6 +1114,7 @@ impl SinkEngine {
     /// end it can.
     pub(super) fn settling_gaps(&self) {
         self.gaps_unsettled.store(false, Ordering::Release);
+        self.opened_unread.store(false, Ordering::Release);
     }
 
     async fn stage_inner(&self, continuity: Continuity) -> Result<()> {

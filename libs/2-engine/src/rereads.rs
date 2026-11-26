@@ -10,8 +10,10 @@
 //!   every sink counts as unread from before the new stream can answer, and
 //!   only a read begun once the opening returned counts again;
 //! - a sink engine whose last read of its records counts for an earlier
-//!   opening reads them again before it writes anything
-//!   ([`Rereads::is_due`]), and says so ([`Rereads::read`]);
+//!   opening reads them again before it writes anything or opens a lane
+//!   ([`Rereads::is_due`]), and says so ([`Rereads::read`]); every path
+//!   that opens a lane or writes, and its check, is listed in the sink
+//!   engine's module doc;
 //! - a fence vouches for nothing on a lane not read since
 //!   ([`Rereads::current`]): it answers `starting`. The opening wakes every
 //!   sink engine ([`Rereads::openings`]), so the read doesn't wait for

@@ -1133,7 +1133,7 @@ The world property then found a fifth of the same shape: a rebuild begun while u
 **B1''' (item 1, `4453a87f`): reads count per lane, never per sink.**
 - **The count.** `Rereads::read(&LaneKey, at)` and `current(&LaneKey)`. `SinkEngine::step` counts its lane only when its step got through: staging, a restage or a reindex alike.
 - **The run's read.** `Run::reread` counts each lane it read. A detached lane counts without a read, since its state answers. A restaging lane is left to its restage path, so a bad index never fails the sink's run (#471).
-- **An index whose read failed** stays unread, answers `starting` and writes nothing new, while its siblings go on.
+- **An index whose read failed** stays unread and answers `starting` while its siblings go on. It is not written while unread: a restage, reindex or attach that returns across an opening reads it again before its lane opens (B-1 of the fourth re-check; before it, a restage whose read spanned an opening reopened its lane unread).
 - **Tests:**
   - `a_staging_that_left_an_index_unread_counts_no_read_of_it`, during a stop too;
   - `a_read_again_that_missed_a_lane_counts_no_read_of_it`;

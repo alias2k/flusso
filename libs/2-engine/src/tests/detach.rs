@@ -105,6 +105,10 @@ struct Gate {
     reads_fail: Mutex<usize>,
     /// Indexes whose records can't be read.
     unreadable: Mutex<BTreeSet<String>>,
+    /// The rereads the engine counts reads in, to judge each write by.
+    rereads: std::sync::OnceLock<Arc<crate::Rereads>>,
+    /// Each document written on a lane not read under the current stream.
+    unread_writes: Mutex<Vec<String>>,
     /// Reads of the records that fail once `forget_detachment` landed then
     /// failed.
     reads_fail_after_forget: Mutex<usize>,
@@ -185,6 +189,16 @@ impl Sink for Gate {
         let mut named = BTreeSet::new();
         for envelope in parts.iter().flat_map(|part| part.iter()) {
             indexes.push(envelope.index.to_string());
+            if self
+                .rereads
+                .get()
+                .is_some_and(|rereads| !rereads.current(&lane(envelope.index.clone())))
+            {
+                self.unread_writes
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}/{}", envelope.index, envelope.id));
+            }
             self.ids
                 .lock()
                 .unwrap()
@@ -541,7 +555,7 @@ impl Rig {
         let progress = Arc::new(Progress::of(indexes.clone(), sinks.clone()));
         let heard = Arc::new(Heard::default());
         let _ = heard.progress.set(Arc::clone(&progress));
-        Self {
+        let rig = Self {
             stream: Arc::new(ChannelStream::over(
                 capacity,
                 indexes.clone(),
@@ -552,7 +566,9 @@ impl Rig {
             heard,
             positions: Arc::new(Seqs::default()),
             rereads: Arc::new(crate::Rereads::default()),
-        }
+        };
+        let _ = rig.sink.rereads.set(Arc::clone(&rig.rereads));
+        rig
     }
 
     /// A live item of `of` at `position`, registered as the ingest engine
@@ -3024,4 +3040,271 @@ fn read_all(rig: &Rig) -> bool {
     [orders(), users()]
         .into_iter()
         .all(|index| rig.rereads.current(&lane(index)))
+}
+
+/// `orders` left restaging by a staging that couldn't read it, `users` read;
+/// the restage's step then reads `orders`' records and waits in
+/// `ensure_index` until `gate` is released.
+async fn restage_held_in_ensure(
+    rig: &Rig,
+) -> (
+    Arc<SinkEngine>,
+    tokio::task::JoinHandle<crate::Result<()>>,
+    Arc<tokio::sync::Semaphore>,
+) {
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.sink
+        .unreadable
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(!rig.rereads.current(&lane(orders())));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *rig.sink.ensure_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    rig.sink.unreadable.lock().unwrap().clear();
+    let ensured = rig.sink.ensured.lock().unwrap().len();
+    let (task, _control) = spawn(&engine);
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(
+        rig.sink.ensured.lock().unwrap().len(),
+        ensured,
+        "held in ensure_index"
+    );
+    assert!(!engine.lane_health(&lane(orders())).is_open());
+    (engine, task, gate)
+}
+
+/// The fourth re-check, B-1: a restage whose read counted for the stream
+/// before an opening reopens its lane only once its records were read again
+/// under the current one: it is not written before, and it vouches once read
+/// (no next opening needed).
+#[tokio::test(start_paused = true)]
+async fn a_restage_that_spans_an_opening_reads_again_before_its_lane_opens() {
+    let rig = Rig::new(64);
+    let (engine, task, gate) = restage_held_in_ensure(&rig).await;
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        rig.rereads.current(&lane(users())),
+        "the run read users again"
+    );
+    *rig.sink.ensure_gate.lock().unwrap() = None;
+    gate.add_permits(16);
+    eventually("orders reopens", || {
+        engine.lane_health(&lane(orders())).is_open()
+    })
+    .await;
+    eventually("orders is read under the current stream", || {
+        rig.rereads.current(&lane(orders()))
+    })
+    .await;
+    rig.live(&orders(), 7, 7).await;
+    eventually("then written", || {
+        rig.sink
+            .ids
+            .lock()
+            .unwrap()
+            .contains(&"orders/7".to_owned())
+    })
+    .await;
+    assert!(rig.sink.unread_writes.lock().unwrap().is_empty());
+    task.abort();
+}
+
+/// `orders`' reindex (a `Rebuild` step when `detached`, else a plain
+/// reindex's), held in `ensure_index` while the slot opens again.
+async fn reindex_held_across_an_opening(
+    rig: &Rig,
+    detached: bool,
+) -> (
+    Arc<SinkEngine>,
+    tokio::task::JoinHandle<crate::Result<()>>,
+    Arc<tokio::sync::Semaphore>,
+) {
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    if detached {
+        rig.sink
+            .kept
+            .lock()
+            .unwrap()
+            .insert("orders".to_owned(), detached_record());
+    }
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(engine.lane_health(&lane(orders())).is_detached(), detached);
+    let (task, control) = spawn(&engine);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *rig.sink.ensure_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let ensured = rig.sink.ensured.lock().unwrap().len();
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        rig.sink.ensured.lock().unwrap().len(),
+        ensured,
+        "held in ensure_index"
+    );
+    if detached {
+        assert_eq!(*rig.sink.rebuilds.lock().unwrap(), ["orders".to_owned()]);
+    }
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    (engine, task, gate)
+}
+
+/// B-1's reindex shape: a reindex whose step read `orders` before an
+/// opening reopens its lane only once read again under the current stream.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_that_spans_an_opening_reads_again_before_its_lane_opens() {
+    let rig = Rig::new(64);
+    let (engine, task, gate) = reindex_held_across_an_opening(&rig, false).await;
+    *rig.sink.ensure_gate.lock().unwrap() = None;
+    gate.add_permits(16);
+    rig.live(&orders(), 7, 7).await;
+    eventually("orders is read under the current stream", || {
+        rig.rereads.current(&lane(orders()))
+    })
+    .await;
+    eventually("then written", || {
+        rig.sink
+            .ids
+            .lock()
+            .unwrap()
+            .contains(&"orders/7".to_owned())
+    })
+    .await;
+    assert!(engine.lane_health(&lane(orders())).is_open());
+    assert!(
+        rig.sink.unread_writes.lock().unwrap().is_empty(),
+        "written before its records were read under the current stream"
+    );
+    task.abort();
+}
+
+/// B-1's reindex shape, writer half: another process detached `orders`
+/// while the reindex was in flight across an opening; nothing is written.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_across_an_opening_never_writes_a_lane_another_process_detached() {
+    let rig = Rig::new(64);
+    let (engine, task, gate) = reindex_held_across_an_opening(&rig, false).await;
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned(), detached_record());
+    *rig.sink.ensure_gate.lock().unwrap() = None;
+    gate.add_permits(16);
+    rig.live(&orders(), 7, 7).await;
+    eventually("orders is taken as detached", || {
+        engine.lane_health(&lane(orders())).is_detached()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        !rig.sink
+            .ids
+            .lock()
+            .unwrap()
+            .contains(&"orders/7".to_owned()),
+        "written into an index the records say is detached"
+    );
+    task.abort();
+}
+
+/// The attach the rebuild of `orders` asked for, answered by the builder.
+async fn attach_orders(rig: &Rig) {
+    let attempt = loop {
+        if let stream::Request::Attach { index, attempt, .. } = next_request(rig).await
+            && index == orders()
+        {
+            break attempt;
+        }
+    };
+    rig.stream
+        .lane(&lane(orders()))
+        .unwrap()
+        .producer
+        .publish(LaneItem::Attached { attempt })
+        .await
+        .unwrap();
+}
+
+/// B-1's rebuild shape: a detached `orders` rebuilt by a reindex whose
+/// step spans an opening is written once attached, never before its
+/// records were read under the current stream.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_that_spans_an_opening_reads_again_before_its_lane_opens() {
+    let rig = Rig::new(64);
+    let (engine, task, gate) = reindex_held_across_an_opening(&rig, true).await;
+    *rig.sink.ensure_gate.lock().unwrap() = None;
+    gate.add_permits(16);
+    attach_orders(&rig).await;
+    rig.live(&orders(), 7, 7).await;
+    eventually("written once attached", || {
+        rig.sink
+            .ids
+            .lock()
+            .unwrap()
+            .contains(&"orders/7".to_owned())
+    })
+    .await;
+    assert!(engine.lane_health(&lane(orders())).is_open());
+    assert!(
+        rig.sink.unread_writes.lock().unwrap().is_empty(),
+        "written before its records were read under the current stream"
+    );
+    task.abort();
+}
+
+/// B-1's rebuild shape, writer half: the process that held the slot before
+/// the opening took this rebuild as another's and put it back to detached.
+/// The attach opens nothing: the records are read first, and say detached.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_across_an_opening_never_writes_a_lane_another_process_demoted() {
+    let rig = Rig::new(64);
+    let (engine, task, gate) = reindex_held_across_an_opening(&rig, true).await;
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned(), detached_record());
+    *rig.sink.ensure_gate.lock().unwrap() = None;
+    gate.add_permits(16);
+    // Each attach asked of `orders` is answered, as a builder would.
+    let mut requests = rig.stream.requests().unwrap().consumer;
+    let producer = rig.stream.lane(&lane(orders())).unwrap().producer;
+    let builder = tokio::spawn(async move {
+        while let Ok(Some(delivery)) = requests.recv().await {
+            let (request, handle) = delivery.into_parts();
+            handle.ack().await.unwrap();
+            if let stream::Request::Attach { index, attempt, .. } = request
+                && index == orders()
+            {
+                producer
+                    .publish(LaneItem::Attached { attempt })
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    rig.live(&orders(), 7, 7).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    builder.abort();
+    assert!(
+        !rig.sink
+            .ids
+            .lock()
+            .unwrap()
+            .contains(&"orders/7".to_owned()),
+        "written into an index the records say is detached"
+    );
+    assert!(rig.sink.unread_writes.lock().unwrap().is_empty());
+    assert!(engine.lane_health(&lane(orders())).is_detached());
+    task.abort();
 }

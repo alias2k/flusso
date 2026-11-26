@@ -2602,6 +2602,12 @@ impl<'a> Run<'a> {
             return Ok(());
         };
         let (substitute, handle) = delivery.into_parts();
+        // O29: a substitute is written past `grant`, as its lane's probe: the
+        // records are read again first when due, and a lane they detach
+        // waits for it no more.
+        if self.engine.reread_due() {
+            self.reread().await?;
+        }
         let lane = self.lanes.iter().position(|run| run.key == substitute.lane);
         let front = lane.and_then(|lane| {
             let awaited = self.lanes.get(lane).is_some_and(|run| {
@@ -3030,29 +3036,35 @@ impl<'a> Run<'a> {
             let Some(run) = self.lanes.get(lane) else {
                 continue;
             };
-            // A detached lane's state already answers (the fence's
-            // precedence); a restaging one is read by its restage path, so a
-            // bad index never fails the sink's run (#471). Neither is read
-            // here.
-            if run.health.health.is_detached() {
-                self.engine.rereads.read(&run.key, read_at);
-                continue;
-            }
+            // A restaging lane is read by its restage path, so a bad index
+            // never fails the sink's run (#471); it opens only once read
+            // under the current stream (`store_lane`).
             if matches!(run.health.health, LaneHealth::Restaging { .. }) {
                 continue;
             }
             let key = run.key.clone();
+            let detached = run.health.health.is_detached();
             let rebuilding = run.health.rebuilding.is_some();
             let index = run.key.index.clone();
             let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
                 continue;
             };
             let failed = |error| super::staging_failed(&index, error);
-            let found = self.engine.sink.detachment(mapping).await.map_err(failed)?;
+            let found = match self.engine.sink.detachment(mapping).await {
+                Ok(found) => found,
+                // A detached lane writes nothing: its read failing leaves it
+                // unread (answering nothing, opened by no attach) and never
+                // fails the run.
+                Err(error) if detached => {
+                    tracing::warn!(%index, sink = %self.engine.name, %error, "read again once the slot is held, the records of a detached index can't be read: it stays detached and unread");
+                    continue;
+                }
+                Err(error) => return Err(failed(error)),
+            };
             let through = found.through.clone();
             match super::AtStaging::of(&found) {
                 super::AtStaging::AsBefore | super::AtStaging::Finished(_) => {
-                    if !found.gaps.is_empty() {
+                    if !detached && !found.gaps.is_empty() {
                         self.engine
                             .known_gaps(mapping, found.gaps, true)
                             .await
@@ -3060,6 +3072,17 @@ impl<'a> Run<'a> {
                     }
                 }
                 super::AtStaging::Rebuilding(_) if rebuilding => {}
+                // Held detached, the records say so too; a rebuild this
+                // process began was put back to detached by the process that
+                // held the slot meanwhile: it is dropped, and no attach of it
+                // opens the lane (B-1).
+                super::AtStaging::Detached(_) if detached => {
+                    if rebuilding {
+                        tracing::warn!(%index, sink = %self.engine.name, "read again once the slot is held, the rebuild this process began was put back to detached meanwhile: it is dropped, the lane stays detached (O29)");
+                        self.drop_rebuild(lane);
+                    }
+                }
+                super::AtStaging::Rebuilding(_) | super::AtStaging::DetachAgain if detached => {}
                 super::AtStaging::Detached(why) => {
                     tracing::warn!(%index, sink = %self.engine.name, "read again once the slot is held, the records say the index is detached: taken as detached before anything of it is written (O29)");
                     self.detached(lane, why, through).await?;
@@ -3096,6 +3119,20 @@ impl<'a> Run<'a> {
         }
         self.engine.records_read(read_at);
         Ok(())
+    }
+
+    /// Drop the rebuild a detached lane waits to attach for: its records
+    /// say detached again. The lane stays detached; an `Attached` for the
+    /// dropped attempt opens nothing.
+    fn drop_rebuild(&mut self, lane: usize) {
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        run.health.rebuilding = None;
+        run.health.rebuild_target = None;
+        run.health.attaching = None;
+        self.to_attach.retain(|at| *at != lane);
+        self.engine.store_lane(&run.key, &run.health, true);
     }
 
     /// Ask `index`'s builder to attach its detached lane again, under a new
@@ -3155,7 +3192,24 @@ impl<'a> Run<'a> {
     /// enter the window or the held items, and its settling entries went at
     /// the detach; nothing of it is in flight once detached.
     async fn take_attached(&mut self) -> Result<()> {
+        // B-1: an attach opens its lane only once its records were read
+        // under the current stream; a rebuild the read drops opens nothing.
+        if self.attached.iter().any(|(lane, ..)| {
+            self.lanes
+                .get(*lane)
+                .is_some_and(|run| !self.engine.rereads.current(&run.key))
+        }) {
+            self.reread().await?;
+        }
         for (lane, seq, handle) in std::mem::take(&mut self.attached) {
+            if self
+                .lanes
+                .get(lane)
+                .is_some_and(|run| run.health.attaching.is_none())
+            {
+                self.acknowledged(handle, lane, Some(seq), false).await?;
+                continue;
+            }
             debug_assert!(
                 !self.discards.iter().any(|(_, of, _)| *of == lane)
                     && !self.window.iter().any(|queued| queued.lane == lane)
