@@ -53,6 +53,9 @@ enum Record {
     Kept,
     NotKept,
     Fail,
+    /// The record lands, and the call still fails (a timeout after
+    /// OpenSearch applied it).
+    FailAfterWriting,
 }
 
 /// A sink that blocks, or misses, the indexes it is told to, records every
@@ -194,6 +197,17 @@ impl Sink for Gate {
             Record::Fail => Err(SinkError::Write(
                 "the meta index refused the record".to_owned(),
             )),
+            Record::FailAfterWriting => {
+                self.kept.lock().unwrap().insert(
+                    mapping.index.to_string(),
+                    Detachment::recorded(
+                        DetachRecord::Detached { live_only: false },
+                        Some(MarkerAt::Newer { seeded: false }),
+                        version(),
+                    ),
+                );
+                Err(SinkError::Write("the record write timed out".to_owned()))
+            }
         }
     }
 
@@ -206,6 +220,7 @@ impl Sink for Gate {
             .lock()
             .unwrap()
             .push(format!("{}@{}", mapping.index, version.as_str()));
+        self.kept.lock().unwrap().remove(mapping.index.as_ref());
         Ok(())
     }
 }
@@ -971,4 +986,43 @@ async fn the_fence_hears_a_detach_before_the_lane_leaves_the_minimum() {
     rig.engine().stage(Continuity::Resumed).await.unwrap();
     assert!(rig.progress.is_detached(&lane(users())));
     assert_eq!(*rig.heard.left_first.lock().unwrap(), [false], "at staging");
+}
+
+/// A record that landed although its call failed (a timeout after the
+/// write) is deleted before the lane's next probe, so a lane whose probe
+/// then lands is not detached by the next staging (§5, review S1).
+#[tokio::test(start_paused = true)]
+async fn a_record_that_landed_although_its_call_failed_goes_before_the_lane_opens() {
+    let rig = Rig::new(64);
+    rig.sink
+        .records
+        .lock()
+        .unwrap()
+        .push_back(Record::FailAfterWriting);
+    rig.sink.block(&users(), true);
+    let engine = rig.engine();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 1, 1).await;
+    eventually("the record was written and the call failed", || {
+        rig.sink.detaches().len() == 1
+    })
+    .await;
+    rig.sink.block(&users(), false);
+    eventually("the probe lands", || rig.applied(&users()) == through(1)).await;
+    assert_eq!(*rig.sink.forgotten.lock().unwrap(), ["users@7:1"]);
+    assert!(rig.sink.kept.lock().unwrap().is_empty());
+    assert!(engine.lane_health(&lane(users())).is_open());
+    task.abort();
+    let _ = task.await;
+
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(
+        engine.lane_health(&lane(users())).is_open(),
+        "the next staging finds no record"
+    );
+    assert!(!rig.progress.is_detached(&lane(users())));
 }

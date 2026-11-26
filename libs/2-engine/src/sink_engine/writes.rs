@@ -341,6 +341,9 @@ enum Outcome {
     Reindex(Reindexed),
     /// A lane's detach, recorded by the sink (ADR 0012 stage 10, R4).
     Detach(sink::Result<sink::Recorded>),
+    /// A record a failed detach may have left, deleted before the lane's
+    /// probe.
+    Clear(Result<()>),
 }
 
 /// A lane waiting for its empty caught-up write: the item whose
@@ -404,6 +407,8 @@ pub(super) struct Run<'a> {
     detached: usize,
     /// Detaches in flight, by lane: they hold no write slot.
     detaching: Vec<(u64, usize)>,
+    /// Records of failed detaches being cleared, by lane: no write slot.
+    clearing: Vec<(u64, usize)>,
     /// Items of detached lanes taken and not yet acknowledged: each is
     /// acknowledged, unwritten, before the next delivery of its lane is
     /// taken (R6).
@@ -502,6 +507,7 @@ impl<'a> Run<'a> {
             unhealthy,
             detached,
             detaching: Vec::new(),
+            clearing: Vec::new(),
             discards: Vec::new(),
             stop_probed: false,
             window: VecDeque::new(),
@@ -726,6 +732,7 @@ impl<'a> Run<'a> {
             if self.unhealthy > 0 {
                 self.start_restages().await?;
                 self.start_detaches().await?;
+                self.start_clears().await?;
                 self.ask_rebuilds().await?;
             }
             // An ordered sink first takes every lane's front, so the pick by
@@ -795,7 +802,10 @@ impl<'a> Run<'a> {
         match &run.health.health {
             LaneHealth::Open => true,
             LaneHealth::Parked { .. } => {
-                run.health.due <= now && run.detach_due.is_none() && !self.lane_in_flight(lane)
+                run.health.due <= now
+                    && run.detach_due.is_none()
+                    && !run.health.detach_unsure
+                    && !self.lane_in_flight(lane)
             }
             _ => false,
         }
@@ -1062,6 +1072,7 @@ impl<'a> Run<'a> {
             || self.refreshing.iter().any(|(_, at)| at.lane == lane)
             || self.restaging.iter().any(|(_, at)| *at == lane)
             || self.detaching.iter().any(|(_, at)| *at == lane)
+            || self.clearing.iter().any(|(_, at)| *at == lane)
     }
 
     /// The flights holding a write slot: writes and seeds, not checkpoints;
@@ -1077,6 +1088,7 @@ impl<'a> Run<'a> {
             - self.recording.len()
             - self.restaging.len()
             - self.detaching.len()
+            - self.clearing.len()
             - refreshes
     }
 
@@ -1968,6 +1980,10 @@ impl<'a> Run<'a> {
             }
             Outcome::Detach(result) => {
                 return self.detach_returned(landed.flight, result).await;
+            }
+            Outcome::Clear(result) => {
+                self.clear_returned(landed.flight, result);
+                return Ok(());
             }
         };
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
@@ -2921,6 +2937,7 @@ impl<'a> Run<'a> {
                 if matches!(run.health.health, LaneHealth::Restaging { .. }) {
                     run.health.restage_failed(Instant::now());
                 }
+                run.health.detach_unsure = true;
                 tracing::warn!(lane = %run.key, %error, "could not record the detach; the lane stays as it was and detaches at its next refused probe or staging");
                 self.engine.store_lane(&run.key, &run.health, false);
             }
@@ -2986,6 +3003,69 @@ impl<'a> Run<'a> {
             "the lane is detached: nothing more of it is written, and reads of the index are frozen at the detach; the other indexes go on"
         );
         self.acknowledge_discards().await
+    }
+
+    /// Before the probe of each parked lane whose detach record failed and
+    /// may have landed, delete a record found and put the marker back, as a
+    /// flight holding no slot: the probe waits for it, so a lane that opens
+    /// leaves nothing for the next staging to detach (§5).
+    async fn start_clears(&mut self) -> Result<()> {
+        let now = Instant::now();
+        let due: Vec<usize> = (0..self.lanes.len())
+            .filter(|lane| {
+                self.lanes.get(*lane).is_some_and(|run| {
+                    run.health.detach_unsure
+                        && run.detach_due.is_none()
+                        && matches!(run.health.health, LaneHealth::Parked { .. })
+                        && run.health.due <= now
+                })
+            })
+            .filter(|lane| !self.lane_in_flight(*lane))
+            .collect();
+        for lane in due {
+            let Some(index) = self.lanes.get(lane).map(|run| run.key.index.clone()) else {
+                continue;
+            };
+            let flight = self.next_flight;
+            self.next_flight += 1;
+            self.clearing.push((flight, lane));
+            let engine = self.engine;
+            let clear = async move {
+                let started = Instant::now();
+                Landed {
+                    flight,
+                    outcome: Outcome::Clear(engine.clear_failed_detach(&index).await),
+                    took: started.elapsed(),
+                }
+            };
+            if let Some(landed) = self.flights.start(clear.boxed()) {
+                Box::pin(self.landed(landed)).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A clear returned: done, the lane's probe goes next; failed, the lane
+    /// stays parked and tries again after its backoff, doubled.
+    fn clear_returned(&mut self, flight: u64, result: Result<()>) {
+        let Some(at) = self.clearing.iter().position(|(id, _)| *id == flight) else {
+            return;
+        };
+        let (_, lane) = self.clearing.swap_remove(at);
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        match result {
+            Ok(()) => run.health.detach_unsure = false,
+            Err(error) => {
+                if let LaneHealth::Parked { reason, .. } = &run.health.health {
+                    let reason = reason.clone();
+                    run.health.park(reason, true, Instant::now());
+                }
+                tracing::warn!(lane = %run.key, %error, "could not delete the record a failed detach may have left; trying again before the next probe");
+            }
+        }
+        self.engine.store_lane(&run.key, &run.health, false);
     }
 
     /// Take `lane` as detached when a staging found it so (the engine's state

@@ -361,6 +361,28 @@ impl SinkEngine {
         Staged::Detached
     }
 
+    /// Delete the detach record a failed `Sink::detach` of `index` may have
+    /// left, on the version read, then read again, which puts the moved
+    /// marker back (§5). A record of another state is left as it is.
+    pub(super) async fn clear_failed_detach(&self, index: &IndexName) -> Result<()> {
+        let Some(mapping) = self.mappings.iter().find(|m| &m.index == index) else {
+            return Ok(());
+        };
+        let failed = |error| staging_failed(index, error);
+        let found = self.sink.detachment(mapping).await.map_err(failed)?;
+        if let (Some(sink::DetachRecord::Detached { .. }), Some(version)) =
+            (&found.record, &found.version)
+        {
+            self.sink
+                .forget_detachment(mapping, version)
+                .await
+                .map_err(failed)?;
+            tracing::info!(%index, sink = %self.name, "a failed detach had left its record; deleted before the lane's probe");
+        }
+        self.sink.detachment(mapping).await.map_err(failed)?;
+        Ok(())
+    }
+
     /// What the engine keeps for a lane it no longer writes (R6): its fence
     /// entries, a reindex pending for its index; an outstanding backfill
     /// stays, cut, so nothing of it seeds the index.

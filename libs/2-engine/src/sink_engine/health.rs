@@ -268,6 +268,11 @@ pub(crate) struct LaneState {
     /// lane's next probe the destination refuses, or its next staging. Dropped
     /// when the lane opens.
     pub(crate) detach_asked: bool,
+    /// A detach's record failed, and may have landed all the same (a
+    /// timeout after the write): before the lane's next probe, a record
+    /// found is deleted and the marker put back, so a lane that opens is
+    /// never detached by the next staging (§5).
+    pub(crate) detach_unsure: bool,
 }
 
 /// A reindex whose staging failed, waiting for its retry.
@@ -312,6 +317,7 @@ impl LaneState {
             reindex: None,
             unensured: false,
             detach_asked: false,
+            detach_unsure: false,
         }
     }
 
@@ -433,6 +439,7 @@ impl LaneState {
             || !self.superseded.is_empty()
             || !self.held_for_seed.is_empty()
             || self.detach_asked
+            || self.detach_unsure
     }
 
     /// Whether the lane is parked or being staged again: what the run's
