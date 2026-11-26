@@ -669,6 +669,7 @@ NOT_READS = {
     ("libs/2-adapters/sink-opensearch/tests/document_ids.rs", "docs"): "a key of an OpenSearch response",
     ("libs/2-adapters/sink-opensearch/src/detachment.rs", "docs"): "a key of an OpenSearch response",
     ("libs/2-adapters/sink-opensearch/src/detachment/tests.rs", "docs"): "a key of an OpenSearch response",
+    ("libs/2-adapters/sink-opensearch/src/detachment/tests/record.rs", "docs"): "a key of an OpenSearch response",
     ("libs/2-adapters/source-postgres/src/cdc/capture.rs", "plugin"): "a column of pg_replication_slots",
     ("libs/2-engine/tests/bytea_output.rs", "docs"): "a test table and index name",
 }
