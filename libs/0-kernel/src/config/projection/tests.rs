@@ -1120,6 +1120,11 @@ fn a_date_format_that_cannot_read_what_flusso_writes_gets_the_iso_pattern_last()
             appended("yyyy-MM-dd'T'HH:mm:ss"),
         ),
         ("HH:mm:ss", Timestamps, None),
+        ("hh:mm a", Timestamps, None),
+        ("KK:mm a", Timestamps, None),
+        ("kk:mm", Dates, None),
+        ("'Day 'HH:mm", Timestamps, None),
+        ("'Week 'w", Timestamps, appended("'Week 'w")),
         ("HH:mm:ss.SSS||hour_minute_second", Timestamps, None),
         ("hour_minute_second", Dates, None),
         ("strict_t_time", Timestamps, None),
@@ -1219,6 +1224,8 @@ fn a_custom_date_over_a_date_or_timestamp_column_takes_the_rule() {
             custom("both", &["date", "timestamptz"], "date"),
             "yyyy-MM-dd",
         ),
+        with_format(custom("days", &["date[]"], "date"), "yyyy/MM/dd"),
+        with_format(custom("mixed", &["date", "text"], "date"), "yyyy/MM/dd"),
     ]);
     let mapping = schema.resolve(IndexName::try_new("products").unwrap());
     let formats: Vec<Option<&str>> = mapping
@@ -1233,11 +1240,18 @@ fn a_custom_date_over_a_date_or_timestamp_column_takes_the_rule() {
             Some("yyyy-MM-dd"),
             Some("yyyy-MM-dd HH:mm:ss||strict_date_optional_time"),
             Some("yyyy-MM-dd||strict_date_optional_time"),
+            Some("yyyy/MM/dd||strict_date_optional_time"),
+            Some("yyyy/MM/dd"),
         ]
     );
     assert_eq!(
         schema.completed_date_formats(),
-        ["day".to_owned(), "nanos".to_owned(), "both".to_owned()]
+        [
+            "day".to_owned(),
+            "nanos".to_owned(),
+            "both".to_owned(),
+            "days".to_owned()
+        ]
     );
 }
 
@@ -1269,6 +1283,14 @@ fn every_date_mapping_with_a_refusing_format_resolves_with_the_iso_pattern() {
             on: vec![],
         })),
     };
+    let mut ids = latest.clone();
+    ids.field = FieldName::try_new("days_ids").unwrap();
+    if let FieldSource::Relation(Relation::Aggregate(aggregate)) = &mut ids.source {
+        aggregate.op = AggregateOp::Ids {
+            element_type: FlussoType::Date,
+        };
+        aggregate.value_type = None;
+    }
     let script = Field {
         field: FieldName::try_new("computed").unwrap(),
         options: Default::default(),
@@ -1287,6 +1309,7 @@ fn every_date_mapping_with_a_refusing_format_resolves_with_the_iso_pattern() {
         with_format(column_field("born", FlussoType::Date), SPACE_ONLY),
         with_format(array, SPACE_ONLY),
         with_format(latest, SPACE_ONLY),
+        with_format(ids, SPACE_ONLY),
         with_format(script, SPACE_ONLY),
         with_format(
             column_field("kept", FlussoType::Timestamp),
@@ -1308,6 +1331,7 @@ fn every_date_mapping_with_a_refusing_format_resolves_with_the_iso_pattern() {
             ("born", Some(appended)),
             ("days", Some(appended)),
             ("latest", Some(appended)),
+            ("days_ids", Some(appended)),
             ("computed", Some(appended)),
             ("kept", Some("strict_date_optional_time")),
             ("plain", None),
@@ -1348,6 +1372,40 @@ fn a_nested_date_field_takes_the_iso_pattern_and_a_map_of_dates_is_untouched() {
     let keys = mapping.fields[2].mapping.map_values.as_ref().unwrap();
     assert_eq!(keys.mapping_type, MappingType::Date);
     assert_eq!(format_of(keys), None);
+}
+
+/// A refusing date field OpenSearch doesn't map keeps its format and adds
+/// no revision to the hash: under an input-only object, under an object with
+/// `enabled: false`, and an input-only field itself.
+#[test]
+fn a_refusing_date_field_the_index_does_not_map_moves_no_hash() {
+    let placed = with_format(column_field("placed", FlussoType::Timestamp), SPACE_ONLY);
+    let group = |name: &str| Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Group(vec![placed.clone()]),
+    };
+    let mut hidden = group("hidden");
+    hidden.emit = false;
+    let mut disabled = group("disabled");
+    disabled.options.insert(
+        "enabled".to_owned(),
+        crate::common::GenericValue::Bool(false),
+    );
+    let mut input_only = placed.clone();
+    input_only.emit = false;
+    assert_eq!(crate::config::iso_date_format(&input_only), None);
+    for field in [hidden, disabled, input_only] {
+        let schema = columns_schema(vec![field]);
+        assert!(schema.completed_date_formats().is_empty());
+        assert_eq!(
+            schema.resolve(IndexName::try_new("products").unwrap()).hash,
+            crate::config::ContentHash::of(&schema),
+            "{:?}",
+            schema.fields[0].field
+        );
+    }
 }
 
 /// Every schema the rule doesn't touch keeps its content hash, so its
