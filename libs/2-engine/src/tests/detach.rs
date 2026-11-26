@@ -654,6 +654,19 @@ async fn a_sink_without_records_never_detaches() {
         "still in the minimum"
     );
     assert!(!engine.lane_state(&lane(users())).detach_asked);
+
+    // The parked item was neither acknowledged nor dropped while the sink
+    // was asked: lifted, the block lets that very item land.
+    let before = rig.sink.writes_of(&users()).len();
+    rig.sink.block(&users(), false);
+    eventually("the parked item lands", || {
+        rig.applied(&users()) == through(1)
+    })
+    .await;
+    assert!(
+        rig.sink.writes_of(&users()).len() > before,
+        "written, not dropped"
+    );
     task.abort();
 }
 
