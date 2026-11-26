@@ -328,7 +328,7 @@ impl SinkEngine {
             // Acted on by the staging step (`AtStaging`).
             None | Some(sink::DetachRecord::Detached { .. }) => {}
             Some(sink::DetachRecord::Rebuilding { live_only: true }) => {
-                tracing::error!(%index, %sink, "a detach record says a rebuild was under way on a sink that can't rebuild (live only); staged as before until this version demotes it (R14). Changes made while it was detached are missing from it until their rows change again");
+                tracing::error!(%index, %sink, "a detach record says a rebuild was under way on a sink that can't rebuild (live only); the index is detached again beside a seed marker on the generation reads see (O30), else staged as before until this version demotes it (R14)");
             }
             Some(sink::DetachRecord::Rebuilding { .. }) => {
                 tracing::error!(%index, %sink, "a detach record says a rebuild was under way; this version stages it as before when its seed marker moved to the new generation, else detaches the index again");
@@ -1520,7 +1520,8 @@ impl AtStaging {
             return Self::Finished(version.clone());
         }
         match (detached, live_only, detachment.marker) {
-            (_, false, Some(MarkerAt::Serving { .. })) => Self::DetachAgain,
+            (false, _, Some(MarkerAt::Serving { .. }))
+            | (true, false, Some(MarkerAt::Serving { .. })) => Self::DetachAgain,
             (false, _, _) => Self::AsBefore,
             (true, live_only, _) => Self::Detached(if live_only {
                 "the detach record says detached, live only".to_owned()

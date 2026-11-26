@@ -910,6 +910,18 @@ async fn staging_classifies_every_record_and_marker_pair() {
             false,
         ),
         (
+            "rebuilding, live only, marker on serving: detached again (O30)",
+            Detachment::recorded(
+                DetachRecord::Rebuilding { live_only: true },
+                serving(true),
+                version(),
+            ),
+            false,
+            true,
+            true,
+            false,
+        ),
+        (
             "rebuilding, marker on serving: detached again (O30)",
             Detachment::recorded(
                 DetachRecord::Rebuilding { live_only: false },
