@@ -4234,3 +4234,62 @@ async fn a_seed_owed_over_a_gap_written_meanwhile_asks_the_backfill_again() {
     task.abort();
     asks.abort();
 }
+
+/// The sixth re-check, S-2: a demotion deletes every generation but the
+/// serving one and the walk checkpoint, so without the slot it would destroy
+/// the rebuild another process holding the slot is walking. This process's
+/// run restarts while its stream is down and stages: the rebuild is left as
+/// it is, the lane taken as detached and left unread (confirmation holds).
+/// Once the slot is held, the read again demotes it.
+#[tokio::test(start_paused = true)]
+async fn a_staging_without_the_slot_leaves_anothers_rebuild_to_the_holder() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    eventually("read under the stream", || read_all(&rig)).await;
+    task.abort();
+    let _ = task.await;
+    rig.rereads.closed();
+    let mut record = Detachment::recorded(
+        DetachRecord::Rebuilding { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    );
+    record.attempts = Some(1);
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), record);
+    rig.sink
+        .walked
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), "k".to_owned());
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(
+        rig.sink.demoted.lock().unwrap().is_empty(),
+        "demoted another process's rebuild with no slot held"
+    );
+    assert_eq!(
+        rig.sink
+            .walked
+            .lock()
+            .unwrap()
+            .get("users")
+            .map(String::as_str),
+        Some("k"),
+        "the holder's checkpoint stays"
+    );
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    assert!(!rig.rereads.current(&lane(users())), "left unread");
+    let (task, _control) = spawn(&engine);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("demoted once the slot is held", || {
+        *rig.sink.demoted.lock().unwrap() == [("users".to_owned(), false)]
+    })
+    .await;
+    task.abort();
+}
