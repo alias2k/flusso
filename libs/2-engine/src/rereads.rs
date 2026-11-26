@@ -83,6 +83,9 @@ pub struct Rereads {
     holding: AtomicBool,
     /// The last opening's run ended cleanly ([`finished`](Rereads::finished)).
     finished: AtomicBool,
+    /// An ingest engine opens the live stream through this
+    /// ([`will_open`](Rereads::will_open)).
+    opener: AtomicBool,
     read: Mutex<BTreeMap<LaneKey, u64>>,
     listeners: Mutex<Vec<RereadListener>>,
     /// The last opening that returned Ok, for sink engines to wake on: an
@@ -97,6 +100,7 @@ impl Default for Rereads {
             held: AtomicU64::new(0),
             holding: AtomicBool::new(false),
             finished: AtomicBool::new(false),
+            opener: AtomicBool::new(false),
             read: Mutex::new(BTreeMap::new()),
             listeners: Mutex::new(Vec::new()),
             openings: tokio::sync::watch::Sender::new(0),
@@ -174,13 +178,25 @@ impl Rereads {
         self.holding.load(Ordering::Acquire)
     }
 
-    /// Whether this process may erase or rewrite a record another process
-    /// may rely on (O29, the fifth re-check): only while it holds the slot.
-    /// Before any opening was counted nothing here opens a stream (a test,
-    /// a sink engine with no ingest engine beside it), and no snapshot is
-    /// served before the first opening, so no seed can come: as on `main`.
+    /// An ingest engine opens the live stream through this: from now on
+    /// nothing erases a record unless the stream is held
+    /// ([`may_erase_records`](Self::may_erase_records)), before the first
+    /// opening too (a process whose `prepare` keeps failing while another
+    /// holds the slot).
+    pub fn will_open(&self) {
+        self.opener.store(true, Ordering::Release);
+    }
+
+    /// Whether this process may erase, or loosen, a record another process
+    /// may rely on (O29, the fifth re-check): only while it holds the slot,
+    /// or once its run ended cleanly (the deployment ends after the drain).
+    /// With nothing to open a stream here (no [`will_open`](Self::will_open)
+    /// and no opening counted: a sink engine on its own, as in tests) there
+    /// is no slot to hold, and it may: as on `main`.
     pub fn may_erase_records(&self) -> bool {
-        self.holding() || self.opened() == 0 || self.finished.load(Ordering::Acquire)
+        self.holding()
+            || self.finished.load(Ordering::Acquire)
+            || (self.opened() == 0 && !self.opener.load(Ordering::Acquire))
     }
 
     /// Hear every opening and every read, for a fence to note and wake on.

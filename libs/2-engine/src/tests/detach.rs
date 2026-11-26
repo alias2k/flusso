@@ -3872,3 +3872,20 @@ async fn a_staging_demotes_a_rebuild_begun_since_ours() {
     );
     assert!(engine.lane_health(&lane(users())).is_detached());
 }
+
+/// Found by the world property (the fifth re-check's round): a process
+/// whose ingest engine opens through `rereads` but hasn't yet (its
+/// `prepare` failing while another process holds the slot) holds no slot.
+/// A reattach then is refused, as once a stream ended.
+#[tokio::test(start_paused = true)]
+async fn a_process_whose_stream_never_opened_deletes_no_record() {
+    let rig = Rig::new(64);
+    rig.rereads.will_open();
+    let (_engine, task, control) = detached_live_only(&rig).await;
+    assert!(matches!(
+        verdict(&control).await,
+        crate::ReattachVerdict::Refused(why) if why.contains("doesn't hold the slot")
+    ));
+    assert!(rig.sink.kept.lock().unwrap().get("users").is_some());
+    task.abort();
+}

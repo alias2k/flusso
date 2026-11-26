@@ -258,6 +258,7 @@ impl IngestEngine {
     /// published: the sink engines read their detach records again before
     /// writing anything after it (ADR 0012 stage 10, O29).
     pub fn with_rereads(mut self, rereads: Arc<crate::Rereads>) -> Self {
+        rereads.will_open();
         self.rereads = rereads;
         self
     }
