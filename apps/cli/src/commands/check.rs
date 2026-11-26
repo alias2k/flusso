@@ -1020,10 +1020,7 @@ mod tests {
         let mut out = Vec::new();
         report.human(&mut out, print::Pen::plain()).unwrap();
         let human = String::from_utf8(out).unwrap();
-        assert!(
-            human.contains("✓ flusso.lock rewritten: flusso.lock"),
-            "{human}"
-        );
+        assert!(human.contains("✓ lock rewritten: flusso.lock"), "{human}");
         let json = report.json();
         assert_eq!(json["lock"]["state"], "lock_stale", "{json}");
         assert_eq!(json["lock"]["rewritten"], true, "{json}");

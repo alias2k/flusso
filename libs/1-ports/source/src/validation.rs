@@ -3106,7 +3106,7 @@ mod tests {
         field
     }
 
-    fn timestamp_formats(fields: serde_json::Value) -> Vec<Found> {
+    fn offline_findings(fields: serde_json::Value) -> Vec<Found> {
         located(validate_spec(&users_spec(json!({ "fields": fields }))))
     }
 
@@ -3131,7 +3131,7 @@ mod tests {
             "yyyy-MM-dd HH:mm:ss",
         );
         assert_eq!(
-            timestamp_formats(json!([
+            offline_findings(json!([
                 int_field("id"),
                 timestamp_field("seen", Some(SPACE_ONLY)),
                 script,

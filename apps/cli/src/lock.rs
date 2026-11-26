@@ -155,13 +155,7 @@ impl LockState {
         let lock = at.lock.display();
         match self {
             Self::Current => format!("{lock} is current"),
-            Self::Rewritten { .. } => format!(
-                "{} rewritten: {lock}",
-                at.lock.file_name().map_or_else(
-                    || lock.to_string(),
-                    |name| name.to_string_lossy().into_owned()
-                )
-            ),
+            Self::Rewritten { .. } => format!("lock rewritten: {lock}"),
             Self::Respelled => format!(
                 "{lock} holds this config in other bytes than flusso writes (line endings or \
                  formatting); `flusso run` would rewrite it"
@@ -609,7 +603,7 @@ mod tests {
             );
             assert_eq!(
                 after.message(&LockAt::new(&lock)),
-                format!("flusso.lock rewritten: {}", lock.display()),
+                format!("lock rewritten: {}", lock.display()),
                 "{case}"
             );
         }

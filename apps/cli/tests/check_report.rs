@@ -339,7 +339,7 @@ fn check_fix_rewrites_the_lock_from_the_config() {
             );
         } else {
             assert!(
-                printed.contains("✓ flusso.lock rewritten: flusso.lock"),
+                printed.contains("✓ lock rewritten: flusso.lock"),
                 "{state}: {}",
                 shown(&fixed)
             );
