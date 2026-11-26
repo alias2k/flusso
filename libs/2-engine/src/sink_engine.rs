@@ -319,16 +319,16 @@ impl SinkEngine {
             // Acted on by the staging step (`AtStaging`).
             None | Some(sink::DetachRecord::Detached { .. }) => {}
             Some(sink::DetachRecord::Rebuilding { live_only: true }) => {
-                tracing::error!(%index, %sink, "a detach record says a newer flusso detached this index on a sink it can't rebuild (live only); this version can't act on it and stages the index as before, as its seed marker says. Changes made while it was detached are missing from it until their rows change again");
+                tracing::error!(%index, %sink, "a detach record says a rebuild was under way on a sink that can't rebuild (live only); staged as before until this version demotes it (R14). Changes made while it was detached are missing from it until their rows change again");
             }
             Some(sink::DetachRecord::Rebuilding { .. }) => {
-                tracing::error!(%index, %sink, "a detach record says a newer flusso was rebuilding this index after detaching it; this version can't act on it and stages the index as before, as its seed marker says");
+                tracing::error!(%index, %sink, "a detach record says a rebuild was under way; this version stages it as before when its seed marker moved to the new generation, else detaches the index again");
             }
             Some(sink::DetachRecord::Unreadable { reason }) => {
-                tracing::error!(%index, %sink, %reason, "a detach record this version can't read; the index is staged as before");
+                tracing::error!(%index, %sink, %reason, "a detach record this version can't read; the index is staged as before only when its seed marker moved to a newer, unseeded generation (a rebuild), else detached again (O30)");
             }
             Some(other) => {
-                tracing::error!(%index, %sink, record = ?other, "a detach record this version doesn't know; the index is staged as before");
+                tracing::error!(%index, %sink, record = ?other, "a detach record this version doesn't know; the index is staged as before only when its seed marker moved to a newer, unseeded generation, else detached again (O30)");
             }
         }
         if let Some(reason) = &detachment.unreadable_marker {
@@ -1059,8 +1059,9 @@ impl SinkEngine {
                 tracing::info!(index = %mapping.index, sink = %self.name, "a detach record outlived the rebuild that finished it; deleted, and the index is staged as before");
             }
             AtStaging::DetachAgain => {
-                let why = "the detach record says detached while the seed marker is on the \
-                           generation reads see; detached again at staging";
+                let why = "the detach records can't be acted on as they stand (detached or \
+                           rebuilding beside a seed marker on the generation reads see, or a \
+                           record this version can't read); detached again at staging";
                 let detach = sink::Detach::new(why).live_only(!self.options.backfill);
                 if self.sink.detach(mapping, &detach).await? != sink::Recorded::Kept {
                     return Err(sink::SinkError::Write(format!(
@@ -1459,12 +1460,13 @@ enum Staged {
 }
 
 /// What a staging does with what an index's detach records say (ADR 0012
-/// stage 10, §4). A `rebuilding` record is staged as before until this
-/// version rebuilds (slice 2, step 4): its marker moved first, so that is a
-/// rebuild of the index.
+/// stage 10, §4, O30). A `rebuilding` record with its marker moved is staged
+/// as before until this version rebuilds (slice 2, step 4): its marker moved
+/// first, so that is a rebuild of the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AtStaging {
-    /// No record, or one this version doesn't act on: staged as before.
+    /// No record, a `rebuilding` one whose marker moved, or an unreadable
+    /// one whose marker is on a newer unseeded generation: staged as before.
     AsBefore,
     /// Detached, for this reason: not ensured, not backfilled.
     Detached(String),
@@ -1473,8 +1475,10 @@ enum AtStaging {
     /// record is deleted and the index staged as before. Never for a
     /// live-only record.
     Finished(sink::RecordVersion),
-    /// Detached, yet the marker is on the generation reads see (restored by
-    /// hand, or a late record of a dead process): detached again.
+    /// Detached or rebuilding, yet the marker is on the generation reads see
+    /// (restored by hand, or a late record of a dead process), or a record
+    /// this version can't read beside any marker but a newer unseeded one:
+    /// detached again.
     DetachAgain,
 }
 
@@ -1487,7 +1491,15 @@ impl AtStaging {
         let (detached, live_only) = match record {
             DetachRecord::Detached { live_only } => (true, *live_only),
             DetachRecord::Rebuilding { live_only } => (false, *live_only),
-            _ => return Self::AsBefore,
+            // O30: an unreadable record is a rebuild only when the marker
+            // moved first to a newer, unseeded generation; any other is
+            // detached again rather than read as attached and current.
+            _ => {
+                return match detachment.marker {
+                    Some(MarkerAt::Newer { seeded: false }) => Self::AsBefore,
+                    _ => Self::DetachAgain,
+                };
+            }
         };
         // Finished only when a newer copy than the serving one was seeded: a
         // live-only index is never rebuilt, so its record stays until an
@@ -1498,11 +1510,10 @@ impl AtStaging {
         {
             return Self::Finished(version.clone());
         }
-        let detached = detached.then_some(live_only);
-        match (detached, detachment.marker) {
-            (None, _) => Self::AsBefore,
-            (Some(false), Some(MarkerAt::Serving { .. })) => Self::DetachAgain,
-            (Some(live_only), _) => Self::Detached(if live_only {
+        match (detached, live_only, detachment.marker) {
+            (_, false, Some(MarkerAt::Serving { .. })) => Self::DetachAgain,
+            (false, _, _) => Self::AsBefore,
+            (true, live_only, _) => Self::Detached(if live_only {
                 "the detach record says detached, live only".to_owned()
             } else {
                 "the detach record says detached".to_owned()

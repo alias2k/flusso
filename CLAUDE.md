@@ -1858,8 +1858,10 @@ is the one concrete piece.
   the lane detached); a seeded marker on a generation newer than the record's `serving`
   (`MarkerAt::Newer`), on a record that isn't live only → the record is deleted (`forget_detachment`,
   on the version read) and staged as before; `detached` with the marker on serving → `Sink::detach`
-  again (one the sink keeps no record of fails the step); `rebuilding` and unreadable → kept and
-  staged as before (O24) until step 4. A lane the process holds detached stays so at any later
+  again (one the sink keeps no record of fails the step), and so is a `rebuilding` record beside a
+  marker on serving, and an unreadable record beside any marker but a newer unseeded one (O30);
+  `rebuilding` with its marker moved, and unreadable beside a newer unseeded marker → kept and staged
+  as before until step 4. A lane the process holds detached stays so at any later
   staging; a staging during a run says itself it found the index detached (`Outcome::Restage(Ok(true))`,
   `Reindexed.detached`) and the run adopts the lane. **The detach** (R4–R6):
   `SinkControl::Detach` sets `LaneState.detach_asked`; the lane detaches at its next probe the

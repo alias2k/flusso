@@ -606,7 +606,7 @@ Written at the start of slice 2's implementation, after #479 (PR #483) merged. S
   - `detached` → detached;
   - a seeded marker elsewhere → finished: the record is deleted on the version read (`Sink::forget_detachment`, new), and the index staged as before;
   - `detached`, not live only, with the marker on `serving` → `Sink::detach` again;
-  - `rebuilding` and unreadable records → staged as before, until step 4.
+  - `rebuilding` and unreadable records → staged as before, until step 4. *Changed in step 3 by O30:* an unreadable record stages as before only beside a marker on a newer, unseeded generation, and is detached again otherwise; a `rebuilding` record with the marker on serving is detached again.
 - **A staging during a run** (a restage, a reindex) that finds the index detached is adopted by the run, which detaches the lane instead of reopening it.
 
 **Corrections the build made.**

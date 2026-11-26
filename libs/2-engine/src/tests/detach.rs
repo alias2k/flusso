@@ -780,6 +780,12 @@ async fn a_reindex_of_a_detached_index_is_ignored() {
     task.abort();
 }
 
+fn unreadable() -> DetachRecord {
+    DetachRecord::Unreadable {
+        reason: "a newer state".to_owned(),
+    }
+}
+
 fn version() -> Option<RecordVersion> {
     Some(RecordVersion::new("7:1"))
 }
@@ -887,17 +893,55 @@ async fn staging_classifies_every_record_and_marker_pair() {
             false,
         ),
         (
-            "unreadable",
+            "rebuilding, marker on serving: detached again (O30)",
             Detachment::recorded(
-                DetachRecord::Unreadable {
-                    reason: "a newer state".to_owned(),
-                },
-                elsewhere(false),
+                DetachRecord::Rebuilding { live_only: false },
+                serving(true),
                 version(),
             ),
+            false,
+            true,
+            true,
+            false,
+        ),
+        (
+            "unreadable, marker on a newer unseeded generation: a rebuild, as before (O30)",
+            Detachment::recorded(unreadable(), newer(false), version()),
             true,
             false,
             false,
+            false,
+        ),
+        (
+            "unreadable, marker on serving: detached again (O30)",
+            Detachment::recorded(unreadable(), serving(true), version()),
+            false,
+            true,
+            true,
+            false,
+        ),
+        (
+            "unreadable, serving unknown: detached again (O30)",
+            Detachment::recorded(unreadable(), elsewhere(false), version()),
+            false,
+            true,
+            true,
+            false,
+        ),
+        (
+            "unreadable, no marker: detached again (O30)",
+            Detachment::recorded(unreadable(), None, version()),
+            false,
+            true,
+            true,
+            false,
+        ),
+        (
+            "unreadable, a newer seeded marker: detached again (O30)",
+            Detachment::recorded(unreadable(), newer(true), version()),
+            false,
+            true,
+            true,
             false,
         ),
     ];

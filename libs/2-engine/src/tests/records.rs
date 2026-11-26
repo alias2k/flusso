@@ -306,8 +306,9 @@ async fn a_failed_read_fails_a_fresh_staging() {
 }
 
 /// A record this version doesn't act on yet (`rebuilding`, until slice 2's
-/// step 4) or can't read is kept for its lane and the index is staged as
-/// before (O24): ensured, asked whether seeded, its backfill asked for when
+/// step 4), or one it can't read beside a marker moved to a newer unseeded
+/// generation (O30), is kept for its lane and the index is staged as before
+/// (O24): ensured, asked whether seeded, its backfill asked for when
 /// unseeded. A `detached` record is kept too, and its index staged detached:
 /// neither ensured nor asked for (slice 2, step 2; every pair is in
 /// `detach.rs`).
@@ -319,6 +320,8 @@ async fn a_record_found_is_kept_for_its_lane_and_acted_on_or_staged_as_before() 
     unreadable.record = Some(DetachRecord::Unreadable {
         reason: "state `frozen`".to_owned(),
     });
+    // A rebuild under way, its marker moved first: staged as before (O30).
+    unreadable.marker = Some(sink::MarkerAt::Newer { seeded: false });
     let reads: BTreeMap<String, Read> = [
         (name(0), Read::Kept(detached(false))),
         (name(1), Read::Kept(detached(true))),
