@@ -55,9 +55,13 @@ fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedFie
     let children = resolve_fields(child_fields, child_pk);
 
     let (mapping_type, nullable, array) = type_and_nullability(field, primary_key);
+    let mut extra = field.options.clone();
+    if let Some(format) = super::iso_date_format(field) {
+        extra.insert("format".to_owned(), GenericValue::String(format));
+    }
     let mapping = Mapping {
         mapping_type,
-        extra: field.options.clone(),
+        extra,
         map_values: map_value_type(field),
         decimal: is_decimal(field),
         enum_order: enum_order(field),
@@ -148,6 +152,11 @@ fn is_decimal(field: &Field) -> bool {
         },
         _ => false,
     }
+}
+
+/// The OpenSearch type `field` maps to (the element type for an array).
+pub(crate) fn mapping_type(field: &Field) -> MappingType {
+    type_and_nullability(field, None).0
 }
 
 /// Returns `(mapping_type, nullable, array)`. `array` is true for an array
