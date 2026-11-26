@@ -3163,7 +3163,10 @@ impl<'a> Run<'a> {
                     last.to = self.engine.place(&run.key);
                 }
                 self.engine.observer.on_lane_gaps(&run.key, &gaps);
-                reattached = gaps.last().cloned().map(|last| (run.key.clone(), last));
+                reattached = gaps
+                    .last()
+                    .cloned()
+                    .map(|last| (run.key.clone(), last, gaps));
             }
             if let Some(run) = self.lanes.get_mut(lane)
                 && let Some(down) = run.health.attached(Instant::now())
@@ -3178,8 +3181,9 @@ impl<'a> Run<'a> {
                 ));
             }
             self.acknowledged(handle, lane, Some(seq), false).await?;
-            if let Some((key, last)) = reattached {
+            if let Some((key, last, gaps)) = reattached {
                 self.engine.record_reattached(&key, &last).await?;
+                self.engine.flag_unsettled(&gaps);
             }
             match rebuild {
                 // r3: every page of the rebuild is read after the attach.

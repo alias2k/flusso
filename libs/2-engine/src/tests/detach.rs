@@ -2860,3 +2860,32 @@ async fn a_restaging_while_the_slot_is_held_settles_the_gap_without_a_new_openin
     .await;
     task.abort();
 }
+
+/// Review of the second fix round, m-f: a gap kept with both ends unknown (a
+/// corrupt entry) before a reattach is settled after the attach, at the
+/// run's next turn while the slot is held, instead of refusing every later
+/// position until the next opening.
+#[tokio::test(start_paused = true)]
+async fn a_corrupt_gap_kept_before_a_reattach_is_settled_after_it() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (_engine, task, control) = detached_live_only(&rig).await;
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), vec![gap(None, None)]);
+    assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
+    let stream::Request::Attach { attempt, .. } = next_request(&rig).await else {
+        panic!("an attach");
+    };
+    rig.progress.routed(Position::new(3));
+    rig.progress.attach(&lane(users()), attempt);
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    eventually("the corrupt gap is settled too", || {
+        rig.sink.marker_gaps.lock().unwrap().get("users")
+            == Some(&vec![gap(None, Some("3")), gap(Some("1"), Some("3"))])
+    })
+    .await;
+    task.abort();
+}

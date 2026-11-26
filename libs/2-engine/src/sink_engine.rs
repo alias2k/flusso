@@ -1007,6 +1007,25 @@ impl SinkEngine {
             || (self.gaps_unsettled.load(Ordering::Acquire) && self.rereads.holding())
     }
 
+    /// `gaps` were just kept with an end still unknown or unreadable (a
+    /// corrupt entry beside a reattach's): the next read while the slot is
+    /// held settles it (review of the second fix round, m-f).
+    pub(super) fn flag_unsettled(&self, gaps: &[sink::Gap]) {
+        let readable = |text: &Option<String>| {
+            text.as_deref().is_some_and(|text| {
+                self.positions
+                    .as_ref()
+                    .is_some_and(|positions| positions.parses(text))
+            })
+        };
+        if gaps
+            .iter()
+            .any(|gap| !readable(&gap.to) || (gap.from.is_some() && !readable(&gap.from)))
+        {
+            self.gaps_unsettled.store(true, Ordering::Release);
+        }
+    }
+
     /// A read while the slot is held is under way: it settles every gap
     /// end it can.
     pub(super) fn settling_gaps(&self) {
