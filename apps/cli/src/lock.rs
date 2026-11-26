@@ -364,4 +364,29 @@ mod tests {
              formatting); `flusso run` would rewrite it"
         );
     }
+
+    /// A lock that fails to parse names where (line and column) and why, never
+    /// the text there: a literal secret may sit on that line.
+    #[test]
+    fn an_unreadable_lock_never_echoes_its_content() {
+        let dir = project("echo", &["users"], "out");
+        let mut bytes = config::to_bytes(&compiled(&dir)).unwrap();
+        bytes.extend_from_slice(b"\n[config.sinks.out.extra]\npassword = \"OsSecretBBB\" typo\n");
+        std::fs::write(dir.join("flusso.lock"), &bytes).unwrap();
+        let state = LockState::of(&compiled(&dir), &dir.join("flusso.lock"));
+        let LockState::Unreadable { reason } = &state else {
+            panic!("{state:?}");
+        };
+        let message = state.message(Path::new("flusso.lock"));
+        for said in [reason, &message] {
+            assert!(!said.contains("OsSecretBBB"), "{said}");
+            assert!(!said.contains("typo"), "{said}");
+            assert!(said.contains("line "), "{said}");
+        }
+        let loaded = config::load_compiled(dir.join("flusso.lock"))
+            .unwrap_err()
+            .to_string();
+        assert!(!loaded.contains("OsSecretBBB"), "{loaded}");
+        assert!(loaded.contains("line "), "{loaded}");
+    }
 }

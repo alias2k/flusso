@@ -69,8 +69,14 @@ pub enum CompileError {
     },
     #[error("failed to encode compiled config: {0}")]
     Encode(#[from] toml::ser::Error),
-    #[error("failed to decode compiled config: {0}")]
-    Decode(#[from] toml::de::Error),
+    /// The lock isn't the TOML it should be. Names the place and the parser's
+    /// reason, never the text there: a literal secret may sit on that line.
+    #[error("failed to decode compiled config at line {line}, column {column}: {message}")]
+    Decode {
+        line: usize,
+        column: usize,
+        message: String,
+    },
     #[error(
         "compiled config format version {got} is not supported by this build \
          (expected {expected}); re-run `flusso build` (or `flusso run` without \
@@ -411,15 +417,33 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Config, CompileError> {
     // The version is checked before the body is decoded, so a lock written in
     // another format reports the version mismatch (and its regenerate hint)
     // rather than whichever field of the old shape fails first.
-    let header: Header = toml::from_str(text)?;
+    let header: Header = toml::from_str(text).map_err(|error| decode_error(text, &error))?;
     if header.format_version != FORMAT_VERSION {
         return Err(CompileError::VersionMismatch {
             got: header.format_version,
             expected: FORMAT_VERSION,
         });
     }
-    let compiled: Compiled = toml::from_str(text)?;
+    let compiled: Compiled = toml::from_str(text).map_err(|error| decode_error(text, &error))?;
     Ok(compiled.config)
+}
+
+/// A TOML error as where it is and why, without the excerpt the parser's own
+/// message quotes.
+fn decode_error(text: &str, error: &toml::de::Error) -> CompileError {
+    let at = error.span().map_or(0, |span| span.start).min(text.len());
+    let before = text.get(..at).unwrap_or_default();
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count())
+        + 1;
+    CompileError::Decode {
+        line,
+        column,
+        message: error.message().to_owned(),
+    }
 }
 
 /// Just the version line of a lock, read ahead of the body.
