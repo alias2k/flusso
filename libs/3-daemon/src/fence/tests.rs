@@ -1910,3 +1910,25 @@ async fn an_unread_lane_never_holds_back_its_read_sibling() {
         unserved("20", &[("orders", "primary", Unserved::Starting)])
     );
 }
+
+mod gate_world;
+
+/// Found by the world property (the third re-check, item 3): a rebuild that
+/// begins while the lane's records are unread (a reindex staged after an
+/// opening) freezes at nothing: what it answered then may be the new
+/// stream's start, past changes another process dropped.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_begun_while_unread_vouches_for_nothing() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    opened(&rereads).await;
+    rig.source.idle_to(50);
+    let _ = fence.positions();
+    rig.observer
+        .on_index_rebuilding(&sink("primary"), &index("users"));
+    assert!(matches!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Rebuilding)]
+    ));
+}

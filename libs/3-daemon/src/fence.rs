@@ -447,8 +447,13 @@ impl Fence {
         // Both levels brought up to date first, so the frozen `through` is
         // what the lane had reached when the rebuild began.
         self.reached(lane, FenceLevel::Searchable);
+        // Unread since the slot opened, what the lane reached may be the new
+        // stream's start: a rebuild begun then freezes at nothing, as a
+        // detach does (found by the world property).
+        let read = self.read(lane);
         self.serve(lane, |furthest| Serving::Rebuilding {
             through: match furthest.serving {
+                Serving::Writes if !read => (None, None),
                 Serving::Writes => (furthest.applied, furthest.searchable),
                 Serving::Rebuilding { through } | Serving::Detached { through } => through,
                 Serving::Pending | Serving::Backfilling => (None, None),
@@ -476,11 +481,7 @@ impl Fence {
         // adopting a detach is one), what it reached may be the new stream's
         // start, past changes another process dropped: it freezes at
         // nothing (S-c).
-        let read = self
-            .inner
-            .rereads
-            .get()
-            .is_none_or(|rereads| rereads.current(lane));
+        let read = self.read(lane);
         self.serve(lane, |furthest| Serving::Detached {
             through: match furthest.serving {
                 Serving::Writes if !read => (None, None),
@@ -489,6 +490,15 @@ impl Fence {
                 Serving::Pending | Serving::Backfilling => (None, None),
             },
         });
+    }
+
+    /// Whether `lane`'s records were read under the current stream (O29);
+    /// with no `Rereads`, always.
+    fn read(&self, lane: &LaneKey) -> bool {
+        self.inner
+            .rereads
+            .get()
+            .is_none_or(|rereads| rereads.current(lane))
     }
 
     /// `lane` carries the gaps reattaches accepted (S3), in the source's
