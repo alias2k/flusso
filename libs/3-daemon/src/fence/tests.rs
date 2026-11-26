@@ -991,6 +991,7 @@ fn detached() -> engine::LaneHealth {
     engine::LaneHealth::Detached {
         since: Instant::now(),
         reason: "blocked: index write (api)".to_owned(),
+        through: None,
     }
 }
 
@@ -1160,5 +1161,219 @@ async fn a_fence_on_a_rebuilding_lane_vouches_for_no_change_dropped_while_detach
             .wait(&request("30", FenceLevel::Applied, None))
             .await,
         reached("30")
+    );
+}
+
+fn gap(from: Option<&str>, to: Option<&str>) -> sink::Gap {
+    sink::Gap {
+        from: from.map(str::to_owned),
+        to: to.map(str::to_owned),
+    }
+}
+
+fn in_gap(position: &str, from: &str, to: Option<&str>) -> Result<FenceOutcome, FenceError> {
+    Ok(FenceOutcome::InGap {
+        position: position.to_owned(),
+        lanes: vec![(
+            lane("primary"),
+            FenceGap {
+                from: Some(from.to_owned()),
+                to: to.map(str::to_owned),
+            },
+        )],
+    })
+}
+
+/// Review of step 3, S3, for `reattach --accept-gap`: the lane vouches as
+/// usual from its attach on and as before up to its detach; a position
+/// inside the gap between them is refused at once, naming the gap. After a
+/// restart the gap is heard from the sink's own records, and refuses the
+/// same positions.
+#[tokio::test(start_paused = true)]
+async fn a_reattached_lane_vouches_only_from_its_attach() {
+    let rig = fence(&["primary"]);
+    let before = rig.source.emit(10);
+    rig.route(before);
+    rig.applied("primary", before);
+    rig.searchable("primary", before);
+    rig.observer.on_lane_health(
+        &lane("primary"),
+        &engine::LaneHealth::Detached {
+            since: Instant::now(),
+            reason: "blocked".to_owned(),
+            through: Some("10".to_owned()),
+        },
+    );
+    rig.progress.detach(&lane("primary"));
+    let dropped = rig.source.emit(20);
+    rig.route(dropped);
+    rig.progress.routed(dropped);
+    assert_eq!(
+        rig.progress.attach(&lane("primary"), 1),
+        engine::Attach::Attached
+    );
+    // What the sink engine hears when it takes `Attached`: the gap ends where
+    // the lane stands, before it opens.
+    let to = rig
+        .source
+        .reached(rig.progress.lane(&lane("primary"), Level::Applied).unwrap())
+        .unwrap();
+    assert_eq!(to, SourcePosition(20));
+    rig.observer
+        .on_lane_gap(&lane("primary"), &gap(Some("10"), Some("20")));
+    rig.observer
+        .on_lane_health(&lane("primary"), &engine::LaneHealth::Open);
+    let after = rig.source.emit(30);
+    rig.route(after);
+    rig.applied("primary", after);
+    rig.searchable("primary", after);
+
+    for level in [FenceLevel::Applied, FenceLevel::Searchable] {
+        assert_eq!(
+            rig.fence.wait(&request("10", level, None)).await,
+            reached("30"),
+            "{level}: before the detach"
+        );
+        let started = Instant::now();
+        for inside in ["11", "20"] {
+            assert_eq!(
+                rig.fence.wait(&request(inside, level, None)).await,
+                in_gap(inside, "10", Some("20")),
+                "{level}: {inside} is inside the gap"
+            );
+        }
+        assert_eq!(started.elapsed(), Duration::ZERO, "{level}: at once");
+        for after in ["21", "30"] {
+            assert_eq!(
+                rig.fence.wait(&request(after, level, None)).await,
+                reached("30"),
+                "{level}: {after} is after the attach"
+            );
+        }
+    }
+
+    // A restart: staging hears the gap from the seed marker.
+    let rig = fence_unstaged(&["users"], &["primary"]);
+    rig.observer
+        .on_lane_gap(&lane("primary"), &gap(Some("10"), Some("20")));
+    rig.observer.on_sink_started(&sink("primary"));
+    let change = rig.source.emit(40);
+    rig.route(change);
+    rig.applied("primary", change);
+    assert_eq!(
+        rig.fence
+            .wait(&request("15", FenceLevel::Applied, None))
+            .await,
+        in_gap("15", "10", Some("20"))
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("40", FenceLevel::Applied, None))
+            .await,
+        reached("40")
+    );
+}
+
+/// A gap whose end is not known yet (the reattach died between deleting its
+/// record and the attach) refuses every position past its start, until it
+/// is heard completed. A seed (a reindex) ends a gap: the index holds every
+/// change again.
+#[tokio::test(start_paused = true)]
+async fn an_open_gap_refuses_everything_past_its_start_and_a_seed_ends_it() {
+    let rig = fence(&["primary"]);
+    let change = rig.source.emit(50);
+    rig.route(change);
+    rig.applied("primary", change);
+    rig.observer
+        .on_lane_gap(&lane("primary"), &gap(Some("10"), None));
+    assert_eq!(
+        rig.fence
+            .wait(&request("50", FenceLevel::Applied, None))
+            .await,
+        in_gap("50", "10", None)
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("10", FenceLevel::Applied, None))
+            .await,
+        reached("50")
+    );
+    rig.observer
+        .on_lane_gap(&lane("primary"), &gap(Some("10"), Some("40")));
+    assert_eq!(
+        rig.fence
+            .wait(&request("50", FenceLevel::Applied, None))
+            .await,
+        reached("50")
+    );
+    rig.observer
+        .on_index_seeded(&sink("primary"), &index("users"));
+    assert_eq!(
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
+        reached("50")
+    );
+}
+
+/// S3: a detach freezes the fence where the sink recorded reads stood, the
+/// start of a later reattach's gap, even when the lane reached further by
+/// the time the detach was heard: what is refused after a reattach starts
+/// exactly where vouching stopped.
+#[tokio::test(start_paused = true)]
+async fn a_detach_freezes_where_the_sink_recorded_it() {
+    let rig = fence(&["primary"]);
+    let change = rig.source.emit(10);
+    rig.route(change);
+    rig.applied("primary", change);
+    rig.source.idle_to(15);
+    rig.observer.on_lane_health(
+        &lane("primary"),
+        &engine::LaneHealth::Detached {
+            since: Instant::now(),
+            reason: "blocked".to_owned(),
+            through: Some("12".to_owned()),
+        },
+    );
+    rig.progress.detach(&lane("primary"));
+    assert_eq!(
+        rig.fence
+            .wait(&request("12", FenceLevel::Applied, None))
+            .await,
+        reached("12")
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("13", FenceLevel::Applied, None))
+            .await,
+        unserved("12", &[("users", "primary", Unserved::Detached)])
+    );
+}
+
+/// O29: once the live stream opens, a sink that hasn't read its detach
+/// records since vouches for nothing: what it read before the slot was held
+/// is advisory. Its read lets the wait through.
+#[tokio::test(start_paused = true)]
+async fn a_sink_that_has_not_read_its_records_since_the_slot_opened_vouches_for_nothing() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
+    assert_eq!(
+        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        reached("20"),
+        "the slot never opened: nothing to read again"
+    );
+    rereads.live_opened();
+    assert_eq!(
+        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        unserved("20", &[("users", "primary", Unserved::Starting)])
+    );
+    rereads.read(&sink("primary"), rereads.live_starts());
+    assert_eq!(
+        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        reached("20")
     );
 }

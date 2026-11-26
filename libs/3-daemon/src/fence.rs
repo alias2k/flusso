@@ -47,10 +47,10 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
-use engine::{Level, Observer, Progress};
+use engine::{Level, Observer, Progress, Rereads};
 use kernel::{IndexName, Position, SinkName};
 use serde::Serialize;
 use source::cdc::{ChangeCapture, SourcePosition};
@@ -133,6 +133,25 @@ pub enum FenceOutcome {
         position: String,
         lanes: Vec<(LaneKey, Unserved)>,
     },
+    /// At once: the position falls inside changes a reattach accepted as
+    /// missing on some lane the wait needs (`flusso reattach --accept-gap`,
+    /// ADR 0012 stage 10, S3). Its index never got them; no wait changes
+    /// that. `lanes` are those lanes, each with its gap.
+    InGap {
+        position: String,
+        lanes: Vec<(LaneKey, FenceGap)>,
+    },
+}
+
+/// The changes a reattach accepted as missing on a lane, in the source's own
+/// text: none after `from` and through `to` reached its index. An end that
+/// is `None` is unknown, and stretches the gap that way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FenceGap {
+    /// Where reads of the index stood at the detach.
+    pub from: Option<String>,
+    /// Where the lane was attached again.
+    pub to: Option<String>,
 }
 
 /// Why a lane can't vouch for its writes yet.
@@ -233,6 +252,10 @@ struct Inner {
     /// How many waits are open: a registration wakes them only then. Its own
     /// `Arc`, so the registration listener reads it without upgrading.
     waits: Arc<AtomicUsize>,
+    /// Whether each sink read its detach records since the slot last
+    /// opened: a lane of one that didn't vouches for nothing (O29). Unset,
+    /// every sink counts as read.
+    rereads: OnceLock<Arc<Rereads>>,
 }
 
 /// Counts one open wait, so registrations know to wake it.
@@ -271,6 +294,19 @@ struct Furthest {
     applied: Option<SourcePosition>,
     searchable: Option<SourcePosition>,
     serving: Serving,
+    /// The changes a reattach accepted as missing, `(from, to)`: a position
+    /// after `from` and at or before `to` is refused at once. An end that is
+    /// `None` is unknown and stretches the gap that way. Gone at the seed.
+    gap: Option<(Option<SourcePosition>, Option<SourcePosition>)>,
+}
+
+impl Furthest {
+    /// Whether `target` falls inside the lane's gap.
+    fn in_gap(&self, target: SourcePosition) -> bool {
+        self.gap.is_some_and(|(from, to)| {
+            from.is_none_or(|from| target > from) && to.is_none_or(|to| target <= to)
+        })
+    }
 }
 
 /// What reads of a lane's index see, set by the sink engine's events.
@@ -337,6 +373,7 @@ impl Fence {
             moved: Notify::new(),
             searchable_waits: AtomicUsize::new(0),
             waits: Arc::new(AtomicUsize::new(0)),
+            rereads: OnceLock::new(),
         });
         // Weak: the source keeps its listeners for life, and must not keep the
         // fence (and through it, itself) alive.
@@ -359,6 +396,14 @@ impl Fence {
             }
         }));
         Self { inner }
+    }
+
+    /// Vouch for no lane of a sink that hasn't read its detach records since
+    /// the slot last opened (ADR 0012 stage 10, O29): the `rereads` its
+    /// engines and the ingest engine share. Set once.
+    pub fn with_rereads(self, rereads: Arc<Rereads>) -> Self {
+        let _ = self.inner.rereads.set(rereads);
+        self
     }
 
     /// A sink reported progress: every waiter checks again.
@@ -399,15 +444,38 @@ impl Fence {
     /// the slot's minimum; a rebuild under way vouches for what it froze.
     /// Heard before the lane leaves the minimum, so `through` is read off its
     /// own answer.
-    fn detached(&self, lane: &LaneKey) {
+    ///
+    /// `recorded` is where the sink recorded reads stood, in the source's
+    /// text (S3): the fence vouches no further, so what it refuses after a
+    /// reattach starts exactly where it stopped vouching here.
+    fn detached(&self, lane: &LaneKey, recorded: Option<&str>) {
         self.reached(lane, FenceLevel::Searchable);
+        let recorded = recorded.and_then(|text| self.inner.source.parse_position(text).ok());
+        let cap = |at: Option<SourcePosition>| match recorded {
+            Some(recorded) => at.map(|at| at.min(recorded)),
+            None => at,
+        };
         self.serve(lane, |furthest| Serving::Detached {
             through: match furthest.serving {
-                Serving::Writes => (furthest.applied, furthest.searchable),
+                Serving::Writes => (cap(furthest.applied), cap(furthest.searchable)),
                 Serving::Rebuilding { through } | Serving::Detached { through } => through,
                 Serving::Pending | Serving::Backfilling => (None, None),
             },
         });
+    }
+
+    /// `lane` carries a gap a reattach accepted (S3), in the source's text.
+    /// An end that doesn't parse is taken as unknown: the gap only grows.
+    fn gap(&self, lane: &LaneKey, gap: &sink::Gap) {
+        let parse = |text: &Option<String>| {
+            text.as_deref()
+                .and_then(|text| self.inner.source.parse_position(text).ok())
+        };
+        let (from, to) = (parse(&gap.from), parse(&gap.to));
+        if let Some(furthest) = self.inner.lanes.get(lane) {
+            lock(furthest).gap = Some((from, to));
+        }
+        self.moved();
     }
 
     /// `lane` is attached again and open (ADR 0012 stage 10, R8): reads see
@@ -430,9 +498,28 @@ impl Fence {
         });
     }
 
-    /// `lane`'s index is seeded: reads see every write it applied.
+    /// `lane`'s index is seeded: reads see every write it applied, and
+    /// every change: a gap a reattach accepted is gone with the rebuild.
     fn seeded(&self, lane: &LaneKey) {
+        if let Some(furthest) = self.inner.lanes.get(lane) {
+            lock(furthest).gap = None;
+        }
         self.serve(lane, |_| Serving::Writes);
+    }
+
+    /// Whether `target` falls inside a gap `lane` carries; the gap, as text.
+    fn gap_holding(&self, lane: &LaneKey, target: SourcePosition) -> Option<FenceGap> {
+        let furthest = lock(self.inner.lanes.get(lane)?);
+        if !furthest.in_gap(target) {
+            return None;
+        }
+        let (from, to) = furthest.gap?;
+        let format =
+            |at: Option<SourcePosition>| at.map(|at| self.inner.source.format_position(at));
+        Some(FenceGap {
+            from: format(from),
+            to: format(to),
+        })
     }
 
     /// `sink` finished staging: its lanes not seeding serve their writes.
@@ -457,11 +544,17 @@ impl Fence {
         Option<Unserved>,
     ) {
         let reached = self.reached(lane, level);
-        let serving = self
+        let read = self
             .inner
-            .lanes
-            .get(lane)
-            .map_or(Serving::Pending, |furthest| lock(furthest).serving);
+            .rereads
+            .get()
+            .is_none_or(|rereads| rereads.current(&lane.sink));
+        let serving = match self.inner.lanes.get(lane) {
+            // O29: what the sink read before the slot opened is advisory.
+            Some(_) if !read => Serving::Pending,
+            Some(furthest) => lock(furthest).serving,
+            None => Serving::Pending,
+        };
         (reached, serving.vouches(level, reached), serving.unserved())
     }
 
@@ -547,6 +640,16 @@ impl Fence {
             let mut short = false;
             let mut unserved = Vec::new();
             let mut detached = false;
+            let in_gap: Vec<(LaneKey, FenceGap)> = lanes
+                .iter()
+                .filter_map(|lane| Some(((*lane).clone(), self.gap_holding(lane, target)?)))
+                .collect();
+            if !in_gap.is_empty() {
+                return Ok(FenceOutcome::InGap {
+                    position: request.position.clone(),
+                    lanes: in_gap,
+                });
+            }
             for lane in lanes.iter().copied() {
                 let (reached, vouches, why) = self.vouched(lane, request.level);
                 // A detached lane never moves: past what it froze, the wait
@@ -753,11 +856,15 @@ impl Observer for FenceObserver {
     }
 
     fn on_lane_health(&self, lane: &LaneKey, health: &engine::LaneHealth) {
-        if health.is_detached() {
-            self.fence.detached(lane);
+        if let engine::LaneHealth::Detached { through, .. } = health {
+            self.fence.detached(lane, through.as_deref());
         } else if health.is_open() {
             self.fence.attached(lane);
         }
+    }
+
+    fn on_lane_gap(&self, lane: &LaneKey, gap: &sink::Gap) {
+        self.fence.gap(lane, gap);
     }
 }
 

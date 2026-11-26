@@ -106,6 +106,8 @@ pub struct Status {
     /// Each lane's rebuild after a detach, when one is under way or an
     /// attach is awaited: the rebuilds its record counts, and the attempt.
     lane_rebuild: Mutex<BTreeMap<stream::LaneKey, LaneRebuild>>,
+    /// The gap a reattach accepted on each lane, until a seed rebuilds it.
+    lane_gap: Mutex<BTreeMap<stream::LaneKey, LaneGap>>,
     /// What the ingest engine knows of each index (slice 7), attached once
     /// the engine exists; until then the section shows nothing held.
     index_states: OnceLock<Arc<IndexStates>>,
@@ -215,7 +217,7 @@ impl LaneHealthView {
                 next_probe: None,
                 reason: reason.clone(),
             }),
-            engine::LaneHealth::Detached { since, reason } => Some(Self {
+            engine::LaneHealth::Detached { since, reason, .. } => Some(Self {
                 state: LaneHealthState::Detached,
                 since: at(*since),
                 next_probe: None,
@@ -305,6 +307,7 @@ impl SinkStatus {
                             reason: None,
                             rebuilding: None,
                             attaching: false,
+                            gap: None,
                         },
                     )
                 })
@@ -357,6 +360,7 @@ impl Status {
             stalls: None,
             lane_health: Mutex::new(BTreeMap::new()),
             lane_rebuild: Mutex::new(BTreeMap::new()),
+            lane_gap: Mutex::new(BTreeMap::new()),
             index_states: OnceLock::new(),
             index_failures: Mutex::new(BTreeMap::new()),
         }
@@ -569,6 +573,41 @@ impl Status {
         } else {
             lanes.insert(lane.clone(), (rebuilding, attaching));
         }
+    }
+
+    /// Record the gap a reattach accepted on `lane` (O16, S3); `None` once a
+    /// seed rebuilt the index.
+    pub(crate) fn set_lane_gap(&self, lane: &stream::LaneKey, gap: Option<&sink::Gap>) {
+        let mut lanes = lock(&self.lane_gap);
+        match gap {
+            Some(gap) => {
+                lanes.insert(
+                    lane.clone(),
+                    LaneGap {
+                        from: gap.from.clone(),
+                        to: gap.to.clone(),
+                    },
+                );
+            }
+            None => {
+                lanes.remove(lane);
+            }
+        }
+    }
+
+    /// Why a reattach of `lane` is refused (O16, §6a): it is not detached,
+    /// or its attach is under way. `None` when a reattach applies.
+    pub fn reattach_refusal(&self, lane: &stream::LaneKey) -> Option<&'static str> {
+        let detached = lock(&self.lane_health)
+            .get(lane)
+            .is_some_and(|view| view.state == LaneHealthState::Detached);
+        if !detached {
+            return Some("the lane is not detached");
+        }
+        let attaching = lock(&self.lane_rebuild)
+            .get(lane)
+            .is_some_and(|(_, attaching)| attaching.is_some());
+        attaching.then_some("the lane is being attached already")
     }
 
     /// Why a reindex of `lane` is not taken now (O20): its rebuild is
@@ -1012,6 +1051,14 @@ impl Status {
                     if let Some(entry) = snapshot.lanes.get_mut(lane.index.as_ref()) {
                         entry.rebuilding = *rebuilding;
                         entry.attaching = attaching.is_some();
+                    }
+                }
+                for (lane, gap) in lock(&self.lane_gap)
+                    .iter()
+                    .filter(|(lane, _)| &lane.sink == name)
+                {
+                    if let Some(entry) = snapshot.lanes.get_mut(lane.index.as_ref()) {
+                        entry.gap = Some(gap.clone());
                     }
                 }
                 if let Some(stalls) = &self.stalls {
@@ -1469,6 +1516,22 @@ pub struct LaneSnapshot {
     /// The lane waits for its attach (a rebuild starting, or a reattach).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub attaching: bool,
+    /// The changes a reattach accepted as missing (O16): a fence refuses a
+    /// position inside them. Absent otherwise, and once a reindex rebuilt
+    /// the index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gap: Option<LaneGap>,
+}
+
+/// The changes a reattach accepted as missing on a lane, in the source's own
+/// text: none after `from` and through `to` reached its index. `null` is an
+/// end not known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LaneGap {
+    /// Where reads of the index stood at the detach.
+    pub from: Option<String>,
+    /// Where the lane was attached again.
+    pub to: Option<String>,
 }
 
 /// The most bytes of an error a per-index `last_error` keeps (slice 8-2):

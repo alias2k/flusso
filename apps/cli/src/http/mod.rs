@@ -157,6 +157,46 @@ fn unserved(position: &str, lanes: &[(LaneKey, Unserved)]) -> Response {
         .into_response()
 }
 
+/// `409` for a wait inside a gap a reattach accepted (ADR 0012 stage 10,
+/// S3): the lanes' indexes never got those changes, so no wait helps. Each
+/// lane names its gap, in the source's own text.
+fn in_gap(position: &str, lanes: &[(LaneKey, daemon::FenceGap)]) -> Response {
+    let names: Vec<String> = lanes
+        .iter()
+        .map(|(lane, gap)| {
+            format!(
+                "{} on {} (from {} to {})",
+                lane.index,
+                lane.sink,
+                gap.from.as_deref().unwrap_or("an unknown position"),
+                gap.to.as_deref().unwrap_or("an unknown position"),
+            )
+        })
+        .collect();
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": format!(
+                "the position falls inside changes a reattach accepted as missing: {}; \
+                 reindex the index on a sink that can rebuild it",
+                names.join(", ")
+            ),
+            "reason": "gap",
+            "position": position,
+            "lanes": lanes
+                .iter()
+                .map(|(lane, gap)| json!({
+                    "index": lane.index.as_ref(),
+                    "sink": lane.sink.as_ref(),
+                    "state": "gap",
+                    "gap": gap,
+                }))
+                .collect::<Vec<_>>(),
+        })),
+    )
+        .into_response()
+}
+
 /// `503` with `Retry-After` and why: `stopping` (this process is going away;
 /// the next one answers the same position) or `starting` (the source isn't
 /// live yet).
@@ -296,6 +336,7 @@ pub(crate) fn private_router(state: PrivateState, basic_auth: Arc<BasicAuth>) ->
     Router::new()
         .route("/indexes", get(indexes))
         .route("/indexes/{name}/reindex", post(reindex))
+        .route("/indexes/{name}/reattach", post(reattach))
         .layer(middleware::from_fn_with_state(
             basic_auth,
             auth::require_basic_auth,
@@ -442,6 +483,7 @@ async fn wait(
         Ok(FenceOutcome::Unserved { position, lanes }) => {
             return unserved(&position, &lanes);
         }
+        Ok(FenceOutcome::InGap { position, lanes }) => return in_gap(&position, &lanes),
         Err(error @ FenceError::InvalidPosition(_)) => {
             return refuse(StatusCode::BAD_REQUEST, error.to_string());
         }
@@ -625,6 +667,84 @@ async fn reindex(
             Json(json!({ "error": error.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// `POST /indexes/{name}/reattach?sink=<name>&accept_gap=true` (ADR 0012
+/// stage 10, O16): reattach a detached lane on a sink that can't rebuild,
+/// accepting the changes it missed. `400` without `sink` or without
+/// `accept_gap=true`; `404` for an unknown index or sink; `409` when the
+/// lane is not detached, is being attached, or its sink can rebuild (a
+/// reindex does); `503` while stopping or busy; else `202`.
+async fn reattach(
+    State(state): State<PrivateState>,
+    Path(name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let index = match known_index(&state.status, &name) {
+        Ok(index) => index,
+        Err(refused) => return *refused,
+    };
+    let refuse = |status: StatusCode, error: String| {
+        (
+            status,
+            Json(json!({ "error": error, "index": index.as_ref() })),
+        )
+            .into_response()
+    };
+    let Some(raw) = params.get("sink") else {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "name the sink: a reattach is for one lane (?sink=<name>)".to_owned(),
+        );
+    };
+    let Ok(sink) = SinkName::try_new(raw.clone()) else {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            format!("invalid sink name {raw:?}"),
+        );
+    };
+    if params.get("accept_gap").map(String::as_str) != Some("true") {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "a reattach drops the changes made while the lane was detached: \
+             say so with accept_gap=true"
+                .to_owned(),
+        );
+    }
+    if !state.control.sinks().any(|known| *known == sink) {
+        return refuse(StatusCode::NOT_FOUND, format!("unknown sink {sink}"));
+    }
+    if let Some(reason) = state
+        .status
+        .reattach_refusal(&LaneKey::new(index.clone(), sink.clone()))
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": reason,
+                "reason": reason,
+                "index": index.as_ref(),
+                "sink": sink.as_ref(),
+            })),
+        )
+            .into_response();
+    }
+    match state.control.reattach(index.clone(), &sink) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "index": index.as_ref(),
+                "sink": sink.as_ref(),
+                "queued": true,
+            })),
+        )
+            .into_response(),
+        Err(ControlError::UnknownSink(name)) => {
+            refuse(StatusCode::NOT_FOUND, format!("unknown sink {name}"))
+        }
+        Err(error @ ControlError::CanRebuild(_)) => refuse(StatusCode::CONFLICT, error.to_string()),
+        Err(error) => refuse(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
     }
 }
 

@@ -87,6 +87,10 @@ struct Gate {
     demoted: Mutex<Vec<(String, bool)>>,
     /// Each index marked seeded.
     seeded: Mutex<Vec<String>>,
+    /// The gap a reattach keeps with each index's seed marker.
+    marker_gaps: Mutex<BTreeMap<String, sink::Gap>>,
+    /// Each gap written, by index, in order.
+    gaps: Mutex<Vec<(String, sink::Gap)>>,
 }
 
 impl Gate {
@@ -193,13 +197,32 @@ impl Sink for Gate {
     }
 
     async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
-        Ok(self
+        let mut kept = self
             .kept
             .lock()
             .unwrap()
             .get(mapping.index.as_ref())
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+        kept.gap = self
+            .marker_gaps
+            .lock()
+            .unwrap()
+            .get(mapping.index.as_ref())
+            .cloned();
+        Ok(kept)
+    }
+
+    async fn record_gap(&self, mapping: &IndexMapping, gap: &sink::Gap) -> sink::Result<()> {
+        self.gaps
+            .lock()
+            .unwrap()
+            .push((mapping.index.to_string(), gap.clone()));
+        self.marker_gaps
+            .lock()
+            .unwrap()
+            .insert(mapping.index.to_string(), gap.clone());
+        Ok(())
     }
 
     async fn detach(
@@ -237,6 +260,7 @@ impl Sink for Gate {
                     version(),
                 );
                 record.attempts = attempts;
+                record.through = detach.through.clone();
                 kept.insert(mapping.index.to_string(), record);
                 Ok(Recorded::Kept)
             }
@@ -315,6 +339,8 @@ struct Heard {
     /// For each detach heard, whether its lane had already left the
     /// minimum: never, or the fence would freeze where `Free` reaches (R5).
     left_first: Mutex<Vec<bool>>,
+    /// Each gap heard, with how many lane healths were heard before it.
+    gaps: Mutex<Vec<(LaneKey, sink::Gap, usize)>>,
 }
 
 impl Heard {
@@ -330,6 +356,14 @@ impl Heard {
 }
 
 impl Observer for Heard {
+    fn on_lane_gap(&self, lane: &LaneKey, gap: &sink::Gap) {
+        let heard = self.health.lock().unwrap().len();
+        self.gaps
+            .lock()
+            .unwrap()
+            .push((lane.clone(), gap.clone(), heard));
+    }
+
     fn on_lane_health(&self, lane: &LaneKey, health: &LaneHealth) {
         if health.is_detached()
             && let Some(progress) = self.progress.get()
@@ -362,12 +396,34 @@ fn item(of: &IndexName, id: i64, position: u64) -> LaneItem {
     })
 }
 
+/// A source whose answer for what landed is the `seq` it covers, as text,
+/// once it is live.
+#[derive(Debug, Default)]
+struct Seqs {
+    down: std::sync::atomic::AtomicBool,
+}
+
+impl crate::SourcePositions for Seqs {
+    fn place(&self, landed: Landed) -> Option<String> {
+        if self.down.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        Some(
+            landed
+                .covered_seq()
+                .map_or_else(|| "nothing".to_owned(), |seq| seq.to_string()),
+        )
+    }
+}
+
 /// Two lanes, `orders` and `users`, of one sink `primary`.
 struct Rig {
     stream: Arc<ChannelStream>,
     progress: Arc<Progress>,
     sink: Arc<Gate>,
     heard: Arc<Heard>,
+    positions: Arc<Seqs>,
+    rereads: Arc<crate::Rereads>,
 }
 
 impl Rig {
@@ -391,6 +447,8 @@ impl Rig {
             progress,
             sink: Arc::new(Gate::default()),
             heard,
+            positions: Arc::new(Seqs::default()),
+            rereads: Arc::new(crate::Rereads::default()),
         }
     }
 
@@ -418,6 +476,18 @@ impl Rig {
 
     /// The engine of sink `name`, writing to `sink`.
     fn engine_of(&self, name: &str, sink: Arc<Gate>) -> Arc<SinkEngine> {
+        Arc::new(self.built(name, sink))
+    }
+
+    /// `primary`'s engine with `backfill = false`: the sink a reattach is for.
+    fn live_only_engine(&self) -> Arc<SinkEngine> {
+        Arc::new(
+            self.built("primary", Arc::clone(&self.sink))
+                .with_options(sink::SinkOptions { backfill: false }),
+        )
+    }
+
+    fn built(&self, name: &str, sink: Arc<Gate>) -> SinkEngine {
         let engine = SinkEngine::new(
             sink_name(name),
             sink as Arc<dyn Sink>,
@@ -426,9 +496,11 @@ impl Rig {
             Arc::clone(&self.progress),
         )
         .with_writes(4)
-        .with_observer(Arc::clone(&self.heard) as Arc<dyn Observer>);
+        .with_observer(Arc::clone(&self.heard) as Arc<dyn Observer>)
+        .with_positions(Arc::clone(&self.positions) as Arc<dyn crate::SourcePositions>)
+        .with_rereads(Arc::clone(&self.rereads));
         engine.set_blame(Blame::Nobody);
-        Arc::new(engine)
+        engine
     }
 
     fn applied(&self, of: &IndexName) -> Option<Landed> {
@@ -1784,4 +1856,284 @@ async fn a_start_attaches_a_rebuild_or_demotes_it() {
             [("users".to_owned(), !backfill)]
         );
     }
+}
+
+fn gap(from: Option<&str>, to: Option<&str>) -> sink::Gap {
+    sink::Gap {
+        from: from.map(str::to_owned),
+        to: to.map(str::to_owned),
+    }
+}
+
+/// `primary` with `backfill = false`, staged and running: `users/1` lands,
+/// then `users` is blocked and asked to detach, and detaches on `users/2`;
+/// the block is lifted.
+async fn detached_live_only(
+    rig: &Rig,
+) -> (
+    Arc<SinkEngine>,
+    tokio::task::JoinHandle<crate::Result<()>>,
+    mpsc::Sender<SinkControl>,
+) {
+    let engine = rig.live_only_engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (task, control) = spawn(&engine);
+    rig.live(&users(), 1, 1).await;
+    eventually("users/1 lands", || rig.applied(&users()) == through(1)).await;
+    rig.sink.block(&users(), true);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 2, 2).await;
+    eventually("the lane detaches", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    rig.sink.block(&users(), false);
+    (engine, task, control)
+}
+
+/// O16, §6a, S2 and S3: `reattach --accept-gap` on a live-only lane. The
+/// detach recorded where reads stood (`from`); the reattach ensures the
+/// index, keeps the gap with `to` unknown, deletes the record (the commit
+/// point), and asks for the attach. At `Attached` the fence hears the whole
+/// gap before the lane opens, the sink keeps it, and the lane is written as
+/// usual.
+#[tokio::test(start_paused = true)]
+async fn a_reattach_keeps_the_gap_deletes_the_record_and_attaches_the_lane() {
+    let rig = Rig::new(64);
+    let (engine, task, control) = detached_live_only(&rig).await;
+    let detaches = rig.sink.detaches();
+    let (_, detach) = detaches.last().unwrap();
+    assert!(detach.live_only);
+    assert_eq!(detach.through.as_deref(), Some("1"), "users/2 never landed");
+    assert!(matches!(
+        engine.lane_health(&lane(users())),
+        LaneHealth::Detached { through: Some(ref at), .. } if at == "1"
+    ));
+
+    let ensured = rig.sink.ensured.lock().unwrap().len();
+    control
+        .send(SinkControl::Reattach { index: users() })
+        .await
+        .unwrap();
+    let stream::Request::Attach { attempt, .. } = next_request(&rig).await else {
+        panic!("the reattach asks for its attach");
+    };
+    assert!(rig.sink.ensured.lock().unwrap().len() > ensured);
+    assert_eq!(
+        *rig.sink.gaps.lock().unwrap(),
+        [("users".to_owned(), gap(Some("1"), None))],
+        "kept before the record goes"
+    );
+    assert!(
+        rig.sink.kept.lock().unwrap().get("users").is_none(),
+        "the record is gone: no staging detaches the lane again"
+    );
+    assert!(
+        engine.lane_health(&lane(users())).is_detached(),
+        "until Attached"
+    );
+    assert!(rig.heard.gaps.lock().unwrap().is_empty());
+
+    // What the index's builder does: the lane answers through the newest
+    // change routed while it was detached, then `Attached` is published.
+    rig.progress.routed(Position::new(3));
+    assert_eq!(
+        rig.progress.attach(&lane(users()), attempt),
+        crate::Attach::Attached
+    );
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    eventually("the lane opens", || {
+        engine.lane_health(&lane(users())).is_open()
+    })
+    .await;
+    let heard = rig.heard.gaps.lock().unwrap().clone();
+    assert_eq!(heard.len(), 1);
+    let (at, heard_gap, healths) = heard.first().cloned().unwrap();
+    assert_eq!((at, heard_gap), (lane(users()), gap(Some("1"), Some("3"))));
+    assert_eq!(
+        rig.heard.kinds(&lane(users())).last(),
+        Some(&"open"),
+        "the lane opened"
+    );
+    assert!(
+        rig.heard
+            .health
+            .lock()
+            .unwrap()
+            .get(healths)
+            .is_some_and(|(_, health)| health.is_open()),
+        "the gap is heard before the lane opens"
+    );
+    eventually("the whole gap is kept", || {
+        rig.sink.gaps.lock().unwrap().last()
+            == Some(&("users".to_owned(), gap(Some("1"), Some("3"))))
+    })
+    .await;
+    rig.live(&users(), 4, 4).await;
+    eventually("written as usual", || {
+        written(&rig).contains(&"users/4".to_owned())
+    })
+    .await;
+    task.abort();
+}
+
+/// O16, §6a: a reattach is refused, and changes nothing, on a sink that can
+/// rebuild (a reindex does), on a lane that is not detached, and when the
+/// records don't say detached live only with the marker on the seeded
+/// generation reads see.
+#[tokio::test(start_paused = true)]
+async fn a_reattach_is_refused_where_it_does_not_apply() {
+    let quiet = |rig: &Rig| {
+        rig.sink.gaps.lock().unwrap().is_empty() && rig.sink.forgotten.lock().unwrap().is_empty()
+    };
+
+    // A sink that can rebuild.
+    let rig = Rig::new(64);
+    let (engine, task) = detached_on_a_block(&rig).await;
+    rig.sink.block(&users(), false);
+    task.abort();
+    let _ = task.await;
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Reattach { index: users() })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(quiet(&rig), "a sink that can rebuild");
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    task.abort();
+
+    // A lane not detached.
+    let rig = Rig::new(64);
+    let engine = rig.live_only_engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Reattach { index: users() })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(quiet(&rig), "a lane not detached");
+    task.abort();
+
+    // Records that don't allow it: the marker moved off the generation
+    // reads see.
+    let rig = Rig::new(64);
+    let (engine, task, control) = detached_live_only(&rig).await;
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .get_mut("users")
+        .unwrap()
+        .marker = Some(MarkerAt::Newer { seeded: false });
+    control
+        .send(SinkControl::Reattach { index: users() })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(quiet(&rig), "records that don't allow it");
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    assert!(engine.lane_state(&lane(users())).attaching.is_none());
+    task.abort();
+}
+
+/// S3's crash window: a reattach that died between deleting its record and
+/// the attach left a gap whose end is unknown. A start before the slot is
+/// held stages the lane attached and hears the open gap; once the slot is
+/// held the read again completes it where the lane stands, before anything
+/// of it is written, and keeps it.
+#[tokio::test(start_paused = true)]
+async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_is_held() {
+    let rig = Rig::new(64);
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), gap(Some("1"), None));
+    rig.positions
+        .down
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let engine = rig.live_only_engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(engine.lane_health(&lane(users())).is_open());
+    assert_eq!(
+        rig.heard
+            .gaps
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(at, gap, _)| (at.clone(), gap.clone()))
+            .collect::<Vec<_>>(),
+        [(lane(users()), gap(Some("1"), None))]
+    );
+    assert!(rig.sink.gaps.lock().unwrap().is_empty());
+
+    rig.positions
+        .down
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    rig.rereads.live_opened();
+    assert!(!rig.rereads.current(&sink_name("primary")));
+    let (task, _control) = spawn(&engine);
+    eventually("the gap is completed and kept", || {
+        rig.sink.gaps.lock().unwrap().as_slice()
+            == [("users".to_owned(), gap(Some("1"), Some("nothing")))]
+    })
+    .await;
+    assert_eq!(
+        rig.heard
+            .gaps
+            .lock()
+            .unwrap()
+            .last()
+            .map(|(_, gap, _)| gap.clone()),
+        Some(gap(Some("1"), Some("nothing")))
+    );
+    eventually("the records count as read", || {
+        rig.rereads.current(&sink_name("primary"))
+    })
+    .await;
+    task.abort();
+}
+
+/// O29: a lane another process detached after this one staged is taken as
+/// detached once the slot is held, before anything of it is written: the
+/// sink engine reads its records again first.
+#[tokio::test(start_paused = true)]
+async fn a_lane_the_records_say_detached_once_the_slot_is_held_is_taken_as_detached() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), detached_record());
+    rig.rereads.live_opened();
+    let (task, _control) = spawn(&engine);
+    rig.live(&users(), 1, 1).await;
+    eventually("the lane is taken as detached", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    assert!(rig.progress.is_detached(&lane(users())));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(written(&rig).is_empty(), "nothing of it is written");
+    assert!(rig.rereads.current(&sink_name("primary")));
+    task.abort();
+}
+
+/// O29: a staging after the slot opened reads every record: it is the read
+/// again, and the run reads nothing more.
+#[tokio::test(start_paused = true)]
+async fn a_staging_once_the_slot_is_held_counts_as_the_read() {
+    let rig = Rig::new(64);
+    rig.rereads.live_opened();
+    let engine = rig.engine();
+    assert!(!rig.rereads.current(&sink_name("primary")));
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(rig.rereads.current(&sink_name("primary")));
 }

@@ -209,6 +209,11 @@ struct LaneRun {
     /// 10, R3): set at a refused probe or a due staging, taken when the
     /// detach starts once nothing of the lane is in flight.
     detach_due: Option<String>,
+    /// Where reads of the index stood as its detach started, in the source's
+    /// own text: recorded with the detach, and where the fence freezes (S3).
+    detach_through: Option<String>,
+    /// A reattach was asked for (O16): its steps run at the next turn.
+    reattach_due: bool,
 }
 
 impl LaneRun {
@@ -416,6 +421,8 @@ pub(super) struct Run<'a> {
     discards: Vec<(Box<dyn AckHandle>, usize, u64)>,
     /// Lanes whose attach request is still to be sent (R8).
     to_attach: Vec<usize>,
+    /// Some lane has a reattach asked for and not yet started (O16).
+    reattaches: bool,
     /// The `Attached` each attaching lane waits for, taken and held at the
     /// lane's front until nothing of the lane is unacknowledged: lane,
     /// receive order, handle.
@@ -476,6 +483,8 @@ impl<'a> Run<'a> {
                     held: Vec::new(),
                     account,
                     detach_due: None,
+                    detach_through: None,
+                    reattach_due: false,
                 }
             })
             .collect();
@@ -527,6 +536,7 @@ impl<'a> Run<'a> {
             clearing: Vec::new(),
             discards: Vec::new(),
             to_attach,
+            reattaches: false,
             attached: Vec::new(),
             stop_probed: false,
             window: VecDeque::new(),
@@ -718,8 +728,14 @@ impl<'a> Run<'a> {
         if !self.attached.is_empty() {
             self.take_attached().await?;
         }
+        if self.reattaches && !self.engine.stop.is_requested() {
+            self.start_reattaches().await?;
+        }
         if !self.to_attach.is_empty() {
             self.send_attaches()?;
+        }
+        if self.engine.reread_due() {
+            self.reread().await?;
         }
         if self.engine.stop.is_requested() {
             self.skip_backfill().await?;
@@ -773,6 +789,11 @@ impl<'a> Run<'a> {
             if self.wants_more() && self.fill()? {
                 if self.engine.stop.is_requested() {
                     self.skip_backfill().await?;
+                }
+                // What `fill` took may have been published after the slot
+                // opened again: never written before the records are read.
+                if self.engine.reread_due() {
+                    self.reread().await?;
                 }
                 self.grant().await?;
             }
@@ -2898,7 +2919,127 @@ impl<'a> Run<'a> {
             SinkControl::Reindex { indexes } => self.engine.set_pending_reindex(indexes),
             SinkControl::Detach { index } => self.ask_detach(&index),
             SinkControl::Attach { index } => self.ask_attach(&index),
+            SinkControl::Reattach { index } => self.ask_reattach(&index),
         }
+    }
+
+    /// Ask for `index`'s detached lane to be reattached at the next turn
+    /// (O16). Only a sink that can't rebuild reattaches: on one that can, a
+    /// reindex rebuilds the index with nothing missing. A lane not detached,
+    /// or one being attached already, is left as it is.
+    fn ask_reattach(&mut self, index: &IndexName) {
+        let backfill = self.engine.options.backfill;
+        let Some(run) = self.lanes.iter_mut().find(|run| run.key.index == *index) else {
+            return;
+        };
+        if backfill {
+            tracing::warn!(lane = %run.key, "not reattached: this sink can rebuild the index (a reindex does, with nothing missing); reattach is for a sink with backfill = false");
+            return;
+        }
+        if !run.health.health.is_detached() || run.health.attaching.is_some() {
+            tracing::warn!(lane = %run.key, "not reattached: the lane is not detached, or is being attached already");
+            return;
+        }
+        run.reattach_due = true;
+        self.reattaches = true;
+    }
+
+    /// Each reattach asked for, in order (O16, §6a): the sink checks its
+    /// records and keeps the gap, the record goes (the commit point), and
+    /// the lane is asked to be attached. One refused or failed is logged and
+    /// dropped: the lane stays detached, and the operator asks again.
+    async fn start_reattaches(&mut self) -> Result<()> {
+        self.reattaches = false;
+        for lane in 0..self.lanes.len() {
+            let Some(run) = self.lanes.get_mut(lane) else {
+                continue;
+            };
+            if !std::mem::take(&mut run.reattach_due) {
+                continue;
+            }
+            let index = run.key.index.clone();
+            let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
+                continue;
+            };
+            match self.engine.reattach(mapping).await {
+                Ok(Some(gap)) => {
+                    if let Some(run) = self.lanes.get_mut(lane) {
+                        run.health.reattach = Some(gap);
+                    }
+                    self.ask_attach(&index);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%index, sink = %self.engine.name, %error, "the reattach failed; the lane stays detached: ask again");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Read every index's detach records again: the slot opened since they
+    /// were last read (O29). A lane they say is detached, or rebuilding by
+    /// another process, is taken as detached before anything of it is
+    /// written; a reattach's gap is heard, and completed when it is still
+    /// open. A failed read fails the run: its restart stages, which reads.
+    async fn reread(&mut self) -> Result<()> {
+        let read_at = self.engine.rereads.live_starts();
+        for lane in 0..self.lanes.len() {
+            let Some(run) = self.lanes.get(lane) else {
+                continue;
+            };
+            if run.health.health.is_detached() {
+                continue;
+            }
+            let rebuilding = run.health.rebuilding.is_some();
+            let index = run.key.index.clone();
+            let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
+                continue;
+            };
+            let failed = |error| super::staging_failed(&index, error);
+            let found = self.engine.sink.detachment(mapping).await.map_err(failed)?;
+            let through = found.through.clone();
+            match super::AtStaging::of(&found) {
+                super::AtStaging::AsBefore | super::AtStaging::Finished(_) => {
+                    if let Some(gap) = found.gap {
+                        self.engine.known_gap(mapping, gap).await.map_err(failed)?;
+                    }
+                }
+                super::AtStaging::Rebuilding(_) if rebuilding => {}
+                super::AtStaging::Detached(why) => {
+                    tracing::warn!(%index, sink = %self.engine.name, "read again once the slot is held, the records say the index is detached: taken as detached before anything of it is written (O29)");
+                    self.detached(lane, why, through).await?;
+                }
+                super::AtStaging::Rebuilding(_) => {
+                    let why = "read again once the slot is held, the records say another process \
+                               began a rebuild: taken as detached (O29)";
+                    tracing::warn!(%index, sink = %self.engine.name, "{why}");
+                    self.detached(lane, why.to_owned(), through).await?;
+                }
+                super::AtStaging::DetachAgain => {
+                    let why = "read again once the slot is held, the detach records can't be acted \
+                               on as they stand: detached again (O29, O30)";
+                    let detach = sink::Detach::new(why)
+                        .live_only(!self.engine.options.backfill)
+                        .through(through.clone());
+                    if self
+                        .engine
+                        .sink
+                        .detach(mapping, &detach)
+                        .await
+                        .map_err(failed)?
+                        != sink::Recorded::Kept
+                    {
+                        return Err(failed(sink::SinkError::Write(format!(
+                            "{index} reads detached, and the sink keeps no record of a detach again"
+                        ))));
+                    }
+                    self.detached(lane, why.to_owned(), through).await?;
+                }
+            }
+        }
+        self.engine.records_read(read_at);
+        Ok(())
     }
 
     /// Ask `index`'s builder to attach its detached lane again, under a new
@@ -2972,6 +3113,18 @@ impl<'a> Run<'a> {
                 "R6: an Attached takes effect with nothing of its lane unacknowledged"
             );
             let mut rebuild = None;
+            let mut reattached = None;
+            // S3: the fence hears the gap a reattach accepted before the lane
+            // opens, so it never vouches inside it. `to` is where the lane
+            // stands now: attached, and nothing of it landed since.
+            if let Some(run) = self.lanes.get_mut(lane)
+                && run.health.health.is_detached()
+                && let Some(mut gap) = run.health.reattach.take()
+            {
+                gap.to = self.engine.place(&run.key);
+                self.engine.observer.on_lane_gap(&run.key, &gap);
+                reattached = Some((run.key.clone(), gap));
+            }
             if let Some(run) = self.lanes.get_mut(lane)
                 && let Some(down) = run.health.attached(Instant::now())
             {
@@ -2985,6 +3138,9 @@ impl<'a> Run<'a> {
                 ));
             }
             self.acknowledged(handle, lane, Some(seq), false).await?;
+            if let Some((key, gap)) = reattached {
+                self.engine.record_reattached(&key, &gap).await?;
+            }
             match rebuild {
                 // r3: every page of the rebuild is read after the attach.
                 Some((index, true, target)) => {
@@ -3060,9 +3216,17 @@ impl<'a> Run<'a> {
             else {
                 continue;
             };
+            let through = self.engine.place(&run.key);
             let detach = sink::Detach::new(run.detach_due.clone().unwrap_or_default())
                 .refused_keys(keys)
-                .live_only(!self.engine.options.backfill);
+                .live_only(!self.engine.options.backfill)
+                .through(through.clone());
+            if let Some(run) = self.lanes.get_mut(lane) {
+                run.detach_through = through;
+            }
+            let Some(run) = self.lanes.get(lane) else {
+                continue;
+            };
             tracing::info!(lane = %run.key, why = %detach.why, "detaching the lane: recording it first");
             let flight = self.next_flight;
             self.next_flight += 1;
@@ -3101,8 +3265,9 @@ impl<'a> Run<'a> {
             return Ok(());
         };
         let why = run.detach_due.take().unwrap_or_default();
+        let through = run.detach_through.take();
         match result {
-            Ok(sink::Recorded::Kept) => return self.detached(lane, why).await,
+            Ok(sink::Recorded::Kept) => return self.detached(lane, why, through).await,
             Ok(_) => {
                 run.health.detach_asked = false;
                 tracing::info!(lane = %run.key, "the sink keeps no detach records, so the lane doesn't detach; it stays as it was");
@@ -3125,7 +3290,7 @@ impl<'a> Run<'a> {
     /// (the observers hear it first); it leaves the slot's minimum; what the
     /// engine kept of it goes; and everything of it in the window or held is
     /// acknowledged unwritten, before anything more of it is taken.
-    async fn detached(&mut self, lane: usize, why: String) -> Result<()> {
+    async fn detached(&mut self, lane: usize, why: String, through: Option<String>) -> Result<()> {
         let now = Instant::now();
         let Some(run) = self.lanes.get_mut(lane) else {
             return Ok(());
@@ -3133,7 +3298,7 @@ impl<'a> Run<'a> {
         let was_unhealthy = run.health.is_unhealthy();
         let held = !run.health.held_for_seed.is_empty();
         let superseding = !run.health.superseded.is_empty();
-        if !run.health.detach(why.clone(), now) {
+        if !run.health.detach(why.clone(), through, now) {
             return Ok(());
         }
         run.detach_due = None;
@@ -3277,7 +3442,7 @@ impl<'a> Run<'a> {
             let why = "a reindex restarts the rebuild, which was parked or restaging (O20)";
             let detach = sink::Detach::new(why).live_only(!self.engine.options.backfill);
             match self.engine.sink.detach(mapping, &detach).await {
-                Ok(sink::Recorded::Kept) => self.detached(lane, why.to_owned()).await?,
+                Ok(sink::Recorded::Kept) => self.detached(lane, why.to_owned(), None).await?,
                 Ok(_) => continue,
                 Err(error) => {
                     tracing::warn!(%index, %error, "could not detach the rebuild to restart it; it goes on as it was");
@@ -3299,11 +3464,13 @@ impl<'a> Run<'a> {
         let Some(run) = self.lanes.get(lane) else {
             return Ok(());
         };
-        let reason = match self.engine.lane_health(&run.key) {
-            LaneHealth::Detached { reason, .. } => reason,
-            _ => "a staging found the index detached".to_owned(),
+        let (reason, through) = match self.engine.lane_health(&run.key) {
+            LaneHealth::Detached {
+                reason, through, ..
+            } => (reason, through),
+            _ => ("a staging found the index detached".to_owned(), None),
         };
-        self.detached(lane, reason).await
+        self.detached(lane, reason, through).await
     }
 
     /// Acknowledge, unwritten, the items of detached lanes taken so far, in

@@ -8,6 +8,7 @@ mod ingest;
 mod observer;
 mod policy;
 mod progress;
+mod rereads;
 mod sink_engine;
 mod stop;
 
@@ -25,5 +26,6 @@ pub use ingest::{DEFAULT_MAX_PENDING_DOCUMENTS, IngestEngine, KEY_PAGE, STUCK_AF
 pub use observer::*;
 pub use policy::{Backoff, BackoffError, BatchPolicy, FailurePolicies, FailurePolicy, MaxWaiting};
 pub use progress::{Attach, Holds, Level, Listener, Pin, Progress, Step, Taken, Token};
+pub use rereads::{CapturePositions, Rereads, SourcePositions};
 pub use sink_engine::{LaneHealth, ParkReason, ProbeOutcome, SinkControl, SinkEngine};
 pub use stop::{Stop, drain_lanes};

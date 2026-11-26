@@ -337,6 +337,25 @@ pub struct Detachment {
     pub version: Option<RecordVersion>,
     /// The rebuilds the record counts as started: the attempt of the last.
     pub attempts: Option<u64>,
+    /// Where reads stood at the detach, in the source's own text: the
+    /// record's `through`, the start of a reattach's gap.
+    pub through: Option<String>,
+    /// The changes a reattach accepted as missing (O16), as the seed marker
+    /// keeps them: from where reads stood at the detach to where the lane
+    /// was attached, each in the source's own text. `to` is unknown when the
+    /// process died between deleting the record and the attach.
+    pub gap: Option<Gap>,
+}
+
+/// The changes a reattach accepted as missing (ADR 0012 stage 10, O16, S3):
+/// none after `from` and through `to` reached the index. Positions in the
+/// source's own text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gap {
+    /// Where reads stood at the detach; unknown when the detach couldn't say.
+    pub from: Option<String>,
+    /// Where the lane was attached again; unknown until it is.
+    pub to: Option<String>,
 }
 
 impl Detachment {
@@ -409,6 +428,9 @@ pub struct Detach {
     /// The sink can't rebuild the index (`backfill = false`): the seed marker
     /// stays where it is, and the gap is for an operator to accept.
     pub live_only: bool,
+    /// Where reads of the index stood at the detach, in the source's own
+    /// text, when the engine knows: the start of a later reattach's gap.
+    pub through: Option<String>,
 }
 
 impl Detach {
@@ -429,6 +451,12 @@ impl Detach {
     /// Whether the sink can't rebuild the index.
     pub fn live_only(mut self, live_only: bool) -> Self {
         self.live_only = live_only;
+        self
+    }
+
+    /// Where reads stood at the detach, in the source's own text.
+    pub fn through(mut self, through: Option<String>) -> Self {
+        self.through = through;
         self
     }
 }
@@ -697,6 +725,13 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
             "{} keeps no detach records to rebuild from",
             mapping.index
         )))
+    }
+
+    /// Keep, with `mapping`'s seed marker, the changes a reattach accepted
+    /// as missing (ADR 0012 stage 10, O16): so a fence never vouches inside
+    /// them, after a restart too. The default keeps nothing.
+    async fn record_gap(&self, _: &IndexMapping, _: &Gap) -> Result<()> {
+        Ok(())
     }
 
     /// Put a rebuild of `mapping`'s index back to detached (ADR 0012 stage

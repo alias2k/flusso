@@ -110,6 +110,9 @@ pub enum LaneHealth {
         since: Instant,
         /// The refusal it detached on, or what staging found.
         reason: String,
+        /// Where reads of the index stood at the detach, in the source's own
+        /// text, when known: a fence vouches no further (S3).
+        through: Option<String>,
     },
 }
 
@@ -282,6 +285,10 @@ pub(crate) struct LaneState {
     /// The target the rebuild's generation was ensured as: its backfill is
     /// asked for it once the lane is attached.
     pub(crate) rebuild_target: Option<sink::TargetId>,
+    /// A reattach (O16) whose record is gone, waiting for its `Attached`:
+    /// the gap it accepted, `to` still unknown. Written with `to` once the
+    /// lane opens.
+    pub(crate) reattach: Option<sink::Gap>,
 }
 
 /// A reindex whose staging failed, waiting for its retry.
@@ -330,6 +337,7 @@ impl LaneState {
             attaching: None,
             rebuilding: None,
             rebuild_target: None,
+            reattach: None,
         }
     }
 
@@ -487,12 +495,16 @@ impl LaneState {
     /// Detach the lane for `reason` (R6): whatever it kept of its parking,
     /// its fresh builds, a reindex it was owed and what a reindex left it
     /// holding goes; its schedule stays. Whether it wasn't detached already.
-    pub(crate) fn detach(&mut self, reason: String, now: Instant) -> bool {
+    pub(crate) fn detach(&mut self, reason: String, through: Option<String>, now: Instant) -> bool {
         if self.health.is_detached() {
             return false;
         }
         *self = Self::new(self.schedule);
-        self.health = LaneHealth::Detached { since: now, reason };
+        self.health = LaneHealth::Detached {
+            since: now,
+            reason,
+            through,
+        };
         true
     }
 

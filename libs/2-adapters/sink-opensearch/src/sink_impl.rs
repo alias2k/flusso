@@ -502,6 +502,10 @@ impl Sink for OpensearchSink {
         self.delete_detach(mapping, version).await
     }
 
+    async fn record_gap(&self, mapping: &IndexMapping, gap: &sink::Gap) -> Result<()> {
+        self.write_gap(mapping, gap).await
+    }
+
     async fn begin_rebuild(&self, mapping: &IndexMapping) -> Result<u64> {
         self.write_rebuild(mapping).await
     }

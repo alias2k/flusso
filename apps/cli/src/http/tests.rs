@@ -680,6 +680,7 @@ async fn status_lists_detached_lanes_and_rebuilds() {
         &daemon::LaneHealth::Detached {
             since: tokio::time::Instant::now(),
             reason: "blocked: index write (api)".to_owned(),
+            through: None,
         },
     );
     let snapshot = serde_json::to_value(status.snapshot()).unwrap();
@@ -693,4 +694,164 @@ async fn status_lists_detached_lanes_and_rebuilds() {
     );
     observer.on_lane_rebuild(&users, Some(2), Some(5));
     assert!(status.reindex_refusal(&users).is_some());
+}
+
+/// ADR 0012 stage 10, S3: a wait for a position inside a gap a reattach
+/// accepted is refused at once with `409`, `reason: gap`, naming the gap;
+/// one after the gap passes.
+#[tokio::test]
+async fn a_wait_inside_a_reattachs_gap_is_refused_with_409() {
+    let (base, _source, _waits) = serve_staged(40, |observer| {
+        daemon::Observer::on_lane_gap(
+            observer,
+            &LaneKey::new(index("users"), SinkName::try_new("primary").unwrap()),
+            &sink::Gap {
+                from: Some("10".to_owned()),
+                to: Some("20".to_owned()),
+            },
+        );
+    })
+    .await;
+    let (status, body) = get_wait(&base, "position=15&until=applied").await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["reason"], "gap");
+    assert_eq!(
+        body["lanes"],
+        json!([{
+            "index": "users",
+            "sink": "primary",
+            "state": "gap",
+            "gap": { "from": "10", "to": "20" },
+        }])
+    );
+    assert!(
+        body["error"].as_str().unwrap().contains("from 10 to 20"),
+        "{body}"
+    );
+    let (status, _) = get_wait(&base, "position=30&until=applied").await;
+    assert_eq!(status, 200);
+}
+
+/// ADR 0012 stage 10, O16: `POST /indexes/<name>/reattach` names its sink
+/// and says `accept_gap=true` (`400` otherwise), refuses an unknown sink
+/// (`404`), a lane that is not detached or is being attached, and a sink that
+/// can rebuild (`409`), and queues the reattach on its sink's engine (`202`).
+#[tokio::test]
+async fn a_reattach_is_refused_unless_it_applies_and_queued_when_it_does() {
+    use daemon::Observer;
+    let (status, _) = indexed_status();
+    let observer = daemon::StatusObserver::new(Arc::clone(&status));
+    let primary = SinkName::try_new("primary").unwrap();
+    let users = LaneKey::new(index("users"), primary.clone());
+    let stop = daemon::Stop::new();
+    let (control, mut receivers) = DaemonControl::detached(&[primary.clone()], stop.clone());
+    let serve = |control: DaemonControl| {
+        let state = PrivateState {
+            status: Arc::clone(&status),
+            control,
+        };
+        async move {
+            let auth = Arc::new(BasicAuth::new("admin".to_owned(), "secret".to_owned()));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, private_router(state, auth)).await });
+            base
+        }
+    };
+    let can_rebuild = serve(control.clone()).await;
+    let base = serve(control.with_live_only([primary.clone()])).await;
+
+    for (path, code) in [
+        ("/indexes/users/reattach?accept_gap=true", 400),
+        ("/indexes/users/reattach?sink=primary", 400),
+        ("/indexes/users/reattach?sink=primary&accept_gap=yes", 400),
+        ("/indexes/users/reattach?sink=audit&accept_gap=true", 404),
+        ("/indexes/nope/reattach?sink=primary&accept_gap=true", 404),
+        ("/indexes/users/reattach?sink=primary&accept_gap=true", 409),
+    ] {
+        let (got, body) = post_reindex(&base, path).await;
+        assert_eq!(got, code, "{path}: {body}");
+    }
+    let (_, body) = post_reindex(
+        &base,
+        "/indexes/users/reattach?sink=primary&accept_gap=true",
+    )
+    .await;
+    assert!(body.contains("the lane is not detached"), "{body}");
+
+    observer.on_lane_health(
+        &users,
+        &daemon::LaneHealth::Detached {
+            since: tokio::time::Instant::now(),
+            reason: "blocked".to_owned(),
+            through: Some("10".to_owned()),
+        },
+    );
+    let (got, body) = post_reindex(
+        &can_rebuild,
+        "/indexes/users/reattach?sink=primary&accept_gap=true",
+    )
+    .await;
+    assert_eq!(got, 409, "{body}");
+    assert!(body.contains("reindex it instead"), "{body}");
+
+    observer.on_lane_rebuild(&users, None, Some(3));
+    let (got, body) = post_reindex(
+        &base,
+        "/indexes/users/reattach?sink=primary&accept_gap=true",
+    )
+    .await;
+    assert_eq!(got, 409, "{body}");
+    assert!(body.contains("being attached already"), "{body}");
+
+    observer.on_lane_rebuild(&users, None, None);
+    let (got, body) = post_reindex(
+        &base,
+        "/indexes/users/reattach?sink=primary&accept_gap=true",
+    )
+    .await;
+    assert_eq!(got, 202, "{body}");
+    assert_eq!(
+        receivers.get_mut(&primary).unwrap().try_recv().unwrap(),
+        daemon::SinkControl::Reattach {
+            index: index("users")
+        }
+    );
+}
+
+/// ADR 0012 stage 10, O16: `/status` shows a lane's accepted gap until a
+/// seed rebuilds the index.
+#[tokio::test]
+async fn status_shows_a_lanes_gap_until_a_seed() {
+    use daemon::Observer;
+    let primary = SinkName::try_new("primary").unwrap();
+    let users = LaneKey::new(index("users"), primary.clone());
+    let fence = Fence::new(
+        Arc::new(SteadySource::default()) as Arc<dyn ChangeCapture>,
+        Arc::new(daemon::Progress::new([users.clone()])),
+        [users.clone()],
+    );
+    let status = Arc::new(
+        Status::new([index("users")], [primary.clone()], Instant::now()).with_fence(fence),
+    );
+    let observer = daemon::StatusObserver::new(Arc::clone(&status));
+    observer.on_lane_gap(
+        &users,
+        &sink::Gap {
+            from: Some("10".to_owned()),
+            to: None,
+        },
+    );
+    let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+    assert_eq!(
+        snapshot["sinks"]["primary"]["lanes"]["users"]["gap"],
+        json!({ "from": "10", "to": null })
+    );
+    observer.on_index_seeded(&primary, &index("users"));
+    let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+    assert!(
+        snapshot["sinks"]["primary"]["lanes"]["users"]
+            .get("gap")
+            .is_none()
+    );
 }

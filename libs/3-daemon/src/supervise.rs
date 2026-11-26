@@ -57,6 +57,8 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone)]
 pub struct DaemonControl {
     senders: Arc<BTreeMap<SinkName, mpsc::Sender<SinkControl>>>,
+    /// The sinks with `backfill = false`: the only ones a reattach is for.
+    live_only: Arc<std::collections::BTreeSet<SinkName>>,
     stop: Stop,
 }
 
@@ -70,6 +72,12 @@ pub enum ControlError {
     /// No sink of that name is configured.
     #[error("unknown sink `{0}`")]
     UnknownSink(String),
+    /// The sink can rebuild the index: a reindex does, with nothing missing.
+    /// A reattach is only for a sink with `backfill = false` (O16).
+    #[error(
+        "sink `{0}` can rebuild the index: reindex it instead (reattach is for a sink with backfill = false)"
+    )]
+    CanRebuild(String),
     /// The sink's engine ended for good, so nothing would act on the operation.
     #[error("sink `{0}` is not accepting operations (its engine has stopped for good)")]
     Closed(String),
@@ -95,10 +103,40 @@ impl DaemonControl {
         (
             Self {
                 senders: Arc::new(senders),
+                live_only: Arc::default(),
                 stop,
             },
             receivers,
         )
+    }
+
+    /// The sinks with `backfill = false`, the ones a reattach is for.
+    pub fn with_live_only(mut self, sinks: impl IntoIterator<Item = SinkName>) -> Self {
+        self.live_only = Arc::new(sinks.into_iter().collect());
+        self
+    }
+
+    /// Reattach `index`'s detached lane on `sink`, accepting the changes it
+    /// missed while detached (ADR 0012 stage 10, O16): only on a sink that
+    /// can't rebuild. The engine checks the records between two batches;
+    /// one that says otherwise is logged and the lane stays detached.
+    pub fn reattach(&self, index: IndexName, sink: &SinkName) -> Result<(), ControlError> {
+        if self.stop.is_requested() {
+            return Err(ControlError::Stopping);
+        }
+        let sender = self
+            .senders
+            .get(sink)
+            .ok_or_else(|| ControlError::UnknownSink(sink.to_string()))?;
+        if !self.live_only.contains(sink) {
+            return Err(ControlError::CanRebuild(sink.to_string()));
+        }
+        sender
+            .try_send(SinkControl::Reattach { index })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => ControlError::Busy(sink.to_string()),
+                mpsc::error::TrySendError::Closed(_) => ControlError::Closed(sink.to_string()),
+            })
     }
 
     /// A control over `sinks` with no deployment behind it: each operation

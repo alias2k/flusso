@@ -131,6 +131,21 @@ impl Store {
                 self.put(id, serde_json::from_str(body).unwrap());
                 (200, "{}".to_owned())
             }
+            ("POST", path) if path.starts_with("/flusso_meta/_update/") => {
+                let id = path.trim_start_matches("/flusso_meta/_update/");
+                let Some(mut source) = self.doc(id) else {
+                    return (
+                        404,
+                        json!({ "error": { "type": "document_missing_exception" } }).to_string(),
+                    );
+                };
+                let update: Value = serde_json::from_str(body).unwrap();
+                for (key, value) in update["doc"].as_object().unwrap() {
+                    source[key] = value.clone();
+                }
+                self.put(id, source);
+                (200, "{}".to_owned())
+            }
             ("DELETE", path) if path.starts_with("/flusso_meta/_doc/") => {
                 let id = path.trim_start_matches("/flusso_meta/_doc/");
                 match (self.docs.get(id).map(|(_, at)| *at), condition) {
@@ -622,4 +637,46 @@ async fn the_seed_deletes_the_finished_rebuilds_record() {
     stub.sink().forget_finished_rebuild(ALIAS).await.unwrap();
     assert!(store.lock().unwrap().doc(DETACH).is_none());
     stub.sink().forget_finished_rebuild(ALIAS).await.unwrap();
+}
+
+/// O16, S3: a detach keeps where reads stood (`through`); a reattach keeps
+/// its gap with the seed marker, which outlives the record, and changes
+/// nothing else of the marker; a staging reads both back.
+#[tokio::test]
+async fn a_reattach_keeps_its_gap_with_the_seed_marker() {
+    let store = Arc::new(Mutex::new(Store::seeded()));
+    let stub = serve(&store).await;
+    let sink = stub.sink();
+    sink.detach(
+        &mapping(),
+        &blocked().live_only(true).through(Some("0/10".to_owned())),
+    )
+    .await
+    .unwrap();
+    let read = sink.detachment(&mapping()).await.unwrap();
+    assert_eq!(read.through.as_deref(), Some("0/10"));
+    assert_eq!(read.gap, None);
+
+    let open = sink::Gap {
+        from: read.through.clone(),
+        to: None,
+    };
+    sink.record_gap(&mapping(), &open).await.unwrap();
+    sink.forget_detachment(&mapping(), read.version.as_ref().unwrap())
+        .await
+        .unwrap();
+    let read = sink.detachment(&mapping()).await.unwrap();
+    assert_eq!(read.record, None, "the record is gone");
+    assert_eq!(read.gap, Some(open), "the gap stays with the marker");
+
+    let whole = sink::Gap {
+        from: Some("0/10".to_owned()),
+        to: Some("0/20".to_owned()),
+    };
+    sink.record_gap(&mapping(), &whole).await.unwrap();
+    assert_eq!(sink.detachment(&mapping()).await.unwrap().gap, Some(whole));
+    let mut kept = store.lock().unwrap().doc(ALIAS).unwrap();
+    assert_eq!(kept["gap"], json!({ "from": "0/10", "to": "0/20" }));
+    kept.as_object_mut().unwrap().remove("gap");
+    assert_eq!(kept, marker(), "nothing else of the marker changed");
 }

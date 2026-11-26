@@ -223,6 +223,10 @@ fn record_body(detach: &Detach, serving: Option<u64>, read: Option<&Found>) -> R
         "attempts": kept("attempts").as_u64().unwrap_or(0),
         "last_attempt": kept("last_attempt"),
         "since": since,
+        "through": match &detach.through {
+            Some(through) => Value::from(through.as_str()),
+            None => kept("through"),
+        },
     }))
 }
 
@@ -420,5 +424,26 @@ impl OpensearchSink {
             fields.insert("uuid".to_owned(), Value::from(uuid));
         }
         self.put_if(hash_alias, &restored, marker).await
+    }
+}
+
+impl OpensearchSink {
+    /// Keep a reattach's gap with the seed marker: a partial update touching
+    /// nothing else. A whole-document write of the marker (a reindex, a seed)
+    /// drops it: the index is rebuilt then, and nothing is missing.
+    pub(crate) async fn write_gap(&self, mapping: &IndexMapping, gap: &sink::Gap) -> Result<()> {
+        let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
+        let url = format!(
+            "{}/{}/_update/{hash_alias}",
+            self.base_url,
+            self.meta_index()
+        );
+        let request = self
+            .client
+            .post(&url)
+            .json(&json!({ "doc": { "gap": { "from": gap.from, "to": gap.to } } }));
+        self.send_ok(request, "recording the reattach's gap failed")
+            .await?;
+        Ok(())
     }
 }

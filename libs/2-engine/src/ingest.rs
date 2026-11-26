@@ -127,6 +127,9 @@ struct Exemption {
 /// The ingest engine over one source, one document builder, and one stream.
 #[derive(Debug)]
 pub struct IngestEngine {
+    /// Told each time the live stream opens, before anything is published
+    /// (ADR 0012 stage 10, O29).
+    rereads: Arc<crate::Rereads>,
     source: Arc<dyn ChangeCapture>,
     documents: Arc<dyn DocumentBuilder>,
     /// Resolves live changes; `documents` when none was given.
@@ -234,6 +237,7 @@ impl IngestEngine {
                 .collect(),
             build_numbers: AtomicU64::new(1),
             stop: Stop::new(),
+            rereads: Arc::new(crate::Rereads::default()),
             has_prepared: AtomicBool::new(false),
             advances: AtomicU64::new(0),
             furthest: Mutex::new(Furthest::default()),
@@ -247,6 +251,14 @@ impl IngestEngine {
     /// (see [`Stop`]).
     pub fn with_stop(mut self, stop: Stop) -> Self {
         self.stop = stop;
+        self
+    }
+
+    /// Tell `rereads` each time the live stream opens, before anything is
+    /// published: the sink engines read their detach records again before
+    /// writing anything after it (ADR 0012 stage 10, O29).
+    pub fn with_rereads(mut self, rereads: Arc<crate::Rereads>) -> Self {
+        self.rereads = rereads;
         self
     }
 
@@ -421,6 +433,7 @@ impl IngestEngine {
 
         let started = Instant::now();
         let live: LiveStream = self.source.live().await?;
+        self.rereads.live_opened();
         self.observer
             .on_startup_step(StartupStep::OpenLive, None, started.elapsed());
         tracing::info!("following live changes");

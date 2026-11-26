@@ -29,6 +29,8 @@
 //! - [`reindex`](commands::admin::reindex) triggers a from-scratch rebuild of one
 //!   index on a running server (zero read-downtime; reads stay on the old copy
 //!   until the rebuild swaps in).
+//! - [`reattach`](commands::admin::reattach) reattaches a detached index on a
+//!   sink that can't rebuild it, accepting the changes it missed.
 
 // Dev-dependencies of the live `duplicate_names` and `fence_restart` tests only.
 #[cfg(test)]
@@ -47,7 +49,7 @@ mod telemetry;
 
 use clap::{Parser, Subcommand};
 
-use commands::admin::{IndexesArgs, ReindexArgs};
+use commands::admin::{IndexesArgs, ReattachArgs, ReindexArgs};
 use commands::build::BuildArgs;
 use commands::check::CheckArgs;
 #[cfg(feature = "design")]
@@ -93,6 +95,9 @@ enum Command {
     Indexes(IndexesArgs),
     /// Trigger a from-scratch rebuild of one index on a running server.
     Reindex(ReindexArgs),
+    /// Reattach a detached index on a sink that can't rebuild it, accepting
+    /// the changes it missed (`--accept-gap`).
+    Reattach(ReattachArgs),
 }
 
 /// How long the runtime waits, once a command has returned, for work that
@@ -121,5 +126,6 @@ async fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::Script(args) => commands::script::execute(args).await,
         Command::Indexes(args) => commands::admin::indexes(args).await,
         Command::Reindex(args) => commands::admin::reindex(args).await,
+        Command::Reattach(args) => commands::admin::reattach(args).await,
     }
 }

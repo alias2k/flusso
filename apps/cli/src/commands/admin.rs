@@ -1,4 +1,5 @@
-//! `flusso indexes` / `flusso reindex` — the operator client.
+//! `flusso indexes` / `flusso reindex` / `flusso reattach` — the operator
+//! client.
 //!
 //! Thin HTTP clients to a *running* flusso's private control surface (HTTP Basic
 //! auth). They hold no privilege the private API doesn't grant any caller — the
@@ -100,6 +101,25 @@ pub(crate) struct ReindexArgs {
     connect: ConnectArgs,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct ReattachArgs {
+    /// The logical index whose detached lane to reattach.
+    index: String,
+
+    /// The sink the lane writes to: one with `backfill = false`, which can't
+    /// rebuild the index.
+    #[arg(long, env = "FLUSSO_SINK")]
+    sink: String,
+
+    /// Accept that the changes made while the lane was detached never reach
+    /// the index. Required: a reattach drops them.
+    #[arg(long)]
+    accept_gap: bool,
+
+    #[command(flatten)]
+    connect: ConnectArgs,
+}
+
 /// `flusso indexes` — list the server's indexes and their lifecycle state.
 pub(crate) async fn indexes(args: IndexesArgs) -> anyhow::Result<()> {
     let resp = args
@@ -123,7 +143,7 @@ pub(crate) async fn indexes(args: IndexesArgs) -> anyhow::Result<()> {
 
 /// `flusso reindex <index>` — trigger a from-scratch rebuild of one index.
 pub(crate) async fn reindex(args: ReindexArgs) -> anyhow::Result<()> {
-    let path = reindex_path(&args.index)?;
+    let path = index_path(&args.index, "reindex")?;
     let resp = args
         .connect
         .request(reqwest::Method::POST, &path)?
@@ -155,12 +175,45 @@ fn queued_message(body: &str) -> String {
     }
 }
 
-/// `POST /indexes/<index>/reindex`'s path; an index name has only
+/// `flusso reattach <index> --sink <name> --accept-gap` — reattach a
+/// detached lane on a sink that can't rebuild (ADR 0012 stage 10, O16).
+pub(crate) async fn reattach(args: ReattachArgs) -> anyhow::Result<()> {
+    if !args.accept_gap {
+        bail!(
+            "a reattach drops the changes made to {} while its lane on {} was detached; \
+             pass --accept-gap to accept that, or reindex it on a sink that can rebuild",
+            args.index,
+            args.sink
+        );
+    }
+    let path = index_path(&args.index, "reattach")?;
+    let resp = args
+        .connect
+        .request(reqwest::Method::POST, &path)?
+        .query(&[("sink", args.sink.as_str()), ("accept_gap", "true")])
+        .send()
+        .await
+        .with_context(|| format!("requesting {path}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!("server returned {status}: {}", body.trim());
+    }
+    let mut out = std::io::stdout().lock();
+    writeln!(
+        out,
+        "reattach of {} on {} queued: `flusso indexes` or /status shows the lane open, with its gap",
+        args.index, args.sink
+    )?;
+    Ok(())
+}
+
+/// `POST /indexes/<index>/<action>`'s path; an index name has only
 /// characters a path takes as they are, and anything else is refused here.
-fn reindex_path(index: &str) -> anyhow::Result<String> {
+fn index_path(index: &str, action: &str) -> anyhow::Result<String> {
     let index = kernel::IndexName::try_new(index.to_owned())
         .map_err(|_| anyhow::anyhow!("{index:?} is not an index name"))?;
-    Ok(format!("/indexes/{}/reindex", index.as_ref()))
+    Ok(format!("/indexes/{}/{action}", index.as_ref()))
 }
 
 #[cfg(test)]

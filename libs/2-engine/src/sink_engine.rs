@@ -154,8 +154,15 @@ pub enum SinkControl {
     /// Attach `index`'s detached lane again (ADR 0012 stage 10, R8): the
     /// engine asks the index's builder, which quiesces, attaches the lane and
     /// publishes `Attached` on it; from there the lane is written as an open
-    /// lane. Nothing sends it yet: the rebuild and `reattach` will (step 4).
+    /// lane. Only tests send it: a rebuild and a reattach attach their lane
+    /// themselves.
     Attach { index: IndexName },
+    /// Reattach `index`'s detached lane on a sink that can't rebuild it,
+    /// accepting the changes dropped while it was detached (O16, `flusso
+    /// reattach --accept-gap`): the sink keeps the gap with the index, the
+    /// record goes, and the lane is attached. Ignored, and logged, on a sink
+    /// that can rebuild (a reindex does that) and on a lane not detached.
+    Reattach { index: IndexName },
 }
 
 /// What staging does to one index.
@@ -250,6 +257,15 @@ pub struct SinkEngine {
     /// How long a parked lane waits between two probes, and a re-staged
     /// lane between two stagings.
     backoff: crate::Backoff,
+    /// Where a lane stands in the source's own text, for a reattach's gap
+    /// (S3). `None`: no gap is ever completed.
+    positions: Option<Arc<dyn crate::SourcePositions>>,
+    /// The slot's openings, and how far this engine read its records since
+    /// (O29).
+    rereads: Arc<crate::Rereads>,
+    /// The slot's openings counted when the last full read of the records
+    /// began: one since is read again before anything is written (O29).
+    read_at: AtomicU64,
 }
 
 impl SinkEngine {
@@ -289,6 +305,9 @@ impl SinkEngine {
             reindex_waiting: AtomicBool::new(false),
             health: Mutex::new(std::collections::BTreeMap::new()),
             backoff: crate::Backoff::default(),
+            positions: None,
+            rereads: Arc::new(crate::Rereads::default()),
+            read_at: AtomicU64::new(0),
         }
     }
 
@@ -358,10 +377,10 @@ impl SinkEngine {
     /// detached for `why`, its fence frozen first (the observers hear the
     /// health), then out of the slot's minimum (R5). Nothing is ensured or
     /// asked for.
-    fn staged_detached(&self, index: &IndexName, why: String) -> Staged {
+    fn staged_detached(&self, index: &IndexName, why: String, through: Option<String>) -> Staged {
         let lane = LaneKey::new(index.clone(), self.name.clone());
         let mut state = self.lane_state(&lane);
-        let changed = state.detach(why.clone(), Instant::now());
+        let changed = state.detach(why.clone(), through, Instant::now());
         if changed {
             tracing::warn!(%lane, %why, "staged detached: nothing of the index is written, and reads of it are frozen at the detach; the other indexes go on");
         }
@@ -369,6 +388,79 @@ impl SinkEngine {
         self.progress.detach(&lane);
         self.forget_detached(&lane);
         Staged::Detached
+    }
+
+    /// The reattach of `mapping`'s index up to its attach (O16, §6a): the
+    /// records must say detached on a sink that can't rebuild, with the seed
+    /// marker on the generation reads see, seeded. Then the index is
+    /// ensured, the gap kept with the marker (its `from` where reads stood
+    /// at the detach), and the record deleted: the commit point, after which
+    /// no staging detaches the lane again (S2). `None`: the records say
+    /// otherwise, logged; nothing changed.
+    pub(super) async fn reattach(&self, mapping: &IndexMapping) -> sink::Result<Option<sink::Gap>> {
+        let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
+        let found = self.sink.detachment(mapping).await?;
+        let detached_live_only = matches!(
+            found.record,
+            Some(sink::DetachRecord::Detached { live_only: true })
+        );
+        let serving = matches!(found.marker, Some(sink::MarkerAt::Serving { seeded: true }));
+        let Some(version) = found
+            .version
+            .clone()
+            .filter(|_| detached_live_only && serving)
+        else {
+            tracing::warn!(%lane, record = ?found.record, marker = ?found.marker, "not reattached: the records must say detached, live only, with the seed marker on the seeded generation reads see");
+            return Ok(None);
+        };
+        let gap = sink::Gap {
+            from: found.through.clone(),
+            to: None,
+        };
+        self.sink.ensure_index(mapping).await?;
+        self.sink.record_gap(mapping, &gap).await?;
+        self.sink.forget_detachment(mapping, &version).await?;
+        tracing::warn!(%lane, from = ?gap.from, "reattaching: the record is gone; the changes from the detach to the attach are accepted as missing");
+        Ok(Some(gap))
+    }
+
+    /// The reattached `lane`'s gap, both ends known, kept with its index. A
+    /// failure fails the run: the fence heard the gap already, and the
+    /// restarted run's staging finds it still open and completes it where
+    /// the lane stands, which is where it was attached (nothing of it landed).
+    pub(super) async fn record_reattached(&self, lane: &LaneKey, gap: &sink::Gap) -> Result<()> {
+        let Some(mapping) = self.mappings.iter().find(|m| m.index == lane.index) else {
+            return Ok(());
+        };
+        self.sink
+            .record_gap(mapping, gap)
+            .await
+            .map_err(|error| staging_failed(&lane.index, error))?;
+        tracing::warn!(%lane, from = ?gap.from, to = ?gap.to, "reattached: written as usual from here; a fence refuses every position inside the accepted gap");
+        Ok(())
+    }
+
+    /// A gap a reattach accepted on `mapping`'s index, found with its seed
+    /// marker (S3): completed when the source can say where the lane stands
+    /// (the reattach died between deleting its record and the attach; the
+    /// lane has landed nothing since), and heard by the fence either way. A
+    /// gap still open (`to` unknown) refuses every position past `from`
+    /// until it is completed.
+    pub(super) async fn known_gap(
+        &self,
+        mapping: &IndexMapping,
+        mut gap: sink::Gap,
+    ) -> sink::Result<()> {
+        let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
+        if gap.to.is_none()
+            && let Some(to) = self.place(&lane)
+        {
+            gap.to = Some(to);
+            self.sink.record_gap(mapping, &gap).await?;
+            tracing::warn!(%lane, from = ?gap.from, to = ?gap.to, "a reattach's gap is completed where the lane stands at this start: a fence refuses every position inside it");
+        }
+        self.observer.on_lane_gap(&lane, &gap);
+        Ok(())
     }
 
     /// Delete the detach record a failed `Sink::detach` of `index` may have
@@ -647,6 +739,29 @@ impl SinkEngine {
         self
     }
 
+    /// Name a lane's place in the source's own text through `positions`: the
+    /// two ends of a reattach's gap (ADR 0012 stage 10, S3). The daemon
+    /// hands it the source.
+    pub fn with_positions(mut self, positions: Arc<dyn crate::SourcePositions>) -> Self {
+        self.positions = Some(positions);
+        self
+    }
+
+    /// Read every index's detach records again each time the live stream
+    /// opens, before writing anything after it (ADR 0012 stage 10, O29): the
+    /// `rereads` the ingest engine and the fence share.
+    pub fn with_rereads(mut self, rereads: Arc<crate::Rereads>) -> Self {
+        self.rereads = rereads;
+        self
+    }
+
+    /// Where `lane` stands in the source's own text: what it applied, as the
+    /// source answers it. `None` while the source can't say.
+    pub(super) fn place(&self, lane: &LaneKey) -> Option<String> {
+        let landed = self.progress.lane(lane, crate::Level::Applied)?;
+        self.positions.as_ref()?.place(landed)
+    }
+
     /// Report lifecycle and progress to `observer`.
     pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
         self.observer = observer;
@@ -691,6 +806,26 @@ impl SinkEngine {
     /// go on (#471, `ensure_per_index`).
     #[tracing::instrument(name = "sink.stage", skip_all, fields(sink = %self.name, ?continuity))]
     pub async fn stage(&self, continuity: Continuity) -> Result<()> {
+        // A staging reads every index's records: once the slot is held, it is
+        // the read O29 asks for.
+        let read_at = self.rereads.live_starts();
+        self.stage_inner(continuity).await?;
+        self.records_read(read_at);
+        Ok(())
+    }
+
+    /// Every index's records were read, the read beginning at `read_at`.
+    pub(super) fn records_read(&self, read_at: u64) {
+        self.read_at.fetch_max(read_at, Ordering::AcqRel);
+        self.rereads.read(&self.name, read_at);
+    }
+
+    /// Whether the slot opened since the last full read of the records.
+    pub(super) fn reread_due(&self) -> bool {
+        self.rereads.is_due(self.read_at.load(Ordering::Acquire))
+    }
+
+    async fn stage_inner(&self, continuity: Continuity) -> Result<()> {
         let started = Instant::now();
         if self.stop.is_requested() {
             self.stage_while_stopping(started).await;
@@ -1067,6 +1202,8 @@ impl SinkEngine {
         // failed read fails the step, never reads as "no record".
         let detachment = self.sink.detachment(mapping).await?;
         let found = AtStaging::of(&detachment);
+        let through = detachment.through.clone();
+        let gap = detachment.gap.clone();
         self.read_detachment(&mapping.index, detachment);
         // Inside a process the lane's own state decides (R8, H1): a lane
         // held detached stays so whatever the records now say, and is
@@ -1078,8 +1215,14 @@ impl SinkEngine {
             return Ok(Staged::Detached);
         }
         match found {
-            AtStaging::AsBefore => {}
-            AtStaging::Detached(why) => return Ok(self.staged_detached(&mapping.index, why)),
+            AtStaging::AsBefore => {
+                if let Some(gap) = gap {
+                    self.known_gap(mapping, gap).await?;
+                }
+            }
+            AtStaging::Detached(why) => {
+                return Ok(self.staged_detached(&mapping.index, why, through));
+            }
             AtStaging::Rebuilding(attempts) => {
                 if !self.options.backfill || self.skip_backfill {
                     // O26 / R14: no backfill to finish it in this process.
@@ -1089,6 +1232,7 @@ impl SinkEngine {
                         &mapping.index,
                         "a rebuild under way, put back to detached at a start with no backfill"
                             .to_owned(),
+                        through,
                     ));
                 }
                 let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
@@ -1107,7 +1251,11 @@ impl SinkEngine {
                 let why = "the detach records can't be acted on as they stand (detached or \
                            rebuilding beside a seed marker on the generation reads see, or a \
                            record this version can't read); detached again at staging";
-                let detach = sink::Detach::new(why).live_only(!self.options.backfill);
+                let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
+                let through = self.place(&lane).or(through);
+                let detach = sink::Detach::new(why)
+                    .live_only(!self.options.backfill)
+                    .through(through.clone());
                 if self.sink.detach(mapping, &detach).await? != sink::Recorded::Kept {
                     return Err(sink::SinkError::Write(format!(
                         "{} reads detached, and the sink keeps no record of a detach again; \
@@ -1115,7 +1263,7 @@ impl SinkEngine {
                         mapping.index
                     )));
                 }
-                return Ok(self.staged_detached(&mapping.index, why.to_owned()));
+                return Ok(self.staged_detached(&mapping.index, why.to_owned(), through));
             }
         }
         let (ask_seeded, restaged) = match step {

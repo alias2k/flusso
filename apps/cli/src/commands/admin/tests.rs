@@ -62,8 +62,11 @@ fn a_ca_file_without_a_certificate_is_refused() {
 /// no index name is refused before any request.
 #[test]
 fn a_reindex_posts_to_the_index_path() {
-    assert_eq!(reindex_path("users").unwrap(), "/indexes/users/reindex");
-    assert!(reindex_path("no such/index").is_err());
+    assert_eq!(
+        index_path("users", "reindex").unwrap(),
+        "/indexes/users/reindex"
+    );
+    assert!(index_path("no such/index", "reindex").is_err());
 }
 
 /// What `flusso reindex` prints for the server's `202` body.
@@ -78,4 +81,24 @@ fn a_queued_reindex_is_printed_from_its_json() {
         "reindex of users on every sink queued"
     );
     assert_eq!(queued_message("plain text\n"), "plain text");
+}
+
+/// `flusso reattach` posts to the index's own path, and without
+/// `--accept-gap` refuses before any request is made (O16).
+#[tokio::test]
+async fn a_reattach_without_accept_gap_is_refused_before_any_request() {
+    assert_eq!(
+        index_path("users", "reattach").unwrap(),
+        "/indexes/users/reattach"
+    );
+    let error = reattach(ReattachArgs {
+        index: "users".to_owned(),
+        sink: "audit".to_owned(),
+        accept_gap: false,
+        connect: connect("127.0.0.1:1"),
+    })
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("--accept-gap"), "{error}");
 }

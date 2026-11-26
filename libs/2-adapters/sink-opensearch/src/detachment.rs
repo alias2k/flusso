@@ -76,6 +76,11 @@ impl OpensearchSink {
                 .version()
                 .map(|(seq_no, term)| RecordVersion::new(format!("{seq_no}:{term}")));
             kept.attempts = record.source.get("attempts").and_then(Value::as_u64);
+            kept.through = record
+                .source
+                .get("through")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
         }
         kept.record = record.map(|record| read_record(&record.source));
         kept.stuck = stuck.map(|stuck| {
@@ -88,6 +93,17 @@ impl OpensearchSink {
             };
             StuckClock::new(text("since"), text("seen_at"))
         });
+        kept.gap = marker
+            .as_ref()
+            .and_then(|marker| marker.source.get("gap"))
+            .filter(|gap| gap.is_object())
+            .map(|gap| {
+                let text = |key: &str| gap.get(key).and_then(Value::as_str).map(str::to_owned);
+                sink::Gap {
+                    from: text("from"),
+                    to: text("to"),
+                }
+            });
         if kept.record.is_none()
             && let Some(marker) = marker
             && let Some(from) = marker.source.get("detaching_from").filter(|v| !v.is_null())
