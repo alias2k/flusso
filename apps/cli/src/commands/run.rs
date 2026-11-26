@@ -401,6 +401,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
             http::PrivateState {
                 status: Arc::clone(&status),
                 control,
+                reattach_wait: http::REATTACH_VERDICT,
             },
             Arc::clone(&basic_auth),
         ),

@@ -418,7 +418,11 @@ async fn serve_private(
     let stop = daemon::Stop::new();
     let (control, receivers) =
         DaemonControl::detached(&[SinkName::try_new("primary").unwrap()], stop.clone());
-    let state = PrivateState { status, control };
+    let state = PrivateState {
+        status,
+        control,
+        reattach_wait: std::time::Duration::from_millis(200),
+    };
     let auth = Arc::new(BasicAuth::new("admin".to_owned(), "secret".to_owned()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -760,6 +764,7 @@ async fn a_reattach_is_refused_unless_it_applies_and_queued_when_it_does() {
         let state = PrivateState {
             status: Arc::clone(&status),
             control,
+            reattach_wait: std::time::Duration::from_millis(200),
         };
         async move {
             let auth = Arc::new(BasicAuth::new("admin".to_owned(), "secret".to_owned()));
@@ -823,24 +828,37 @@ async fn a_reattach_is_refused_unless_it_applies_and_queued_when_it_does() {
     // The engine's verdict decides the answer (review of step 4, S4).
     let mut engine = receivers.remove(&primary).unwrap();
     let answers = tokio::spawn(async move {
-        for verdict in [
-            Some(daemon::ReattachVerdict::Started),
-            Some(daemon::ReattachVerdict::Refused(
+        // What the engine does with each reattach in turn: answer, drop the
+        // reply (its run ended), or hold it unanswered (busy past the wait).
+        enum Does {
+            Answers(daemon::ReattachVerdict),
+            Drops,
+            Holds,
+        }
+        let mut held = Vec::new();
+        for does in [
+            Does::Answers(daemon::ReattachVerdict::Started),
+            Does::Answers(daemon::ReattachVerdict::Refused(
                 "the seed marker is not on the seeded generation reads see; restart flusso"
                     .to_owned(),
             )),
-            None,
+            Does::Drops,
+            Does::Answers(daemon::ReattachVerdict::Failed(
+                "the meta index refused".to_owned(),
+            )),
+            Does::Holds,
         ] {
             let Some(daemon::SinkControl::Reattach { index, reply }) = engine.recv().await else {
                 panic!("a reattach");
             };
             assert_eq!(index, kernel::IndexName::try_new("users").unwrap());
-            match verdict {
-                Some(verdict) => reply.send(verdict),
-                None => drop(reply),
+            match does {
+                Does::Answers(verdict) => reply.send(verdict),
+                Does::Drops => drop(reply),
+                Does::Holds => held.push(reply),
             }
         }
-        engine
+        (engine, held)
     });
     let path = "/indexes/users/reattach?sink=primary&accept_gap=true";
     let (got, body) = post_reindex(&base, path).await;
@@ -851,7 +869,14 @@ async fn a_reattach_is_refused_unless_it_applies_and_queued_when_it_does() {
     assert!(body.contains("restart flusso"), "{body}");
     let (got, body) = post_reindex(&base, path).await;
     assert_eq!(got, 503, "no verdict, the run ended: {body}");
-    let _engine = answers.await.unwrap();
+    let (got, body) = post_reindex(&base, path).await;
+    assert_eq!(got, 503, "the engine failed a step: {body}");
+    assert!(body.contains("Nothing accepted is lost"), "{body}");
+    assert!(body.contains("/status tells"), "{body}");
+    let (got, body) = post_reindex(&base, path).await;
+    assert_eq!(got, 503, "no verdict within the wait: {body}");
+    assert!(body.contains("no verdict within"), "{body}");
+    let (_engine, _held) = answers.await.unwrap();
 
     // A detached index on a sink that can't rebuild: a reindex names reattach.
     let (got, body) = post_reindex(&base, "/indexes/users/reindex?sink=primary").await;

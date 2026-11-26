@@ -330,6 +330,8 @@ pub(crate) struct PrivateState {
     /// The daemon's operations handle: a reindex reaches the targeted sink
     /// engines through it.
     pub control: DaemonControl,
+    /// How long a reattach waits for its sink engine's verdict.
+    pub reattach_wait: std::time::Duration,
 }
 
 pub(crate) fn private_router(state: PrivateState, basic_auth: Arc<BasicAuth>) -> Router {
@@ -769,7 +771,7 @@ async fn reattach(
     };
     // The engine answers between two batches: the operator hears its
     // verdict, not a blind "queued" (review of step 4, S4).
-    match tokio::time::timeout(REATTACH_VERDICT, verdict).await {
+    match tokio::time::timeout(state.reattach_wait, verdict).await {
         Ok(Ok(daemon::ReattachVerdict::Started)) => (
             StatusCode::ACCEPTED,
             Json(json!({
@@ -797,16 +799,16 @@ async fn reattach(
         Err(_) => refuse(
             StatusCode::SERVICE_UNAVAILABLE,
             format!(
-                "no verdict within {}s: the sink engine is busy; the reattach may still \
+                "no verdict within {:.0}s: the sink engine is busy; the reattach may still \
                  start, and /status shows the lane when it does",
-                REATTACH_VERDICT.as_secs()
+                state.reattach_wait.as_secs_f64()
             ),
         ),
     }
 }
 
 /// How long a reattach waits for its sink engine's verdict.
-const REATTACH_VERDICT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const REATTACH_VERDICT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `503` `stopping`: the deployment takes no operation while it stops.
 fn stopping_refusal() -> Response {
