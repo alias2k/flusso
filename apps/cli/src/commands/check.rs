@@ -17,10 +17,10 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use clap::{Args, ValueEnum};
 use config::Config;
-use source::{CoverageReport, Diagnostic, PreImageReport, Severity};
+use source::{CoverageReport, Diagnostic, PreImageReport};
 use source_postgres::PgDocumentBuilder;
 
 use crate::adapters;
@@ -141,7 +141,6 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     };
     let refused = server.as_ref().and_then(Option::as_deref);
 
-    let has_errors = diagnostics.iter().any(|d| d.severity == Severity::Error);
     let online = match (&coverage, &pre_image) {
         (Some(coverage), Some(pre_image)) => Some(Online::new(
             &source_spec(&config),
@@ -153,7 +152,6 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         )),
         _ => None,
     };
-    let gaps = online.as_ref().map_or(0, |o| o.gaps.len());
     let report = Report {
         path: &args.config,
         config: &config,
@@ -169,22 +167,10 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         OutputFormat::Human => report.human(&mut out, print::Pen::for_stdout(args.color))?,
     }
 
-    if let Some(refusal) = refused {
-        anyhow::bail!("flusso run would refuse the source server: {refusal}");
+    match report.failure() {
+        Some(failure) => anyhow::bail!("check failed: {failure}"),
+        None => Ok(()),
     }
-    ensure!(
-        !has_errors,
-        if args.offline {
-            "schema validation failed"
-        } else {
-            "schema validation failed against the database"
-        }
-    );
-    ensure!(
-        gaps == 0,
-        "{gaps} capture gap(s) `flusso run` won't close: the indexes miss changes"
-    );
-    Ok(())
 }
 
 /// What an online check found beside the schema diagnostics.
@@ -244,6 +230,43 @@ impl Report<'_> {
             self.online.is_none(),
             self.online.as_ref().is_some_and(|o| o.server.is_some()),
         )
+    }
+
+    /// Why the check fails, or `None` when it passed. Decided by the summary,
+    /// so the exit code and the report's last line never disagree.
+    fn failure(&self) -> Option<String> {
+        let summary = self.summary();
+        if summary.passed() {
+            return None;
+        }
+        if let Some(refusal) = self.online.as_ref().and_then(|o| o.server) {
+            return Some(format!(
+                "flusso run would refuse the source server: {refusal}"
+            ));
+        }
+        let gaps = self.online.as_ref().map_or(0, |o| o.gaps.len());
+        let plural = |n: usize, one: &str| {
+            if n == 1 {
+                format!("1 {one}")
+            } else {
+                format!("{n} {one}s")
+            }
+        };
+        let mut failed = Vec::new();
+        if summary.errors > gaps {
+            failed.push(plural(summary.errors - gaps, "schema error"));
+        }
+        if gaps > 0 {
+            failed.push(format!(
+                "{} `flusso run` won't close",
+                plural(gaps, "capture gap")
+            ));
+        }
+        let mut failure = failed.join(" and ");
+        if summary.offline {
+            failure.push_str(" (database checks not run)");
+        }
+        Some(failure)
     }
 
     /// The human report: one line per section that passes, a section with a
@@ -348,7 +371,7 @@ impl Report<'_> {
                 "table": gap.table.to_string(),
                 "indexes": gap.indexes.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "message": gap.message,
-            })).collect::<Vec<_>>()).unwrap_or_default(),
+            })).collect::<Vec<_>>()),
             "diagnostics": self.diagnostics
                 .iter()
                 .map(|d| serde_json::json!({
@@ -772,6 +795,70 @@ mod tests {
 
     /// Both formats render the one report: the same sections, the same
     /// findings and the same counts, and no config or mapping in JSON.
+    /// `check` fails exactly when its summary says it failed, and the
+    /// failure names everything that counts: one judge for the exit code and
+    /// the last line.
+    #[test]
+    fn the_exit_follows_the_summary() {
+        let config = config();
+        let failing = CoverageReport {
+            satisfied: false,
+            present: vec![table("products")],
+            missing: vec![table("users")],
+            misrouted: Vec::new(),
+            manageable: false,
+            blockers: vec!["role does not own table public.users".to_owned()],
+            remediation: Vec::new(),
+        };
+        let clean = satisfied();
+        let pre_image = PreImageReport::default();
+        let error = [finding(source::DiagnosticKind::Nullability, "title")];
+        let warning = [finding(source::DiagnosticKind::IgnoredPrimaryKey, "team")];
+        let cases: Vec<(&str, Option<Online<'_>>, &[Diagnostic], Option<&str>)> = vec![
+            ("clean", Some(online(&clean, &pre_image, None)), &[], None),
+            (
+                "warning",
+                Some(online(&clean, &pre_image, None)),
+                &warning,
+                None,
+            ),
+            ("offline warning", None, &warning, None),
+            (
+                "offline error",
+                None,
+                &error,
+                Some("1 schema error (database checks not run)"),
+            ),
+            (
+                "gap",
+                Some(online(&failing, &pre_image, None)),
+                &warning,
+                Some("1 capture gap `flusso run` won't close"),
+            ),
+            (
+                "error and gap",
+                Some(online(&failing, &pre_image, None)),
+                &error,
+                Some("1 schema error and 1 capture gap `flusso run` won't close"),
+            ),
+            (
+                "refused server",
+                Some(online(&clean, &pre_image, Some("a standby"))),
+                &[],
+                Some("flusso run would refuse the source server: a standby"),
+            ),
+        ];
+        for (case, online, diagnostics, failure) in cases {
+            let report = built(&config, diagnostics, online.as_ref());
+            let found = report.failure();
+            assert_eq!(found.is_none(), report.summary().passed(), "{case}");
+            if let Some(failure) = failure {
+                let found = found.unwrap();
+                assert!(found.contains(failure), "{case}: {found}");
+            }
+        }
+    }
+
     #[test]
     fn both_formats_render_the_same_report() {
         let config = config();
@@ -809,6 +896,11 @@ mod tests {
             report.human(&mut out, print::Pen::plain()).unwrap();
             let human = String::from_utf8(out).unwrap();
             let json = report.json();
+            assert_eq!(
+                json["gaps"].is_null(),
+                online.is_none(),
+                "{case}: offline, `gaps` is not known, as the other database sections"
+            );
 
             assert_eq!(
                 json["summary"]["line"].as_str(),
@@ -820,7 +912,10 @@ mod tests {
             assert_eq!(json["summary"]["errors"], errors, "{case}");
             assert_eq!(json["summary"]["warnings"], warnings, "{case}");
             let listed = json["diagnostics"].as_array().unwrap();
-            let gaps = json["gaps"].as_array().unwrap();
+            let gaps = json["gaps"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             assert_eq!(listed.len() + gaps.len(), errors + warnings, "{case}");
             for gap in gaps {
                 let line = format!("[error] {}  ", gap["table"].as_str().unwrap());
