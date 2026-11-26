@@ -553,7 +553,8 @@ and the container at once (same replication slot).
 subcommands: `build` (compile config+schemas → portable `flusso.lock`, no DB, no secrets
 baked in), `check` (validate only; `--offline` skips the DB; a passing section is one line, a
 failing one prints in full with its SQL, then warnings, errors last, and a summary line; `--color
-auto|always|never`; `--format json` stays complete), `show config|mapping [index]` (the deployment,
+auto|always|never`; `--format json` is the same report, one `Report` value rendered twice, with no
+config or mapping), `show config|mapping [index]` (the deployment,
 secrets redacted, or the typed mapping; no DB; reads `--config` or the `--lock`; `--format json`;
 `commands/show.rs`, reusing `print::config`/`print::resolved`), `run`
 (cargo-style: when a `flusso.toml` is present — the default path, or `--config` — it
@@ -2081,8 +2082,9 @@ column under a `timestamp`/`date` field there (`Checker.date_mapped`: no namesak
 at all); not a `min`/`max` or a field in a join (a parent with no related row indexes). Guards:
 `backends::tests` (one per kind, the `strict_*` cases, plus `only_an_opensearch_sink_that_maps_the_value_as_written_refuses_it`),
 `validation::tests`' `an_index_that_differs_from_its_schema_is_an_error`, `schema_errors::tests`,
-`check::tests` and `apps/cli/tests/check_report.rs` (the report's order, one-line sections and colour,
-no Docker), `apps/cli/tests/strict_start.rs` (live Postgres: `--strict` refuses from the config and
+`check::tests` (`both_formats_render_the_same_report`) and `apps/cli/tests/check_report.rs` (the
+report's order, one-line sections and colour, a JSON report with no config, mapping or secret; no
+Docker), `apps/cli/tests/strict_start.rs` (live Postgres: `--strict` refuses from the config and
 from a `--locked` lock, a plain start logs the event and sets the gauge),
 `config_coverage`'s `an_enum_or_domain_column_is_a_type_mismatch_that_still_builds` and
 `a_time_of_day_under_a_date_mapping_is_reported`, `apps/cli/tests/time_columns.rs` (live Postgres

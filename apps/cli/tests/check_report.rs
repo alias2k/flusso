@@ -22,7 +22,7 @@ fn project() -> PathBuf {
     .unwrap();
     std::fs::write(
         dir.join("flusso.toml"),
-        "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://nobody@127.0.0.1:1/none\"\n\n\
+        "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://nobody:hunter2@127.0.0.1:1/none\"\n\n\
          [sinks.out]\ntype = \"stdout\"\n\n[[index]]\nname = \"t\"\nschema = \"t.schema.yml\"\n\
          enabled = true\n",
     )
@@ -96,4 +96,25 @@ fn a_forced_colour_paints_errors_and_warnings() {
             assert!(stdout.contains(painted), "{painted:?} missing: {stdout:?}");
         }
     }
+}
+
+/// `check --format json` carries what the human report says and nothing more:
+/// no config dump, no mapping, so no secret (the URL's password here).
+#[test]
+fn the_json_report_holds_no_config_mapping_or_secret() {
+    let output = check(&["--format", "json"], &[]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    for gone in ["config", "mappings"] {
+        assert!(document.get(gone).is_none(), "{gone}: {stdout}");
+    }
+    assert!(!stdout.contains("hunter2"), "{stdout}");
+    assert_eq!(document["summary"]["errors"], 1, "{stdout}");
+    assert_eq!(document["summary"]["warnings"], 1, "{stdout}");
+    assert_eq!(document["summary"]["database_checked"], false, "{stdout}");
+    assert_eq!(
+        document["summary"]["line"], "✗ check failed: 1 error, 1 warning",
+        "{stdout}"
+    );
+    assert!(document["server"].is_null(), "{stdout}");
 }

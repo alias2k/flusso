@@ -197,6 +197,54 @@ pub(crate) fn server(out: &mut impl Write, pen: Pen, problem: Option<&str>) -> R
     }
 }
 
+/// How a section of `flusso check` came out: one line, or in full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Status {
+    /// Nothing to do.
+    Ok,
+    /// The next `flusso run` closes the gap itself, or flusso keeps it on
+    /// purpose: nothing to do by hand.
+    RunFixes,
+    /// Something to do by hand: the section prints in full, with its SQL.
+    Problem,
+}
+
+impl Status {
+    /// The status as a stable `snake_case` token.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::RunFixes => "run_fixes",
+            Self::Problem => "problem",
+        }
+    }
+}
+
+/// How the publication section comes out under `manage`.
+pub(crate) fn coverage_status(report: &CoverageReport, manage: bool) -> Status {
+    if report.satisfied {
+        Status::Ok
+    } else if report.manageable && manage {
+        Status::RunFixes
+    } else {
+        Status::Problem
+    }
+}
+
+/// How the replica identity section comes out under `manage`.
+pub(crate) fn pre_image_status(report: &PreImageReport, manage: bool) -> Status {
+    let every = || report.gaps.iter().chain(&report.partial);
+    if report.complete() {
+        Status::Ok
+    } else if every().any(|gap| gap.kept.is_none() && !gap.will_manage(manage)) {
+        Status::Problem
+    } else if every().any(|gap| gap.kept.is_none()) {
+        Status::RunFixes
+    } else {
+        Status::Ok
+    }
+}
+
 /// Report whether the source streams every table the indexes read, and — when it
 /// doesn't — whether `flusso run` will fix it automatically or the operator must.
 ///
@@ -210,27 +258,30 @@ pub(crate) fn coverage(
     report: &CoverageReport,
     manage: bool,
 ) -> Result<()> {
-    if report.satisfied {
-        let covered = match report.present.len() {
-            0 => "publication: the indexes read no table".to_owned(),
-            1 => "publication covers the one table the indexes read".to_owned(),
-            n => format!("publication covers all {n} tables the indexes read"),
-        };
-        return passed(out, pen, &covered);
-    }
-    if report.manageable && manage {
-        return passed(
-            out,
-            pen,
-            &format!(
-                "publication: the next `flusso run` covers the {} it misses",
-                count(
-                    report.missing.len() + report.misrouted.len(),
-                    "table",
-                    "tables"
-                )
-            ),
-        );
+    match coverage_status(report, manage) {
+        Status::Ok => {
+            let covered = match report.present.len() {
+                0 => "publication: the indexes read no table".to_owned(),
+                1 => "publication covers the one table the indexes read".to_owned(),
+                n => format!("publication covers all {n} tables the indexes read"),
+            };
+            return passed(out, pen, &covered);
+        }
+        Status::RunFixes => {
+            return passed(
+                out,
+                pen,
+                &format!(
+                    "publication: the next `flusso run` covers the {} it misses",
+                    count(
+                        report.missing.len() + report.misrouted.len(),
+                        "table",
+                        "tables"
+                    )
+                ),
+            );
+        }
+        Status::Problem => {}
     }
     section(out, pen, "Publication coverage")?;
 
@@ -309,9 +360,8 @@ pub(crate) fn pre_image(
             "replica identity: every table an index reads logs its whole old row",
         );
     }
-    let by_hand = |gap: &&PreImageGap| gap.kept.is_none() && !gap.will_manage(manage);
     let every = || report.gaps.iter().chain(&report.partial);
-    if every().filter(by_hand).count() == 0 {
+    if pre_image_status(report, manage) != Status::Problem {
         let set = every().filter(|gap| gap.kept.is_none()).count();
         let kept = every().filter(|gap| gap.kept.is_some()).count();
         let mut parts = Vec::new();
@@ -609,72 +659,92 @@ fn diagnostic_lines(out: &mut impl Write, pen: Pen, diagnostics: &[Diagnostic]) 
     Ok(())
 }
 
-/// The last line of a report: whether it passed, with the counts. `refused`
-/// is the source server refusal `flusso run` would stop with, which fails it
-/// too. An `offline` pass says the database checks didn't run.
-pub(crate) fn summary(
-    out: &mut impl Write,
-    pen: Pen,
-    diagnostics: &[Diagnostic],
-    offline: bool,
-    refused: Option<&str>,
-) -> Result<()> {
-    let count = |severity: Severity| {
-        diagnostics
-            .iter()
-            .filter(|d| d.severity == severity)
-            .count()
-    };
-    let plural = |n: usize, one: &str| {
-        if n == 1 {
-            format!("{n} {one}")
-        } else {
-            format!("{n} {one}s")
+/// What `flusso check` concluded: the counts, and whether it passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Summary {
+    pub(crate) errors: usize,
+    pub(crate) warnings: usize,
+    /// Run with `--offline`: the database checks were not run.
+    pub(crate) offline: bool,
+    /// The source server refusal `flusso run` would stop with, which fails
+    /// the check too.
+    pub(crate) server_refused: bool,
+}
+
+impl Summary {
+    /// The summary of `diagnostics`, `offline` or not, with the server refused
+    /// or not.
+    pub(crate) fn of(diagnostics: &[Diagnostic], offline: bool, server_refused: bool) -> Self {
+        let count = |severity: Severity| {
+            diagnostics
+                .iter()
+                .filter(|d| d.severity == severity)
+                .count()
+        };
+        Self {
+            errors: count(Severity::Error),
+            warnings: count(Severity::Warning),
+            offline,
+            server_refused,
         }
-    };
-    let errors = count(Severity::Error);
-    let warnings = count(Severity::Warning);
-    let counts = format!(
-        "{}, {}",
-        plural(errors, "error"),
-        plural(warnings, "warning")
-    );
-    let line = match (refused.is_some(), errors, warnings) {
-        (true, ..) => pen.paint(
-            "1;31",
-            &format!("✗ check failed: flusso run would refuse the source server; {counts}"),
-        ),
-        (false, 1.., _) => pen.paint("1;31", &format!("✗ check failed: {counts}")),
-        (false, 0, warnings) => {
-            let passed = if offline {
-                "offline checks passed"
+    }
+
+    /// Whether the check passed: no error, and the server accepted.
+    pub(crate) fn passed(&self) -> bool {
+        self.errors == 0 && !self.server_refused
+    }
+
+    /// The last line of the report, with its `✓` or `✗`.
+    pub(crate) fn line(&self) -> String {
+        let plural = |n: usize, one: &str| {
+            if n == 1 {
+                format!("{n} {one}")
             } else {
-                "check passed"
-            };
-            let not_run = if offline {
-                "; database checks not run"
-            } else {
-                ""
-            };
-            if warnings == 0 {
-                format!(
-                    "{} {}",
-                    pen.green("✓"),
-                    pen.bold(&format!("{passed}{not_run}"))
-                )
-            } else {
-                format!(
-                    "{} {}",
-                    pen.green("✓"),
-                    pen.paint(
-                        "1;33",
-                        &format!("{passed} with {}{not_run}", plural(warnings, "warning"))
-                    ),
-                )
+                format!("{n} {one}s")
             }
+        };
+        let counts = format!(
+            "{}, {}",
+            plural(self.errors, "error"),
+            plural(self.warnings, "warning")
+        );
+        if self.server_refused {
+            return format!("✗ check failed: flusso run would refuse the source server; {counts}");
         }
+        if self.errors > 0 {
+            return format!("✗ check failed: {counts}");
+        }
+        let passed = if self.offline {
+            "offline checks passed"
+        } else {
+            "check passed"
+        };
+        let warned = if self.warnings > 0 {
+            format!(" with {}", plural(self.warnings, "warning"))
+        } else {
+            String::new()
+        };
+        let not_run = if self.offline {
+            "; database checks not run"
+        } else {
+            ""
+        };
+        format!("✓ {passed}{warned}{not_run}")
+    }
+}
+
+/// The last line of a report, `summary`'s line painted: a failure bold red, a
+/// pass with warnings yellow.
+pub(crate) fn summary(out: &mut impl Write, pen: Pen, summary: &Summary) -> Result<()> {
+    let line = summary.line();
+    let painted = match line.strip_prefix("✓ ") {
+        None => pen.paint("1;31", &line),
+        Some(rest) if summary.warnings > 0 => {
+            format!("{} {}", pen.green("✓"), pen.paint("1;33", rest))
+        }
+        Some(rest) => format!("{} {}", pen.green("✓"), pen.bold(rest)),
     };
-    writeln!(out, "{line}")?;
+    writeln!(out, "{painted}")?;
     Ok(())
 }
 

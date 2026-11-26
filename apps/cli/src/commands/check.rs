@@ -7,10 +7,11 @@
 //! `--offline` still reports the findings that need no database. `flusso run`
 //! runs the same database validation at start.
 //!
-//! The human report only checks: a section that passes is one line, a section
-//! with a problem prints in full, then warnings, then errors, then a summary
-//! line. What the config declares is `flusso show`'s. `--format json` stays
-//! complete (config, mappings, every section), since tools read it.
+//! The report only checks: a section that passes is one line, a section with a
+//! problem prints in full, then warnings, then errors, then a summary line.
+//! `--format json` is the same report (one `Report` value rendered twice):
+//! each section with its status and detail, the diagnostics and the summary.
+//! What the config declares, and the mapping, are `flusso show`'s.
 
 use std::io::Write;
 use std::path::Path;
@@ -71,7 +72,8 @@ pub(crate) struct CheckArgs {
 enum OutputFormat {
     /// A colored, human-readable report (default).
     Human,
-    /// A single JSON document: `{ "config": …, "mappings": … }`.
+    /// The same report as one JSON document: `config_file`, `server`,
+    /// `coverage`, `pre_image`, `diagnostics`, `summary`.
     Json,
 }
 
@@ -101,7 +103,6 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         .with_context(|| format!("compiling the scripts of {}", args.config.display()))?;
     let config = Arc::new(config);
 
-    let mappings = config.resolve_mappings();
     let postgres = adapters::source_config(&config)?;
 
     let diagnostics = if args.offline {
@@ -141,81 +142,29 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     let refused = server.as_ref().and_then(Option::as_deref);
 
     let has_errors = diagnostics.iter().any(|d| d.severity == Severity::Error);
+    let online = match (&coverage, &pre_image) {
+        (Some(coverage), Some(pre_image)) => Some(Online {
+            server: refused,
+            coverage,
+            pre_image,
+            manage_publication: manage,
+            manage_replica_identity: postgres.manage_replica_identity,
+        }),
+        _ => None,
+    };
+    let report = Report {
+        path: &args.config,
+        config: &config,
+        diagnostics: &diagnostics,
+        online,
+    };
 
     let mut out = std::io::stdout().lock();
     match args.format {
         OutputFormat::Json => {
-            let doc = serde_json::json!({
-                "config": &*config,
-                "mappings": mappings,
-                "diagnostics": diagnostics
-                    .iter()
-                    .map(|d| serde_json::json!({
-                        "index": d.index.as_ref(),
-                        "field": d.field.as_ref(),
-                        "path": d.dotted_path(),
-                        "anchor": d.anchor.as_str(),
-                        "severity": format!("{:?}", d.severity).to_lowercase(),
-                        "kind": d.kind.as_str(),
-                        "message": d.message,
-                    }))
-                    .collect::<Vec<_>>(),
-                "server": server.as_ref().map(|problem| serde_json::json!({
-                    "ok": problem.is_none(),
-                    "problem": problem,
-                })),
-                "coverage": coverage.as_ref().map(|c| serde_json::json!({
-                    "satisfied": c.satisfied,
-                    "manageable": c.manageable,
-                    "will_manage": manage,
-                    "present": c.present.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
-                    "missing": c.missing.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
-                    "misrouted": c.misrouted.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
-                    "blockers": c.blockers,
-                    "remediation": c.remediation,
-                })),
-                "pre_image": pre_image.as_ref().map(|p| {
-                    let gaps = |gaps: &[source::PreImageGap]| gaps.iter().map(|gap| serde_json::json!({
-                        "table": gap.table.to_string(),
-                        "missing": gap.missing.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
-                        "missing_key": gap.missing_key.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
-                        "manageable": gap.manageable,
-                        "will_manage": gap.will_manage(postgres.manage_replica_identity),
-                        "blockers": gap.blockers,
-                        "remediation": gap.remediation,
-                        "kept": gap.kept,
-                    })).collect::<Vec<_>>();
-                    serde_json::json!({
-                        "satisfied": p.satisfied(),
-                        "complete": p.complete(),
-                        "gaps": gaps(&p.gaps),
-                        "partial": gaps(&p.partial),
-                    })
-                }),
-            });
-            writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
+            writeln!(out, "{}", serde_json::to_string_pretty(&report.json())?)?;
         }
-        OutputFormat::Human => {
-            let pen = print::Pen::for_stdout(args.color);
-            let online = match (&coverage, &pre_image) {
-                (Some(coverage), Some(pre_image)) => Some(Online {
-                    server: refused,
-                    coverage,
-                    pre_image,
-                    manage_publication: manage,
-                    manage_replica_identity: postgres.manage_replica_identity,
-                }),
-                _ => None,
-            };
-            human_report(
-                &mut out,
-                pen,
-                &args.config,
-                &config,
-                &diagnostics,
-                online.as_ref(),
-            )?;
-        }
+        OutputFormat::Human => report.human(&mut out, print::Pen::for_stdout(args.color))?,
     }
 
     if let Some(refusal) = refused {
@@ -242,39 +191,130 @@ struct Online<'a> {
     manage_replica_identity: bool,
 }
 
-/// The human-readable report: one line per section that passes, a section
-/// with a problem in full (with its SQL), then the schema findings, warnings
-/// above errors, and a summary line. What failed is always on the last screen.
-/// The config and the mapping are `flusso show`'s.
-fn human_report(
-    out: &mut impl Write,
-    pen: print::Pen,
-    path: &Path,
-    config: &Config,
-    diagnostics: &[Diagnostic],
-    online: Option<&Online<'_>>,
-) -> anyhow::Result<()> {
-    print::config_line(out, pen, path, config)?;
-    match online {
-        None => {
-            print::offline(out, pen)?;
-            print::offline_diagnostics(out, pen, diagnostics)?;
-        }
-        Some(online) => {
-            print::server(out, pen, online.server)?;
-            print::coverage(out, pen, online.coverage, online.manage_publication)?;
-            print::pre_image(out, pen, online.pre_image, online.manage_replica_identity)?;
-            print::diagnostics(out, pen, diagnostics)?;
-        }
+/// Everything `check` found, rendered as the human report or as JSON: one
+/// value, so the two formats say the same thing. Neither holds the config or
+/// the mapping, which are `flusso show`'s.
+struct Report<'a> {
+    path: &'a Path,
+    config: &'a Config,
+    diagnostics: &'a [Diagnostic],
+    /// `None` under `--offline`.
+    online: Option<Online<'a>>,
+}
+
+impl Report<'_> {
+    fn summary(&self) -> print::Summary {
+        print::Summary::of(
+            self.diagnostics,
+            self.online.is_none(),
+            self.online.as_ref().is_some_and(|o| o.server.is_some()),
+        )
     }
-    writeln!(out)?;
-    print::summary(
-        out,
-        pen,
-        diagnostics,
-        online.is_none(),
-        online.and_then(|online| online.server),
-    )
+
+    /// The human report: one line per section that passes, a section with a
+    /// problem in full (with its SQL), then the schema findings, warnings
+    /// above errors, and a summary line. What failed is always on the last
+    /// screen.
+    fn human(&self, out: &mut impl Write, pen: print::Pen) -> anyhow::Result<()> {
+        print::config_line(out, pen, self.path, self.config)?;
+        match &self.online {
+            None => {
+                print::offline(out, pen)?;
+                print::offline_diagnostics(out, pen, self.diagnostics)?;
+            }
+            Some(online) => {
+                print::server(out, pen, online.server)?;
+                print::coverage(out, pen, online.coverage, online.manage_publication)?;
+                print::pre_image(out, pen, online.pre_image, online.manage_replica_identity)?;
+                print::diagnostics(out, pen, self.diagnostics)?;
+            }
+        }
+        writeln!(out)?;
+        print::summary(out, pen, &self.summary())
+    }
+
+    /// The same report as one JSON document: each section with its status and
+    /// detail, the diagnostics, and the summary. The sections the database
+    /// gives are `null` under `--offline`.
+    fn json(&self) -> serde_json::Value {
+        let strings = |items: &[source::QualifiedTable]| {
+            items.iter().map(ToString::to_string).collect::<Vec<_>>()
+        };
+        let disabled = self.config.indexes.values().filter(|i| !i.enabled).count();
+        let summary = self.summary();
+        let online = self.online.as_ref();
+        serde_json::json!({
+            "config_file": {
+                "path": self.path.display().to_string(),
+                "status": print::Status::Ok.as_str(),
+                "indexes": self.config.indexes.len(),
+                "disabled_indexes": disabled,
+                "sinks": self.config.sinks.len(),
+            },
+            "server": online.map(|o| serde_json::json!({
+                "status": if o.server.is_none() { print::Status::Ok } else { print::Status::Problem }.as_str(),
+                "ok": o.server.is_none(),
+                "problem": o.server,
+            })),
+            "coverage": online.map(|o| {
+                let c = o.coverage;
+                serde_json::json!({
+                    "status": print::coverage_status(c, o.manage_publication).as_str(),
+                    "satisfied": c.satisfied,
+                    "manageable": c.manageable,
+                    "will_manage": o.manage_publication,
+                    "present": strings(&c.present),
+                    "missing": strings(&c.missing),
+                    "misrouted": strings(&c.misrouted),
+                    "blockers": c.blockers,
+                    "remediation": c.remediation,
+                })
+            }),
+            "pre_image": online.map(|o| {
+                let p = o.pre_image;
+                let manage = o.manage_replica_identity;
+                let gaps = |gaps: &[source::PreImageGap]| gaps.iter().map(|gap| serde_json::json!({
+                    "table": gap.table.to_string(),
+                    "missing": gap.missing.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    "missing_key": gap.missing_key.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    "manageable": gap.manageable,
+                    "will_manage": gap.will_manage(manage),
+                    "blockers": gap.blockers,
+                    "remediation": gap.remediation,
+                    "kept": gap.kept,
+                })).collect::<Vec<_>>();
+                serde_json::json!({
+                    "status": print::pre_image_status(p, manage).as_str(),
+                    "satisfied": p.satisfied(),
+                    "complete": p.complete(),
+                    "gaps": gaps(&p.gaps),
+                    "partial": gaps(&p.partial),
+                })
+            }),
+            "diagnostics": self.diagnostics
+                .iter()
+                .map(|d| serde_json::json!({
+                    "index": d.index.as_ref(),
+                    "field": d.field.as_ref(),
+                    "path": d.dotted_path(),
+                    "positions": d.positions,
+                    "anchor": d.anchor.as_str(),
+                    "severity": format!("{:?}", d.severity).to_lowercase(),
+                    "kind": d.kind.as_str(),
+                    "message": d.message,
+                }))
+                .collect::<Vec<_>>(),
+            "summary": {
+                "passed": summary.passed(),
+                "errors": summary.errors,
+                "warnings": summary.warnings,
+                "offline": summary.offline,
+                "database_checked": !summary.offline,
+                "server_refused": summary.server_refused,
+                "line": summary.line(),
+            },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -342,16 +382,29 @@ mod tests {
     fn report(diagnostics: &[Diagnostic], online: Option<&Online<'_>>, pen: print::Pen) -> String {
         let config = config();
         let mut out = Vec::new();
-        human_report(
-            &mut out,
-            pen,
-            Path::new("flusso.toml"),
-            &config,
-            diagnostics,
-            online,
-        )
-        .unwrap();
+        built(&config, diagnostics, online)
+            .human(&mut out, pen)
+            .unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    fn built<'a>(
+        config: &'a Config,
+        diagnostics: &'a [Diagnostic],
+        online: Option<&Online<'a>>,
+    ) -> Report<'a> {
+        Report {
+            path: Path::new("flusso.toml"),
+            config,
+            diagnostics,
+            online: online.map(|o| Online {
+                server: o.server,
+                coverage: o.coverage,
+                pre_image: o.pre_image,
+                manage_publication: o.manage_publication,
+                manage_replica_identity: o.manage_replica_identity,
+            }),
+        }
     }
 
     fn online<'a>(
@@ -603,6 +656,97 @@ mod tests {
             "{warned}"
         );
         assert!(!clean.contains("✓ check passed"), "{clean}");
+    }
+
+    /// Both formats render the one report: the same sections, the same
+    /// findings and the same counts, and no config or mapping in JSON.
+    #[test]
+    fn both_formats_render_the_same_report() {
+        let config = config();
+        let clean_coverage = satisfied();
+        let failing_coverage = CoverageReport {
+            satisfied: false,
+            present: vec![table("products")],
+            missing: vec![table("users")],
+            misrouted: Vec::new(),
+            manageable: false,
+            blockers: vec!["role does not own table public.users".to_owned()],
+            remediation: vec!["ALTER PUBLICATION flusso ADD TABLE public.users;".to_owned()],
+        };
+        let pre_image = PreImageReport::default();
+        let findings = [
+            finding(source::DiagnosticKind::UndeclaredArrayColumn, "tags"),
+            finding(source::DiagnosticKind::IgnoredPrimaryKey, "team"),
+        ];
+        let cases: Vec<(&str, Option<Online<'_>>, &[Diagnostic])> = vec![
+            (
+                "clean",
+                Some(online(&clean_coverage, &pre_image, None)),
+                &[],
+            ),
+            (
+                "failing section",
+                Some(online(&failing_coverage, &pre_image, None)),
+                &findings,
+            ),
+            ("offline", None, &findings),
+        ];
+        for (case, online, diagnostics) in cases {
+            let report = built(&config, diagnostics, online.as_ref());
+            let mut out = Vec::new();
+            report.human(&mut out, print::Pen::plain()).unwrap();
+            let human = String::from_utf8(out).unwrap();
+            let json = report.json();
+
+            assert_eq!(
+                json["summary"]["line"].as_str(),
+                human.trim_end().lines().last(),
+                "{case}"
+            );
+            let errors = human.matches("[error]").count();
+            let warnings = human.matches("[warning]").count();
+            assert_eq!(json["summary"]["errors"], errors, "{case}");
+            assert_eq!(json["summary"]["warnings"], warnings, "{case}");
+            let listed = json["diagnostics"].as_array().unwrap();
+            assert_eq!(listed.len(), errors + warnings, "{case}");
+            for d in listed {
+                let line = format!(
+                    "[{}] {}.{}",
+                    d["severity"].as_str().unwrap(),
+                    d["index"].as_str().unwrap(),
+                    d["path"].as_str().unwrap()
+                );
+                assert!(
+                    human.contains(&line),
+                    "{case}: {line} missing from\n{human}"
+                );
+            }
+            for (key, heading, one_line) in [
+                ("coverage", "\nPublication coverage\n", "✓ publication"),
+                ("pre_image", "\nReplica identity\n", "✓ replica identity"),
+                ("server", "\nSource server\n", "✓ source server"),
+            ] {
+                match json[key]["status"].as_str() {
+                    None => {
+                        assert!(json[key].is_null(), "{case}: {key}");
+                        assert!(
+                            !human.contains(one_line) && !human.contains(heading),
+                            "{case}"
+                        );
+                    }
+                    Some("problem") => assert!(human.contains(heading), "{case}: {key}\n{human}"),
+                    Some(_) => assert!(human.contains(one_line), "{case}: {key}\n{human}"),
+                }
+            }
+            assert_eq!(
+                json["summary"]["offline"],
+                human.contains("! offline"),
+                "{case}"
+            );
+            for gone in ["config", "mappings"] {
+                assert!(json.get(gone).is_none(), "{case}: {gone} in {json}");
+            }
+        }
     }
 
     #[test]
