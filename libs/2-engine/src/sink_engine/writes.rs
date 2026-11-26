@@ -3617,7 +3617,12 @@ impl<'a> Run<'a> {
     /// would: between batches, nothing of the lane in flight (it is
     /// detached). Not while stopping: the next start's reindex asks again.
     async fn retry_rebuilds(&mut self) -> Result<()> {
-        if !self.rebuilds_owed || self.engine.stop.is_requested() {
+        // O29: `begin_rebuild` rewrites the detach record, which may be
+        // another process's while this one holds no slot: tried once it does.
+        if !self.rebuilds_owed
+            || self.engine.stop.is_requested()
+            || !self.engine.rereads.may_erase_records()
+        {
             return Ok(());
         }
         let now = Instant::now();

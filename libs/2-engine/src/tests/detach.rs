@@ -3707,3 +3707,103 @@ async fn a_clear_waits_after_the_stream_ended() {
         "no stream held, yet: forgotten {forgotten:?}, record after {kept:?}"
     );
 }
+
+/// The fifth re-check's narrowing: a reattach deletes the detach record,
+/// which may be another process's once this process stopped holding the
+/// slot. It is refused, with the reason, until the slot is held again; then
+/// it starts as usual.
+#[tokio::test(start_paused = true)]
+async fn a_reattach_is_refused_while_no_stream_is_held() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (_engine, task, control) = detached_live_only(&rig).await;
+    rig.rereads.closed();
+    assert_eq!(
+        verdict(&control).await,
+        crate::ReattachVerdict::Refused(
+            "this process doesn't hold the slot (its stream ended or its opening failed), \
+             so the record may be another process's; ask again once it holds the slot"
+                .to_owned()
+        )
+    );
+    assert!(rig.sink.kept.lock().unwrap().get("users").is_some());
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
+    task.abort();
+}
+
+/// The fifth re-check's narrowing: a reindex of a detached index begins a
+/// rebuild, rewriting the detach record, which may be another process's once
+/// this process stopped holding the slot. The reindex is owed until the slot
+/// is held again, then the rebuild begins; the run neither hangs nor fails.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_waits_for_the_slot_before_it_rewrites_a_record() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task) = detached_on_a_block(&rig).await;
+    rig.sink.block(&users(), false);
+    task.abort();
+    let _ = task.await;
+    rig.rereads.closed();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert!(
+        rig.sink.rebuilds.lock().unwrap().is_empty(),
+        "a rebuild began with no slot held"
+    );
+    assert!(!task.is_finished(), "the run goes on");
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("the rebuild begins once the slot is held", || {
+        *rig.sink.rebuilds.lock().unwrap() == ["users"]
+    })
+    .await;
+    task.abort();
+}
+
+/// ... and a reindex of an open index (a new generation) is owed too, its
+/// lane restaging with the reason, until the slot is held; the sibling lane
+/// writes on.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_of_an_open_index_is_owed_while_no_stream_is_held() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, control) = spawn(&engine);
+    eventually("read under the stream", || read_all(&rig)).await;
+    rig.rereads.closed();
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    eventually("owed, with why", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Restaging { ref reason, .. } if reason.contains("waits until this process holds the slot")
+        )
+    })
+    .await;
+    rig.live(&orders(), 1, 1).await;
+    eventually("the sibling writes on", || {
+        rig.sink
+            .ids
+            .lock()
+            .unwrap()
+            .contains(&"orders/1".to_owned())
+    })
+    .await;
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("staged once the slot is held", || {
+        engine.lane_health(&lane(users())).is_open()
+    })
+    .await;
+    task.abort();
+}

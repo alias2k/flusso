@@ -492,6 +492,15 @@ impl SinkEngine {
         mapping: &IndexMapping,
     ) -> sink::Result<std::result::Result<Vec<sink::Gap>, String>> {
         let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
+        // O29: the reattach deletes the record, which may be another
+        // process's once this one stopped holding the slot.
+        if !self.rereads.may_erase_records() {
+            return Ok(Err(
+                "this process doesn't hold the slot (its stream ended or its opening failed), \
+                 so the record may be another process's; ask again once it holds the slot"
+                    .to_owned(),
+            ));
+        }
         let found = self.sink.detachment(mapping).await?;
         // The lane is held detached in this process, yet the sink keeps no
         // record: an earlier reattach's delete landed and nobody heard it
@@ -1920,6 +1929,16 @@ impl SinkEngine {
         &self,
         mapping: &IndexMapping,
     ) -> sink::Result<(u64, Option<TargetId>)> {
+        // O29: `begin_rebuild` rewrites the detach record, which may be
+        // another process's while this one holds no slot. Refused, the
+        // rebuild is owed and tried again once the slot is held.
+        if !self.rereads.may_erase_records() {
+            return Err(sink::SinkError::Write(
+                "the rebuild waits until this process holds the slot (its stream ended or its \
+                 opening failed)"
+                    .to_owned(),
+            ));
+        }
         let attempts = self.sink.begin_rebuild(mapping).await?;
         let ensured = self.sink.ensure_index(mapping).await?;
         self.observer
@@ -1948,6 +1967,26 @@ impl SinkEngine {
         chosen: Vec<&IndexMapping>,
         outstanding: &BTreeSet<IndexName>,
     ) -> Reindexed {
+        // O29: a reindex moves the index to a new generation, or begins a
+        // rebuild over its detach record, which may be another process's
+        // once this one stopped holding the slot. Owed until the slot is
+        // held: retried on the restage backoff, the other lanes writing on.
+        if !self.rereads.may_erase_records() {
+            return Reindexed {
+                failed: chosen
+                    .into_iter()
+                    .map(|mapping| {
+                        (
+                            mapping.index.clone(),
+                            "the reindex waits until this process holds the slot (its stream \
+                             ended or its opening failed)"
+                                .to_owned(),
+                        )
+                    })
+                    .collect(),
+                ..Reindexed::default()
+            };
+        }
         let tried = self
             .try_each_index(
                 chosen,
