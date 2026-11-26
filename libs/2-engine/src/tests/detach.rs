@@ -2934,3 +2934,26 @@ async fn a_reattach_after_a_delete_that_landed_unseen_finishes_it() {
     let _attach = next_request(&rig).await;
     task.abort();
 }
+
+/// The third re-check, item 2: an unread lane vouches for nothing, so after
+/// an opening its sink reads promptly even on a quiet stream (no change, no
+/// write): the opening wakes the run, which reads within the read's own
+/// time, not at its next idle tick or write.
+#[tokio::test(start_paused = true)]
+async fn an_opening_on_a_quiet_stream_is_read_at_once() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let opened = Instant::now();
+    while !rig.rereads.current(&sink_name("primary")) {
+        assert!(
+            opened.elapsed() < Duration::from_millis(50),
+            "not read within 50 ms of the opening"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    task.abort();
+}

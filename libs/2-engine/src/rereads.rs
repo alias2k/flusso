@@ -12,9 +12,10 @@
 //! - a sink engine whose last read of its records counts for an earlier
 //!   opening reads them again before it writes anything
 //!   ([`Rereads::is_due`]), and says so ([`Rereads::read`]);
-//! - a fence vouches, for a lane of a sink not read since
-//!   ([`Rereads::current`]), no further than this process applied under the
-//!   previous stream.
+//! - a fence vouches for nothing on a lane not read since
+//!   ([`Rereads::current`]): it answers `starting`. The opening wakes every
+//!   sink engine ([`Rereads::openings`]), so the read doesn't wait for
+//!   traffic.
 //!
 //! The order lives in [`open`](Rereads::open) alone, the one place outside
 //! tests that opens a live stream (a test here fails if another appears), so
@@ -66,7 +67,6 @@ use source::cdc::{ChangeCapture, Landed};
 /// How many times the live stream opened, and how far each sink read its
 /// detach records since. Shared by the ingest engine, the sink engines and
 /// the fence.
-#[derive(Default)]
 pub struct Rereads {
     /// Openings begun.
     opened: AtomicU64,
@@ -77,40 +77,35 @@ pub struct Rereads {
     holding: AtomicBool,
     read: Mutex<BTreeMap<SinkName, u64>>,
     listeners: Mutex<Vec<RereadListener>>,
+    /// The last opening that returned Ok, for sink engines to wake on: an
+    /// unread lane vouches for nothing, so its read can't wait for traffic.
+    openings: tokio::sync::watch::Sender<u64>,
 }
 
-/// What a [`Rereads`] listener hears.
-#[derive(Debug, Clone, Copy)]
-pub enum Reread<'a> {
-    /// An opening begins: the previous stream still answers, the new one
-    /// not yet; every sink's records are unread from here. `read` says which
-    /// sinks counted as read during the stream being left: only their
-    /// answers then were given while read.
-    Opening { read: &'a ReadBefore },
-    /// A sink read its records.
-    Read,
-}
-
-/// Which sinks counted as read just before an opening moved the count.
-#[derive(Debug, Clone)]
-pub struct ReadBefore {
-    opened: u64,
-    held: u64,
-    read: BTreeMap<SinkName, u64>,
-}
-
-impl ReadBefore {
-    /// Whether `sink` counted as read during the stream being left (any
-    /// sink, before the first opening: nothing could vouch then).
-    pub fn read(&self, sink: &SinkName) -> bool {
-        self.opened == 0
-            || (self.held == self.opened
-                && self.read.get(sink).is_some_and(|at| *at >= self.opened))
+impl Default for Rereads {
+    fn default() -> Self {
+        Self {
+            opened: AtomicU64::new(0),
+            held: AtomicU64::new(0),
+            holding: AtomicBool::new(false),
+            read: Mutex::new(BTreeMap::new()),
+            listeners: Mutex::new(Vec::new()),
+            openings: tokio::sync::watch::Sender::new(0),
+        }
     }
 }
 
+/// What a [`Rereads`] listener hears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reread {
+    /// An opening begins: every lane's records are unread from here.
+    Opening,
+    /// A lane's records were read.
+    Read,
+}
+
 /// Called on each [`Reread`]: cheap, it only wakes or notes something.
-pub type RereadListener = Arc<dyn Fn(Reread<'_>) + Send + Sync>;
+pub type RereadListener = Arc<dyn Fn(Reread) + Send + Sync>;
 
 impl std::fmt::Debug for Rereads {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -130,26 +125,22 @@ impl Rereads {
     /// answer; once it returns Ok, a read begun from then counts. Failed,
     /// nothing counts as read until an opening succeeds.
     pub async fn open<T, E>(&self, opening: impl Future<Output = Result<T, E>>) -> Result<T, E> {
-        // Which sinks read during the stream being left, taken before the
-        // count moves (once it has, none counts as read).
-        let before = ReadBefore {
-            opened: self.opened.load(Ordering::Acquire),
-            held: self.held.load(Ordering::Acquire),
-            read: self
-                .read
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone(),
-        };
         let epoch = self.opened.fetch_add(1, Ordering::AcqRel) + 1;
         self.holding.store(false, Ordering::Release);
-        self.tell(Reread::Opening { read: &before });
+        self.tell(Reread::Opening);
         let opened = opening.await;
         if opened.is_ok() {
             self.held.store(epoch, Ordering::Release);
             self.holding.store(true, Ordering::Release);
+            self.openings.send_replace(epoch);
         }
         opened
+    }
+
+    /// Wakes on every opening that returned Ok: a sink engine reads its
+    /// records at once, not at its next write or idle tick.
+    pub fn openings(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.openings.subscribe()
     }
 
     /// The stream of the last opening ended: this process may no longer hold
@@ -172,7 +163,7 @@ impl Rereads {
             .push(listener);
     }
 
-    fn tell(&self, event: Reread<'_>) {
+    fn tell(&self, event: Reread) {
         let listeners = self
             .listeners
             .lock()

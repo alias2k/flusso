@@ -1443,13 +1443,12 @@ async fn an_unread_sink_still_answers_rebuilding_and_detached() {
     );
 }
 
-/// Review of step 4, B1: while its records are unread after the slot
-/// opened again (a sink whose destination is down never reads), a lane
-/// serving its writes still vouches for what this process saw it apply
-/// before the opening: those writes are in the index, and no detach takes
-/// them back. Past that it answers `starting` until the read.
+/// The third re-check, item 2: an unread lane vouches for nothing. From the
+/// moment a new stream may answer until its records were read under that
+/// stream, it answers `starting`, even for a position this process applied
+/// before the opening; the read lets the wait through.
 #[tokio::test(start_paused = true)]
-async fn an_unread_lane_keeps_vouching_for_what_it_applied_before_the_slot_reopened() {
+async fn an_unread_lane_vouches_for_nothing_until_its_read() {
     let rig = fence(&["primary"]);
     let rereads = Arc::new(Rereads::default());
     let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
@@ -1463,18 +1462,15 @@ async fn an_unread_lane_keeps_vouching_for_what_it_applied_before_the_slot_reope
         reached("20")
     );
     opened(&rereads).await;
-    let after = rig.source.emit(30);
-    rig.route(after);
-    rig.applied("primary", after);
     assert_eq!(
         fence.wait(&request("20", FenceLevel::Applied, None)).await,
-        reached("20"),
-        "applied before the slot reopened"
+        unserved("20", &[("users", "primary", Unserved::Starting)]),
+        "applied before the opening, still nothing until the read"
     );
+    rereads.read(&sink("primary"), rereads.read_begins());
     assert_eq!(
-        fence.wait(&request("30", FenceLevel::Applied, None)).await,
-        unserved("30", &[("users", "primary", Unserved::Starting)]),
-        "past it, until the read"
+        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        reached("20")
     );
 }
 
@@ -1606,24 +1602,6 @@ async fn unread(rig: &Rig) -> Fence {
     fence
 }
 
-/// Review of the step-4 fixes, m-a: what an unread lane vouches for is taken
-/// fresh from the previous stream as the opening begins, not a cached answer
-/// that nothing asked for since the lane's last landing.
-#[tokio::test(start_paused = true)]
-async fn the_answer_frozen_at_an_opening_is_taken_fresh_from_the_previous_stream() {
-    let rig = fence(&["primary"]);
-    let rereads = Arc::new(Rereads::default());
-    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
-    let change = rig.source.emit(20);
-    rig.route(change);
-    rig.applied("primary", change);
-    opened(&rereads).await;
-    assert_eq!(
-        fence.wait(&request("20", FenceLevel::Applied, None)).await,
-        reached("20")
-    );
-}
-
 /// Review of the step-4 fixes, S-c: a detach record without a readable
 /// `through`, adopted by the read once the slot is held, freezes the lane at
 /// what this process applied under the previous stream (here nothing),
@@ -1641,8 +1619,8 @@ async fn an_adopted_detach_without_its_through_vouches_for_nothing_new() {
     let started = Instant::now();
     assert_eq!(
         fence.wait(&request("40", FenceLevel::Applied, None)).await,
-        unserved("0", &[("users", "primary", Unserved::Detached)]),
-        "frozen where the previous stream stood (nothing applied), not at 50"
+        unserved("", &[("users", "primary", Unserved::Detached)]),
+        "frozen at nothing, not at 50"
     );
     assert_eq!(started.elapsed(), Duration::ZERO, "at once");
 }

@@ -574,6 +574,9 @@ impl<'a> Run<'a> {
         let mut control_open = true;
         let mut idle_tick = tokio::time::interval_at(Instant::now() + IDLE_TICK, IDLE_TICK);
         idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // An opening wakes the run: its lanes vouch for nothing until read.
+        let mut openings = self.engine.rereads.openings();
+        let mut openings_open = true;
         loop {
             if self.failure.is_none()
                 && let Err(error) = self.advance().await
@@ -715,6 +718,10 @@ impl<'a> Run<'a> {
                     }
                 }
                 () = stop.requested(), if watch_stop => self.close_idle(),
+                opened = openings.changed(), if openings_open => {
+                    openings_open = opened.is_ok();
+                    self.close_idle();
+                }
                 _ = idle_tick.tick() => self.close_idle(),
             }
         }

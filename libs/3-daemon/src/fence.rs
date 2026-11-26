@@ -26,16 +26,12 @@
 //! unless the seed lands first. The sink engines' events set the state
 //! ([`FenceObserver`]); they are a few per index per run.
 //!
-//! **A lane of an unread sink vouches only for what it covered while read
-//! (ADR 0012 stage 10, O29, B1', B1'').** The rule is inductive: what a lane
-//! may vouch for while its sink is unread only ever comes from answers the
-//! fence gave while that sink counted as read. [`Rereads::open`] (the one
-//! place the ingest engine opens its stream) hands the fence, before the
-//! new stream can answer and before the count moves, which sinks read
-//! during the stream being left; only their lanes' frozen answer
-//! (`at_open`) advances, taken fresh from that stream. Every other lane
-//! keeps what it froze before: nothing, for a sink that never read. Guard:
-//! the property test `gate_property`.
+//! **An unread lane vouches for nothing (ADR 0012 stage 10, O29).** A lane
+//! answers `starting` from the moment a new stream may answer until its own
+//! records were read under that stream; `gap`, `detached`, `rebuilding` and
+//! `backfilling` still take precedence as themselves. [`Rereads::open`] (the
+//! one place the ingest engine opens its stream) marks every lane unread
+//! before the stream can answer. Guard: the property test `gate_property`.
 //!
 //! The daemon owns the wait; putting it on a wire is the transport's job
 //! (the CLI serves it as `GET /wait`).
@@ -310,12 +306,6 @@ struct Furthest {
     /// once; one between two gaps is vouched as usual. An end that is `None`
     /// is unknown and stretches its gap that way. Gone at the seed.
     gaps: Vec<(Option<SourcePosition>, Option<SourcePosition>)>,
-    /// What the lane may vouch for while its sink's records are unread
-    /// (O29): the fence's answer from the previous stream, taken fresh as an
-    /// opening begins, but only when the sink read during that stream;
-    /// otherwise it keeps what it held (B1''). A lane serving its writes
-    /// while unread vouches no further.
-    at_open: (Option<SourcePosition>, Option<SourcePosition>),
 }
 
 impl Furthest {
@@ -424,31 +414,10 @@ impl Fence {
     /// engines and the ingest engine share. Set once.
     pub fn with_rereads(self, rereads: Arc<Rereads>) -> Self {
         let listener: Weak<Inner> = Arc::downgrade(&self.inner);
-        rereads.subscribe(Arc::new(move |event| {
-            let Some(inner) = listener.upgrade() else {
-                return;
-            };
-            if let Reread::Opening { read } = event {
-                // Only the previous stream answers here. A lane whose sink
-                // read during it freezes that answer, taken fresh (B1'); any
-                // other keeps what it froze before (B1''): what an unread
-                // lane vouches for only ever comes from answers given while
-                // its sink counted as read.
-                let fence = Fence { inner };
-                for lane in fence.inner.lanes.keys() {
-                    if !read.read(&lane.sink) {
-                        continue;
-                    }
-                    fence.reached(lane, FenceLevel::Searchable);
-                    if let Some(furthest) = fence.inner.lanes.get(lane) {
-                        let mut furthest = lock(furthest);
-                        furthest.at_open = (furthest.applied, furthest.searchable);
-                    }
-                }
-                fence.moved();
-                return;
+        rereads.subscribe(Arc::new(move |_: Reread| {
+            if let Some(inner) = listener.upgrade() {
+                inner.moved.notify_waiters();
             }
-            inner.moved.notify_waiters();
         }));
         let _ = self.inner.rereads.set(rereads);
         self
@@ -503,10 +472,10 @@ impl Fence {
             Some(recorded) => at.map(|at| at.min(recorded)),
             None => at,
         };
-        // While the sink's records are unread since the slot opened (a read
-        // adopting a detach is one), what the lane reached may be the new
-        // stream's start: it freezes no further than what this process
-        // applied under the previous stream (review of the fixes, S-c).
+        // While the lane's records are unread since the slot opened (a read
+        // adopting a detach is one), what it reached may be the new stream's
+        // start, past changes another process dropped: it freezes at
+        // nothing (S-c).
         let read = self
             .inner
             .rereads
@@ -514,7 +483,7 @@ impl Fence {
             .is_none_or(|rereads| rereads.current(&lane.sink));
         self.serve(lane, |furthest| Serving::Detached {
             through: match furthest.serving {
-                Serving::Writes if !read => (cap(furthest.at_open.0), cap(furthest.at_open.1)),
+                Serving::Writes if !read => (None, None),
                 Serving::Writes => (cap(furthest.applied), cap(furthest.searchable)),
                 Serving::Rebuilding { through } | Serving::Detached { through } => through,
                 Serving::Pending | Serving::Backfilling => (None, None),
@@ -611,17 +580,12 @@ impl Fence {
             return (reached, None, Serving::Pending.unserved());
         };
         let furthest = lock(furthest);
-        // O29, review of step 4 B1: an unread record can make only `Writes`
-        // false (another process may have detached the lane since). It still
-        // vouches for what this process saw it apply before the slot opened:
-        // no detach takes those writes back. The other states vouch for
-        // nothing new, so they answer as themselves.
+        // O29: an unread record can make only `Writes` false (another
+        // process may have detached the lane since), so an unread lane
+        // serving its writes vouches for nothing; the other states vouch for
+        // nothing new and answer as themselves.
         if !read && furthest.serving == Serving::Writes {
-            let vouches = match level {
-                FenceLevel::Applied => furthest.at_open.0,
-                FenceLevel::Searchable => furthest.at_open.1,
-            };
-            return (reached, vouches, Some(Unserved::Starting));
+            return (reached, None, Some(Unserved::Starting));
         }
         let serving = furthest.serving;
         (reached, serving.vouches(level, reached), serving.unserved())

@@ -26,7 +26,7 @@ pub use ingest::{DEFAULT_MAX_PENDING_DOCUMENTS, IngestEngine, KEY_PAGE, STUCK_AF
 pub use observer::*;
 pub use policy::{Backoff, BackoffError, BatchPolicy, FailurePolicies, FailurePolicy, MaxWaiting};
 pub use progress::{Attach, Holds, Level, Listener, Pin, Progress, Step, Taken, Token};
-pub use rereads::{CapturePositions, ReadBefore, Reread, RereadListener, Rereads, SourcePositions};
+pub use rereads::{CapturePositions, Reread, RereadListener, Rereads, SourcePositions};
 pub use sink_engine::{
     LaneHealth, ParkReason, ProbeOutcome, ReattachVerdict, Reply, SinkControl, SinkEngine,
 };
