@@ -777,6 +777,12 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
                     None => return array_value_check(field, inner, scalar, resolved),
                 }
             } else {
+                if vec_inner(inner).is_some() {
+                    return Err(syn::Error::new(
+                        field.ty.span(),
+                        single_value_message(field, os, inner),
+                    ));
+                }
                 inner
             };
             let found = leaf_ident(inner);
@@ -805,18 +811,34 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
 /// A custom type at a single-valued leaf must not read an array (an array
 /// newtype has no `FlussoValue<K>`, so its bound fails too; this says why).
 fn single_value_check(field: &DocField, inner: &Type, os: &str) -> TokenStream {
-    let key = &field.doc_key;
-    let rendered = crate::fragment::render(inner);
-    let message = format!(
-        "field `{key}` is a single `{os}` in the schema, not an array — `{rendered}` reads an \
-         array; use its element type, or declare the field `array: true`"
-    );
+    let message = single_value_message(field, os, inner);
     quote::quote_spanned! {inner.span()=>
         const _: () = {
             #[allow(unused_imports)]
             use ::flusso_query::OpaqueWithoutMeta as _;
             assert!(!::flusso_query::OpaqueProbe::<#inner>::ARRAY, #message);
         };
+    }
+}
+
+/// Why a type that reads an array can't stand at a single-valued leaf. Where
+/// the schema can declare the field `array: true`, that is the fix it leads
+/// with: the element type alone compiles, then fails on every list.
+fn single_value_message(field: &DocField, os: &str, inner: &Type) -> String {
+    let key = &field.doc_key;
+    let rendered = crate::fragment::render(inner);
+    if os == "geo_point" {
+        format!(
+            "field `{key}` is a single `{os}` in the schema, not an array — `{rendered}` reads \
+             an array; use its element type"
+        )
+    } else {
+        format!(
+            "field `{key}` is a single `{os}` in the schema, but `{rendered}` reads an array — if \
+             the column holds an array, declare the field `array: true` in the schema (the \
+             element type alone fails to read every document that holds a list); otherwise use \
+             its element type"
+        )
     }
 }
 

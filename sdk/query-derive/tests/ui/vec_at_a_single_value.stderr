@@ -1,0 +1,17 @@
+error: field `email` is a single `keyword` in the schema, but `Vec<String>` reads an array — if the column holds an array, declare the field `array: true` in the schema (the element type alone fails to read every document that holds a list); otherwise use its element type
+  --> tests/ui/vec_at_a_single_value.rs:11:12
+   |
+11 |     email: Vec<String>,
+   |            ^^^
+
+error[E0080]: evaluation panicked: fragment `Leaves`: field `email` is declared `Vec<String>`, but the schema field here is not an array — if its column holds an array, declare the field `array: true` in the schema (without the `Vec<…>` it fails to read every document that holds a list); otherwise drop the `Vec<…>`
+  --> tests/ui/vec_at_a_single_value.rs:24:11
+   |
+24 |     flat: Leaves,
+   |           ^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Leaves::__flusso_check`
+  --> tests/ui/vec_at_a_single_value.rs:16:12
+   |
+16 |     email: Vec<String>,
+   |            ^^^ the failure occurred here
