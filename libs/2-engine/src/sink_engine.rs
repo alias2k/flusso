@@ -1041,6 +1041,15 @@ impl SinkEngine {
         let detachment = self.sink.detachment(mapping).await?;
         let found = AtStaging::of(&detachment);
         self.read_detachment(&mapping.index, detachment);
+        // Inside a process the lane's own state decides (R8, H1): a lane
+        // held detached stays so whatever the records now say, and is
+        // neither ensured nor asked for.
+        if self
+            .lane_health(&LaneKey::new(mapping.index.clone(), self.name.clone()))
+            .is_detached()
+        {
+            return Ok(Staged::Detached);
+        }
         match found {
             AtStaging::AsBefore => {}
             AtStaging::Detached(why) => return Ok(self.staged_detached(&mapping.index, why)),

@@ -75,6 +75,8 @@ struct Gate {
     /// What staging reads of each index's records.
     kept: Mutex<BTreeMap<String, Detachment>>,
     forgotten: Mutex<Vec<String>>,
+    /// Indexes `is_seeded` answers unseeded.
+    unseeded: Mutex<BTreeSet<String>>,
 }
 
 impl Gate {
@@ -163,8 +165,8 @@ impl Sink for Gate {
         Ok(report)
     }
 
-    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
-        Ok(true)
+    async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {
+        Ok(!self.unseeded.lock().unwrap().contains(index.as_ref()))
     }
 
     async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
@@ -1142,4 +1144,22 @@ async fn a_reindex_whose_staging_finds_the_index_detached_detaches_the_lane() {
     assert_eq!(rig.sink.writes_of(&users()).len(), 1);
     assert!(rig.sink.ensured.lock().unwrap().is_empty());
     task.abort();
+}
+
+/// A lane the process holds detached is asked no backfill by a later
+/// staging that finds no record (removed by hand): `Progress` decides inside
+/// a process, and the fence keeps answering `detached` (review m5).
+#[tokio::test(start_paused = true)]
+async fn a_lane_held_detached_is_asked_no_backfill_by_a_later_staging() {
+    let rig = Rig::new(64);
+    let (engine, task) = detached_on_a_block(&rig).await;
+    task.abort();
+    let _ = task.await;
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let mut requests = rig.stream.requests().unwrap().consumer;
+    let asked = tokio::time::timeout(Duration::from_millis(1), requests.recv()).await;
+    assert!(asked.is_err(), "no backfill asked: {asked:?}");
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    assert!(rig.progress.is_detached(&lane(users())));
 }

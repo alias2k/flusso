@@ -1066,3 +1066,20 @@ async fn a_lane_detached_before_the_start_answers_detached_at_once() {
         reached("20")
     );
 }
+
+/// A backfill asked for a detached lane keeps its fence `detached`: reads
+/// stay frozen until the lane is attached again (review m5).
+#[tokio::test(start_paused = true)]
+async fn a_backfill_asked_for_a_detached_lane_keeps_it_detached() {
+    let rig = fence(&["primary"]);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    assert!(matches!(
+        rig.fence
+            .wait(&request("5", FenceLevel::Applied, None))
+            .await,
+        Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Detached)]
+    ));
+}

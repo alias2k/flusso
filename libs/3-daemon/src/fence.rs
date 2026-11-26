@@ -410,11 +410,12 @@ impl Fence {
         });
     }
 
-    /// A snapshot was requested for `lane`: a rebuild stays one; anything else
-    /// is a seed of an index that reads see filling.
+    /// A snapshot was requested for `lane`: a rebuild stays one, and so does
+    /// a detached lane (its reads stay frozen); anything else is a seed of an
+    /// index that reads see filling.
     fn backfilling(&self, lane: &LaneKey) {
         self.serve(lane, |furthest| match furthest.serving {
-            rebuilding @ Serving::Rebuilding { .. } => rebuilding,
+            kept @ (Serving::Rebuilding { .. } | Serving::Detached { .. }) => kept,
             _ => Serving::Backfilling,
         });
     }
