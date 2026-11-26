@@ -337,7 +337,8 @@ struct Seeding {
 /// What a flight returned.
 enum Outcome {
     Write(sink::Result<WriteReport>),
-    Seed(sink::Result<()>),
+    /// A seed; refused when this process held no slot right before it.
+    Seed(std::result::Result<sink::Result<()>, super::slot::NotHeld>),
     Record(sink::Result<()>),
     /// A quiet lane's empty caught-up write.
     Refresh(sink::Result<WriteReport>),
@@ -1487,15 +1488,6 @@ impl<'a> Run<'a> {
                             .await?;
                         continue;
                     }
-                    // O29: a seed writes the marker whole, erasing whatever
-                    // record another process wrote since; with no stream held
-                    // it waits for the next read while the slot is held.
-                    if !self.engine.rereads.may_erase_records() {
-                        self.engine.cut_unheld_seed(&index);
-                        self.acknowledge(handle, lane, seq, None, true, None)
-                            .await?;
-                        continue;
-                    }
                     if !self.lane_open(lane)
                         && let Some(run) = self.lanes.get_mut(lane)
                     {
@@ -1949,7 +1941,7 @@ impl<'a> Run<'a> {
     ) -> Option<Landed> {
         let flight = self.next_flight;
         self.next_flight += 1;
-        let sink = &self.engine.sink;
+        let erasing = self.engine.erasing();
         let marking = index.clone();
         self.seeding.push((
             flight,
@@ -1963,7 +1955,7 @@ impl<'a> Run<'a> {
         ));
         let seed = async move {
             let started = Instant::now();
-            let result = sink.mark_seeded(&marking).await;
+            let result = erasing.mark_seeded(&marking).await;
             Landed {
                 flight,
                 outcome: Outcome::Seed(result),
@@ -1979,13 +1971,34 @@ impl<'a> Run<'a> {
     async fn seed_returned(
         &mut self,
         flight: u64,
-        result: sink::Result<()>,
+        result: std::result::Result<sink::Result<()>, super::slot::NotHeld>,
         took: Duration,
     ) -> Result<()> {
         let Some(at) = self.seeding.iter().position(|(id, _)| *id == flight) else {
             return Ok(());
         };
         let (_, seeding) = self.seeding.swap_remove(at);
+        // O29: a seed writes the marker whole, erasing whatever record
+        // another process wrote since: refused while this process holds no
+        // slot (`slot`). A parked lane's seed is its probe, tried again on
+        // the lane's backoff; an open lane's is cut, and asked again at the
+        // next read while the slot is held.
+        let result = match result {
+            Ok(result) => result,
+            Err(super::slot::NotHeld) => {
+                let lane = seeding.lane;
+                if !self.lane_open(lane) {
+                    self.put_back_complete(seeding);
+                    self.probed(lane, ProbeOutcome::Failed);
+                    return Ok(());
+                }
+                self.engine.cut_unheld_seed(&seeding.index);
+                let oldest = self.is_oldest(lane, seeding.seq);
+                return self
+                    .acknowledge(seeding.handle, lane, seeding.seq, None, oldest, None)
+                    .await;
+            }
+        };
         match result {
             Ok(()) => {}
             // The target is not the one staged: the lane is staged again,
@@ -3335,10 +3348,10 @@ impl<'a> Run<'a> {
             let flight = self.next_flight;
             self.next_flight += 1;
             self.detaching.push((flight, lane));
-            let sink = &self.engine.sink;
+            let erasing = self.engine.erasing();
             let record = async move {
                 let started = Instant::now();
-                let result = sink.detach(mapping, &detach).await;
+                let result = erasing.detach_ungated(mapping, &detach).await;
                 Landed {
                     flight,
                     outcome: Outcome::Detach(result),
@@ -3454,13 +3467,6 @@ impl<'a> Run<'a> {
     /// flight holding no slot: the probe waits for it, so a lane that opens
     /// leaves nothing for the next staging to detach (§5).
     async fn start_clears(&mut self) -> Result<()> {
-        // O29: a clear deletes the `Detached` record it reads, which may be
-        // another process's by now. With no slot held the lane stays parked
-        // and the record stays (a conservative detach); every turn tries
-        // again, so the clear runs once the slot is held.
-        if !self.engine.rereads.may_erase_records() {
-            return Ok(());
-        }
         let now = Instant::now();
         let due: Vec<usize> = (0..self.lanes.len())
             .filter(|lane| {
@@ -3608,7 +3614,7 @@ impl<'a> Run<'a> {
             };
             let why = "a reindex restarts the rebuild, which was parked or restaging (O20)";
             let detach = sink::Detach::new(why).live_only(!self.engine.options.backfill);
-            match self.engine.sink.detach(mapping, &detach).await {
+            match self.engine.erasing().detach_ungated(mapping, &detach).await {
                 Ok(sink::Recorded::Kept) => self.detached(lane, why.to_owned(), None).await?,
                 Ok(_) => continue,
                 Err(error) => {
