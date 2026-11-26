@@ -25,7 +25,7 @@
 //! (input-only, or under an `indexed: false` join or an `enabled: false`
 //! object) is left alone. The projection
 //! ([`IndexSchema::resolve`](super::IndexSchema::resolve)) and the content hash
-//! follow [`IndexSchema::completed_date_formats`], so exactly the indexes with
+//! follow [`IndexSchema::completed_date_formats`](super::IndexSchema::completed_date_formats), so exactly the indexes with
 //! such a field move to a new physical index, once.
 //!
 //! | Named format (also `strict_` and camelCase) | date field | timestamp field |
@@ -188,7 +188,7 @@ pub fn with_iso(format: &str, values: DateValues) -> Option<String> {
 /// date-typed field whose format can't read what flusso writes into it;
 /// `None` for any other field. Whether the index maps the field at all (an
 /// `indexed: false` ancestor) is the caller's: see
-/// [`IndexSchema::completed_date_formats`].
+/// [`IndexSchema::completed_date_formats`](super::IndexSchema::completed_date_formats).
 pub fn iso_date_format(field: &Field) -> Option<String> {
     if !field.emit {
         return None;
