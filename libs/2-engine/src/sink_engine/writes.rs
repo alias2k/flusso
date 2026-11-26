@@ -3514,6 +3514,13 @@ impl<'a> Run<'a> {
     /// flight holding no slot: the probe waits for it, so a lane that opens
     /// leaves nothing for the next staging to detach (§5).
     async fn start_clears(&mut self) -> Result<()> {
+        // O29: a clear deletes the `Detached` record it reads, which may be
+        // another process's by now. With no slot held the lane stays parked
+        // and the record stays (a conservative detach); every turn tries
+        // again, so the clear runs once the slot is held.
+        if !self.engine.rereads.may_erase_records() {
+            return Ok(());
+        }
         let now = Instant::now();
         let due: Vec<usize> = (0..self.lanes.len())
             .filter(|lane| {
