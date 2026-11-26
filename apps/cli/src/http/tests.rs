@@ -927,7 +927,10 @@ async fn status_shows_a_lanes_gaps_until_a_seed() {
     let snapshot = serde_json::to_value(status.snapshot()).unwrap();
     assert_eq!(
         snapshot["sinks"]["primary"]["lanes"]["users"]["gaps"],
-        json!([{ "from": "2", "to": "5" }, { "from": "10", "to": null }])
+        json!([
+            { "from": "2", "to": "5" },
+            { "from": "10", "to": null, "settling": true },
+        ])
     );
     observer.on_index_seeded(&primary, &index("users"));
     let snapshot = serde_json::to_value(status.snapshot()).unwrap();

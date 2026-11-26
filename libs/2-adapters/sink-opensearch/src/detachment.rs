@@ -321,7 +321,7 @@ mod tests;
 fn read_gaps(marker: &Value) -> Vec<sink::Gap> {
     let one = |gap: &Value| {
         if !gap.is_object() {
-            tracing::error!(%gap, "a gap the seed marker keeps can't be read: taken as a gap with both ends unknown, which refuses every position until it is settled");
+            tracing::error!(%gap, "a gap the seed marker keeps can't be read: taken as a gap with both ends unknown, which refuses every position until it is settled. flusso settles it by itself at its next read while it holds the slot (to where the lane stands, refusing only the past from there); a detached lane keeps it until it is attached. Meanwhile a reindex on a sink that can rebuild clears it");
         }
         let text = |key: &str| gap.get(key).and_then(Value::as_str).map(str::to_owned);
         sink::Gap {

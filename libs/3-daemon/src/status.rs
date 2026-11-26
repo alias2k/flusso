@@ -596,6 +596,7 @@ impl Status {
                     .map(|gap| LaneGap {
                         from: gap.from.clone(),
                         to: gap.to.clone(),
+                        settling: gap.to.is_none(),
                     })
                     .collect(),
             );
@@ -1548,6 +1549,13 @@ pub struct LaneGap {
     pub from: Option<String>,
     /// Where the lane was attached again.
     pub to: Option<String>,
+    /// The end is unknown (a reattach cut short, or an entry that can't be
+    /// read): flusso settles it by itself at its next read while it holds
+    /// the slot, to where the lane stands, refusing only the past from
+    /// there; a detached lane keeps it until it is attached. Meanwhile every
+    /// position after `from` is refused. Absent once settled.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub settling: bool,
 }
 
 /// The most bytes of an error a per-index `last_error` keeps (slice 8-2):
