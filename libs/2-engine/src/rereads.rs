@@ -180,6 +180,14 @@ impl Rereads {
         }
     }
 
+    /// Whether an opening began and has not returned `Ok` yet: one in
+    /// flight, or one that failed and no later one got through. No stream is
+    /// current then, so no lane is written until an opening returns and its
+    /// records are read again. Two atomic loads.
+    pub fn opening_outstanding(&self) -> bool {
+        self.opened.load(Ordering::Acquire) != self.read_begins()
+    }
+
     /// What a read of the records beginning now counts for: the last
     /// opening that returned. A sink engine takes it before it reads, and
     /// hands it to [`read`](Self::read) after.

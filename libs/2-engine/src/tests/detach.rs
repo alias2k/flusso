@@ -3425,3 +3425,35 @@ async fn a_step_whose_read_spans_an_opening_counts_no_read_for_it() {
         );
     }
 }
+
+/// The fourth re-check's world property: after a failed opening no stream is
+/// current (another process may hold the slot), so nothing is written, a
+/// seed included, until an opening gets through and the records are read
+/// again.
+#[tokio::test(start_paused = true)]
+async fn a_failed_opening_writes_nothing_until_one_gets_through() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    rig.live(&users(), 1, 1).await;
+    eventually("written while the stream is current", || {
+        written(&rig).contains(&"users/1".to_owned())
+    })
+    .await;
+    assert!(rig.rereads.open(async { Err::<(), ()>(()) }).await.is_err());
+    rig.live(&users(), 2, 2).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        written(&rig),
+        ["users/1"],
+        "nothing written with no stream current"
+    );
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("written once an opening got through", || {
+        written(&rig).contains(&"users/2".to_owned())
+    })
+    .await;
+    assert!(rig.sink.unread_writes.lock().unwrap().is_empty());
+    task.abort();
+}

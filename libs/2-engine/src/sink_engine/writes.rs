@@ -1459,6 +1459,13 @@ impl<'a> Run<'a> {
     /// run a lane's `SnapshotComplete` once it is the oldest thing unfinished
     /// on its lane.
     async fn grant(&mut self) -> Result<()> {
+        // O29: with no stream current (an opening in flight, or one that
+        // failed: another process may hold the slot), nothing is written or
+        // seeded. The opening that gets through wakes the run, which reads
+        // the records again first.
+        if self.engine.rereads.opening_outstanding() {
+            return Ok(());
+        }
         let slots = self.slots();
         // A write handled at its first poll may have failed the run: from
         // then on nothing new starts.
@@ -2528,6 +2535,7 @@ impl<'a> Run<'a> {
         // No probe starts once the run failed (review of #458, m2).
         self.unhealthy > 0
             && self.failure.is_none()
+            && !self.engine.rereads.opening_outstanding()
             && self.substitutes.is_some()
             && self.lanes.iter().any(|run| run.health.rebuild.is_some())
     }
