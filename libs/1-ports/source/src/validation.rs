@@ -239,6 +239,20 @@ pub trait Catalog: Send + Sync {
     ) -> Result<bool> {
         Ok(true)
     }
+
+    /// Whether the store records which of `table`'s columns admit null: a
+    /// table does; a view's columns read as nullable whatever they hold. Only
+    /// asked of a table with a column a field declares non-null that the
+    /// store reports nullable.
+    ///
+    /// The default is `true`: the column is judged as a table's.
+    async fn tracks_nullability(
+        &self,
+        _schema: &DatabaseSchema,
+        _table: &TableName,
+    ) -> Result<bool> {
+        Ok(true)
+    }
 }
 
 /// How serious a [`Diagnostic`] is.
@@ -273,6 +287,11 @@ pub enum DiagnosticKind {
     /// A field declared non-null (`required`) over a column that allows null:
     /// a document can hold null where the schema says it never does.
     Nullability,
+    /// A field declared non-null (`required`) over a column of a relation
+    /// that records no nullability (a view, say), which reads as nullable
+    /// whatever it holds: nothing is known either way, so the field must
+    /// really never be null.
+    NullabilityUntracked,
     /// A join's `primary_key` names no column. Nothing builds on it: the join
     /// is keyed by the table's own primary key.
     IgnoredPrimaryKey,
@@ -382,9 +401,10 @@ impl DiagnosticKind {
             | Self::UndeclaredArrayColumn
             | Self::IdsElementLossy
             | Self::TimestampFormat => Severity::Error,
-            Self::IgnoredPrimaryKey | Self::DuplicateFieldName | Self::CheckSkipped => {
-                Severity::Warning
-            }
+            Self::IgnoredPrimaryKey
+            | Self::DuplicateFieldName
+            | Self::NullabilityUntracked
+            | Self::CheckSkipped => Severity::Warning,
         }
     }
 
@@ -397,6 +417,7 @@ impl DiagnosticKind {
             Self::TypeMismatch => "type_mismatch",
             Self::NotNumeric => "not_numeric",
             Self::Nullability => "nullability",
+            Self::NullabilityUntracked => "nullability_untracked",
             Self::IgnoredPrimaryKey => "ignored_primary_key",
             Self::RelationPrimaryKey => "relation_primary_key",
             Self::TransformNotApplicable => "transform_not_applicable",
@@ -1721,6 +1742,23 @@ impl Checker<'_> {
         // a plain non-null declaration over a nullable column is worth flagging.
         let forced_non_null = primary_key == Some(&column.column) || column.default.is_some();
         if !column.nullable && info.nullable && !forced_non_null {
+            if !self
+                .catalog
+                .tracks_nullability(self.db_schema, table)
+                .await?
+            {
+                self.report(
+                    DiagnosticKind::NullabilityUntracked,
+                    format!(
+                        "declared non-null (`required: true`), but `{table}` records no \
+                         nullability (a view, a materialized view or a foreign table reads every \
+                         column as nullable): flusso cannot check it. The column must really \
+                         never hold null; if it can, declare `required: false` or give the \
+                         field a `default`"
+                    ),
+                );
+                return Ok(());
+            }
             self.report(
                 DiagnosticKind::Nullability,
                 "declared non-null (`required: true`) but the database column allows null: a \
@@ -2326,6 +2364,73 @@ mod tests {
                 (path("email"), DiagnosticKind::TypeMismatch, Severity::Error),
                 (path("at"), DiagnosticKind::NotNumeric, Severity::Error),
             ]
+        );
+    }
+
+    /// `Places` read as a view: its columns record no nullability.
+    struct PlacesView;
+
+    #[async_trait]
+    impl Catalog for PlacesView {
+        async fn column(
+            &self,
+            schema: &DatabaseSchema,
+            table: &TableName,
+            column: &ColumnName,
+        ) -> Result<ColumnInfo> {
+            Places.column(schema, table, column).await
+        }
+
+        async fn has_table(&self, _: &DatabaseSchema, _: &TableName) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn tracks_nullability(&self, _: &DatabaseSchema, _: &TableName) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    /// `required` over a view's column is only a warning (issue #485): the
+    /// store reports it nullable whatever it holds, so nothing is known. On a
+    /// table it stays the error.
+    #[test]
+    fn required_over_a_views_column_is_a_warning_that_says_why() {
+        let schema: IndexSchema = serde_json::from_value(json!({
+            "version": 1, "table": "places", "db_schema": "public", "primary_key": "id",
+            "fields": [
+                { "field": "id", "source": { "column": { "column": "id", "ty": "integer", "nullable": false } } },
+                { "field": "label", "source": { "column": { "column": "label", "ty": "keyword", "nullable": false } } },
+            ],
+        }))
+        .unwrap();
+        let spec = SourceSpec::new(BTreeMap::from([(
+            IndexName::try_new("places").unwrap(),
+            schema,
+        )]));
+        let kinds = |catalog: &dyn Catalog| {
+            futures::executor::block_on(validate_indexes(&spec, catalog))
+                .unwrap()
+                .into_iter()
+                .filter(|d| d.dotted_path() == "label")
+                .filter(|d| d.kind != DiagnosticKind::TypeMismatch)
+                .collect::<Vec<_>>()
+        };
+        let on_a_table = kinds(&Places);
+        assert_eq!(
+            on_a_table.iter().map(|d| d.kind).collect::<Vec<_>>(),
+            vec![DiagnosticKind::Nullability]
+        );
+        let on_a_view = kinds(&PlacesView);
+        let [finding] = on_a_view.as_slice() else {
+            panic!("one finding: {on_a_view:?}");
+        };
+        assert_eq!(finding.kind, DiagnosticKind::NullabilityUntracked);
+        assert_eq!(finding.severity, Severity::Warning);
+        assert!(
+            finding.message.contains("flusso cannot check it")
+                && finding.message.contains("must really never hold null"),
+            "{}",
+            finding.message
         );
     }
 

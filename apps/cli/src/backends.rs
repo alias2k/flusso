@@ -434,6 +434,7 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         DiagnosticKind::TypeMismatch
         | DiagnosticKind::NotNumeric
         | DiagnosticKind::Nullability
+        | DiagnosticKind::NullabilityUntracked
         | DiagnosticKind::IgnoredPrimaryKey
         | DiagnosticKind::RootPrimaryKey
         | DiagnosticKind::UndeclaredArrayColumn
@@ -826,6 +827,13 @@ mod tests {
         let printed = starts(DiagnosticKind::Nullability);
         assert!(printed.contains("[error]"), "{printed}");
         assert!(printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn required_over_a_views_column_warns_and_starts() {
+        let printed = starts(DiagnosticKind::NullabilityUntracked);
+        assert!(printed.contains("[warning]"), "{printed}");
+        assert!(!printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
