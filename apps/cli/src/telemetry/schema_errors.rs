@@ -14,12 +14,50 @@
 //! ```text
 //! flusso_index_schema_errors{index="products",kind="undeclared_array_column"} 1
 //! ```
+//!
+//! **One copy per reader.** The start's printed report and these events both
+//! go to stderr, so who reads stderr decides ([`Reader::of_stderr`]): at a
+//! terminal the report prints them and the events stay off the stderr log
+//! ([`on_the_stderr_log`]); into a log the events are the copy and the report
+//! leaves them out. Either way the events reach the OTel export, where with no
+//! log bridge they are span events of the `daemon.start` span.
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
 
 use opentelemetry::metrics::Meter;
 use opentelemetry::{KeyValue, global};
 use source::{Diagnostic, Severity};
+
+/// The target of the events, by which the stderr log leaves them out at a
+/// terminal.
+pub(crate) const TARGET: &str = "flusso::schema_errors";
+
+/// Who reads stderr: a person at a terminal, or a log a deployment collects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reader {
+    /// stderr is a terminal: the printed report is read.
+    Person,
+    /// stderr goes elsewhere: the log lines are read.
+    Log,
+}
+
+impl Reader {
+    /// Who reads this process's stderr.
+    pub(crate) fn of_stderr() -> Self {
+        if std::io::stderr().is_terminal() {
+            Self::Person
+        } else {
+            Self::Log
+        }
+    }
+}
+
+/// Whether the stderr log writes an event of `target` for `reader`: every
+/// event but these, which a person reads in the report instead.
+pub(crate) fn on_the_stderr_log(target: &str, reader: Reader) -> bool {
+    reader == Reader::Log || target != TARGET
+}
 
 /// Log every error-severity diagnostic in `diagnostics` and set the gauge on
 /// the global meter. Warnings are left to the printed report.
@@ -32,6 +70,7 @@ pub(crate) fn record(meter: &Meter, diagnostics: &[Diagnostic]) {
     let mut counts: BTreeMap<(String, &'static str), u64> = BTreeMap::new();
     for d in errors {
         tracing::error!(
+            target: TARGET,
             index = %d.index,
             kind = d.kind.as_str(),
             field = %d.dotted_path(),
@@ -144,12 +183,22 @@ mod tests {
             _: tracing_subscriber::layer::Context<'_, S>,
         ) {
             let mut fields = Fields::default();
+            fields
+                .0
+                .push(("target".to_owned(), event.metadata().target().to_owned()));
             event.record(&mut fields);
             self.0
                 .lock()
                 .unwrap()
                 .push((*event.metadata().level(), fields.0));
         }
+    }
+
+    #[test]
+    fn the_stderr_log_leaves_the_events_to_the_report_only_at_a_terminal() {
+        assert!(!on_the_stderr_log(TARGET, Reader::Person));
+        assert!(on_the_stderr_log(TARGET, Reader::Log));
+        assert!(on_the_stderr_log("flusso::daemon", Reader::Person));
     }
 
     #[test]
@@ -168,6 +217,12 @@ mod tests {
             events
                 .iter()
                 .all(|(level, _)| *level == tracing::Level::ERROR)
+        );
+        assert!(
+            events.iter().all(|(_, fields)| fields
+                .iter()
+                .any(|(name, value)| name == "target" && value == TARGET)),
+            "every event carries the target: {events:?}"
         );
         let field = |at: usize, name: &str| {
             events[at]

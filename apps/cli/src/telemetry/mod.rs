@@ -46,7 +46,11 @@ pub(crate) fn init_tracing() -> Option<SdkTracerProvider> {
     } else {
         Box::new(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
     };
-    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = vec![fmt_layer];
+    let reader = schema_errors::Reader::of_stderr();
+    let fmt_layer = fmt_layer.with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+        schema_errors::on_the_stderr_log(meta.target(), reader)
+    }));
+    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = vec![Box::new(fmt_layer)];
 
     // Capture any setup error to log *after* the subscriber is installed (we have
     // no logging yet).

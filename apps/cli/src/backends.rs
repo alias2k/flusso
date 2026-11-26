@@ -32,6 +32,7 @@ use script::{ScriptedBuilder, Scripts};
 
 use crate::adapters::{self, IndexSinkConfig, SinkConfig};
 use crate::commands::print;
+use crate::telemetry::schema_errors::Reader;
 
 /// The one [`Backends`] implementation: the composition root's choice of
 /// concrete adapters, looked up by each port entry's `type`.
@@ -220,6 +221,7 @@ async fn validate_at_start(
         &diagnostics,
         &|at| refused.get(at).copied().unwrap_or(true),
         strict,
+        Reader::of_stderr(),
     )?;
     crate::telemetry::schema_errors::report(&diagnostics);
     Ok(())
@@ -326,42 +328,69 @@ fn plain_opensearch(
 /// Every other diagnostic is printed and the start goes on. `refused(i)` says
 /// whether a sink refuses what `diagnostics[i]` describes, for a kind only a
 /// sink's mapping refuses (see [`a_sink_refuses`]).
+///
+/// An error the start goes on with is also an `error` event
+/// ([`schema_errors`](crate::telemetry::schema_errors)), so each reader gets
+/// one copy: a person at a terminal reads it here and the event stays off
+/// stderr; a deployment's log reads the event, so it is left out here.
 fn start_verdict(
     out: &mut impl Write,
     pen: print::Pen,
     diagnostics: &[Diagnostic],
     refused: &dyn Fn(usize) -> bool,
     strict: bool,
+    reader: Reader,
 ) -> anyhow::Result<()> {
     if diagnostics.is_empty() {
         return Ok(());
     }
-    print::diagnostics(out, pen, diagnostics)?;
-    writeln!(out)?;
     let blocking = diagnostics
         .iter()
         .enumerate()
         .filter(|(at, d)| stops_the_start(d.kind) && refused(*at))
         .count();
+    let errors = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .count();
+    let starts = blocking == 0 && (!strict || errors == 0);
+    if starts && reader == Reader::Log {
+        let warnings: Vec<Diagnostic> = diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .cloned()
+            .collect();
+        if !warnings.is_empty() {
+            print::diagnostics(out, pen, &warnings)?;
+            writeln!(out)?;
+        }
+    } else {
+        print::diagnostics(out, pen, diagnostics)?;
+        writeln!(out)?;
+    }
     ensure!(
         blocking == 0,
         "the schemas cannot be built against this database ({blocking} problem(s) above); \
          fix them, confirm with `flusso check`, then start again"
     );
-    let errors = diagnostics
-        .iter()
-        .filter(|d| d.severity == Severity::Error)
-        .count();
     ensure!(
         !strict || errors == 0,
         "the schemas do not give a working index against this database ({errors} error(s) \
          above, refused under --strict); fix them, confirm with `flusso check`, then start again"
     );
     if errors > 0 {
-        writeln!(
-            out,
-            "starting anyway: the errors above do not stop `flusso run` (`flusso check` still fails on them)\n"
-        )?;
+        match reader {
+            Reader::Person => writeln!(
+                out,
+                "starting anyway: the errors above do not stop `flusso run` (`flusso check` still \
+                 fails on them; `--strict` refuses them)\n"
+            )?,
+            Reader::Log => writeln!(
+                out,
+                "starting anyway with {errors} schema error(s) `flusso check` fails on, each \
+                 logged next as an `error` line (`--strict` refuses them)\n"
+            )?,
+        }
     }
     Ok(())
 }
@@ -549,14 +578,88 @@ mod tests {
             diagnostics,
             &|_| true,
             false,
+            Reader::Person,
         );
         (result, String::from_utf8(out).unwrap())
     }
 
     fn strict_verdict(diagnostics: &[Diagnostic]) -> (anyhow::Result<()>, String) {
         let mut out = Vec::new();
-        let result = start_verdict(&mut out, print::Pen::plain(), diagnostics, &|_| true, true);
+        let result = start_verdict(
+            &mut out,
+            print::Pen::plain(),
+            diagnostics,
+            &|_| true,
+            true,
+            Reader::Log,
+        );
         (result, String::from_utf8(out).unwrap())
+    }
+
+    fn logged_verdict(diagnostics: &[Diagnostic]) -> (anyhow::Result<()>, String) {
+        let mut out = Vec::new();
+        let result = start_verdict(
+            &mut out,
+            print::Pen::plain(),
+            diagnostics,
+            &|_| true,
+            false,
+            Reader::Log,
+        );
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    /// Into a log (stderr not a terminal), an error the start goes on with is
+    /// left to its `error` event: the report prints the warnings and says how
+    /// many errors follow as log lines, so no finding is read twice.
+    #[test]
+    fn into_a_log_an_error_the_start_goes_on_with_is_left_to_its_event() {
+        let (result, printed) = logged_verdict(&[
+            diagnostic(DiagnosticKind::UndeclaredArrayColumn),
+            diagnostic(DiagnosticKind::IgnoredPrimaryKey),
+        ]);
+        assert!(result.is_ok(), "{printed}");
+        assert!(printed.contains("a IgnoredPrimaryKey finding"), "{printed}");
+        assert!(
+            !printed.contains("a UndeclaredArrayColumn finding"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains(
+                "starting anyway with 1 schema error(s) `flusso check` fails on, each logged next \
+                 as an `error` line"
+            ),
+            "{printed}"
+        );
+    }
+
+    /// A refused start emits no event, so its report prints everything, into a
+    /// log too.
+    #[test]
+    fn into_a_log_a_refused_start_prints_every_finding() {
+        let (result, printed) = logged_verdict(&[
+            diagnostic(DiagnosticKind::UndeclaredArrayColumn),
+            diagnostic(DiagnosticKind::UnknownColumn),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            printed.contains("a UndeclaredArrayColumn finding"),
+            "{printed}"
+        );
+        assert!(printed.contains("a UnknownColumn finding"), "{printed}");
+    }
+
+    /// Into a log with nothing but errors the start goes on with, the report is
+    /// the one line saying they follow.
+    #[test]
+    fn into_a_log_errors_alone_print_one_line() {
+        let (result, printed) = logged_verdict(&[diagnostic(DiagnosticKind::Nullability)]);
+        assert!(result.is_ok());
+        assert_eq!(
+            printed.lines().filter(|l| !l.is_empty()).count(),
+            1,
+            "{printed}"
+        );
     }
 
     /// `--strict` (issue #485) refuses every error `flusso check` fails on,
@@ -777,6 +880,7 @@ mod tests {
             &diagnostics,
             &|_| false,
             false,
+            Reader::Person,
         );
         assert!(result.is_ok());
         let printed = String::from_utf8(out).unwrap();
