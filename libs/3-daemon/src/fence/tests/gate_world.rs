@@ -1556,3 +1556,86 @@ proptest! {
             .block_on(run(events))?;
     }
 }
+
+/// Run `events` in the world, as the property does.
+fn replay(events: Vec<Event>) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap()
+        .block_on(run(events))
+        .unwrap();
+}
+
+/// The sixth re-check, B-1, the reviewer's first seed, as its shrunk events:
+/// the seed in the regression file replays another list once the strategy
+/// changes. A reattach waits in `ensure_index` while the stream ends; its
+/// delete of another process's record is refused.
+#[test]
+fn a_reattach_waiting_in_ensure_as_the_stream_ends_deletes_no_record() {
+    replay(vec![
+        Event::StreamEnds {
+            jump: 10,
+            drop: Some(1),
+            rebuild: false,
+        },
+        Event::Open {
+            ok: true,
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::HoldEnsure { sink: 0 },
+        Event::Reattach { index: 1 },
+        Event::StreamEnds {
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::Release { sink: 0 },
+    ]);
+}
+
+/// The sixth re-check, B-1, the reviewer's second seed: the same, the
+/// reattach waiting in its read of the records instead.
+#[test]
+fn a_reattach_waiting_in_its_read_as_the_stream_ends_deletes_no_record() {
+    replay(vec![
+        Event::StreamEnds {
+            jump: 10,
+            drop: Some(1),
+            rebuild: false,
+        },
+        Event::Open {
+            ok: true,
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::HoldReads { sink: 0 },
+        Event::Reattach { index: 1 },
+        Event::StreamEnds {
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::Release { sink: 0 },
+    ]);
+}
+
+/// An earlier round's seed, as its shrunk events: another process's rebuild
+/// found by a new process, then a reindex.
+#[test]
+fn a_reindex_after_a_new_process_found_anothers_rebuild() {
+    replay(vec![
+        Event::Open {
+            ok: true,
+            jump: 10,
+            drop: Some(2),
+            rebuild: true,
+        },
+        Event::NewProcess,
+        Event::Reindex { index: 0 },
+    ]);
+}
