@@ -3807,3 +3807,68 @@ async fn a_reindex_of_an_open_index_is_owed_while_no_stream_is_held() {
     .await;
     task.abort();
 }
+
+/// The fifth re-check, B-3: a staging of a lane held detached finds another
+/// process's rebuild (its record `rebuilding`, a walk checkpoint kept). It
+/// puts it back to detached before it counts the read, as the read again
+/// does, or the slot would pass what the lane dropped and a later start
+/// would resume that walk over it.
+#[tokio::test(start_paused = true)]
+async fn a_staging_of_a_lane_held_detached_demotes_anothers_rebuild() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task) = detached_on_a_block(&rig).await;
+    task.abort();
+    let _ = task.await;
+    let mut record = Detachment::recorded(
+        DetachRecord::Rebuilding { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    );
+    record.attempts = Some(1);
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), record);
+    rig.sink
+        .walked
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), "k".to_owned());
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(
+        *rig.sink.demoted.lock().unwrap(),
+        [("users".to_owned(), false)],
+        "another process's rebuild put back to detached"
+    );
+    assert!(rig.sink.walked.lock().unwrap().get("users").is_none());
+    assert!(engine.lane_health(&lane(users())).is_detached());
+}
+
+/// The fifth re-check (the staging half of `acf2328a`): a lane rebuilding
+/// here under attempt 1 whose record, read at a staging of a running
+/// process, counts attempt 2 is another process's: put back to detached,
+/// never taken as this one's.
+#[tokio::test(start_paused = true)]
+async fn a_staging_demotes_a_rebuild_begun_since_ours() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    eventually("the rebuild is attached", || {
+        engine.lane_health(&lane(users())).is_open()
+    })
+    .await;
+    task.abort();
+    let _ = task.await;
+    if let Some(record) = rig.sink.kept.lock().unwrap().get_mut("users") {
+        record.attempts = Some(2);
+    }
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(
+        *rig.sink.demoted.lock().unwrap(),
+        [("users".to_owned(), false)]
+    );
+    assert!(engine.lane_health(&lane(users())).is_detached());
+}
