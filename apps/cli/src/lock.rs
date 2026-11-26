@@ -59,6 +59,9 @@ pub(crate) fn plan_config(
 pub(crate) enum LockState {
     /// It holds exactly what the config compiles to.
     Current,
+    /// It holds the same config in other bytes (line endings, formatting):
+    /// `run --locked` runs this config, and `run` would rewrite it.
+    Respelled,
     /// It holds another config; `differs` names what, at the top level.
     Stale { differs: Vec<String> },
     /// No file there: `run` with the config writes one.
@@ -92,6 +95,7 @@ impl LockState {
             }
         }
         match config::from_bytes(&existing) {
+            Ok(old) if same(&old, &compiled.config) => Self::Respelled,
             Ok(old) => Self::Stale {
                 differs: differences(&old, &compiled.config),
             },
@@ -116,6 +120,7 @@ impl LockState {
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Current => "current",
+            Self::Respelled => "same_config",
             Self::Stale { .. } => "lock_stale",
             Self::Missing => "missing",
             Self::Unreadable { .. } => "lock_unreadable",
@@ -128,6 +133,10 @@ impl LockState {
         let lock = path.display();
         match self {
             Self::Current => format!("{lock} is current"),
+            Self::Respelled => format!(
+                "{lock} holds this config in other bytes than flusso writes (line endings or \
+                 formatting); `flusso run` would rewrite it"
+            ),
             Self::Missing => format!("{lock} not found; flusso build writes it"),
             Self::NotCompared => {
                 format!("no config to compare {lock} with: the lock is what was checked")
@@ -156,6 +165,14 @@ impl LockState {
 
 const REGENERATE: &str =
     "re-run `flusso build` (or `flusso run` without `--locked`) to regenerate the lock";
+
+/// Whether the config a lock holds is the config now, value for value.
+fn same(old: &config::Config, new: &config::Config) -> bool {
+    match (serde_json::to_value(old), serde_json::to_value(new)) {
+        (Ok(old), Ok(new)) => old == new,
+        _ => false,
+    }
+}
 
 /// What differs between the config a lock holds and the config now, at the
 /// top level: each index's schema (added, removed, changed), then the
@@ -326,5 +343,25 @@ mod tests {
                         .contains("flusso build")
             );
         }
+    }
+
+    /// A lock holding this config in other bytes (CRLF line endings from a
+    /// Windows checkout, another formatting) runs exactly this config, so it
+    /// is no error: a note that `run` would rewrite it (review 3 of #486).
+    #[test]
+    fn a_lock_with_crlf_line_endings_holds_the_same_config_and_is_no_error() {
+        let dir = project("crlf", &["users"], "out");
+        let bytes = config::to_bytes(&compiled(&dir)).unwrap();
+        let crlf = String::from_utf8(bytes).unwrap().replace('\n', "\r\n");
+        std::fs::write(dir.join("flusso.lock"), crlf).unwrap();
+        let state = LockState::of(&compiled(&dir), &dir.join("flusso.lock"));
+        assert_eq!(state, LockState::Respelled);
+        assert!(!state.is_error());
+        assert_eq!(state.as_str(), "same_config");
+        assert_eq!(
+            state.message(Path::new("flusso.lock")),
+            "flusso.lock holds this config in other bytes than flusso writes (line endings or \
+             formatting); `flusso run` would rewrite it"
+        );
     }
 }
