@@ -1625,6 +1625,82 @@ async fn an_adopted_detach_without_its_through_vouches_for_nothing_new() {
     assert_eq!(started.elapsed(), Duration::ZERO, "at once");
 }
 
+/// A rebuild under way on `primary`'s `users`, frozen at 10 with the change at
+/// 20 dropped while detached; the detach heard again meanwhile (a staging
+/// re-announces it).
+fn rebuilding_heard_detached_again() -> Rig {
+    let rig = fence(&["primary"]);
+    let before = rig.source.emit(10);
+    rig.route(before);
+    rig.applied("primary", before);
+    rig.searchable("primary", before);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    let _dropped = rig.source.emit(20);
+    rig.observer
+        .on_index_rebuilding(&sink("primary"), &index("users"));
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig
+}
+
+/// The fourth re-check's world property: a detach heard again while a
+/// rebuild waits for its attach keeps the lane rebuilding, so the attach
+/// never makes it vouch for what the old generation misses: after the attach
+/// a wait inside the drop is `rebuilding`, not vouched for, not `backfilling`.
+#[tokio::test(start_paused = true)]
+async fn a_detach_heard_again_during_a_rebuild_keeps_it_a_rebuild() {
+    let rig = rebuilding_heard_detached_again();
+    assert_eq!(
+        rig.progress.attach(&lane("primary"), 1),
+        engine::Attach::Attached
+    );
+    rig.observer
+        .on_lane_health(&lane("primary"), &engine::LaneHealth::Open);
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    let after = rig.source.emit(30);
+    rig.route(after);
+    rig.applied("primary", after);
+    assert_eq!(
+        rig.fence
+            .wait(&request("10", FenceLevel::Applied, None))
+            .await,
+        reached("10")
+    );
+    assert!(
+        matches!(
+            rig.fence
+                .wait(&request("20", FenceLevel::Applied, None))
+                .await,
+            Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Rebuilding)]
+        ),
+        "the change dropped while detached"
+    );
+}
+
+/// ... and only the rebuild's end makes the lane plain detached, frozen
+/// where the rebuild froze.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_that_ends_without_its_seed_leaves_the_lane_detached() {
+    let rig = rebuilding_heard_detached_again();
+    rig.observer.on_lane_rebuild(&lane("primary"), None, None);
+    assert_eq!(
+        rig.fence
+            .wait(&request("10", FenceLevel::Applied, None))
+            .await,
+        reached("10")
+    );
+    assert!(
+        matches!(
+            rig.fence
+                .wait(&request("20", FenceLevel::Applied, None))
+                .await,
+            Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Detached)]
+        ),
+        "frozen where the rebuild froze"
+    );
+}
+
 /// Review of the second fix round, B1'': the property over the fence and
 /// the O29 gate. Random sequences of what one sink and one lane go through
 /// run against a small model whose only rule is that a wait for `p` passes

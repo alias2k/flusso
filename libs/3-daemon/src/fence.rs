@@ -482,13 +482,31 @@ impl Fence {
         // start, past changes another process dropped: it freezes at
         // nothing (S-c).
         let read = self.read(lane);
-        self.serve(lane, |furthest| Serving::Detached {
-            through: match furthest.serving {
-                Serving::Writes if !read => (None, None),
-                Serving::Writes => (cap(furthest.applied), cap(furthest.searchable)),
-                Serving::Rebuilding { through } | Serving::Detached { through } => through,
-                Serving::Pending | Serving::Backfilling => (None, None),
+        self.serve(lane, |furthest| match furthest.serving {
+            // A rebuild under way stays one while its lane is detached
+            // waiting for its attach, whatever re-announces the detach: only
+            // its end makes the lane plain detached (`rebuild_ended`).
+            Serving::Rebuilding { through } => Serving::Rebuilding { through },
+            Serving::Writes if !read => Serving::Detached {
+                through: (None, None),
             },
+            Serving::Writes => Serving::Detached {
+                through: (cap(furthest.applied), cap(furthest.searchable)),
+            },
+            Serving::Detached { through } => Serving::Detached { through },
+            Serving::Pending | Serving::Backfilling => Serving::Detached {
+                through: (None, None),
+            },
+        });
+    }
+
+    /// The rebuild of `lane` ended without its seed (dropped, or its lane
+    /// detached again): the lane is plain detached, frozen where the rebuild
+    /// froze. A seed already served it as `Writes`.
+    fn rebuild_ended(&self, lane: &LaneKey) {
+        self.serve(lane, |furthest| match furthest.serving {
+            Serving::Rebuilding { through } => Serving::Detached { through },
+            other => other,
         });
     }
 
@@ -908,6 +926,12 @@ impl Observer for FenceObserver {
 
     fn on_lane_gaps(&self, lane: &LaneKey, gaps: &[sink::Gap]) {
         self.fence.gaps(lane, gaps);
+    }
+
+    fn on_lane_rebuild(&self, lane: &LaneKey, rebuilding: Option<u64>, _: Option<u64>) {
+        if rebuilding.is_none() {
+            self.fence.rebuild_ended(lane);
+        }
     }
 }
 
