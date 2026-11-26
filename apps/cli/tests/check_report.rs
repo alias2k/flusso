@@ -372,3 +372,64 @@ fn check_fix_rewrites_the_lock_from_the_config() {
     );
     assert_eq!(std::fs::read(dir.join("flusso.lock")).unwrap(), written);
 }
+
+/// The advice for a stale lock works pasted as printed (fourth review of
+/// #486): with a config at another path, each command names it, and each
+/// leaves the lock current.
+#[test]
+fn the_advice_for_a_stale_lock_runs_as_printed() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("check_report")
+        .join("advice");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("deploy")).unwrap();
+    std::fs::write(
+        dir.join("deploy/t.schema.yml"),
+        "version: 1\ntable: t\nprimary_key: id\nfields:\n  - integer: id\n    required: true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("deploy/flusso.toml"),
+        "[source]\ntype = \"postgres\"\n\n[sinks.out]\ntype = \"stdout\"\n\n[[index]]\nname = \"t\"\n\
+         schema = \"t.schema.yml\"\nenabled = true\n",
+    )
+    .unwrap();
+    for (at, command) in [(0, "check"), (1, "build")] {
+        std::fs::write(dir.join("flusso.lock"), b"format_version = 2\n").unwrap();
+        let checked = flusso(
+            &dir,
+            &["check", "--offline", "--config", "deploy/flusso.toml"],
+        );
+        assert!(!checked.status.success(), "{}", shown(&checked));
+        let printed = String::from_utf8_lossy(&checked.stdout).into_owned();
+        let advice = printed
+            .split("Run `")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no advice in {printed}"));
+        let commands: Vec<&str> = advice
+            .split('`')
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 0)
+            .map(|(_, text)| text)
+            .take(2)
+            .collect();
+        let pasted: Vec<&str> = commands[at].split_whitespace().skip(1).collect();
+        assert_eq!(pasted[0], command, "{advice}");
+        assert!(
+            commands[at].contains("--config deploy/flusso.toml"),
+            "{advice}"
+        );
+        let ran = flusso(&dir, &pasted);
+        assert!(ran.status.success(), "{:?}: {}", pasted, shown(&ran));
+        let again = flusso(
+            &dir,
+            &["check", "--offline", "--config", "deploy/flusso.toml"],
+        );
+        assert!(
+            String::from_utf8_lossy(&again.stdout).contains("is current"),
+            "{:?}: {}",
+            pasted,
+            shown(&again)
+        );
+    }
+}

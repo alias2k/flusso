@@ -695,15 +695,15 @@ pub(crate) fn gaps(out: &mut impl Write, pen: Pen, gaps: &[crate::gaps::Gap]) ->
 pub(crate) fn lock(
     out: &mut impl Write,
     pen: Pen,
-    path: &std::path::Path,
+    at: &crate::lock::LockAt<'_>,
     state: &crate::lock::LockState,
 ) -> Result<()> {
     match state {
         crate::lock::LockState::Current | crate::lock::LockState::Rewritten { .. } => {
-            passed(out, pen, &state.message(path))
+            passed(out, pen, &state.message(at))
         }
         state if state.is_error() => Ok(()),
-        state => note(out, pen, &state.message(path)),
+        state => note(out, pen, &state.message(at)),
     }
 }
 
@@ -711,7 +711,7 @@ pub(crate) fn lock(
 pub(crate) fn lock_error(
     out: &mut impl Write,
     pen: Pen,
-    path: &std::path::Path,
+    at: &crate::lock::LockAt<'_>,
     state: &crate::lock::LockState,
 ) -> Result<()> {
     if !state.is_error() {
@@ -722,8 +722,8 @@ pub(crate) fn lock_error(
         out,
         "  {} {}  {}",
         pen.paint("1;31", "[error]"),
-        pen.bold(&path.display().to_string()),
-        state.message(path),
+        pen.bold(&at.lock.display().to_string()),
+        state.message(at),
     )?;
     Ok(())
 }

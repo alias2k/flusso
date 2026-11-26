@@ -149,14 +149,15 @@ impl LockState {
         }
     }
 
-    /// What it means, in a sentence, for the lock at `path`.
-    pub(crate) fn message(&self, path: &Path) -> String {
-        let lock = path.display();
+    /// What it means, in a sentence, for the lock `at` names, with the
+    /// commands that write it again spelled to run as printed.
+    pub(crate) fn message(&self, at: &LockAt<'_>) -> String {
+        let lock = at.lock.display();
         match self {
             Self::Current => format!("{lock} is current"),
             Self::Rewritten { .. } => format!(
                 "{} rewritten: {lock}",
-                path.file_name().map_or_else(
+                at.lock.file_name().map_or_else(
                     || lock.to_string(),
                     |name| name.to_string_lossy().into_owned()
                 )
@@ -165,10 +166,10 @@ impl LockState {
                 "{lock} holds this config in other bytes than flusso writes (line endings or \
                  formatting); `flusso run` would rewrite it"
             ),
-            Self::Missing if is_default(path) => {
+            Self::Missing if at.is_default() => {
                 format!("{lock} not found; flusso build writes it")
             }
-            Self::Missing => format!("{lock} not found; `{}` writes it", build(path)),
+            Self::Missing => format!("{lock} not found; `{}` writes it", at.build()),
             Self::NotCompared => {
                 format!("no config to compare {lock} with: the lock is what was checked")
             }
@@ -182,48 +183,89 @@ impl LockState {
                     "`{lock}` was compiled from another config than this one{what}: `flusso run \
                      --locked`, or an image baked from this lock, would run the older config. {} \
                      and commit the result",
-                    rewrite(path)
+                    at.rewrite()
                 )
             }
             Self::Unreadable { reason } => {
                 format!(
                     "`{lock}` can't be read as a lock, so `flusso run --locked` would fail on it: \
                      {reason}. {} to regenerate it",
-                    rewrite(path)
+                    at.rewrite()
                 )
             }
         }
     }
 }
 
-/// Whether `path` is the lock `build` and `run` write when not told another.
-fn is_default(path: &Path) -> bool {
-    path == Path::new(crate::DEFAULT_LOCK)
+/// The lock a `check` compared, and what its advice must name for the
+/// commands it prints to run as printed: a config at another path, `--offline`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LockAt<'a> {
+    pub(crate) lock: &'a Path,
+    /// The `--config` given, when there was one.
+    pub(crate) config: Option<&'a Path>,
+    pub(crate) offline: bool,
 }
 
-/// The `build` that writes the lock at `path`.
-fn build(path: &Path) -> String {
-    if is_default(path) {
-        "flusso build".to_owned()
-    } else {
-        format!("flusso build --out {}", path.display())
+impl<'a> LockAt<'a> {
+    /// The lock at `lock`, beside the default config, checked online.
+    #[cfg(test)]
+    pub(crate) fn new(lock: &'a Path) -> Self {
+        Self {
+            lock,
+            config: None,
+            offline: false,
+        }
     }
-}
 
-/// How to write the lock at `path` again: `check --fix`, `build` or `run`.
-fn rewrite(path: &Path) -> String {
-    let (fix, run) = if is_default(path) {
-        ("flusso check --fix".to_owned(), "flusso run".to_owned())
-    } else {
-        (
-            format!("flusso check --fix --lock {}", path.display()),
-            format!("flusso run --lock {}", path.display()),
+    /// Whether `build` writes this lock from this config with no flag.
+    fn is_default(&self) -> bool {
+        self.lock == Path::new(crate::DEFAULT_LOCK) && self.config.is_none()
+    }
+
+    /// ` --config <path>` when one was given.
+    fn config_flag(&self) -> String {
+        self.config
+            .map(|config| format!(" --config {}", config.display()))
+            .unwrap_or_default()
+    }
+
+    /// ` <flag> <lock>` when the lock isn't the default one.
+    fn lock_flag(&self, flag: &str) -> String {
+        if self.lock == Path::new(crate::DEFAULT_LOCK) {
+            String::new()
+        } else {
+            format!(" {flag} {}", self.lock.display())
+        }
+    }
+
+    /// The `build` that writes this lock.
+    fn build(&self) -> String {
+        format!(
+            "flusso build{}{}",
+            self.config_flag(),
+            self.lock_flag("--out")
         )
-    };
-    format!(
-        "Run `{fix}` or `{}` (or `{run}`, which rewrites it)",
-        build(path)
-    )
+    }
+
+    /// How to write this lock again: `check --fix`, `build` or `run`.
+    fn rewrite(&self) -> String {
+        let offline = if self.offline { " --offline" } else { "" };
+        let fix = format!(
+            "flusso check{}{offline} --fix{}",
+            self.config_flag(),
+            self.lock_flag("--lock")
+        );
+        let run = format!(
+            "flusso run{}{}",
+            self.config_flag(),
+            self.lock_flag("--lock")
+        );
+        format!(
+            "Run `{fix}` or `{}` (or `{run}`, which rewrites it)",
+            self.build()
+        )
+    }
 }
 
 /// Whether the config a lock holds is the config now, value for value.
@@ -362,7 +404,7 @@ mod tests {
         );
         assert!(state.is_error());
         assert_eq!(state.as_str(), "lock_stale");
-        let message = state.message(Path::new("flusso.lock"));
+        let message = state.message(&LockAt::new(Path::new("flusso.lock")));
         assert!(message.contains("would run the older config"), "{message}");
         assert!(
             message.contains("Run `flusso check --fix` or `flusso build`"),
@@ -377,7 +419,7 @@ mod tests {
         assert_eq!(state, LockState::Missing);
         assert!(!state.is_error());
         assert_eq!(
-            state.message(Path::new("flusso.lock")),
+            state.message(&LockAt::new(Path::new("flusso.lock"))),
             "flusso.lock not found; flusso build writes it"
         );
     }
@@ -397,7 +439,7 @@ mod tests {
                 "{state:?}"
             );
             assert!(state.is_error());
-            let message = state.message(Path::new("flusso.lock"));
+            let message = state.message(&LockAt::new(Path::new("flusso.lock")));
             assert!(
                 message.contains(
                     "Run `flusso check --fix` or `flusso build` (or `flusso run`, which rewrites \
@@ -422,7 +464,7 @@ mod tests {
         assert!(!state.is_error());
         assert_eq!(state.as_str(), "same_config");
         assert_eq!(
-            state.message(Path::new("flusso.lock")),
+            state.message(&LockAt::new(Path::new("flusso.lock"))),
             "flusso.lock holds this config in other bytes than flusso writes (line endings or \
              formatting); `flusso run` would rewrite it"
         );
@@ -440,7 +482,7 @@ mod tests {
         let LockState::Unreadable { reason } = &state else {
             panic!("{state:?}");
         };
-        let message = state.message(Path::new("flusso.lock"));
+        let message = state.message(&LockAt::new(Path::new("flusso.lock")));
         for said in [reason, &message] {
             assert!(!said.contains("OsSecretBBB"), "{said}");
             assert!(!said.contains("typo"), "{said}");
@@ -466,7 +508,7 @@ mod tests {
             reason: "line 1, column 1: invalid key".to_owned(),
         };
         for state in [&stale, &unreadable] {
-            let message = state.message(elsewhere);
+            let message = state.message(&LockAt::new(elsewhere));
             assert!(
                 message.contains(
                     "Run `flusso check --fix --lock deploy/flusso.lock` or `flusso build --out \
@@ -475,13 +517,17 @@ mod tests {
                 ),
                 "{message}"
             );
-            assert!(state.message(Path::new(crate::DEFAULT_LOCK)).contains(
-                "Run `flusso check --fix` or `flusso build` (or `flusso run`, which \
+            assert!(
+                state
+                    .message(&LockAt::new(Path::new(crate::DEFAULT_LOCK)))
+                    .contains(
+                        "Run `flusso check --fix` or `flusso build` (or `flusso run`, which \
                          rewrites it)"
-            ));
+                    )
+            );
         }
         assert_eq!(
-            LockState::Missing.message(elsewhere),
+            LockState::Missing.message(&LockAt::new(elsewhere)),
             "deploy/flusso.lock not found; `flusso build --out deploy/flusso.lock` writes it"
         );
     }
@@ -545,7 +591,7 @@ mod tests {
                 "{case}"
             );
             assert_eq!(
-                after.message(&lock),
+                after.message(&LockAt::new(&lock)),
                 format!("flusso.lock rewritten: {}", lock.display()),
                 "{case}"
             );

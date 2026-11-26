@@ -34,7 +34,7 @@ use crate::adapters;
 use crate::backends::source_spec;
 
 use crate::commands::print;
-use crate::lock::{ConfigPlan, LockState, plan_config};
+use crate::lock::{ConfigPlan, LockAt, LockState, plan_config};
 use crate::{DEFAULT_CONFIG, DEFAULT_LOCK};
 
 #[derive(Debug, Args)]
@@ -232,6 +232,7 @@ async fn inspect(
         config: &config,
         lock: &lock,
         lock_path: &args.lock,
+        config_path: args.config.as_deref(),
         fix: args.fix,
         diagnostics: &diagnostics,
         online,
@@ -298,6 +299,8 @@ struct Report<'a> {
     /// How the lock stands against the config.
     lock: &'a LockState,
     lock_path: &'a Path,
+    /// The `--config` given, which the lock's advice names.
+    config_path: Option<&'a Path>,
     /// `--fix` was asked for.
     fix: bool,
     diagnostics: &'a [Diagnostic],
@@ -313,6 +316,15 @@ impl Report<'_> {
             self.online.is_none(),
             self.online.as_ref().is_some_and(|o| o.server.is_some()),
         )
+    }
+
+    /// The lock this report judged, as its advice names it.
+    fn lock_at(&self) -> LockAt<'_> {
+        LockAt {
+            lock: self.lock_path,
+            config: self.config_path,
+            offline: self.online.is_none(),
+        }
     }
 
     /// Why the check fails, or `None` when it passed. Decided by the summary,
@@ -369,7 +381,7 @@ impl Report<'_> {
     /// screen.
     fn human(&self, out: &mut impl Write, pen: print::Pen) -> anyhow::Result<()> {
         print::config_line(out, pen, self.path, self.config)?;
-        print::lock(out, pen, self.lock_path, self.lock)?;
+        print::lock(out, pen, &self.lock_at(), self.lock)?;
         if self.fix && *self.lock == LockState::NotCompared {
             print::note(
                 out,
@@ -384,7 +396,7 @@ impl Report<'_> {
             None => {
                 print::offline(out, pen)?;
                 print::offline_diagnostics(out, pen, self.diagnostics)?;
-                print::lock_error(out, pen, self.lock_path, self.lock)?;
+                print::lock_error(out, pen, &self.lock_at(), self.lock)?;
             }
             Some(online) => {
                 let coverage_fails =
@@ -402,7 +414,7 @@ impl Report<'_> {
                 }
                 print::diagnostics(out, pen, self.diagnostics)?;
                 print::gaps(out, pen, &online.gaps)?;
-                print::lock_error(out, pen, self.lock_path, self.lock)?;
+                print::lock_error(out, pen, &self.lock_at(), self.lock)?;
                 if coverage_fails {
                     print::coverage(out, pen, online.coverage, online.manage_publication)?;
                 }
@@ -438,7 +450,7 @@ impl Report<'_> {
                 "state": self.lock.as_str(),
                 "path": self.lock_path.display().to_string(),
                 "rewritten": matches!(self.lock, LockState::Rewritten { .. }),
-                "message": self.lock.message(self.lock_path),
+                "message": self.lock.message(&self.lock_at()),
             },
             "server": online.map(|o| serde_json::json!({
                 "status": if o.server.is_none() { print::Status::Ok } else { print::Status::Problem }.as_str(),
@@ -602,6 +614,7 @@ mod tests {
             config,
             lock,
             lock_path: Path::new("flusso.lock"),
+            config_path: None,
             fix: false,
             diagnostics,
             online: online.map(|o| {
