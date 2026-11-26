@@ -10,6 +10,12 @@ use sink::{Detach, DetachRecord, MarkerAt, Recorded, Sink};
 
 use super::{ALIAS, DETACH, Stub, mapping};
 
+/// The seed marker of a seeded index on generation 3, with a checkpoint
+/// left from its backfill: a put-back restores it byte for byte.
+fn marker() -> Value {
+    json!({ "active_generation": 3, "seeded": true, "uuid": "u3", "walked": { "generation": 3, "mark": "k" } })
+}
+
 /// A meta index, the generations of [`ALIAS`] and its holder, answering the
 /// requests a detach and a staging's read make.
 #[derive(Debug, Default)]
@@ -32,10 +38,7 @@ impl Store {
     /// A seeded index on generation 3, with a stale partial generation 4.
     fn seeded() -> Self {
         let mut store = Self::default();
-        store.put(
-            ALIAS,
-            json!({ "active_generation": 3, "seeded": true, "uuid": "u3" }),
-        );
+        store.put(ALIAS, marker());
         store.generations = ["users_00000001_3", "users_00000001_4"]
             .map(str::to_owned)
             .into();
@@ -230,17 +233,14 @@ async fn a_detach_killed_after_any_step_comes_back_correct() {
         match done {
             0 => {
                 assert!(read.is_empty(), "nothing kept: {read:?}");
-                assert_eq!(
-                    store.doc(ALIAS).unwrap(),
-                    json!({ "active_generation": 3, "seeded": true, "uuid": "u3" })
-                );
+                assert_eq!(store.doc(ALIAS).unwrap(), marker());
             }
             1 => {
                 assert_eq!(read.restored, Some(3), "{read:?}");
                 assert_eq!(read.record, None);
                 assert_eq!(
                     store.doc(ALIAS).unwrap(),
-                    json!({ "active_generation": 3, "seeded": true, "uuid": "u3" }),
+                    marker(),
                     "the marker is put back as it was"
                 );
             }
@@ -300,7 +300,7 @@ async fn a_detach_moves_the_marker_first_then_records_serving() {
         store.doc(ALIAS).unwrap(),
         json!({
             "active_generation": 5, "seeded": false, "walked": null, "uuid": null,
-            "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3" },
+            "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3", "walked": { "generation": 3, "mark": "k" } },
         })
     );
     let record = store.doc(DETACH).unwrap();
@@ -364,10 +364,7 @@ async fn a_live_only_detach_leaves_the_marker_on_serving() {
         Some(DetachRecord::Detached { live_only: true })
     );
     assert_eq!(read.marker, Some(MarkerAt::Serving { seeded: true }));
-    assert_eq!(
-        store.lock().unwrap().doc(ALIAS).unwrap(),
-        json!({ "active_generation": 3, "seeded": true, "uuid": "u3" })
-    );
+    assert_eq!(store.lock().unwrap().doc(ALIAS).unwrap(), marker());
 }
 
 /// A record another writer created between the read and the create is read

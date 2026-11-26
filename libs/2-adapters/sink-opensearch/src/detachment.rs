@@ -175,11 +175,13 @@ impl OpensearchSink {
             "active_generation": generation,
             "seeded": from.get("seeded").and_then(Value::as_bool).unwrap_or(false),
         });
-        if let (Some(uuid), Some(fields)) = (
-            from.get("uuid").and_then(Value::as_str),
-            doc.as_object_mut(),
-        ) {
-            fields.insert("uuid".to_owned(), Value::from(uuid));
+        if let Some(fields) = doc.as_object_mut() {
+            if let Some(uuid) = from.get("uuid").and_then(Value::as_str) {
+                fields.insert("uuid".to_owned(), Value::from(uuid));
+            }
+            if let Some(walked) = from.get("walked").filter(|walked| !walked.is_null()) {
+                fields.insert("walked".to_owned(), walked.clone());
+            }
         }
         let url = format!(
             "{}/{}/_doc/{hash_alias}?if_seq_no={seq_no}&if_primary_term={primary_term}",

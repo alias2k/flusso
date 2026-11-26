@@ -3,7 +3,7 @@
 //!
 //! - **d2b.** The marker moves to a generation past every existing one,
 //!   unseeded, with no `walked` and no `uuid`, keeping the marker as it was in
-//!   `detaching_from`. A marker that already carries `detaching_from` is left
+//!   `detaching_from`, checkpoint included. A marker that already carries `detaching_from` is left
 //!   exactly as it is, so a detach run again never moves it again. Skipped
 //!   for a `live_only` detach: its marker stays on the serving generation.
 //! - **d2a.** The record, `detach:{hash_alias}`: created when none was read,
@@ -74,6 +74,7 @@ impl OpensearchSink {
                         "generation": marker.source.get("active_generation"),
                         "seeded": marker.source.get("seeded").and_then(Value::as_bool).unwrap_or(false),
                         "uuid": marker.source.get("uuid"),
+                        "walked": marker.source.get("walked"),
                     },
                 });
                 if let Written::Conflict = self.put_if(&hash_alias, &moved, Some(marker)).await? {
