@@ -18,35 +18,47 @@
 //! failure seen, and the daemon retries the whole stage (each step is
 //! idempotent), which starts the rest.
 //!
-//! **Read under the current stream (O29).** A lane is written, and opened
-//! again after any staging, restage, reindex or attach, only if its records
-//! were read under the current stream ([`crate::Rereads`]): by a read that
-//! *began* after the last opening returned (its epoch,
-//! [`Rereads::read_begins`](crate::Rereads::read_begins), taken before the
-//! read starts). Two checks enforce it, and every path goes through one:
+//! **Another process may hold the slot (O29).** Two rules, both about the
+//! slot this process may not hold ([`crate::Rereads`]):
 //!
-//! - **Opening a lane** goes through `store_lane`: a lane stored open while
-//!   [`Rereads::current`](crate::Rereads::current) is false makes the run's
-//!   read due (`opened_unread`) before anything is granted.
-//! - **Writing** goes through `grant_once_read` (or, for a substitute,
-//!   `substituted`), which reads the records again first while the read is
-//!   due ([`Rereads::is_due`](crate::Rereads::is_due), `opened_unread`, an
-//!   unsettled gap). The run's turn reads too, and an opening wakes it.
+//! - **No record is erased, or loosened, without the slot.** This process
+//!   destroys or rewrites no record another process may rely on unless it
+//!   holds the slot ([`Rereads::may_erase_records`](crate::Rereads::may_erase_records)):
+//!   a seed (its marker erases any record), the failed-detach clear, a
+//!   reattach's delete, a reindex, a rebuild. Each waits, and is retried,
+//!   never failing the run: a seed's backfill is cut and asked again at the
+//!   next read while held, a clear and an owed rebuild wait for a turn that
+//!   may, a reindex is owed (its lane restaging), a reattach is refused with
+//!   the reason. Plain writes of what the lanes hold behave as on `main`.
+//! - **What the records say is read again once the slot is held.** After
+//!   every opening the run reads each lane's records (`Run::reread`, while
+//!   it holds the slot), deciding from them with the same function staging
+//!   uses (`decide`, executed by `act_on_records`): another process's
+//!   rebuild is put back to detached before the lane drops anything; a lane
+//!   the records say detached is taken as detached. A lane stored open while
+//!   its records count only for an earlier stream (a restage, reindex or
+//!   attach that spanned an opening: `store_lane`) makes that read due
+//!   before anything is granted (`grant_once_read`, and `substituted` for a
+//!   substitute, written past `grant`). A read counts for the stream it
+//!   began under ([`Rereads::read_begins`](crate::Rereads::read_begins), taken
+//!   before the read).
 //!
-//! Each path, and the check it uses:
+//! Every write of a record or marker, and why it is gated or not:
 //!
-//! | Path | Its check |
+//! | Write | Without the slot |
 //! | --- | --- |
-//! | Staging (`stage`, each index's `step`) | the epoch is taken before the step; its read counts only when the step returns `Ok` |
-//! | Restage return (`restage_returned`) | reopens through `store_lane`: read again first when the step's read counts for an earlier stream |
-//! | Reindex return (`settle_reindex`) | staged inline on the run: an opening meanwhile makes the read due; the lane opens through `store_lane` |
-//! | Rebuild attach and reattach (`take_attached`) | read again before the attach takes effect when the lane isn't current; a rebuild the read finds put back to detached opens nothing |
-//! | The run's read again (`Run::reread`) | the epoch is taken before the first read; each lane read counts, a detached one too; a read failing on a detached lane leaves it unread |
-//! | An ordered sink's fill, and every grant | `grant_once_read` |
-//! | A substitute written as its lane's probe (`substituted`) | reads first when due, since it is written past `grant` |
-//! | A stop | stages nothing that opens a lane: a restaging lane stays restaging, an owed reindex is the next start's |
+//! | a seed (`mark_seeded`) | gated: it writes the marker whole, erasing any record |
+//! | the failed-detach clear (`clear_failed_detach`) | gated: it deletes the `Detached` record it reads |
+//! | a reattach (`forget_detachment`, its gap) | gated: refused with the reason |
+//! | a reindex (`sink.reindex`) | gated: owed, the lane restaging |
+//! | a rebuild (`begin_rebuild`), from a reindex, an owed rebuild or O20's restart | gated: owed through `owe_rebuild` |
+//! | a detach (`detach`), staging's `DetachAgain` | safe: it only tightens a record (to detached) |
+//! | a demotion (`demote`), O26, R14 and another's rebuild | safe: rebuilding to detached, or detached to live only |
+//! | a finished rebuild's record deleted at staging (`forget_detachment`) | safe: on the version read, beside a newer seeded marker |
+//! | a gap added or its end moved later (`record_gaps`) | safe: a gap only grows; an unknown end is settled only while the slot is held |
+//! | a walk checkpoint written or forgotten (`record_walked`, `forget_walked`) | safe: it claims only this process's own pages, read only where no record stands against the index; forgetting one only makes a walk start earlier |
 //!
-//! The loop ([`SinkEngine::run`], in `writes`) writes each lane item with
+//! //! The loop ([`SinkEngine::run`], in `writes`) writes each lane item with
 //! one [`Sink::write`], several at once but never two holding the same
 //! document, decides item-level rejections by the failure policies, and
 //! acknowledges: write-then-ack is what makes delivery at-least-once, because
