@@ -1050,6 +1050,55 @@ The re-check (`target/review-482-step4-fixes/REPORT.md`) found one blocker, thre
 - B1' and S-a live, with two overlapping processes;
 - the conditional `_update` against a real OpenSearch.
 
+### After the re-check of the second fix round
+
+The re-check (`target/review-482-fix-round-2/REPORT.md`) found the same place a third time: what an unread sink's lanes may vouch for. So the rule is now inductive and guarded by a property test, not patched again.
+
+**B1'' (`17a06e85`). The rule.** What a lane may vouch for while its sink is unread only ever comes from answers the fence gave while that sink counted as read.
+
+- **How it is kept.** `Rereads::open` takes, before its count moves, which sinks counted as read during the stream being left (`ReadBefore`), and hands that in `Reread::Opening { read }`. Only those sinks' lanes take a fresh answer into `at_open`; every other lane keeps what it froze before. For a sink that never read, that is nothing.
+- **Why this way.** It is the single ordering that matters, and it lives in one function. A frozen value kept up to date continuously while read would need every answer-taking path to know the read state.
+- **The bug it closes.** Before it, a second opening (a stream that ended, or a `live()` failing and retried) before the read re-froze the first stream's start: the slot's confirmed position, past another process's dropped changes.
+- **Tests:**
+  - `a_second_opening_before_the_read_keeps_what_the_first_froze`;
+  - `a_failed_opening_before_the_read_keeps_what_the_first_froze`.
+
+**The property test** (`fence::tests::gate_property::a_lane_vouches_only_for_what_it_covered_while_its_sink_was_read`, proptest, 512 cases of 1 to 40 events, on paused time).
+- **The events** (one sink, one lane, a source that answers nothing before the first opening):
+  - an opening that succeeds or fails, its new stream starting 0, 10 or 20 past where the source stood. A start past what this process covered is another process that dropped the lane's changes and confirmed them; its records then say detached, and the next read adopts it;
+  - a read of the records beginning, and one ending: it counts for when it began, and adopts a detach the records hold;
+  - a change applied, only while the sink counts as read and the lane is attached, as the engine guarantees;
+  - the source reading on with nothing to deliver;
+  - a `/status` read;
+  - a wait for a position.
+- **The model.** It keeps its own count of openings and reads, and the highest position the source answered for the lane at a moment the sink counted as read and the lane was attached.
+- **Safety.** The fence never passes a wait for a position the model never saw covered.
+- **Liveness.** At the end, once read with nothing detached, a change applied is vouched for.
+- **What it rediscovers when the fix is reverted:**
+  - **B1''**, by itself: two successful openings, then a wait for 0;
+  - **B1'**, the old order of telling the opening after the stream opened;
+  - **S-c**, a detach adopted while unread freezing at the new stream's answer.
+- **What it doesn't find.** B1's precedence (an unread sink masking every state, not only `Writes`) is over-refusal, not a soundness bug, so the property doesn't find it; its unit tests keep it.
+- **Seeds.** The minimal failing cases are kept in `proptest-regressions/fence/tests.txt`.
+
+**S-a' (`cc435aef`).** The attach takes its gap by its start, open or not, and only ever moves its end later. Another process may have settled it at a stale place first.
+- **Why another process can.** `holding()` is only this process's belief. Postgres can free the slot server side (`wal_sender_timeout` after a partition, `pg_terminate_backend`) before the client sees its stream end, and a cleanly ended stream counts as held until the run ends.
+- **Both orders are safe.** The conditional gap write plus this rule make either order of the two writers keep the later end.
+- **Test:** `a_gap_settled_by_another_writer_before_the_attach_keeps_the_attach_end`.
+
+**The untested claims (`e2c9b418`).** Each test fails under its mutation:
+- the `Held` guard: `an_ingest_run_that_ends_no_longer_holds_the_slot`;
+- a failed opening counting no read: `a_failed_opening_counts_no_read_and_settles_nothing`;
+- the read that settles a gap a staging flagged: `a_restaging_while_the_slot_is_held_settles_the_gap_without_a_new_opening`.
+
+**Minors.**
+- **m-f (`d2c7e7d5`).** After an attach, gaps kept with an unknown or unreadable end are flagged, and the run's next turn settles them while the slot is held (`a_corrupt_gap_kept_before_a_reattach_is_settled_after_it`).
+- **m-g (`d7fbfc40`).** The log says an unreadable entry settles by itself at the next read while flusso holds the slot, that a detached lane keeps it until attached, and that a reindex on a sink that can rebuild clears it. `/status` shows `settling: true` on a gap whose end is unknown.
+- **m-h (`d712c062`).** `the_live_stream_is_opened_only_through_rereads_open` scans every non-test source under `libs`, `apps`, `sdk` and `dev`, and fails on a call to `live()` that isn't inside `Rereads::open`. It fails when the ingest engine calls `live()` directly. The docs say "the one place outside tests".
+- **m-i (`09e68150`).** When a delete's re-read also fails, the operator hears both errors and that a reattach finds out. A reattach on a lane held detached with no record kept finishes what the earlier one began, with the one gap (`a_reattach_after_a_delete_that_landed_unseen_finishes_it`).
+
+**Not proven.** As before. Nothing in this round runs against a live Postgres or OpenSearch.
+
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
 **O29: can a process that staged before another one's detach keep the lane attached? (S3)**

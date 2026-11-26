@@ -1924,10 +1924,14 @@ is the one concrete piece.
   `gaps_unsettled`): an unknown `to` becomes where the lane stands (nothing of it landed since, so
   the gap still covers what was dropped), an unreadable `from` unknown (reaching back only into the
   past). `Sink::record_gaps` takes a decision over the list kept (`DecideGaps`); OpenSearch writes it
-  conditionally on the marker's `if_seq_no`/`if_primary_term`, reading again on a conflict. A gap
-  entry that can't be read is a gap with unknown ends, never no gap. A reattach reuses an open last
+  conditionally on the marker's `if_seq_no`/`if_primary_term`, reading again on a conflict; the
+  attach takes its gap by its start, open or not, and only ever moves its end later (S-a': another
+  process believing it held the slot may have settled it at a stale place). A gap entry that can't
+  be read is a gap with unknown ends, never no gap (`/status` `settling: true` while an end is
+  unknown); after an attach, kept gaps with such an end are settled at the next turn while held. A reattach reuses an open last
   gap starting at its record's `through` (one gap per detach); a failed record delete is read again
-  (gone: the reattach goes on). **O29**: `engine::Rereads` — the ingest engine opens the stream
+  (gone: the reattach goes on); a reattach on a lane held detached with no record kept finishes the
+  earlier one whose delete landed unseen. **O29**: `engine::Rereads` — the ingest engine opens the stream
   through `Rereads::open` (below), before publishing; a sink engine whose last full read counts for
   an earlier opening (`reread_due`, one atomic, or an unsettled gap while the slot is held) reads
   every index's records again in `advance` before any grant (`Run::reread`: adopts a lane the records
@@ -1935,12 +1939,16 @@ is the one concrete piece.
   staging begun once the opening returned counts as the read; the fence vouches for no lane
   of a sink not read since (`Rereads::current`) **only where it would serve its writes**: `Gap`,
   `Detached`, `Rebuilding`, `Backfilling` answer as themselves; an unread `Writes` lane vouches up to
-  `Furthest.at_open` (the fence's answer from the previous stream, taken fresh as the opening
-  begins) and answers `Unserved::Starting` past it; a read wakes the fence (`Rereads::subscribe`).
-  **B1': from the moment a new stream may answer until the sink has read its records, a lane vouches
-  for nothing past what this process applied under the previous stream**: the ingest engine opens
-  the stream only through `Rereads::open(source.live())`, which marks every sink unread and has the
-  fence freeze `at_open` (`Reread::Opening`) before the future runs; a read counts only when it began
+  `Furthest.at_open` and answers `Unserved::Starting` past it; a read wakes the fence
+  (`Rereads::subscribe`). **The rule is inductive (B1', B1''): what a lane may vouch for while its
+  sink is unread only ever comes from answers the fence gave while that sink counted as read.** The
+  ingest engine opens the stream only through `Rereads::open(source.live())` (the one place outside
+  tests; `the_live_stream_is_opened_only_through_rereads_open` fails on another), which, before the
+  future runs and before its count moves, hands the fence which sinks read during the stream being
+  left (`Reread::Opening { read: &ReadBefore }`): only their lanes take a fresh answer into `at_open`,
+  every other lane keeps its earlier freeze (nothing for a sink that never read); guard: the property
+  test `fence::tests::gate_property` (random openings ok/failed, reads, applies, idle WAL, `/status`,
+  waits, another process's drop, against a model); a read counts only when it began
   once `open` returned Ok (`read_begins`); `Rereads::holding` is true while that stream is open (the
   ingest run's `Held` guard calls `closed`). A detach adopted while its sink is unread freezes at
   `at_open` (S-c). Every grant goes through `grant_once_read`.
