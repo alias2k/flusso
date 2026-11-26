@@ -272,6 +272,19 @@ enum Step {
     Restage,
 }
 
+/// A seed refused because this process held no slot (`owe_seed`).
+#[derive(Debug, Clone, Copy)]
+struct OwedSeed {
+    ticket: Ticket,
+    due: Instant,
+    wait: Duration,
+}
+
+/// The first wait before an owed seed that failed is tried again.
+const OWED_SEED_WAIT: Duration = Duration::from_secs(1);
+/// The longest.
+const OWED_SEED_WAIT_MAX: Duration = Duration::from_secs(60);
+
 /// A backfill an index was asked for and not yet seeded by.
 #[derive(Debug, Clone)]
 struct Asked {
@@ -345,6 +358,13 @@ pub struct SinkEngine {
     /// What the last staging of each index read of its detach records, when
     /// the sink keeps any (ADR 0012 stage 10). Slice 1 only keeps it.
     detachments: Mutex<BTreeMap<IndexName, sink::Detachment>>,
+    /// Seeds refused because this process held no slot, per index: the
+    /// backfill's documents are written, only `mark_seeded` waits (the sixth
+    /// re-check, S-1). Kept whatever the lane does meanwhile; dropped when the
+    /// lane detaches or a new backfill of the index is asked for.
+    owed_seeds: Mutex<BTreeMap<IndexName, OwedSeed>>,
+    /// The indexes whose last read of the records kept gaps.
+    gapped: Mutex<BTreeSet<IndexName>>,
     /// Each lane's health (open, parked, restaging) and its probe backoff.
     /// Outlives a run: a run failing for another reason leaves a parked lane
     /// parked, on its schedule. A lane not in it is open.
@@ -394,6 +414,8 @@ impl SinkEngine {
             tickets: AtomicU64::new(0),
             attempts: AtomicU64::new(0),
             detachments: Mutex::new(BTreeMap::new()),
+            owed_seeds: Mutex::new(BTreeMap::new()),
+            gapped: Mutex::new(BTreeSet::new()),
             fences: Mutex::new(Fences::default()),
             progress,
             stop: Stop::new(),
@@ -465,6 +487,14 @@ impl SinkEngine {
         }
         if let Some(reason) = &detachment.unreadable_marker {
             tracing::error!(%index, %sink, %reason, "the seed marker carries a detach this version can't read; nothing was put back and the index is staged as before, as its seed marker says");
+        }
+        {
+            let mut gapped = self.gapped.lock().unwrap_or_else(PoisonError::into_inner);
+            if detachment.gaps.is_empty() {
+                gapped.remove(index);
+            } else {
+                gapped.insert(index.clone());
+            }
         }
         let mut detachments = self
             .detachments
@@ -912,6 +942,7 @@ impl SinkEngine {
         if let Some(asked) = self.lock_outstanding().get_mut(&lane.index) {
             asked.cut = true;
         }
+        self.drop_owed_seed(&lane.index);
     }
 
     /// Drop `index`'s outstanding backfill when it is cut: what an attach
@@ -1245,24 +1276,66 @@ impl SinkEngine {
             || (self.gaps_unsettled.load(Ordering::Acquire) && self.rereads.holding())
     }
 
-    /// `index`'s seed was met while this process holds no stream: the
-    /// backfill is cut, so nothing of it seeds the index, and the next read
-    /// while the slot is held asks for it again (O29, the fifth re-check).
-    pub(super) fn cut_unheld_seed(&self, index: &IndexName) {
-        if let Some(asked) = self.lock_outstanding().get_mut(index) {
-            asked.cut = true;
-        }
-        tracing::warn!(%index, sink = %self.name, "its backfill completed while this process holds no stream: it seeds nothing (a seed may erase a record another process wrote since); asked for again once the slot is held");
+    /// `index`'s seed, answering `ticket`, was refused because this process
+    /// held no slot: owed, landed once the slot is held and the records read
+    /// again show nothing written over the index (O29, the sixth re-check).
+    pub(super) fn owe_seed(&self, index: &IndexName, ticket: Ticket) {
+        tracing::warn!(%index, sink = %self.name, "its backfill completed while this process holds no slot: the seed waits (it writes the marker whole, erasing whatever record another process wrote since), and lands once the slot is held and the records show nothing written over the index");
+        self.lock_owed_seeds().insert(
+            index.clone(),
+            OwedSeed {
+                ticket,
+                due: Instant::now(),
+                wait: OWED_SEED_WAIT,
+            },
+        );
     }
 
-    /// The cut backfills of `lanes`' indexes, with the target each was asked
-    /// for: what a read while the slot is held asks for again.
-    pub(super) fn cut_asks(&self, indexes: &[IndexName]) -> Vec<(IndexName, Option<TargetId>)> {
-        self.lock_outstanding()
+    /// The seeds owed, with when each may be tried.
+    pub(super) fn owed_seeds(&self) -> Vec<(IndexName, Ticket, Instant)> {
+        self.lock_owed_seeds()
             .iter()
-            .filter(|(index, asked)| asked.cut && indexes.contains(index))
-            .map(|(index, asked)| (index.clone(), asked.target.clone()))
+            .map(|(index, owed)| (index.clone(), owed.ticket, owed.due))
             .collect()
+    }
+
+    /// `index`'s seed is no longer owed: it landed, its lane detached, or a
+    /// new backfill decides it.
+    pub(super) fn drop_owed_seed(&self, index: &IndexName) {
+        self.lock_owed_seeds().remove(index);
+    }
+
+    /// `index`'s owed seed failed for now: tried again after a wait that
+    /// doubles, to a minute.
+    pub(super) fn owed_seed_later(&self, index: &IndexName) {
+        if let Some(owed) = self.lock_owed_seeds().get_mut(index) {
+            owed.due = Instant::now() + owed.wait;
+            owed.wait = (owed.wait * 2).min(OWED_SEED_WAIT_MAX);
+        }
+    }
+
+    fn lock_owed_seeds(&self) -> std::sync::MutexGuard<'_, BTreeMap<IndexName, OwedSeed>> {
+        self.owed_seeds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the last read of `index`'s records kept a record or a gap:
+    /// something another process may have written over the index.
+    pub(super) fn written_over(&self, index: &IndexName) -> bool {
+        self.detachment(index).is_some()
+            || self
+                .gapped
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(index)
+    }
+
+    /// The target `index`'s outstanding backfill was asked for.
+    pub(super) fn asked_target(&self, index: &IndexName) -> Option<TargetId> {
+        self.lock_outstanding()
+            .get(index)
+            .and_then(|asked| asked.target.clone())
     }
 
     /// The sink's requests that may erase or loosen a record, each checked
@@ -1796,6 +1869,7 @@ impl SinkEngine {
                     cut: false,
                 },
             );
+            self.drop_owed_seed(&index);
             indexes.push(index);
         }
         self.observer.on_backfill_requested(&self.name, &indexes);

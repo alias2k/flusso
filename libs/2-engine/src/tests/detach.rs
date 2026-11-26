@@ -3450,10 +3450,11 @@ async fn a_step_whose_read_spans_an_opening_counts_no_read_for_it() {
 }
 
 /// The fifth re-check: after a failed opening (another process may hold the
-/// slot) what the lanes hold is written as on `main`, but no seed is made:
-/// the backfill is cut, and asked for again once an opening gets through.
+/// slot) what the lanes hold is written as on `main`, but no seed is made;
+/// since the sixth, the seed is owed and lands once an opening gets through,
+/// with no new walk.
 #[tokio::test(start_paused = true)]
-async fn a_failed_opening_seeds_nothing_and_asks_the_backfill_again_once_held() {
+async fn a_failed_opening_seeds_nothing_until_an_opening_gets_through() {
     let rig = Rig::new(64);
     rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
     let engine = rig.engine();
@@ -3485,17 +3486,14 @@ async fn a_failed_opening_seeds_nothing_and_asks_the_backfill_again_once_held() 
         "seeded with no slot held"
     );
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    let stream::Request::Backfill {
-        index,
-        ticket: again,
-        after,
-        ..
-    } = next_request(&rig).await
-    else {
-        panic!("the backfill is asked again");
-    };
-    assert_eq!((index, after), (users(), None));
-    assert!(again > ticket);
+    eventually("the owed seed lands", || {
+        rig.sink
+            .seeded
+            .lock()
+            .unwrap()
+            .contains(&"users".to_owned())
+    })
+    .await;
     task.abort();
 }
 

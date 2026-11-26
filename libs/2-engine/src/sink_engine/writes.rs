@@ -352,6 +352,9 @@ enum Outcome {
     /// A record a failed detach may have left, deleted before the lane's
     /// probe.
     Clear(Result<()>),
+    /// An owed seed (`land_owed_seeds`); refused when this process held no
+    /// slot right before it.
+    OwedSeed(std::result::Result<sink::Result<()>, super::slot::NotHeld>),
 }
 
 /// A lane waiting for its empty caught-up write: the item whose
@@ -386,6 +389,8 @@ pub(super) struct Run<'a> {
     flights: Flights<'a, Landed>,
     flying: Vec<(u64, Flight)>,
     seeding: Vec<(u64, Seeding)>,
+    /// Owed seeds in flight: the flight, the lane, the index and the ticket.
+    owed_flying: Vec<(u64, usize, IndexName, Ticket)>,
     /// Backfill checkpoints in flight, by lane: they hold no write slot.
     recording: Vec<(u64, usize)>,
     /// The empty caught-up writes in flight, by flight.
@@ -549,6 +554,7 @@ impl<'a> Run<'a> {
             flights: Flights::new(),
             flying: Vec::new(),
             seeding: Vec::new(),
+            owed_flying: Vec::new(),
             recording: Vec::new(),
             refreshing: Vec::new(),
             hold_until: None,
@@ -750,6 +756,9 @@ impl<'a> Run<'a> {
         }
         if self.engine.reread_due() {
             self.reread().await?;
+        }
+        if !self.engine.stop.is_requested() {
+            self.land_owed_seeds().await?;
         }
         if self.engine.stop.is_requested() {
             self.skip_backfill().await?;
@@ -1152,6 +1161,7 @@ impl<'a> Run<'a> {
             || self.restaging.iter().any(|(_, at)| *at == lane)
             || self.detaching.iter().any(|(_, at)| *at == lane)
             || self.clearing.iter().any(|(_, at)| *at == lane)
+            || self.owed_flying.iter().any(|(_, at, ..)| *at == lane)
     }
 
     /// The flights holding a write slot: writes and seeds, not checkpoints;
@@ -1965,6 +1975,110 @@ impl<'a> Run<'a> {
         self.flights.start(seed.boxed())
     }
 
+    /// Land each owed seed that may (the sixth re-check, S-1): this process
+    /// holds the slot, the lane's records were read under the current
+    /// stream, and the lane is open with nothing in flight. When that read
+    /// shows a record or a gap over the index (another process wrote over it
+    /// meanwhile), the seed would claim what they miss: the backfill is asked
+    /// again from the first key instead. A seed whose backfill was cut since
+    /// waits for the backfill asked in its place.
+    async fn land_owed_seeds(&mut self) -> Result<()> {
+        let owed = self.engine.owed_seeds();
+        if owed.is_empty() || !self.engine.rereads.may_erase_records() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        for (index, ticket, due) in owed {
+            if due > now || self.owed_flying.iter().any(|(_, _, at, _)| *at == index) {
+                continue;
+            }
+            let Some(lane) = self.lanes.iter().position(|run| run.key.index == index) else {
+                continue;
+            };
+            let ready = self
+                .lanes
+                .get(lane)
+                .is_some_and(|run| run.health.is_open() && self.engine.rereads.current(&run.key));
+            if !ready || self.lane_in_flight(lane) || !self.engine.answers(&index, Some(ticket)) {
+                continue;
+            }
+            if self.engine.written_over(&index) {
+                tracing::warn!(%index, sink = %self.engine.name, "the seed owed since the slot was lost is not landed: the records read again keep a record or a gap over the index, which the backfill's documents may miss; asking for the backfill again from the first key");
+                self.engine.drop_owed_seed(&index);
+                let target = self.engine.asked_target(&index);
+                self.engine.ask_again(vec![(index, target)]).await?;
+                continue;
+            }
+            self.owed_seed(index, ticket, lane).await?;
+        }
+        Ok(())
+    }
+
+    /// Seed `index` as an owed seed, a flight blocking its lane until it
+    /// returns.
+    async fn owed_seed(&mut self, index: IndexName, ticket: Ticket, lane: usize) -> Result<()> {
+        let flight = self.next_flight;
+        self.next_flight += 1;
+        let erasing = self.engine.erasing();
+        let marking = index.clone();
+        self.owed_flying.push((flight, lane, index, ticket));
+        let seed = async move {
+            let started = Instant::now();
+            let result = erasing.mark_seeded(&marking).await;
+            Landed {
+                flight,
+                outcome: Outcome::OwedSeed(result),
+                took: started.elapsed(),
+            }
+        };
+        if let Some(landed) = self.flights.start(seed.boxed()) {
+            Box::pin(self.landed(landed)).await?;
+        }
+        Ok(())
+    }
+
+    /// An owed seed returned. Refused again for want of the slot, it stays
+    /// owed; landed, the index is seeded; a target changed since stages the
+    /// lane again (which cuts the backfill and asks it again); any other
+    /// failure tries it again after a wait.
+    async fn owed_seed_returned(
+        &mut self,
+        flight: u64,
+        result: std::result::Result<sink::Result<()>, super::slot::NotHeld>,
+        took: Duration,
+    ) -> Result<()> {
+        let Some(at) = self.owed_flying.iter().position(|(id, ..)| *id == flight) else {
+            return Ok(());
+        };
+        let (_, lane, index, ticket) = self.owed_flying.swap_remove(at);
+        match result {
+            Err(super::slot::NotHeld) => {}
+            Ok(Ok(())) => {
+                self.engine.drop_owed_seed(&index);
+                self.engine.seeded(&index, ticket, took);
+                if let Some(run) = self.lanes.get_mut(lane)
+                    && run.health.rebuilding.take().is_some()
+                {
+                    run.health.rebuild_target = None;
+                    tracing::info!(lane = %run.key, "the rebuild is seeded: the index is current again");
+                    self.engine.store_lane(&run.key, &run.health, false);
+                }
+                if self.holding > 0 && !self.engine.is_outstanding(&index) {
+                    self.release_held(lane).await?;
+                }
+            }
+            Ok(Err(sink::SinkError::TargetChanged(reason))) => {
+                self.engine.drop_owed_seed(&index);
+                self.hold(lane, Held::Missing(reason), false);
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%index, sink = %self.engine.name, %error, "the owed seed failed; trying again later");
+                self.engine.owed_seed_later(&index);
+            }
+        }
+        Ok(())
+    }
+
     /// A seed returned: once it succeeded the index is seeded and its
     /// `SnapshotComplete` acknowledged; a failed one fails the run blamed on
     /// its lane, and the lane hands the `SnapshotComplete` back.
@@ -1981,8 +2095,8 @@ impl<'a> Run<'a> {
         // O29: a seed writes the marker whole, erasing whatever record
         // another process wrote since: refused while this process holds no
         // slot (`slot`). A parked lane's seed is its probe, tried again on
-        // the lane's backoff; an open lane's is cut, and asked again at the
-        // next read while the slot is held.
+        // the lane's backoff; an open lane's is owed: its documents are
+        // written, and it lands once the slot is held (`land_owed_seeds`).
         let result = match result {
             Ok(result) => result,
             Err(super::slot::NotHeld) => {
@@ -1992,7 +2106,7 @@ impl<'a> Run<'a> {
                     self.probed(lane, ProbeOutcome::Failed);
                     return Ok(());
                 }
-                self.engine.cut_unheld_seed(&seeding.index);
+                self.engine.owe_seed(&seeding.index, seeding.ticket);
                 let oldest = self.is_oldest(lane, seeding.seq);
                 return self
                     .acknowledge(seeding.handle, lane, seeding.seq, None, oldest, None)
@@ -2111,6 +2225,11 @@ impl<'a> Run<'a> {
             Outcome::Clear(result) => {
                 self.clear_returned(landed.flight, result);
                 return Ok(());
+            }
+            Outcome::OwedSeed(result) => {
+                return self
+                    .owed_seed_returned(landed.flight, result, landed.took)
+                    .await;
             }
         };
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
@@ -3124,18 +3243,6 @@ impl<'a> Run<'a> {
             self.engine.rereads.read(&key, read_at);
         }
         self.engine.records_read(read_at);
-        // A backfill whose seed was met while no stream was held is asked for
-        // again now (`cut_unheld_seed`).
-        let open: Vec<IndexName> = self
-            .lanes
-            .iter()
-            .filter(|run| run.health.is_open())
-            .map(|run| run.key.index.clone())
-            .collect();
-        let again = self.engine.cut_asks(&open);
-        if !again.is_empty() {
-            self.engine.ask_again(again).await?;
-        }
         Ok(())
     }
 
