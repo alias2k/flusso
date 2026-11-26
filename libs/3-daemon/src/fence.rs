@@ -510,13 +510,19 @@ impl Fence {
         });
     }
 
-    /// Whether `lane`'s records were read under the current stream (O29);
-    /// with no `Rereads`, always.
+    /// Whether `lane`'s records were read under the current stream (O29),
+    /// and no stream was opened past the openings `Rereads` counted (the
+    /// source counts its own, m-1 of the fourth re-check); with no
+    /// `Rereads`, always.
     fn read(&self, lane: &LaneKey) -> bool {
-        self.inner
-            .rereads
-            .get()
-            .is_none_or(|rereads| rereads.current(lane))
+        self.inner.rereads.get().is_none_or(|rereads| {
+            rereads.current(lane)
+                && self
+                    .inner
+                    .source
+                    .streams_opened()
+                    .is_none_or(|streams| streams <= rereads.opened())
+        })
     }
 
     /// `lane` carries the gaps reattaches accepted (S3), in the source's
@@ -599,11 +605,7 @@ impl Fence {
         Option<Unserved>,
     ) {
         let reached = self.reached(lane, level);
-        let read = self
-            .inner
-            .rereads
-            .get()
-            .is_none_or(|rereads| rereads.current(lane));
+        let read = self.read(lane);
         let Some(furthest) = self.inner.lanes.get(lane) else {
             return (reached, None, Serving::Pending.unserved());
         };

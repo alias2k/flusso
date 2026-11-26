@@ -17,6 +17,9 @@ struct NumberedSource {
     state: Mutex<Numbered>,
     listeners: Mutex<Vec<AdvanceListener>>,
     closed: AtomicBool,
+    /// When set, the source counts the streams it opened (m-1).
+    counts_streams: AtomicBool,
+    streams: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for NumberedSource {
@@ -68,7 +71,14 @@ impl ChangeCapture for NumberedSource {
     }
 
     async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
+        self.streams.fetch_add(1, Ordering::SeqCst);
         Ok(Box::pin(futures::stream::empty()))
+    }
+
+    fn streams_opened(&self) -> Option<u64> {
+        self.counts_streams
+            .load(Ordering::SeqCst)
+            .then(|| self.streams.load(Ordering::SeqCst))
     }
 
     fn confirm(&self, _: Landed) {}
@@ -1517,6 +1527,51 @@ async fn a_lane_with_two_gaps_vouches_between_them() {
 /// The slot opened: an opening whose new stream answers nothing new.
 async fn opened(rereads: &Rereads) {
     rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+}
+
+/// The fourth re-check, m-1: a stream opened past `Rereads::open` (a second
+/// caller of `live`) is caught by the source's own count. Every lane answers
+/// `starting` while the source has opened more streams than the openings
+/// counted, instead of vouching from a stream the sinks never read under.
+#[tokio::test(start_paused = true)]
+async fn a_stream_opened_past_the_counted_openings_vouches_for_nothing() {
+    let rig = fence(&["primary"]);
+    rig.source.counts_streams.store(true, Ordering::SeqCst);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    let at = rig.source.emit(10);
+    rig.route(at);
+    rig.applied("primary", at);
+    rig.observer.on_sink_started(&sink("primary"));
+    let source = Arc::clone(&rig.source);
+    let _stream = rereads.open(source.live()).await.unwrap();
+    rereads.read(&lane("primary"), rereads.read_begins());
+    assert_eq!(
+        fence.wait(&request("10", FenceLevel::Applied, None)).await,
+        reached("10"),
+        "opened through Rereads::open and read"
+    );
+    let _bypass = rig.source.live().await.unwrap();
+    let after = rig.source.emit(20);
+    rig.route(after);
+    rig.applied("primary", after);
+    assert!(
+        matches!(
+            fence.wait(&request("20", FenceLevel::Applied, None)).await,
+            Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Starting)]
+        ),
+        "a stream opened past the count vouches for nothing"
+    );
+    let source = Arc::clone(&rig.source);
+    let _stream = rereads.open(source.live()).await.unwrap();
+    rereads.read(&lane("primary"), rereads.read_begins());
+    assert!(
+        matches!(
+            fence.wait(&request("20", FenceLevel::Applied, None)).await,
+            Ok(FenceOutcome::Unserved { .. })
+        ),
+        "the count stays ahead: the bypass is never forgotten"
+    );
 }
 
 /// Review of the step-4 fixes, B1': the new stream starts answering inside

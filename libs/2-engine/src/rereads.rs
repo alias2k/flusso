@@ -180,6 +180,13 @@ impl Rereads {
         }
     }
 
+    /// How many openings began: a source that counts the streams it opened
+    /// ([`ChangeCapture::streams_opened`]) never counts more, unless a stream
+    /// was opened past [`open`](Self::open).
+    pub fn opened(&self) -> u64 {
+        self.opened.load(Ordering::Acquire)
+    }
+
     /// Whether an opening began and has not returned `Ok` yet: one in
     /// flight, or one that failed and no later one got through. No stream is
     /// current then, so no lane is written until an opening returns and its
