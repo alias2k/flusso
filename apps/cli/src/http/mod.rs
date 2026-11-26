@@ -783,7 +783,9 @@ async fn reattach(
         Ok(Ok(daemon::ReattachVerdict::Failed(error))) => refuse(
             StatusCode::SERVICE_UNAVAILABLE,
             format!(
-                "the reattach failed before the record was deleted; nothing changed: ask again ({error})"
+                "the reattach failed: {error}. Nothing accepted is lost. If it failed before \
+                 the record's delete, nothing changed; /status tells: the lane still detached, \
+                 ask again; attaching or open, the reattach took effect"
             ),
         ),
         Ok(Err(_)) => refuse(

@@ -98,6 +98,9 @@ struct Gate {
     dead: Mutex<BTreeSet<&'static str>>,
     /// While set, `ensure_index` waits for a permit here.
     ensure_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// `forget_detachment` deletes the record, then fails (a timeout after
+    /// the delete landed).
+    forget_lands_then_fails: Mutex<bool>,
 }
 
 impl Gate {
@@ -235,17 +238,31 @@ impl Sink for Gate {
         Ok(kept)
     }
 
-    async fn record_gaps(&self, mapping: &IndexMapping, gaps: &[sink::Gap]) -> sink::Result<()> {
+    async fn record_gaps(
+        &self,
+        mapping: &IndexMapping,
+        decide: &sink::DecideGaps<'_>,
+    ) -> sink::Result<Vec<sink::Gap>> {
         self.dies_before("record_gap")?;
+        let kept = self
+            .marker_gaps
+            .lock()
+            .unwrap()
+            .get(mapping.index.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        let Some(gaps) = decide(&kept) else {
+            return Ok(kept);
+        };
         self.gaps
             .lock()
             .unwrap()
-            .push((mapping.index.to_string(), gaps.to_vec()));
+            .push((mapping.index.to_string(), gaps.clone()));
         self.marker_gaps
             .lock()
             .unwrap()
-            .insert(mapping.index.to_string(), gaps.to_vec());
-        Ok(())
+            .insert(mapping.index.to_string(), gaps.clone());
+        Ok(gaps)
     }
 
     async fn detach(
@@ -358,6 +375,10 @@ impl Sink for Gate {
         version: &RecordVersion,
     ) -> sink::Result<()> {
         self.dies_before("forget_detachment")?;
+        if *self.forget_lands_then_fails.lock().unwrap() {
+            self.kept.lock().unwrap().remove(mapping.index.as_ref());
+            return Err(SinkError::Write("the delete timed out".to_owned()));
+        }
         self.forgotten
             .lock()
             .unwrap()
@@ -2206,8 +2227,8 @@ async fn a_second_reattach_keeps_both_gaps_exactly() {
     task.abort();
 }
 
-/// Review of step 4, m4: at a start, a gap end the source can't read is
-/// settled and kept: an unreadable `to` becomes where the lane stands
+/// Review of step 4, m4: once the slot is held, a gap end the source can't
+/// read is settled and kept: an unreadable `to` becomes where the lane stands
 /// (everything after it reaches the lane), an unreadable `from` unknown (the
 /// gap reaches back from its end, all in the past). Nothing refuses forever.
 #[tokio::test(start_paused = true)]
@@ -2222,11 +2243,14 @@ async fn a_gap_end_the_source_cannot_read_is_settled_at_a_start() {
     );
     let engine = rig.live_only_engine();
     engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(&engine);
     let settled = vec![gap(None, Some("2")), gap(Some("3"), Some("nothing"))];
-    assert_eq!(
-        *rig.sink.gaps.lock().unwrap(),
-        [("users".to_owned(), settled.clone())]
-    );
+    eventually("settled once the slot is held", || {
+        *rig.sink.gaps.lock().unwrap() == [("users".to_owned(), settled.clone())]
+    })
+    .await;
+    task.abort();
     assert_eq!(
         rig.heard
             .gaps
@@ -2628,5 +2652,98 @@ async fn a_rebuild_that_cannot_begin_is_owed_and_tried_again() {
         panic!("the owed rebuild begins and asks for its attach");
     };
     assert_eq!(*rig.sink.rebuilds.lock().unwrap(), ["users"]);
+    task.abort();
+}
+
+/// Review of the step-4 fixes, S-a: a staging needs no slot, so it never
+/// settles a gap's unknown end, even with the source answering (here from a
+/// stream that ended): the fence hears the gap open, and only a read while
+/// this process's stream holds the slot settles it.
+#[tokio::test(start_paused = true)]
+async fn a_staging_while_the_stream_is_closed_never_settles_a_gap_end() {
+    let rig = Rig::new(64);
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), vec![gap(Some("1"), None)]);
+    let engine = rig.live_only_engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(rig.sink.gaps.lock().unwrap().is_empty(), "nothing written");
+    // The stream opened and ended again before the run reads its records:
+    // the read is due, and the source answers from the ended stream.
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.rereads.closed();
+    assert_eq!(
+        rig.heard
+            .gaps
+            .lock()
+            .unwrap()
+            .last()
+            .map(|(_, gaps, _)| gaps.clone()),
+        Some(vec![gap(Some("1"), None)])
+    );
+    let (task, _control) = spawn(&engine);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        rig.sink.gaps.lock().unwrap().is_empty(),
+        "nor by the run while the slot isn't held: {:?}",
+        rig.sink.gaps.lock().unwrap()
+    );
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("settled once the slot is held", || {
+        rig.sink.gaps.lock().unwrap().as_slice()
+            == [("users".to_owned(), vec![gap(Some("1"), Some("nothing"))])]
+    })
+    .await;
+    task.abort();
+}
+
+/// Review of the step-4 fixes, S-b: a reattach whose record delete failed
+/// left its gap open; asked again, it reuses that gap (one per detach) and
+/// completes it at the attach, so no open gap refuses later positions.
+#[tokio::test(start_paused = true)]
+async fn a_failed_forget_then_a_reattach_keeps_one_gap_and_completes_it() {
+    let rig = Rig::new(64);
+    let (_engine, task, control) = detached_live_only(&rig).await;
+    rig.sink.dead.lock().unwrap().insert("forget_detachment");
+    assert!(matches!(
+        verdict(&control).await,
+        crate::ReattachVerdict::Failed(_)
+    ));
+    rig.sink.dead.lock().unwrap().clear();
+    assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
+    let stream::Request::Attach { attempt, .. } = next_request(&rig).await else {
+        panic!("an attach");
+    };
+    rig.progress.routed(Position::new(3));
+    rig.progress.attach(&lane(users()), attempt);
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    eventually("the gap is completed", || {
+        rig.sink.marker_gaps.lock().unwrap().get("users") == Some(&vec![gap(Some("1"), Some("3"))])
+    })
+    .await;
+    assert_eq!(
+        rig.heard
+            .gaps
+            .lock()
+            .unwrap()
+            .last()
+            .map(|(_, gaps, _)| gaps.clone()),
+        Some(vec![gap(Some("1"), Some("3"))])
+    );
+    task.abort();
+}
+
+/// Review of the step-4 fixes, S-b: a record delete whose call failed after
+/// it landed is read again: the reattach goes on, and the operator hears
+/// `Started`, not that nothing changed.
+#[tokio::test(start_paused = true)]
+async fn a_record_delete_that_landed_although_its_call_failed_goes_on() {
+    let rig = Rig::new(64);
+    let (_engine, task, control) = detached_live_only(&rig).await;
+    *rig.sink.forget_lands_then_fails.lock().unwrap() = true;
+    assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
+    let _attach = next_request(&rig).await;
     task.abort();
 }

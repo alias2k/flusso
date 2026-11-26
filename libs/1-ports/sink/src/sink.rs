@@ -348,6 +348,10 @@ pub struct Detachment {
     pub gaps: Vec<Gap>,
 }
 
+/// How [`Sink::record_gaps`] decides: the list kept now in, the list to
+/// keep (or `None`: as it is) out.
+pub type DecideGaps<'a> = dyn Fn(&[Gap]) -> Option<Vec<Gap>> + Send + Sync + 'a;
+
 /// The changes a reattach accepted as missing (ADR 0012 stage 10, O16, S3):
 /// none after `from` and through `to` reached the index. Positions in the
 /// source's own text.
@@ -728,13 +732,15 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         )))
     }
 
-    /// Keep, with `mapping`'s seed marker, every gap a reattach accepted
-    /// (ADR 0012 stage 10, O16), the whole list replacing the one kept: so a
-    /// fence never vouches inside any of them, after a restart too. A seed
-    /// or a reindex drops them: the index then holds every change. The
-    /// default keeps nothing.
-    async fn record_gaps(&self, _: &IndexMapping, _: &[Gap]) -> Result<()> {
-        Ok(())
+    /// Change the gaps kept with `mapping`'s seed marker (ADR 0012 stage 10,
+    /// O16): `decide` is handed the list kept now and answers the list to
+    /// keep, or `None` to keep it as it is. The write is conditional on what
+    /// was read: another writer meanwhile makes the sink read again and ask
+    /// `decide` again. Returns the list kept after. So a fence never vouches
+    /// inside any gap, after a restart too. A seed or a reindex drops them:
+    /// the index then holds every change. The default keeps nothing.
+    async fn record_gaps(&self, _: &IndexMapping, _: &DecideGaps<'_>) -> Result<Vec<Gap>> {
+        Ok(Vec::new())
     }
 
     /// Put a rebuild of `mapping`'s index back to detached (ADR 0012 stage

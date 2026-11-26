@@ -3018,6 +3018,7 @@ impl<'a> Run<'a> {
     /// open. A failed read fails the run: its restart stages, which reads.
     async fn reread(&mut self) -> Result<()> {
         let read_at = self.engine.rereads.read_begins();
+        self.engine.settling_gaps();
         for lane in 0..self.lanes.len() {
             let Some(run) = self.lanes.get(lane) else {
                 continue;
@@ -3037,7 +3038,7 @@ impl<'a> Run<'a> {
                 super::AtStaging::AsBefore | super::AtStaging::Finished(_) => {
                     if !found.gaps.is_empty() {
                         self.engine
-                            .known_gaps(mapping, found.gaps)
+                            .known_gaps(mapping, found.gaps, true)
                             .await
                             .map_err(failed)?;
                     }
@@ -3162,7 +3163,7 @@ impl<'a> Run<'a> {
                     last.to = self.engine.place(&run.key);
                 }
                 self.engine.observer.on_lane_gaps(&run.key, &gaps);
-                reattached = Some((run.key.clone(), gaps));
+                reattached = gaps.last().cloned().map(|last| (run.key.clone(), last));
             }
             if let Some(run) = self.lanes.get_mut(lane)
                 && let Some(down) = run.health.attached(Instant::now())
@@ -3177,8 +3178,8 @@ impl<'a> Run<'a> {
                 ));
             }
             self.acknowledged(handle, lane, Some(seq), false).await?;
-            if let Some((key, gaps)) = reattached {
-                self.engine.record_reattached(&key, &gaps).await?;
+            if let Some((key, last)) = reattached {
+                self.engine.record_reattached(&key, &last).await?;
             }
             match rebuild {
                 // r3: every page of the rebuild is read after the attach.

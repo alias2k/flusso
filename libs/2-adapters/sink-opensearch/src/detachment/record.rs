@@ -428,30 +428,65 @@ impl OpensearchSink {
 }
 
 impl OpensearchSink {
-    /// Keep every reattach's gap with the seed marker: a partial update
-    /// touching nothing else, the list replacing an earlier single `gap`. A
-    /// whole-document write of the marker (a reindex, a seed) drops them:
-    /// the index is rebuilt then, and nothing is missing.
+    /// Change the gaps kept with the seed marker as `decide` says: a partial
+    /// update touching nothing else (an earlier single `gap` nulled),
+    /// conditional on the marker read, read again and decided again on a
+    /// conflict. A whole-document write of the marker (a reindex, a seed)
+    /// drops them: the index is rebuilt then, and nothing is missing.
     pub(crate) async fn write_gaps(
         &self,
         mapping: &IndexMapping,
-        gaps: &[sink::Gap],
-    ) -> Result<()> {
+        decide: &sink::DecideGaps<'_>,
+    ) -> Result<Vec<sink::Gap>> {
         let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
-        let url = format!(
-            "{}/{}/_update/{hash_alias}",
-            self.base_url,
-            self.meta_index()
-        );
-        let request = self.client.post(&url).json(&json!({ "doc": {
+        let context = "recording the reattach's gaps failed";
+        for _ in 0..CONFLICT_ROUNDS {
+            let Kept { marker, .. } = self.read_kept(&hash_alias).await?;
+            let Some(marker) = marker else {
+                return Err(SinkError::Write(format!(
+                    "{context}: {hash_alias} has no seed marker"
+                )));
+            };
+            let kept = super::read_gaps(&marker.source);
+            let Some(gaps) = decide(&kept) else {
+                return Ok(kept);
+            };
+            let Some((seq_no, primary_term)) = marker.version() else {
+                return Err(SinkError::Write(format!(
+                    "{context}: the seed marker of {hash_alias} was read without its sequence number"
+                )));
+            };
+            let url = format!(
+                "{}/{}/_update/{hash_alias}?if_seq_no={seq_no}&if_primary_term={primary_term}",
+                self.base_url,
+                self.meta_index()
+            );
+            let body = json!({ "doc": {
                 "gaps": gaps
                     .iter()
                     .map(|gap| json!({ "from": gap.from, "to": gap.to }))
                     .collect::<Vec<_>>(),
                 "gap": null,
-            } }));
-        self.send_ok(request, "recording the reattach's gap failed")
-            .await?;
-        Ok(())
+            } });
+            let response = self
+                .maybe_auth(self.client.post(&url).json(&body))
+                .send()
+                .await
+                .map_err(|e| request_error(context, e))?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(gaps);
+            }
+            if status == reqwest::StatusCode::CONFLICT {
+                continue;
+            }
+            let text = response.text().await.unwrap_or_default();
+            return Err(SinkError::Write(format!(
+                "{context}: HTTP {status}: {text}"
+            )));
+        }
+        Err(SinkError::Write(format!(
+            "the seed marker of {hash_alias} kept changing under the gaps' write"
+        )))
     }
 }

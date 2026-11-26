@@ -32,6 +32,9 @@ struct Store {
     /// Runs before a `_create` of this id is answered, once: another writer
     /// gets there first.
     before_create: Option<(String, Value)>,
+    /// Runs before an `_update` of this id is answered, once: another writer
+    /// replaces the document first.
+    before_update: Option<(String, Value)>,
 }
 
 impl Store {
@@ -133,6 +136,20 @@ impl Store {
             }
             ("POST", path) if path.starts_with("/flusso_meta/_update/") => {
                 let id = path.trim_start_matches("/flusso_meta/_update/");
+                if let Some((first, source)) =
+                    self.before_update.take_if(|(at, _)| at.as_str() == id)
+                {
+                    self.put(&first, source);
+                }
+                if let Some(seq) = condition
+                    && self.docs.get(id).map(|(_, at)| *at) != Some(seq)
+                {
+                    return (
+                        409,
+                        json!({ "error": { "type": "version_conflict_engine_exception" } })
+                            .to_string(),
+                    );
+                }
                 let Some(mut source) = self.doc(id) else {
                     return (
                         404,
@@ -661,7 +678,7 @@ async fn a_reattach_keeps_its_gap_with_the_seed_marker() {
         from: read.through.clone(),
         to: None,
     };
-    sink.record_gaps(&mapping(), std::slice::from_ref(&open))
+    sink.record_gaps(&mapping(), &|_| Some(vec![open.clone()]))
         .await
         .unwrap();
     sink.forget_detachment(&mapping(), read.version.as_ref().unwrap())
@@ -680,7 +697,9 @@ async fn a_reattach_keeps_its_gap_with_the_seed_marker() {
         to: Some("0/40".to_owned()),
     };
     let both = [first, second];
-    sink.record_gaps(&mapping(), &both).await.unwrap();
+    sink.record_gaps(&mapping(), &|_| Some(both.to_vec()))
+        .await
+        .unwrap();
     assert_eq!(sink.detachment(&mapping()).await.unwrap().gaps, both);
     let mut kept = store.lock().unwrap().doc(ALIAS).unwrap();
     assert_eq!(
@@ -708,5 +727,56 @@ async fn a_single_gap_an_earlier_build_kept_reads_as_a_list_of_one() {
             from: Some("0/10".to_owned()),
             to: Some("0/20".to_owned()),
         }]
+    );
+}
+
+/// Review of the step-4 fixes, S-a: the gaps' write is conditional on the
+/// marker read. Another writer changing the marker first makes the sink read
+/// again and decide again over what that writer kept, never write blind.
+#[tokio::test]
+async fn a_gap_write_meeting_another_writer_reads_again_and_decides_again() {
+    let mut seeded = Store::seeded();
+    let mut theirs = marker();
+    theirs["gaps"] = json!([{ "from": "0/10", "to": "0/40" }]);
+    seeded.before_update = Some((ALIAS.to_owned(), theirs));
+    let store = Arc::new(Mutex::new(seeded));
+    let stub = serve(&store).await;
+    let seen = Mutex::new(Vec::new());
+    let kept = stub
+        .sink()
+        .record_gaps(&mapping(), &|kept| {
+            seen.lock().unwrap().push(kept.to_vec());
+            // Settle an open end only: one known already stays.
+            let open = kept.iter().any(|gap| gap.to.is_none());
+            open.then(|| {
+                vec![sink::Gap {
+                    from: Some("0/10".to_owned()),
+                    to: Some("0/20".to_owned()),
+                }]
+            })
+            .or_else(|| {
+                kept.is_empty().then(|| {
+                    vec![sink::Gap {
+                        from: Some("0/10".to_owned()),
+                        to: None,
+                    }]
+                })
+            })
+        })
+        .await
+        .unwrap();
+    let seen = seen.into_inner().unwrap();
+    assert_eq!(seen.len(), 2, "read again after the conflict: {seen:?}");
+    assert_eq!(
+        kept,
+        [sink::Gap {
+            from: Some("0/10".to_owned()),
+            to: Some("0/40".to_owned()),
+        }],
+        "the other writer's settled gap stands"
+    );
+    assert_eq!(
+        store.lock().unwrap().doc(ALIAS).unwrap()["gaps"],
+        json!([{ "from": "0/10", "to": "0/40" }])
     );
 }
