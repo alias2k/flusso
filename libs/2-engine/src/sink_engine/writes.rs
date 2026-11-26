@@ -875,7 +875,7 @@ impl<'a> Run<'a> {
                 run.health.due <= now
                     && run.detach_due.is_none()
                     && !run.health.detach_unsure
-                    && !(run.seed_waits_for_slot && !self.engine.rereads.may_erase_records())
+                    && (!run.seed_waits_for_slot || self.engine.rereads.may_erase_records())
                     && !self.lane_in_flight(lane)
             }
             _ => false,
