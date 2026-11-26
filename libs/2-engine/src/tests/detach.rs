@@ -2803,3 +2803,60 @@ async fn a_gap_settled_by_another_writer_before_the_attach_keeps_the_attach_end(
     .await;
     task.abort();
 }
+
+/// Review of the second fix round: a failed opening counts no read and
+/// holds no slot, so a read after it doesn't count and an open gap stays
+/// open.
+#[tokio::test(start_paused = true)]
+async fn a_failed_opening_counts_no_read_and_settles_nothing() {
+    let rig = Rig::new(64);
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), vec![gap(Some("1"), None)]);
+    let engine = rig.live_only_engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(rig.rereads.open(async { Err::<(), ()>(()) }).await.is_err());
+    assert!(!rig.rereads.holding());
+    rig.rereads
+        .read(&sink_name("primary"), rig.rereads.read_begins());
+    assert!(!rig.rereads.current(&sink_name("primary")));
+    let (task, _control) = spawn(&engine);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(rig.sink.gaps.lock().unwrap().is_empty(), "nothing settled");
+    task.abort();
+}
+
+/// Review of the second fix round: a sink run restarted mid-stream re-stages
+/// over a gap a reattach left open (it died between the record's delete and
+/// saving the end). With the slot held, its run settles the gap at its next
+/// turn, without waiting for a new opening, so `/wait` doesn't refuse every
+/// later position meanwhile.
+#[tokio::test(start_paused = true)]
+async fn a_restaging_while_the_slot_is_held_settles_the_gap_without_a_new_opening() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), vec![gap(Some("1"), None)]);
+    let engine = rig.live_only_engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(
+        rig.rereads.current(&sink_name("primary")),
+        "the staging is the read"
+    );
+    assert!(
+        rig.sink.gaps.lock().unwrap().is_empty(),
+        "a staging never settles"
+    );
+    let (task, _control) = spawn(&engine);
+    eventually("settled by the run", || {
+        rig.sink.gaps.lock().unwrap().as_slice()
+            == [("users".to_owned(), vec![gap(Some("1"), Some("nothing"))])]
+    })
+    .await;
+    task.abort();
+}
