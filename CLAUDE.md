@@ -552,7 +552,8 @@ and the container at once (same replication slot).
 `default-members = ["apps/cli"]`, so bare `cargo run` is the `flusso` binary. CLI
 subcommands: `build` (compile config+schemas → portable `flusso.lock`, no DB, no secrets
 baked in), `check` (validate only; `--offline` skips the DB; a passing section is one line, a
-failing one prints in full with its SQL, then warnings, errors last, and a summary line; `--color
+failing one prints in full with its SQL, then warnings, errors last (a capture gap `run` won't close
+among them), and a summary line; `--color
 auto|always|never`; `--format json` is the same report, one `Report` value rendered twice, with no
 config or mapping), `show config|mapping [index]` (the deployment,
 secrets redacted, or the typed mapping; no DB; reads `--config` or the `--lock`; `--format json`;
@@ -2015,7 +2016,7 @@ key a missing declared column is `UnknownColumn` only when a relation reads it, 
 designer tells a key from a same-named field; every relation table also needs a single-column
 primary key; a `field` that reads no column — `source::soft_delete_column` is `None`,
 which the document query silently skips — is an error that `validate_spec` reports with no
-database, so `check --offline` shows it; so is `DuplicateFieldName` (issue #284), a warning: two
+database, so `check --offline` shows it; so is `DuplicateFieldName` (issue #284), a warning while a document still holds what the index maps (else `DuplicateFieldNameWrong`, an error; see above): two
 fields sharing a `FieldName` at one level still load (format freeze), but the OpenSearch mapping
 keeps the last, the Postgres document holds the last one's value coerced through the first one's
 declaration (`coerce_document`; a first constant builds its own value, a last one reaches the
@@ -2058,17 +2059,35 @@ plain: an allow-list (no `pipeline`, only `PLAIN_SETTINGS` index settings, plus
 `ignore_malformed` where it doesn't lift the refusal; every `OpensearchConfig` field is destructured
 by name, so a new option must be decided) — any state it doesn't model means no stop
 (`refused_only_by_a_mapping`);
-type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementMismatch` (an empty
-`ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `RootPrimaryKey`
+type, numeric, nullability (and `NullabilityUntracked`), ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementMismatch` (an empty
+`ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `DuplicateFieldNameWrong`, `RootPrimaryKey`
 and `TimestampFormat` (issue #304: a timestamp `options.format` no pattern of which reads the ISO
 form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) and `CheckSkipped` findings print and start, as they built or ran in 0.17), so a new kind forces a decision there. A kind
 that stops a deployment the previous release started is a breaking change: allowed in a minor or major release when it is the correct behaviour, marked breaking, with an entry on that release's upgrade page (`docs/src/operate/upgrade-to-*.md`) saying what stops and how to fix it. `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
 `#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. **An index
 that starting flusso does not make work as its schema says is an `Error`, whatever the cause**
 (issue #485): `Nullability` (a null where the schema says never), `UndeclaredArrayColumn` (a list
-where it says one value) and `IdsElementLossy` (other ids than the table's) are errors that still
-start without `--strict`; `IgnoredPrimaryKey`, `CheckSkipped`, `DuplicateFieldName` and
-`TimestampFormat` stay warnings. Each `Error` the start goes on with is a `tracing::error!` event
+where it says one value), `IdsElementLossy` (other ids than the table's), `TimestampFormat` and
+`DuplicateFieldNameWrong` are errors that still start without `--strict`; `IgnoredPrimaryKey`,
+`CheckSkipped`, `DuplicateFieldName` and `NullabilityUntracked` stay warnings. A namesake pair's
+severity is decided in one place, `source::duplicate_is_wrong(same, Reach)` over `duplicate_outcome`:
+`Holds` a value the mapping takes and `Unknown` are the `DuplicateFieldName` warning, every other
+outcome (`Holds` as raw JSON, `Wrapped`, `FirstsChildren`, `Nothing`, `Null`, `AsText`,
+`FailsToBuild`, `Rejected`) is `DuplicateFieldNameWrong`, except under an input-only ancestor
+(`Reach::Absent`: no document holds it) and a refusal where nothing is indexed (`Reach::Stored`: an
+unindexed join, an object with `enabled: false`); the live `duplicate_names` matrix asserts each pair's
+severity against what it saw, and the designer counts the kind among its duplicate kinds
+(`model/issues.ts`). `required` over a column of a relation that records no nullability is
+`NullabilityUntracked`, not `Nullability`: `Catalog::tracks_nullability` (default `true`, the table
+rule; Postgres: `relkind` not `v`/`m`/`f`), asked only before a nullability finding. **A gap in
+capture `run` won't close is an error too** (`apps/cli/src/gaps.rs`, `publication_gap` /
+`replica_identity_gap`): a table the publication doesn't stream (or misroutes) when the role can't
+fix it or `manage_publication = false`, and a replica identity `gaps` entry (primary key or parent
+link) `run` won't set; a gap `run` closes, a `partial` entry (only the #169 skip) and a kept table are
+not (`print::Status`: `ok`/`run_fixes`/`by_hand`/`problem`, the one judge for both formats). `check`
+prints each as an `[error]` line at the bottom with its section's SQL and counts it; `Backends::source`
+inspects the same, read-only, before staging: `--strict` refuses, a plain start reports each gap as
+the schema errors' event and gauge, once per index reading its table. Each `Error` the start goes on with is a `tracing::error!` event
 (target `flusso::schema_errors`; `index`, `kind`, `field`, the message) at every start and a value
 of the `flusso.index.schema_errors{index,kind}` gauge (`telemetry/schema_errors.rs`). Under OTLP the
 event is a span event of the `daemon.start` span: the CLI has no OTel log bridge. One copy per
@@ -2082,10 +2101,14 @@ column under a `timestamp`/`date` field there (`Checker.date_mapped`: no namesak
 at all); not a `min`/`max` or a field in a join (a parent with no related row indexes). Guards:
 `backends::tests` (one per kind, the `strict_*` cases, plus `only_an_opensearch_sink_that_maps_the_value_as_written_refuses_it`),
 `validation::tests`' `an_index_that_differs_from_its_schema_is_an_error`, `schema_errors::tests`,
-`check::tests` (`both_formats_render_the_same_report`) and `apps/cli/tests/check_report.rs` (the
+`check::tests` (`both_formats_render_the_same_report`, `a_partial_replica_identity_set_by_hand_is_no_error`),
+`gaps::tests`, `validation::tests`' `required_over_a_views_column_is_a_warning_that_says_why`,
+`config_coverage`'s `required_over_a_views_column_is_a_warning_and_over_a_tables_an_error`,
+`apps/cli/tests/check_report.rs` (the
 report's order, one-line sections and colour, a JSON report with no config, mapping or secret; no
 Docker), `apps/cli/tests/strict_start.rs` (live Postgres: `--strict` refuses from the config and
-from a `--locked` lock, a plain start logs the event and sets the gauge),
+from a `--locked` lock, a schema error and a `publication_gap` alike, creating no slot or publication
+and leaving the replica identity; a plain start logs the event and sets the gauge),
 `config_coverage`'s `an_enum_or_domain_column_is_a_type_mismatch_that_still_builds` and
 `a_time_of_day_under_a_date_mapping_is_reported`, `apps/cli/tests/time_columns.rs` (live Postgres
 + OpenSearch: reported only where no document indexes; the workarounds index and leave `check`
@@ -3095,7 +3118,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
 | Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
-| CLI subcommands (`build`/`run`/`check`/`show`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs` (the report: `human_report`), `show.rs` (`show config`/`show mapping`), `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport (`telemetry/schema_errors.rs`: the schema errors a start goes on with), `backends.rs` the backend assembly |
+| CLI subcommands (`build`/`run`/`check`/`show`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs` (the report: `human_report`), `show.rs` (`show config`/`show mapping`), `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport (`telemetry/schema_errors.rs`: the schema errors and capture gaps a start goes on with), `gaps.rs` the capture gaps `run` won't close, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /indexes/{name}/reindex?sink=`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
 | Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position; `rules/`: read-time fields — `condition.rs` the two-sided tests, `date.rs`, `handles.rs` the rule handles, `list.rs` `Rules`/`Plan`, `field.rs` `RuleField`, `computation.rs`) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `read_time.rs` (what `context`/`rules`/`computed` generate, and which stored fields get a rule handle), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
