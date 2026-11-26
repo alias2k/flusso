@@ -4,7 +4,8 @@
 //! start, from the config and from a `--locked` lock alike, with `check`'s
 //! report, before anything is staged (no slot, no publication, the replica
 //! identity untouched); a plain start goes on, logs the error at `error` with
-//! its index, kind and field, and sets `flusso.index.schema_errors`.
+//! its index, kind and field, and sets `flusso.index.schema_errors`. A gap in
+//! capture `run` won't close is refused and reported the same way.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -54,9 +55,31 @@ async fn strict_refuses_an_error_a_plain_start_goes_on_with() {
     let flagged = run(&dir, &["--config", "flusso.toml", "--strict"], &[]).await;
     assert!(!flagged.status.success(), "{}", text(&flagged));
 
+    let wanted = r#"flusso_index_schema_errors{index="t",kind="undeclared_array_column"} 1"#;
+    let (metrics, seen) = plain_start(&dir, wanted, None).await;
+    assert!(
+        metrics.contains(wanted),
+        "{wanted} missing from:\n{metrics}"
+    );
+    let event = seen
+        .lines()
+        .find(|line| line.contains(r#""kind":"undeclared_array_column""#))
+        .unwrap_or_else(|| panic!("no error event for t.tags in:\n{seen}"));
+    let event: serde_json::Value = serde_json::from_str(event).unwrap();
+    assert_eq!(event["level"], "ERROR", "{event}");
+    assert_eq!(event["fields"]["index"], "t", "{event}");
+    assert_eq!(event["fields"]["field"], "tags", "{event}");
+    assert!(seen.contains("starting anyway"), "{seen}");
+}
+
+/// A plain `flusso run` of `dir`, logging JSON, stopped once `/metrics`
+/// shows `wanted` and, when `slot` names a database and a slot, that slot
+/// exists (so `prepare` has run), or after 60 s: what `/metrics` last showed,
+/// and every line it logged.
+async fn plain_start(dir: &Path, wanted: &str, slot: Option<(&str, &str)>) -> (String, String) {
     let port = free_port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_flusso"))
-        .current_dir(&dir)
+        .current_dir(dir)
         .args([
             "run",
             "--config",
@@ -77,21 +100,26 @@ async fn strict_refuses_an_error_a_plain_start_goes_on_with() {
     let logged = std::thread::spawn(move || {
         let mut seen = String::new();
         for line in BufReader::new(stderr).lines() {
-            let line = line.unwrap();
-            seen.push_str(&line);
+            seen.push_str(&line.unwrap());
             seen.push('\n');
-            if line.contains(r#""kind":"undeclared_array_column""#) {
-                return (true, seen);
-            }
         }
-        (false, seen)
+        seen
     });
 
+    let pool = match slot {
+        Some((url, _)) => Some(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect(url)
+                .await
+                .unwrap(),
+        ),
+        None => None,
+    };
     let http = reqwest::Client::new();
-    let wanted = r#"flusso_index_schema_errors{index="t",kind="undeclared_array_column"} 1"#;
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut metrics = String::new();
-    while Instant::now() < deadline && !metrics.contains(wanted) {
+    let mut prepared = slot.is_none();
+    while Instant::now() < deadline && !(metrics.contains(wanted) && prepared) {
         if let Ok(response) = http
             .get(format!("http://127.0.0.1:{port}/metrics"))
             .send()
@@ -99,25 +127,21 @@ async fn strict_refuses_an_error_a_plain_start_goes_on_with() {
         {
             metrics = response.text().await.unwrap_or_default();
         }
+        if let (Some(pool), Some((_, name))) = (&pool, slot) {
+            let slots: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_replication_slots WHERE slot_name = $1",
+            )
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            prepared = slots > 0;
+        }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     child.kill().unwrap();
     child.wait().unwrap();
-    let (found, seen) = logged.join().unwrap();
-    assert!(
-        metrics.contains(wanted),
-        "{wanted} missing from:\n{metrics}"
-    );
-    assert!(found, "no error event for t.tags in:\n{seen}");
-    let event = seen
-        .lines()
-        .find(|line| line.contains(r#""kind":"undeclared_array_column""#))
-        .unwrap();
-    let event: serde_json::Value = serde_json::from_str(event).unwrap();
-    assert_eq!(event["level"], "ERROR", "{event}");
-    assert_eq!(event["fields"]["index"], "t", "{event}");
-    assert_eq!(event["fields"]["field"], "tags", "{event}");
-    assert!(seen.contains("starting anyway"), "{seen}");
+    (metrics, logged.join().unwrap())
 }
 
 /// A project of one index over `t`, reading `tags` as one keyword, writing
@@ -175,7 +199,9 @@ async fn a_strict_refusal_creates_no_slot_or_publication() {
 /// A gap in capture `flusso run` won't close (issue #485): with
 /// `manage_publication = false` and no publication, no change to `t` would
 /// reach its index. `check` fails on it; `run --strict` refuses before
-/// anything is staged; a plain start goes on.
+/// anything is staged; a plain start goes on, logs the gap once as an `error`
+/// event (`prepare` doesn't warn about it again) and sets
+/// `flusso.index.schema_errors` to `publication_gap`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_gap_run_wont_close_fails_check_and_a_strict_start() {
@@ -218,6 +244,22 @@ async fn a_gap_run_wont_close_fails_check_and_a_strict_start() {
         );
         assert_untouched(&url, "gap", args).await;
     }
+
+    let wanted = r#"flusso_index_schema_errors{index="t",kind="publication_gap"} 1"#;
+    let (metrics, seen) = plain_start(&dir, wanted, Some((&url, "s_gap"))).await;
+    assert!(
+        metrics.contains(wanted),
+        "{wanted} missing from:\n{metrics}"
+    );
+    let events: Vec<&str> = seen
+        .lines()
+        .filter(|line| line.contains(r#""kind":"publication_gap""#))
+        .collect();
+    assert_eq!(events.len(), 1, "one error event for the gap in:\n{seen}");
+    assert!(
+        !seen.contains("publication is missing tables"),
+        "prepare warned about the gap the start reported:\n{seen}"
+    );
 }
 
 /// No slot `s_<name>`, no publication `p_<name>`, and `t` still at its
