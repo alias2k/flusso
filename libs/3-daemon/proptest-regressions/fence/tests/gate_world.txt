@@ -1,9 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 3cd1d048737cfb197e6688eea1e2ebf713ed37089be55300f9c5ae22fd29fcd1 # shrinks to events = [Restart { sink: 1, unreadable: 2 }, Reindex { index: 1 }]
-cc dfe0cce3688aebb6955ccd53cd6db9d5da27d395bdfa0612e05414a292e82bf6 # shrinks to events = [Open { ok: false, jump: 0, drop: None }, Open { ok: false, jump: 0, drop: None }, Readable { sink: 0 }, Open { ok: true, jump: 10, drop: Some(2) }, Open { ok: false, jump: 0, drop: None }, Readable { sink: 0 }, Open { ok: true, jump: 10, drop: None }, Open { ok: true, jump: 0, drop: None }, Reindex { index: 0 }, Restart { sink: 0, unreadable: 0 }, Apply { index: 0, on: 0 }, Restart { sink: 0, unreadable: 0 }, Apply { index: 0, on: 0 }, Apply { index: 0, on: 0 }, Wait { lane: 2, whole_sink: false, searchable: false, at: 0 }]
-cc 5eed8715e9f223c38a9f2fa40592cea90cc12586160915019a9ffaf64ff07491 # shrinks to events = [Open { ok: false, jump: 20, drop: None }, Open { ok: false, jump: 10, drop: None }, Restart { sink: 1, unreadable: 2 }, Reindex { index: 1 }, Open { ok: true, jump: 0, drop: None }, Wait { lane: 2, whole_sink: true, searchable: false, at: 0 }]
