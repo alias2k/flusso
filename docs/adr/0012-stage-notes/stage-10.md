@@ -765,6 +765,111 @@ The independent review (`target/review-482-step3/REPORT.md`) found nothing block
   - With one build permit, the held build holds the engine's only permit, so the other index waits too. That is the permit, not the quiesce.
   - That the budget refused a batch during the attach is not asserted.
 
+### Step 4: the rebuild and the reattach, as designed before the code
+
+**What reaches it.** Still only operations, no threshold (slice 4):
+
+- `reindex` of a detached index (R13) starts a rebuild;
+- `flusso reattach --accept-gap` reattaches a `backfill = false` lane (O16).
+
+Both are user-visible from here: the `reattach` command and endpoint, the `409` of O20, and `/status`.
+
+**The rebuild** (r0–r4, §5), in the sink engine, at the lane barrier:
+
+1. **r1, `Sink::begin_rebuild` (new).** One call does three things:
+   - deletes every generation but `serving` (r1a); a refused delete fails the attempt before anything is read;
+   - moves the marker past every existing generation, unseeded, with no checkpoint, keeping `detaching_from`, conditionally (r1b; #477's reason: a failed attempt's walk mark is never read again);
+   - writes the record `rebuilding`, `attempts + 1`, `last_attempt`, conditionally (r1c).
+
+   It returns the new `attempts`, which is the attach's attempt. **S2:** the record says `rebuilding` before `Attach` is sent, so a staging after the attach finds `rebuilding`, never `detached`.
+2. **r2.**
+   - `ensure_index` creates the generation;
+   - the fence hears `on_index_rebuilding` and goes from `Detached { through }` to `Rebuilding { through }`;
+   - `LaneState.rebuilding = Some(attempts)`;
+   - `Request::Attach { attempt: attempts }` is sent.
+3. **r3.**
+   - The sink engine takes `Attached`: the lane opens and stays rebuilding;
+   - it publishes `Backfill` under a new ticket, which replaces the cut outstanding entry (m5's half for the rebuild);
+   - the fence stays `Rebuilding` until the seed (**S3**, O2), never `Writes`.
+4. **r4.**
+   - The seed's `mark_seeded` deletes the record after the marker's `PUT`, on the version it reads (OpenSearch; the port says so);
+   - `rebuilding` is cleared;
+   - the fence goes to `Writes` at `on_index_seeded`.
+   - #479's rule holds: a seed refused by a block on `serving` parks the lane.
+
+**A kill between the record write and `Attached`.**
+
+| Killed after | The restart finds | What happens |
+| --- | --- | --- |
+| r1 (record `rebuilding`, no attach) | `rebuilding`, marker unseeded on a generation that may not exist | the process-start attach below |
+| r2 (generation created, `Attach` sent) | the same | the same |
+| r3 (`Attached` taken, walk running) | `rebuilding`, a walk mark | the same; the walk resumes from its mark |
+| r4, before the record's delete | `rebuilding`, marker seeded on a newer generation | finished: the record is deleted (`AtStaging::Finished`) |
+
+**The process-start attach of a `rebuilding` record.** `AtStaging::Rebuilding(attempts)`:
+
+- `ensure_index`, R9's delete, the fence `on_index_rebuilding`, the lane `rebuilding`, the backfill asked (its walk resumes from its mark);
+- the lane is attached already: `Progress` starts with every lane attached;
+- under `--skip-backfill` or `backfill = false`, **O26**: `Sink::demote` (new) puts the record back to `detached`, moves the marker explicitly past every generation, forgets the walk and deletes the partial, and the index is staged detached.
+
+**O27.** The rebuild's `Backfill` goes to the inbox, which is read only while no walk runs, so it waits behind another sink's walk of the index, with the lane attached meanwhile. Existing behaviour; a test pins it.
+
+**O20(c), `reindex` of a rebuilding index.**
+
+| The lane is | The engine | The HTTP edge |
+| --- | --- | --- |
+| waiting for `Attached` | ignores it and logs | `409 "the index is being rebuilt (starting)"` |
+| open, rebuilding | ignores it and logs | `409 "the index is being rebuilt"` |
+| parked or restaging, rebuilding | detaches again (d1–d5, `attempts` unchanged) and rebuilds at once | `202` |
+
+A reindex naming no sink goes on where it applies, and its `202` lists the lanes it skipped. `/status` carries what the edge reads: per lane, `rebuilding { attempts }` beside its health, and `attaching`.
+
+**`reattach --accept-gap`** (O16, §6a):
+
+- **The surface:** `DaemonControl::reattach(index, sink)`, then `SinkControl::Reattach { index }`, behind `POST /indexes/{name}/reattach?sink=&accept_gap=true` on the private surface, and `flusso reattach <index> --sink <name> --accept-gap`. The refusals and their HTTP codes are §6a's.
+- **The steps, at the lane barrier:**
+  1. read the records: `live_only`, the marker on `serving` and seeded, the lane detached;
+  2. `ensure_index`;
+  3. `forget_detachment`, the commit point (**S2** for the reattach: no record is left to detach it again);
+  4. `Attach` under a new attempt;
+  5. on `Attached` the lane opens as an ordinary lane. The cut backfill entry is cleared (**m5**), so a later `reindex` is staged.
+
+**S3 for the reattach, the gap.** The owner's rule, built literally:
+
+- **The gap** runs from the fence's frozen position at the detach (`from`) to the source's answer for the lane at the moment it opens (`to`).
+- **What a wait gets:**
+  - a position at or before `from` is vouched as before;
+  - one inside `(from, to]` is refused at once, as `Unserved::Gap`, naming the gap;
+  - one after `to` is vouched as usual.
+- **Exact inside the process:** the fence computes both ends itself, from its own source.
+- **Durable across a restart:**
+  - the sink engine writes the gap's two ends as the source's own text into the seed marker (`gap: { from, to }`, through `Sink::record_gap`, new). It gets the text from a seam the daemon hands it (`SinkEngine::with_positions`: the source's `reached` and `format_position`);
+  - staging reads the gap back (`Detachment.gap`), and the fence hears it as `on_lane_gap`.
+- **The crash window.** A crash between step 3 (record gone) and step 5 (`Attached`) leaves `to` unknown. The next process's lane starts attached: its gap ends at the position the slot resumes from at that start. That needs a read-only `ChangeCapture::resume_point()` (Postgres: the slot's `confirmed_flush_lsn`), read at staging. If that read turns out not to be exact, the build stops there and reports the options.
+
+**O29: the record read once the slot is held.**
+
+- **When.** The ingest engine's run, after `live()` opened the stream and before the first item is published, asks every sink engine to read each index's records again (`SinkControl::Reread`, answered over a oneshot), and waits.
+- **What it changes.**
+  - A lane the records say is detached is adopted as detached;
+  - slice 1's put-back of a half-moved marker happens only at this read: the staging read takes `put_back: false` (`Sink::detachment` gains the argument);
+  - since every read before the slot is held is only advisory, a half-moved marker that staging found is left for this read.
+- **Cost.** One `_mget` per index per sink per live start.
+
+**m7 of step 2.** `/status`'s `committed` lists the detached lanes it leaves out (O21), and the top level lists `detached: [{index, sink}]` (§9).
+
+**Tests first, at least:**
+
+- `an_attached_lane_stays_attached_across_a_sink_run_restart`, through the real staging, over a stand-in that keeps its records (S2);
+- `a_fence_on_a_rebuilding_lane_vouches_for_no_change_dropped_while_detached` (S3);
+- `a_reattached_lane_vouches_only_from_its_attach`, inside the process and after a restart (S3);
+- `a_reindex_after_an_attach_is_staged` (m5);
+- the kill walk r1–r4, and the process-start attach;
+- O26's demotion, O27's wait, and O20(c)'s three rows;
+- the `409`s at the edge;
+- the reattach's refusals and steps;
+- O29's adopt and its put-back.
+
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
 **O29: can a process that staged before another one's detach keep the lane attached? (S3)**
