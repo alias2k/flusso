@@ -2372,22 +2372,36 @@ async fn a_reindex_of_a_rebuild_waiting_on_its_seeds_retire_block_is_refused() {
 /// vouches inside it. The gap must be kept before the record goes.
 #[tokio::test(start_paused = true)]
 async fn a_reattach_killed_before_any_step_comes_back_with_its_gap_or_detached() {
-    // The call the process died before, and whether the next start finds
-    // the lane detached (else attached, carrying the open gap).
+    // The step the process died before, and whether the next start finds
+    // the lane detached (else attached, carrying the open gap). The last
+    // row dies after `Attached`, before the completed gap is saved.
     for (died_before, detached) in [
         ("ensure_index", true),
         ("record_gap", true),
         ("forget_detachment", true),
         ("attached", false),
+        ("saved", false),
     ] {
         let rig = Rig::new(64);
-        let (_engine, task, control) = detached_live_only(&rig).await;
-        if died_before != "attached" {
+        let (engine, task, control) = detached_live_only(&rig).await;
+        if !matches!(died_before, "attached" | "saved") {
             rig.sink.dead.lock().unwrap().insert(died_before);
         }
         control.send(reattach(users())).await.unwrap();
-        if died_before == "attached" {
-            let _attach = next_request(&rig).await;
+        if matches!(died_before, "attached" | "saved") {
+            let stream::Request::Attach { attempt, .. } = next_request(&rig).await else {
+                panic!("an attach");
+            };
+            if died_before == "saved" {
+                rig.sink.dead.lock().unwrap().insert("record_gap");
+                rig.progress.routed(Position::new(3));
+                rig.progress.attach(&lane(users()), attempt);
+                publish(&rig, LaneItem::Attached { attempt }).await;
+                eventually("the lane opens", || {
+                    engine.lane_health(&lane(users())).is_open()
+                })
+                .await;
+            }
         } else {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
@@ -2412,11 +2426,18 @@ async fn a_reattach_killed_before_any_step_comes_back_with_its_gap_or_detached()
             .flat_map(|(_, gaps, _)| gaps.clone())
             .collect();
         if detached {
+            // The fence freezes where the detach recorded reads stood: it
+            // vouches up to 1, nothing past it.
             assert!(
-                engine.lane_health(&lane(users())).is_detached(),
-                "{died_before}: the record still says detached"
+                matches!(
+                    engine.lane_health(&lane(users())),
+                    LaneHealth::Detached { through: Some(ref at), .. } if at == "1"
+                ),
+                "{died_before}: the record still says detached, frozen at 1"
             );
         } else {
+            // The fence refuses every position past 1 until a read while
+            // the slot is held settles the gap's end.
             assert!(
                 engine.lane_health(&lane(users())).is_open(),
                 "{died_before}: no record, the lane attached"
