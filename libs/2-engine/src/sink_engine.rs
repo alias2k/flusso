@@ -140,6 +140,7 @@ impl Blame {
 
 /// An operation the daemon hands a running sink engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SinkControl {
     /// Rebuild `indexes` into fresh generations: stage them and request a
     /// snapshot. Handled between two batches; nothing restarts.

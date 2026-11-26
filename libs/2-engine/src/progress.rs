@@ -19,9 +19,9 @@
 //! Several lanes answer as the one that covers least: what the source may
 //! confirm is every lane's answer at once. A detached lane
 //! ([`Progress::detach`]) is left out, its index's backlog with it, so with
-//! every lane detached the source confirms through its own horizon. The source turns the case into its
-//! own terms (`ChangeCapture::confirm`, `ChangeCapture::reached`), so it keeps
-//! no map of the changes it emitted.
+//! every lane detached the source confirms through its own horizon. The
+//! source turns the case into its own terms (`ChangeCapture::confirm`,
+//! `ChangeCapture::reached`), so it keeps no map of the changes it emitted.
 //!
 //! ```
 //! use engine::{Level, Progress};
@@ -338,7 +338,9 @@ impl Progress {
     /// ignored, and no answer over several lanes reads it, whatever it or its
     /// index's backlog holds. With no lane left attached, [`landed`](Self::landed)
     /// answers [`Landed::Free`]. Outlives [`forget_all`](Self::forget_all).
-    /// Whether `lane` is one this progress keeps.
+    ///
+    /// Returns whether `lane` is one this progress keeps (`false`: nothing
+    /// was done).
     pub fn detach(&self, lane: &LaneKey) -> bool {
         let mut registry = lock(&self.registry);
         let Some(registered) = registry.lanes.get_mut(lane) else {
