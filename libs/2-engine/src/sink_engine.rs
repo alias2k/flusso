@@ -1357,6 +1357,11 @@ impl SinkEngine {
                 }
                 let mut state = self.lane_state(&lane);
                 if state.rebuilding.is_none() {
+                    // O2: reads see the old generation until the seed; the
+                    // fence hears it before the backfill is asked (review of
+                    // step 4, m1).
+                    self.observer
+                        .on_index_rebuilding(&self.name, &mapping.index);
                     state.rebuilding = Some(attempts);
                     tracing::info!(%lane, attempts, "a rebuild under way: the lane is attached and its walk resumes");
                     self.store_lane(&lane, &state, false);

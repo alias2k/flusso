@@ -424,6 +424,8 @@ pub(super) struct Run<'a> {
     to_attach: Vec<usize>,
     /// Some lane has a reattach asked for and not yet started (O16).
     reattaches: bool,
+    /// Some lane owes a rebuild that could not begin (§6a item 2).
+    rebuilds_owed: bool,
     /// The `Attached` each attaching lane waits for, taken and held at the
     /// lane's front until nothing of the lane is unacknowledged: lane,
     /// receive order, handle.
@@ -497,6 +499,7 @@ impl<'a> Run<'a> {
             .iter()
             .filter(|lane| lane.health.health.is_detached())
             .count();
+        let rebuilds_owed = lanes.iter().any(|run| run.health.rebuild_owed);
         // A run restarted while a lane waits for its attach asks again: the
         // builder attaches once per attempt and publishes `Attached` again
         // for one it attached already (R8).
@@ -536,6 +539,7 @@ impl<'a> Run<'a> {
             detaching: Vec::new(),
             clearing: Vec::new(),
             discards: Vec::new(),
+            rebuilds_owed,
             to_attach,
             reattaches: false,
             attached: Vec::new(),
@@ -732,6 +736,7 @@ impl<'a> Run<'a> {
         if self.reattaches && !self.engine.stop.is_requested() {
             self.start_reattaches().await?;
         }
+        self.retry_rebuilds().await?;
         if !self.to_attach.is_empty() {
             self.send_attaches()?;
         }
@@ -857,12 +862,14 @@ impl<'a> Run<'a> {
     /// due, if any is still ahead: a due one starts on the next pass, or once
     /// what holds it back (a write of the lane, every slot) returns.
     fn lane_wake(&self, now: Instant) -> Option<Instant> {
-        if self.unhealthy == 0 || self.failure.is_some() {
+        if (self.unhealthy == 0 && !self.rebuilds_owed) || self.failure.is_some() {
             return None;
         }
         self.lanes
             .iter()
-            .filter(|run| run.health.is_unhealthy() && run.health.due > now)
+            .filter(|run| {
+                (run.health.is_unhealthy() || run.health.rebuild_owed) && run.health.due > now
+            })
             .map(|run| run.health.due)
             .min()
     }
@@ -988,7 +995,7 @@ impl<'a> Run<'a> {
             self.adopt_detached(lane).await?;
         }
         for (index, reason) in rebuild_failed {
-            tracing::warn!(%index, sink = %self.engine.name, %reason, "the rebuild could not begin; the index stays detached");
+            self.owe_rebuild(&index, &reason);
         }
         for (index, attempts, target) in rebuilt {
             self.rebuilding(&index, attempts, target);
@@ -3452,12 +3459,63 @@ impl<'a> Run<'a> {
         };
         run.health.rebuilding = Some(attempts);
         run.health.rebuild_target = target;
+        run.health.rebuild_owed = false;
         run.health.attaching = Some(attempt);
         tracing::info!(lane = %run.key, attempts, attempt, "rebuilding: asking for the lane to be attached");
         self.engine.store_lane(&run.key, &run.health, false);
         if !self.to_attach.contains(&lane) {
             self.to_attach.push(lane);
         }
+    }
+
+    /// `index`'s rebuild could not begin: owed, tried again on the staging
+    /// backoff (§6a item 2), the lane's reason saying why.
+    fn owe_rebuild(&mut self, index: &IndexName, why: &str) {
+        let Some(run) = self.lanes.iter_mut().find(|run| run.key.index == *index) else {
+            return;
+        };
+        if run.health.rebuild_failed(why, Instant::now()) {
+            tracing::warn!(lane = %run.key, %why, "the rebuild could not begin; the index stays detached and it is tried again on the staging backoff");
+            self.rebuilds_owed = true;
+            self.engine.store_lane(&run.key, &run.health, true);
+        }
+    }
+
+    /// Begin each owed rebuild that came due (§6a item 2), as a reindex
+    /// would: between batches, nothing of the lane in flight (it is
+    /// detached). Not while stopping: the next start's reindex asks again.
+    async fn retry_rebuilds(&mut self) -> Result<()> {
+        if !self.rebuilds_owed || self.engine.stop.is_requested() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let due: Vec<IndexName> = self
+            .lanes
+            .iter()
+            .filter(|run| {
+                run.health.rebuild_owed
+                    && run.health.due <= now
+                    && run.health.attaching.is_none()
+                    && run.health.health.is_detached()
+            })
+            .map(|run| run.key.index.clone())
+            .collect();
+        for index in due {
+            let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
+                continue;
+            };
+            match self.engine.rebuild(mapping).await {
+                Ok((attempts, target)) => {
+                    if let Some(run) = self.lanes.iter_mut().find(|run| run.key.index == index) {
+                        run.health.rebuild_owed = false;
+                    }
+                    self.rebuilding(&index, attempts, target);
+                }
+                Err(error) => self.owe_rebuild(&index, &error.to_string()),
+            }
+        }
+        self.rebuilds_owed = self.lanes.iter().any(|run| run.health.rebuild_owed);
+        Ok(())
     }
 
     /// O20(c): each rebuild parked or restaging starts again now. The lane
@@ -3483,9 +3541,7 @@ impl<'a> Run<'a> {
             }
             match self.engine.rebuild(mapping).await {
                 Ok((attempts, target)) => self.rebuilding(&index, attempts, target),
-                Err(error) => {
-                    tracing::warn!(%index, %error, "the rebuild could not begin again; the index stays detached");
-                }
+                Err(error) => self.owe_rebuild(&index, &error.to_string()),
             }
         }
         Ok(())

@@ -298,6 +298,10 @@ pub(crate) struct LaneState {
     /// every gap kept, the last the one it accepted, its `to` still unknown.
     /// Written with `to` once the lane opens.
     pub(crate) reattach: Option<Vec<sink::Gap>>,
+    /// A rebuild asked for could not begin (§6a item 2): it is owed, and
+    /// tried again at `due`, on the staging backoff. Dropped by a detach
+    /// again and once one begins.
+    pub(crate) rebuild_owed: bool,
 }
 
 /// A reindex whose staging failed, waiting for its retry.
@@ -347,6 +351,7 @@ impl LaneState {
             rebuilding: None,
             rebuild_target: None,
             reattach: None,
+            rebuild_owed: false,
         }
     }
 
@@ -504,6 +509,20 @@ impl LaneState {
     /// Detach the lane for `reason` (R6): whatever it kept of its parking,
     /// its fresh builds, a reindex it was owed and what a reindex left it
     /// holding goes; its schedule stays. Whether it wasn't detached already.
+    /// A rebuild of the detached lane could not begin for `why`: owed, tried
+    /// again after the staging backoff, doubled each time; the lane's reason
+    /// says so. Whether the lane is detached.
+    pub(crate) fn rebuild_failed(&mut self, why: &str, now: Instant) -> bool {
+        self.restage_failed(now);
+        let retry_in = self.due.saturating_duration_since(now);
+        let LaneHealth::Detached { reason, .. } = &mut self.health else {
+            return false;
+        };
+        *reason = format!("the rebuild could not begin: {why}; tried again in {retry_in:?}");
+        self.rebuild_owed = true;
+        true
+    }
+
     pub(crate) fn detach(&mut self, reason: String, through: Option<String>, now: Instant) -> bool {
         if self.health.is_detached() {
             return false;

@@ -306,6 +306,7 @@ impl Sink for Gate {
     }
 
     async fn begin_rebuild(&self, mapping: &IndexMapping) -> sink::Result<u64> {
+        self.dies_before("begin_rebuild")?;
         let mut kept = self.kept.lock().unwrap();
         let Some(record) = kept.get_mut(mapping.index.as_ref()) else {
             return Err(SinkError::Write("no detach record".to_owned()));
@@ -375,6 +376,8 @@ struct Heard {
     /// For each detach heard, whether its lane had already left the
     /// minimum: never, or the fence would freeze where `Free` reaches (R5).
     left_first: Mutex<Vec<bool>>,
+    /// Each index heard rebuilding.
+    rebuilding: Mutex<Vec<IndexName>>,
     /// Each list of gaps heard, with how many lane healths were heard before.
     gaps: Mutex<Vec<(LaneKey, Vec<sink::Gap>, usize)>>,
 }
@@ -392,6 +395,10 @@ impl Heard {
 }
 
 impl Observer for Heard {
+    fn on_index_rebuilding(&self, _: &kernel::SinkName, index: &IndexName) {
+        self.rebuilding.lock().unwrap().push(index.clone());
+    }
+
     fn on_lane_gaps(&self, lane: &LaneKey, gaps: &[sink::Gap]) {
         let heard = self.health.lock().unwrap().len();
         self.gaps
@@ -2535,5 +2542,91 @@ async fn a_slot_reopened_while_a_reindex_stages_is_read_before_the_items_it_brou
     .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(written(&rig).is_empty(), "nothing of it is written");
+    task.abort();
+}
+
+/// Review of step 4, m1: a rebuild resumed at a start serves `rebuilding`
+/// (O2), not `backfilling`: reads see the old generation. The fence hears
+/// the rebuild before the backfill is asked.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_resumed_at_a_start_serves_rebuilding() {
+    let rig = Rig::new(64);
+    let mut record = Detachment::recorded(
+        DetachRecord::Rebuilding { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    );
+    record.attempts = Some(1);
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), record);
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(*rig.heard.rebuilding.lock().unwrap(), [users()]);
+    assert_eq!(engine.lane_state(&lane(users())).rebuilding, Some(1));
+}
+
+/// Review of step 4, m3: read again once the slot is held, a `rebuilding`
+/// record another process began on a lane this process holds open takes the
+/// lane as detached before anything of it is written.
+#[tokio::test(start_paused = true)]
+async fn a_lane_another_process_began_rebuilding_is_taken_as_detached_once_the_slot_is_held() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.sink.kept.lock().unwrap().insert(
+        "users".to_owned(),
+        Detachment::recorded(
+            DetachRecord::Rebuilding { live_only: false },
+            Some(MarkerAt::Newer { seeded: false }),
+            version(),
+        ),
+    );
+    rig.rereads.live_opened();
+    let (task, _control) = spawn(&engine);
+    rig.live(&users(), 1, 1).await;
+    eventually("the lane is taken as detached", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(written(&rig).is_empty(), "nothing of it is written");
+    task.abort();
+}
+
+/// Review of step 4, m2 (§6a item 2): a rebuild that can't begin is owed:
+/// the lane stays detached, its reason says why, and the rebuild is tried
+/// again on the staging backoff until it begins.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_that_cannot_begin_is_owed_and_tried_again() {
+    let rig = Rig::new(64);
+    let (engine, task) = detached_on_a_block(&rig).await;
+    rig.sink.block(&users(), false);
+    task.abort();
+    let _ = task.await;
+    rig.sink.dead.lock().unwrap().insert("begin_rebuild");
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    eventually("the reason says why", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Detached { ref reason, .. } if reason.contains("the rebuild could not begin")
+        )
+    })
+    .await;
+    assert!(rig.sink.rebuilds.lock().unwrap().is_empty());
+    rig.sink.dead.lock().unwrap().clear();
+    let stream::Request::Attach { .. } = next_request(&rig).await else {
+        panic!("the owed rebuild begins and asks for its attach");
+    };
+    assert_eq!(*rig.sink.rebuilds.lock().unwrap(), ["users"]);
     task.abort();
 }
