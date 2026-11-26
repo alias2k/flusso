@@ -157,6 +157,13 @@ pub enum ParkReason {
         /// What the destination said.
         reason: String,
     },
+    /// The index's seed is held: its new generation is built, and the
+    /// generation reads see can't be retired, since the destination blocks
+    /// it (#479). The new generation waits for the block to lift.
+    SeedBlocked {
+        /// The block, and what lifts it.
+        reason: String,
+    },
 }
 
 impl ParkReason {
@@ -164,7 +171,7 @@ impl ParkReason {
     pub fn kind(&self) -> &'static str {
         match self {
             ParkReason::Refused { .. } => "refused",
-            ParkReason::Blocked { .. } => "blocked",
+            ParkReason::Blocked { .. } | ParkReason::SeedBlocked { .. } => "blocked",
         }
     }
 
@@ -172,7 +179,7 @@ impl ParkReason {
     pub fn label(&self) -> &'static str {
         match self {
             ParkReason::Refused { .. } => "refused",
-            ParkReason::Blocked { .. } => "blocked",
+            ParkReason::Blocked { .. } | ParkReason::SeedBlocked { .. } => "blocked",
         }
     }
 }
@@ -187,7 +194,9 @@ impl std::fmt::Display for ParkReason {
                 }
                 Ok(())
             }
-            ParkReason::Blocked { reason } => write!(f, "blocked: {reason}"),
+            ParkReason::Blocked { reason } | ParkReason::SeedBlocked { reason } => {
+                write!(f, "blocked: {reason}")
+            }
         }
     }
 }

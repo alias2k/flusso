@@ -182,6 +182,9 @@ pub struct LaneHealthView {
     pub next_probe: Option<chrono::DateTime<chrono::Utc>>,
     /// Why, in the destination's words (the refused ids for a refusal).
     pub reason: String,
+    /// Parked on its seed: the new generation is built, and the generation
+    /// reads see can't be retired while the destination blocks it (#479).
+    pub seed_blocked: bool,
 }
 
 impl LaneHealthView {
@@ -204,24 +207,29 @@ impl LaneHealthView {
                 next_probe,
             } => Some(Self {
                 state: match reason {
-                    engine::ParkReason::Blocked { .. } => LaneHealthState::Blocked,
+                    engine::ParkReason::Blocked { .. } | engine::ParkReason::SeedBlocked { .. } => {
+                        LaneHealthState::Blocked
+                    }
                     _ => LaneHealthState::Refused,
                 },
                 since: at(*since),
                 next_probe: Some(at(*next_probe)),
                 reason: reason.to_string(),
+                seed_blocked: matches!(reason, engine::ParkReason::SeedBlocked { .. }),
             }),
             engine::LaneHealth::Restaging { since, reason } => Some(Self {
                 state: LaneHealthState::Restaging,
                 since: at(*since),
                 next_probe: None,
                 reason: reason.clone(),
+                seed_blocked: false,
             }),
             engine::LaneHealth::Detached { since, reason, .. } => Some(Self {
                 state: LaneHealthState::Detached,
                 since: at(*since),
                 next_probe: None,
                 reason: reason.clone(),
+                seed_blocked: false,
             }),
             _ => None,
         }
@@ -611,16 +619,25 @@ impl Status {
     }
 
     /// Why a reindex of `lane` is not taken now (O20): its rebuild is
-    /// starting (waiting for its attach) or running with the lane open.
-    /// `None` when a reindex applies, a rebuild parked or restaging
+    /// starting (waiting for its attach), running with the lane open, or
+    /// waiting with its complete generation for a block on the serving one
+    /// (O28: a restart would delete it and meet the same block). `None`
+    /// when a reindex applies, a rebuild parked or restaging otherwise
     /// included (it starts again).
-    pub fn reindex_refusal(&self, lane: &stream::LaneKey) -> Option<&'static str> {
+    pub fn reindex_refusal(&self, lane: &stream::LaneKey) -> Option<String> {
         let (rebuilding, attaching) = lock(&self.lane_rebuild).get(lane).copied()?;
         if attaching.is_some() {
-            return Some("the index is being rebuilt (starting)");
+            return Some("the index is being rebuilt (starting)".to_owned());
         }
-        let open = !lock(&self.lane_health).contains_key(lane);
-        (rebuilding.is_some() && open).then_some("the index is being rebuilt")
+        rebuilding?;
+        match lock(&self.lane_health).get(lane) {
+            None => Some("the index is being rebuilt".to_owned()),
+            Some(view) if view.seed_blocked => Some(format!(
+                "the rebuild waits for the block on the serving generation: {}",
+                view.reason
+            )),
+            Some(_) => None,
+        }
     }
 
     /// Every lane detached from the slot's minimum (ADR 0012 stage 10).
@@ -2158,6 +2175,7 @@ mod tests {
                 since: chrono::Utc::now(),
                 next_probe: None,
                 reason: String::new(),
+                seed_blocked: false,
             };
             assert_eq!(view.why(), name);
         }

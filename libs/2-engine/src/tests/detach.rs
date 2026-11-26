@@ -91,6 +91,8 @@ struct Gate {
     marker_gaps: Mutex<BTreeMap<String, sink::Gap>>,
     /// Each gap written, by index, in order.
     gaps: Mutex<Vec<(String, sink::Gap)>>,
+    /// The seed meets a block on the serving generation (#479).
+    retire_blocked: Mutex<bool>,
 }
 
 impl Gate {
@@ -310,6 +312,14 @@ impl Sink for Gate {
     }
 
     async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
+        if *self.retire_blocked.lock().unwrap() {
+            return Err(SinkError::RetireBlocked {
+                new: format!("{index}_2"),
+                old: format!("{index}_1"),
+                block: "index write (api)".to_owned(),
+                deletable: false,
+            });
+        }
         // r4: the seed deletes a finished rebuild's record.
         self.kept.lock().unwrap().remove(index.as_ref());
         self.seeded.lock().unwrap().push(index.to_string());
@@ -2205,4 +2215,61 @@ async fn a_rebuild_forced_under_skip_backfill_survives_a_sink_run_restart() {
     );
     assert!(engine.lane_health(&lane(users())).is_open());
     assert_eq!(engine.lane_state(&lane(users())).rebuilding, Some(1));
+}
+
+/// Review of step 4, S2: a rebuild whose seed meets a block on the serving
+/// generation (#479) waits with its complete generation, parked `blocked`.
+/// A reindex then would delete that generation and meet the same block, the
+/// cost O28 rejected: it is ignored, and the rebuild stays parked as it was.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_of_a_rebuild_waiting_on_its_seeds_retire_block_is_refused() {
+    let rig = Rig::new(64);
+    let (engine, task, control, attempt) = rebuilding_on_reindex(&rig).await;
+    *rig.sink.retire_blocked.lock().unwrap() = true;
+    rig.progress.attach(&lane(users()), attempt);
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let stream::Request::Backfill { ticket, .. } = next_request(&rig).await else {
+        panic!("the rebuild asks its backfill");
+    };
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    eventually("the seed parks on the retire block", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked {
+                reason: crate::ParkReason::SeedBlocked { .. },
+                ..
+            }
+        )
+    })
+    .await;
+    let detaches = rig.sink.detaches().len();
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        rig.sink.rebuilds.lock().unwrap().len(),
+        1,
+        "no second rebuild"
+    );
+    assert_eq!(rig.sink.detaches().len(), detaches, "not detached again");
+    assert_eq!(engine.lane_state(&lane(users())).rebuilding, Some(1));
+    assert!(matches!(
+        engine.lane_health(&lane(users())),
+        LaneHealth::Parked {
+            reason: crate::ParkReason::SeedBlocked { .. },
+            ..
+        }
+    ));
+    task.abort();
 }

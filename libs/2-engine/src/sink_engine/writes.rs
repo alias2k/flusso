@@ -2001,7 +2001,7 @@ impl<'a> Run<'a> {
                 self.put_back_complete(seeding);
                 self.hold(
                     lane,
-                    Held::Blocked(retire_blocked_reason(&new, &old, &block, deletable)),
+                    Held::SeedBlocked(retire_blocked_reason(&new, &old, &block, deletable)),
                     probe,
                 );
                 return Ok(());
@@ -2852,6 +2852,11 @@ impl<'a> Run<'a> {
             Held::Missing(reason) => (run.health.restage(reason, now), ProbeOutcome::Missing),
             Held::Blocked(reason) => (
                 run.health.park(ParkReason::Blocked { reason }, probe, now),
+                ProbeOutcome::Blocked,
+            ),
+            Held::SeedBlocked(reason) => (
+                run.health
+                    .park(ParkReason::SeedBlocked { reason }, probe, now),
                 ProbeOutcome::Blocked,
             ),
             Held::Refused { ids, reason } => (
@@ -3990,6 +3995,8 @@ enum Held {
     Missing(String),
     /// Its index refuses writes for now.
     Blocked(String),
+    /// Its seed can't retire the generation reads see, which is blocked.
+    SeedBlocked(String),
     /// Documents of it were refused, and its index's `on_error` is `stop`.
     Refused { ids: Vec<String>, reason: String },
 }
@@ -3998,7 +4005,7 @@ impl std::fmt::Display for Held {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Held::Missing(reason) => write!(f, "missing: {reason}"),
-            Held::Blocked(reason) => write!(f, "blocked: {reason}"),
+            Held::Blocked(reason) | Held::SeedBlocked(reason) => write!(f, "blocked: {reason}"),
             Held::Refused { ids, reason } => ParkReason::Refused {
                 ids: ids.clone(),
                 reason: reason.clone(),

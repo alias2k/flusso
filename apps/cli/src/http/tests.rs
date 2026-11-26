@@ -855,3 +855,35 @@ async fn status_shows_a_lanes_gap_until_a_seed() {
             .is_none()
     );
 }
+
+/// Review of step 4, S2: a reindex of a rebuild parked on its seed's retire
+/// block is refused with `409`, naming the block and what lifts it: a
+/// restart would delete the complete generation and meet the same block.
+#[tokio::test]
+async fn a_reindex_of_a_rebuild_waiting_on_its_seeds_block_is_refused_with_409() {
+    use daemon::Observer;
+    let (status, _) = indexed_status();
+    let observer = daemon::StatusObserver::new(Arc::clone(&status));
+    let users = LaneKey::new(index("users"), SinkName::try_new("primary").unwrap());
+    let (base, _receivers, _stop) = serve_private(Arc::clone(&status)).await;
+    observer.on_lane_rebuild(&users, Some(1), None);
+    observer.on_lane_health(
+        &users,
+        &daemon::LaneHealth::Parked {
+            reason: daemon::ParkReason::SeedBlocked {
+                reason: "the old generation users_1 can't be retired: index write (api); lift \
+                         the block on users_1"
+                    .to_owned(),
+            },
+            since: tokio::time::Instant::now(),
+            next_probe: tokio::time::Instant::now(),
+        },
+    );
+    let (code, body) = post_reindex(&base, "/indexes/users/reindex?sink=primary").await;
+    assert_eq!(code, 409, "{body}");
+    assert!(
+        body.contains("waits for the block on the serving generation"),
+        "{body}"
+    );
+    assert!(body.contains("lift the block on users_1"), "{body}");
+}

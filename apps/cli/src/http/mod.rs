@@ -600,7 +600,7 @@ async fn reindex(
         Some(sink) => vec![sink.clone()],
         None => state.control.sinks().cloned().collect(),
     };
-    let skipped: Vec<(SinkName, &'static str)> = targets
+    let skipped: Vec<(SinkName, String)> = targets
         .iter()
         .filter_map(|target| {
             state

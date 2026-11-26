@@ -1526,6 +1526,14 @@ impl SinkEngine {
             if state.rebuilding.is_some() {
                 if health.is_open() {
                     tracing::warn!(%index, sink = %self.name, "reindex ignored: the index is being rebuilt");
+                } else if let LaneHealth::Parked {
+                    reason: ParkReason::SeedBlocked { reason },
+                    ..
+                } = &health
+                {
+                    // O28: restarting would delete the complete generation
+                    // and meet the same block (review of step 4, S2).
+                    tracing::warn!(%index, sink = %self.name, %reason, "reindex ignored: the rebuild waits for the block on the serving generation");
                 } else {
                     tracing::info!(%index, sink = %self.name, "reindex of a rebuild that is parked or restaging: it starts again (O20)");
                     restart.push(index.clone());
