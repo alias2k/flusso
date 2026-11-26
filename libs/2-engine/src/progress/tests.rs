@@ -5,6 +5,8 @@ use std::thread;
 use super::*;
 use source::document::DocumentId;
 
+mod detach;
+
 fn sink(name: &str) -> LaneKey {
     LaneKey::new(
         kernel::IndexName::try_new("users").unwrap(),
