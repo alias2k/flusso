@@ -685,7 +685,7 @@ impl<'a> Run<'a> {
     /// here is the run's failure: the caller lets the writes in flight finish.
     async fn advance(&mut self) -> Result<()> {
         if !self.discards.is_empty() {
-            self.acknowledge_discards().await?;
+            self.drain_detached().await?;
         }
         if !self.unacknowledged_held.is_empty() {
             self.acknowledge_held().await?;
@@ -750,6 +750,9 @@ impl<'a> Run<'a> {
             if self.unhealthy > 0 {
                 self.start_restages().await?;
             }
+        }
+        if !self.discards.is_empty() {
+            self.drain_detached().await?;
         }
         Ok(())
     }
@@ -1141,31 +1144,61 @@ impl<'a> Run<'a> {
     fn fill(&mut self) -> Result<bool> {
         let mut took = false;
         for lane in 0..self.lanes.len() {
-            // `is_empty` is a cheap look at the lane; a `recv` future is made
-            // only when something waits to be taken.
-            while self.lane_wants_more(lane)
-                && self
-                    .lanes
-                    .get(lane)
-                    .is_some_and(|run| !run.consumer.is_empty())
-            {
-                let Some(run) = self.lanes.get_mut(lane) else {
-                    break;
-                };
-                match run.consumer.recv().now_or_never() {
-                    None => break,
-                    Some(delivery) => match delivery {
-                        Err(error) => return Err(error.into()),
-                        Ok(None) => run.closed = true,
-                        Ok(Some(delivery)) => {
-                            self.queue(lane, delivery)?;
-                            took = true;
-                        }
-                    },
-                }
+            took |= self.fill_lane(lane)?;
+        }
+        Ok(took)
+    }
+
+    /// Take what `lane` has ready, while it is wanted; whether it took
+    /// anything.
+    fn fill_lane(&mut self, lane: usize) -> Result<bool> {
+        let mut took = false;
+        // `is_empty` is a cheap look at the lane; a `recv` future is made
+        // only when something waits to be taken.
+        while self.lane_wants_more(lane)
+            && self
+                .lanes
+                .get(lane)
+                .is_some_and(|run| !run.consumer.is_empty())
+        {
+            let Some(run) = self.lanes.get_mut(lane) else {
+                break;
+            };
+            match run.consumer.recv().now_or_never() {
+                None => break,
+                Some(delivery) => match delivery {
+                    Err(error) => return Err(error.into()),
+                    Ok(None) => run.closed = true,
+                    Ok(Some(delivery)) => {
+                        self.queue(lane, delivery)?;
+                        took = true;
+                    }
+                },
             }
         }
         Ok(took)
+    }
+
+    /// Acknowledge every discard, and take and acknowledge what the detached
+    /// lanes have ready, until none is pending: a pending discard leaves its
+    /// lane out of the run's wait, so one left there would wait for the
+    /// run's next wake-up (review B1). Each is still acknowledged before the
+    /// next item of its lane is taken. At most [`LOOKAHEAD`] rounds a call,
+    /// ending with none pending, so a producer as fast as the loop never
+    /// keeps it from the other lanes: the lane, wanted again, wakes the run.
+    async fn drain_detached(&mut self) -> Result<()> {
+        for _ in 0..LOOKAHEAD {
+            if self.discards.is_empty() {
+                return Ok(());
+            }
+            self.acknowledge_discards().await?;
+            for lane in 0..self.lanes.len() {
+                if self.lane_detached(lane) {
+                    self.fill_lane(lane)?;
+                }
+            }
+        }
+        self.acknowledge_discards().await
     }
 
     /// Take a delivered item into the window. A live item (it carries a

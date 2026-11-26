@@ -263,14 +263,20 @@ struct Rig {
 
 impl Rig {
     fn new(capacity: usize) -> Self {
+        Self::over(capacity, &["primary"])
+    }
+
+    /// Both indexes on each of `sinks`; `sink` is `primary`'s.
+    fn over(capacity: usize, sinks: &[&str]) -> Self {
         let indexes = [orders(), users()];
+        let sinks: Vec<_> = sinks.iter().map(|name| sink_name(name)).collect();
         Self {
             stream: Arc::new(ChannelStream::over(
                 capacity,
                 indexes.clone(),
-                [sink_name("primary")],
+                sinks.clone(),
             )),
-            progress: Arc::new(Progress::of(indexes, [sink_name("primary")])),
+            progress: Arc::new(Progress::of(indexes, sinks)),
             sink: Arc::new(Gate::default()),
             heard: Arc::new(Heard::default()),
         }
@@ -295,9 +301,14 @@ impl Rig {
     }
 
     fn engine(&self) -> Arc<SinkEngine> {
+        self.engine_of("primary", Arc::clone(&self.sink))
+    }
+
+    /// The engine of sink `name`, writing to `sink`.
+    fn engine_of(&self, name: &str, sink: Arc<Gate>) -> Arc<SinkEngine> {
         let engine = SinkEngine::new(
-            sink_name("primary"),
-            Arc::clone(&self.sink) as Arc<dyn Sink>,
+            sink_name(name),
+            sink as Arc<dyn Sink>,
             Arc::clone(&self.stream) as Arc<dyn Stream>,
             vec![mapping(orders()), mapping(users())],
             Arc::clone(&self.progress),
@@ -420,27 +431,96 @@ async fn a_refused_probe_detaches_a_lane_asked_to_detach() {
 }
 
 /// A detached lane is always taken from and each item acknowledged
-/// unwritten, so a send blocked on a full lane completes (R6).
+/// unwritten, so a send blocked on a full lane completes (R6), at once: no
+/// item waits for the run's next wake-up (review B1: one item per idle
+/// tick).
 #[tokio::test(start_paused = true)]
 async fn a_detached_lane_is_drained() {
     let rig = Rig::new(2);
-    let (_engine, task) = detached_on_a_block(&rig).await;
+    rig.sink.block(&users(), true);
+    let engine = rig.engine();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    // The producer is ahead of the parked lane, blocked on it, when it
+    // detaches.
     let producer = rig.stream.lane(&lane(users())).unwrap().producer;
-    let sent = tokio::time::timeout(Duration::from_secs(30), async {
-        for position in 10..60 {
+    let sending = tokio::spawn(async move {
+        for position in 1..1001 {
             producer
                 .publish(item(&users(), i64::try_from(position).unwrap(), position))
                 .await
                 .unwrap();
         }
+    });
+    eventually("the lane detaches", || {
+        engine.lane_health(&lane(users())).is_detached()
     })
     .await;
+    let sent = tokio::time::timeout(Duration::from_millis(100), sending).await;
     assert!(
         sent.is_ok(),
-        "fifty items through a lane of two: each was taken"
+        "a thousand items through a lane of two within 100 ms: each was taken at once"
     );
     assert_eq!(rig.sink.writes_of(&users()).len(), 2);
     task.abort();
+}
+
+/// The index's builder publishes each item to every lane of the index, the
+/// detached one first: a healthy second sink of the same index is not slowed
+/// by the detached lane (review B1).
+#[tokio::test(start_paused = true)]
+async fn a_detached_lane_slows_no_healthy_sink_of_its_index() {
+    let rig = Rig::over(2, &["primary", "secondary"]);
+    rig.sink.block(&users(), true);
+    let engine = rig.engine();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    let healthy = rig.engine_of("secondary", Arc::new(Gate::default()));
+    let (healthy_task, _control) = spawn(&healthy);
+    let secondary = LaneKey::new(users(), sink_name("secondary"));
+    let detached = rig.stream.lane(&lane(users())).unwrap().producer;
+    let other = rig.stream.lane(&secondary).unwrap().producer;
+    let progress = Arc::clone(&rig.progress);
+    let registered = secondary.clone();
+    let builder = tokio::spawn(async move {
+        for position in 1..1001 {
+            let id = i64::try_from(position).unwrap();
+            detached
+                .publish(item(&users(), id, position))
+                .await
+                .unwrap();
+            progress.published(
+                &registered,
+                stream::ItemKey::new(position),
+                Position::new(position),
+                Position::new(position),
+            );
+            other.publish(item(&users(), id, position)).await.unwrap();
+        }
+    });
+    eventually("the lane detaches", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    let start = Instant::now();
+    eventually("the healthy sink lands the last item", || {
+        rig.progress.lane(&secondary, Level::Applied) == through(1000)
+    })
+    .await;
+    assert!(
+        start.elapsed() < Duration::from_millis(100),
+        "a thousand items in {:?}",
+        start.elapsed()
+    );
+    builder.await.unwrap();
+    task.abort();
+    healthy_task.abort();
 }
 
 /// A restaging lane has no probe: asked to detach, it detaches when its
