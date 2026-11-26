@@ -54,8 +54,11 @@
 //! Two checks need no database at all: a `soft_delete` `field` that names no
 //! column field, and two fields sharing a name at one level
 //! ([`DiagnosticKind::DuplicateFieldName`], a warning, since such a schema
-//! has always loaded; an error of its own kind for a pair that never gives an
-//! indexed document, see [`never_indexed`](crate::never_indexed)).
+//! has always loaded, while a document still holds what the index maps;
+//! [`DiagnosticKind::DuplicateFieldNameWrong`], an error, where it doesn't,
+//! see [`duplicate_is_wrong`](crate::duplicate_is_wrong); an error of its
+//! own kind for a pair that never gives an indexed document, see
+//! [`never_indexed`](crate::never_indexed)).
 //! [`validate_spec`] reports them on their own (`flusso check --offline`) and
 //! [`validate_indexes`] reports them with the rest.
 //!
@@ -338,16 +341,12 @@ pub enum DiagnosticKind {
     /// than the table.
     IdsElementLossy,
     /// Two fields at one level of the document share a name (as
-    /// [`FieldName`] reads it: trimmed, case kept). The index maps the last
-    /// one; a document holds the last one's value, read as the first one
-    /// declares it, and an input-only (`emit: false`) one strips the name from
-    /// every document. Some pairs fail documents: an `array: true` column
-    /// before a field holding objects fails the build, a script before a field
-    /// its output does not fit is rejected by OpenSearch; the message says
-    /// which. A pair that fails every document whatever the data is
-    /// [`DuplicateFieldNameFailsToBuild`](Self::DuplicateFieldNameFailsToBuild)
-    /// or [`DuplicateFieldNameRefused`](Self::DuplicateFieldNameRefused)
-    /// instead. A schema with one still loads, as earlier releases did.
+    /// [`FieldName`] reads it: trimmed, case kept), and a document still holds
+    /// a value the index's mapping takes: the last one's, read as the first
+    /// one declares it, or a script's output; or nothing is known either way.
+    /// Every other pair is
+    /// [`DuplicateFieldNameWrong`](Self::DuplicateFieldNameWrong) (issue #485).
+    /// A schema with one still loads, as earlier releases did.
     DuplicateFieldName,
     /// A `timestamp` field, aggregate result or script output whose
     /// `options.format` has no pattern that reads the ISO 8601 form the
@@ -355,6 +354,16 @@ pub enum DiagnosticKind {
     /// rejects a document holding a timestamp. Only a format whose every
     /// pattern is known to refuse that form is reported.
     TimestampFormat,
+    /// Two fields at one level share a name, and a document then holds
+    /// something other than the index maps (see
+    /// [`duplicate_is_wrong`](crate::duplicate_is_wrong)): a list where it
+    /// maps one value, an object cut to other child fields, raw JSON, text,
+    /// `null`, no value at all, or a document that fails to build or is
+    /// refused. Where that holds for every document whatever the data, it is
+    /// [`DuplicateFieldNameFailsToBuild`](Self::DuplicateFieldNameFailsToBuild)
+    /// or [`DuplicateFieldNameRefused`](Self::DuplicateFieldNameRefused)
+    /// instead.
+    DuplicateFieldNameWrong,
     /// Two fields at one level share a name, and every document fails to
     /// build whatever the data: an `array: true` column of scalars before an
     /// `object` (see [`never_indexed`](crate::never_indexed)), at the root or
@@ -400,7 +409,8 @@ impl DiagnosticKind {
             | Self::Nullability
             | Self::UndeclaredArrayColumn
             | Self::IdsElementLossy
-            | Self::TimestampFormat => Severity::Error,
+            | Self::TimestampFormat
+            | Self::DuplicateFieldNameWrong => Severity::Error,
             Self::IgnoredPrimaryKey
             | Self::DuplicateFieldName
             | Self::NullabilityUntracked
@@ -430,6 +440,7 @@ impl DiagnosticKind {
             Self::IdsElementMismatch => "ids_element_mismatch",
             Self::IdsElementLossy => "ids_element_lossy",
             Self::DuplicateFieldName => "duplicate_field_name",
+            Self::DuplicateFieldNameWrong => "duplicate_field_name_wrong",
             Self::TimestampFormat => "timestamp_format",
             Self::DuplicateFieldNameFailsToBuild => "duplicate_field_name_fails_to_build",
             Self::DuplicateFieldNameRefused => "duplicate_field_name_refused",
@@ -582,7 +593,7 @@ async fn validate_index(
     duplicate_names(
         name,
         &schema.fields,
-        true,
+        (true, crate::Reach::Indexed),
         &mut Vec::new(),
         &mut diagnostics,
     );
@@ -614,7 +625,7 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
         duplicate_names(
             name,
             &schema.fields,
-            true,
+            (true, crate::Reach::Indexed),
             &mut Vec::new(),
             &mut diagnostics,
         );
@@ -626,11 +637,13 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
 /// One [`DiagnosticKind::DuplicateFieldName`] per name declared more than
 /// once at a level of `fields`, at any depth, anchored at that name. A pair
 /// that never gives an indexed document gets its own kind, but only where
-/// every document carries the level (`carried`: see [`carries`]).
+/// every document carries the level (`carried`: see [`carries`]); one whose
+/// documents hold something other than the index maps at the level's
+/// [`Reach`](crate::Reach) is [`DiagnosticKind::DuplicateFieldNameWrong`].
 fn duplicate_names(
     index: &IndexName,
     fields: &[Field],
-    carried: bool,
+    (carried, reach): (bool, crate::Reach),
     path: &mut Vec<(FieldName, Option<usize>)>,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -657,6 +670,9 @@ fn duplicate_names(
                 DiagnosticKind::DuplicateFieldNameFailsToBuild
             }
             Some(crate::NeverIndexed::Refused) => DiagnosticKind::DuplicateFieldNameRefused,
+            None if crate::duplicate_is_wrong(&fields, reach) => {
+                DiagnosticKind::DuplicateFieldNameWrong
+            }
             None => DiagnosticKind::DuplicateFieldName,
         };
         out.push(Diagnostic {
@@ -676,7 +692,7 @@ fn duplicate_names(
         duplicate_names(
             index,
             field.children(),
-            carried && carries(field),
+            (carried && carries(field), reach.max(reach_of(field))),
             path,
             out,
         );
@@ -759,6 +775,21 @@ fn writes_timestamps(source: &FieldSource) -> bool {
 /// object with `enabled: false`, say), is not mapped as its children declare.
 fn carries(field: &Field) -> bool {
     matches!(field.source, FieldSource::Group(_)) && field.emit && field.options.is_empty()
+}
+
+/// How far the fields under `field` reach on its account: nowhere under an
+/// input-only field, stored only under an unindexed join or an object with
+/// `enabled: false`.
+fn reach_of(field: &Field) -> crate::Reach {
+    let unindexed = matches!(&field.source, FieldSource::Relation(Relation::Join(join)) if !join.indexed)
+        || field.options.get("enabled") == Some(&kernel::GenericValue::Bool(false));
+    if !field.emit {
+        crate::Reach::Absent
+    } else if unindexed {
+        crate::Reach::Stored
+    } else {
+        crate::Reach::Indexed
+    }
 }
 
 /// The 1-based position of `fields[at]` when another field of `fields` has
@@ -2955,10 +2986,11 @@ mod tests {
                 ),
                 (
                     "team",
-                    DiagnosticKind::DuplicateFieldName,
+                    DiagnosticKind::DuplicateFieldNameWrong,
                     "`team` is declared 2 times at this level: #1 (join on `teams`), #2 (column \
                      `team`); the index maps the last one, and a document holds the last one's \
-                     value as raw JSON, not converted to the declared types. Rename all but one"
+                     value as raw JSON, not converted to the declared types, so its values are \
+                     not what the schema declares. Rename all but one"
                 ),
             ]),
         );
@@ -3214,11 +3246,11 @@ mod tests {
             problems(&[
                 (
                     "orders",
-                    DiagnosticKind::DuplicateFieldName,
+                    DiagnosticKind::DuplicateFieldNameWrong,
                     "`orders` is declared 2 times at this level: #1 (join on `orders`), #2 \
                      (join on `orders`); the index maps the last one, but a document keeps none \
                      of its child fields: #1 and #2 declare none in common, so every element is \
-                     empty. Rename all but one"
+                     empty, not the object the index maps. Rename all but one"
                 ),
                 (
                     "orders#1.id",
@@ -3283,19 +3315,33 @@ mod tests {
         let quiet = json!({ "field": "v", "emit": false, "source": { "column": {
             "column": "tags", "ty": "keyword", "nullable": true, "array": true,
         } } });
-        for still_a_warning in [
-            json!([int_field("id"), tags.clone(), column_field("v", "k")]),
-            json!([int_field("id"), quiet, object.clone()]),
-            json!([int_field("id"), keyed.clone(), k]),
-            json!([int_field("id"), keyed, map]),
-            json!([int_field("id"), five.clone(), disabled]),
-            json!([int_field("id"), five, column_field("v", "k")]),
-        ] {
-            assert_eq!(
-                kind(still_a_warning.clone()),
+        for (pair, expected) in [
+            (
+                json!([int_field("id"), tags.clone(), column_field("v", "k")]),
+                DiagnosticKind::DuplicateFieldNameWrong,
+            ),
+            (
+                json!([int_field("id"), quiet, object.clone()]),
+                DiagnosticKind::DuplicateFieldNameWrong,
+            ),
+            (
+                json!([int_field("id"), keyed.clone(), k]),
                 DiagnosticKind::DuplicateFieldName,
-                "{still_a_warning}"
-            );
+            ),
+            (
+                json!([int_field("id"), keyed, map]),
+                DiagnosticKind::DuplicateFieldName,
+            ),
+            (
+                json!([int_field("id"), five.clone(), disabled]),
+                DiagnosticKind::DuplicateFieldNameWrong,
+            ),
+            (
+                json!([int_field("id"), five, column_field("v", "k")]),
+                DiagnosticKind::DuplicateFieldName,
+            ),
+        ] {
+            assert_eq!(kind(pair.clone()), expected, "{pair}");
         }
     }
 
@@ -3336,54 +3382,79 @@ mod tests {
             ])),
             DiagnosticKind::DuplicateFieldNameRefused
         );
-        for still_a_warning in [
-            json!([int_field("id"), unindexed]),
-            json!([
-                int_field("id"),
-                with(orders_join("rel", pair.clone()), "emit", json!(false))
-            ]),
-            json!([int_field("id"), orders_join("rel", pair.clone())]),
-            json!([int_field("id"), to_one("rel", pair.clone())]),
-            json!([
-                int_field("id"),
-                orders_join("rel", json!([tags, object.clone()]))
-            ]),
-            json!([
-                int_field("id"),
-                group("o", json!([orders_join("rel", pair.clone())]))
-            ]),
-            json!([
-                int_field("id"),
-                with(group("o", pair.clone()), "emit", json!(false))
-            ]),
-            json!([
-                int_field("id"),
-                with(
-                    group("o", pair),
-                    "options",
-                    json!({ "enabled": { "Bool": false } })
-                )
-            ]),
-            json!([
-                int_field("id"),
-                keyed.clone(),
-                with(
-                    object.clone(),
-                    "options",
-                    json!({ "dynamic": { "Bool": true } })
-                )
-            ]),
-            json!([
-                int_field("id"),
-                keyed,
-                with(object, "options", json!({ "dynamic": { "Bool": false } }))
-            ]),
+        // Under an input-only ancestor no document holds the pair, and where
+        // nothing is indexed OpenSearch refuses nothing: the warning. Anywhere
+        // else a document holds what the index doesn't map: the error.
+        let warning = DiagnosticKind::DuplicateFieldName;
+        let wrong = DiagnosticKind::DuplicateFieldNameWrong;
+        for (fields, expected) in [
+            (json!([int_field("id"), unindexed]), warning),
+            (
+                json!([
+                    int_field("id"),
+                    with(orders_join("rel", pair.clone()), "emit", json!(false))
+                ]),
+                warning,
+            ),
+            (
+                json!([int_field("id"), orders_join("rel", pair.clone())]),
+                wrong,
+            ),
+            (json!([int_field("id"), to_one("rel", pair.clone())]), wrong),
+            (
+                json!([
+                    int_field("id"),
+                    orders_join("rel", json!([tags, object.clone()]))
+                ]),
+                wrong,
+            ),
+            (
+                json!([
+                    int_field("id"),
+                    group("o", json!([orders_join("rel", pair.clone())]))
+                ]),
+                wrong,
+            ),
+            (
+                json!([
+                    int_field("id"),
+                    with(group("o", pair.clone()), "emit", json!(false))
+                ]),
+                warning,
+            ),
+            (
+                json!([
+                    int_field("id"),
+                    with(
+                        group("o", pair),
+                        "options",
+                        json!({ "enabled": { "Bool": false } })
+                    )
+                ]),
+                warning,
+            ),
+            (
+                json!([
+                    int_field("id"),
+                    keyed.clone(),
+                    with(
+                        object.clone(),
+                        "options",
+                        json!({ "dynamic": { "Bool": true } })
+                    )
+                ]),
+                wrong,
+            ),
+            (
+                json!([
+                    int_field("id"),
+                    keyed,
+                    with(object, "options", json!({ "dynamic": { "Bool": false } }))
+                ]),
+                wrong,
+            ),
         ] {
-            assert_eq!(
-                kind(still_a_warning.clone()),
-                DiagnosticKind::DuplicateFieldName,
-                "{still_a_warning}"
-            );
+            assert_eq!(kind(fields.clone()), expected, "{fields}");
         }
     }
 
@@ -3418,12 +3489,14 @@ mod tests {
                 orders_join("o", json!([b(), c(), a()]))
             ])),
             "the index maps the last one, but a document holds its value cut to the child \
-             fields #1 declares that #2 has too (`a`, `b`), read as #1 declares them"
+             fields #1 declares that #2 has too (`a`, `b`), read as #1 declares them, not the \
+             object the index maps"
         );
         assert_eq!(
             kept(json!([group("o", json!([a()])), to_one("o", json!([b()]))])),
             "the index maps the last one, but a document keeps none of its child fields: #1 \
-             and #2 declare none in common, so the object is empty"
+             and #2 declare none in common, so the object is empty, not the object the index \
+             maps"
         );
         assert_eq!(
             kept(json!([
@@ -3431,7 +3504,8 @@ mod tests {
                 group("o", json!([a(), b()]))
             ])),
             "the index maps the last one, but a document holds its value cut to the child \
-             fields #1 declares that #2 has too (`a`), read as #1 declares them"
+             fields #1 declares that #2 has too (`a`), read as #1 declares them, not the \
+             object the index maps"
         );
         assert_eq!(
             kept(json!([
@@ -3439,17 +3513,18 @@ mod tests {
                 orders_join("o", json!([a(), b()]))
             ])),
             "the index maps the last one, and a document holds the last one's value as raw JSON, \
-             not converted to the declared types"
+             not converted to the declared types, so its values are not what the schema declares"
         );
         assert_eq!(
             kept(json!([int_field("o"), orders_join("o", json!([a()]))])),
             "the index maps the last one, and a document holds the last one's value as raw JSON, \
-             not converted to the declared types"
+             not converted to the declared types, so its values are not what the schema declares"
         );
         assert_eq!(
             kept(json!([group("o", json!([a()])), int_field("o")])),
             "the index maps the last one, and a document holds the last one's value as raw \
-             JSON, not converted to the declared types"
+             JSON, not converted to the declared types, so its values are not what the schema \
+             declares"
         );
     }
 
@@ -3653,9 +3728,9 @@ mod tests {
                 tags.clone(),
                 constant(json!({ "Array": [{ "BigInt": 1 }, { "BigInt": 2 }] }))
             ])),
-            "the index maps the last one, but every document holds `null`: #3 is a constant \
-             holding a list or an object, which the document query reads as `null`, and #2 \
-             reads that"
+            "the index maps the last one, but every document holds `null`, not the constant the \
+             schema declares: #3 is a constant holding a list or an object, which the document \
+             query reads as `null`, and #2 reads that"
         );
         assert_eq!(
             message(json!([
@@ -3663,10 +3738,10 @@ mod tests {
                 tags,
                 constant(json!({ "BigInt": 5 }))
             ])),
-            "the index maps the last one, and a document holds the last one's value as text, \
-             in a one-element array since #2 is an `array: true` column: #3 is a number \
-             constant, which reaches #2 as a string (`\"5\"`), and only a `decimal` field \
-             reads a string as a number"
+            "the index maps the last one, but a document holds the last one's value as text, \
+             in a one-element array since #2 is an `array: true` column, not the value the \
+             schema declares: #3 is a number constant, which reaches #2 as a string (`\"5\"`), \
+             and only a `decimal` field reads a string as a number"
         );
         let column = |name: &str, ty: &str| {
             json!({ "field": "v", "source": { "column": {
@@ -3679,9 +3754,10 @@ mod tests {
                 column("k", "keyword"),
                 column("bin", "binary")
             ])),
-            "the index maps the last one, and a document holds the last one's value as text: \
-             #3 is a `binary` column, whose bytes reach #2 as Postgres hex text \
-             (`\"\\x0102\"`), not base64: only a `binary` field decodes them"
+            "the index maps the last one, but a document holds the last one's value as text, \
+             not the value the schema declares: #3 is a `binary` column, whose bytes reach #2 \
+             as Postgres hex text (`\"\\x0102\"`), not base64: only a `binary` field decodes \
+             them"
         );
         assert_eq!(
             message(json!([
@@ -3698,9 +3774,9 @@ mod tests {
                 column("n", "integer"),
                 constant(json!({ "Bool": true }))
             ])),
-            "the index maps the last one, and a document holds the last one's value as text: \
-             #3 is a boolean constant, which reaches #2 as the string `\"true\"` or \
-             `\"false\"`"
+            "the index maps the last one, but a document holds the last one's value as text, \
+             not the value the schema declares: #3 is a boolean constant, which reaches #2 as \
+             the string `\"true\"` or `\"false\"`"
         );
         assert_eq!(
             message(json!([
@@ -3784,7 +3860,7 @@ mod tests {
                 "`name` is declared 2 times at this level: #1 (column `name`), #2 (column \
               `full_name`, `emit: false`); the index maps the last emitted one, but the \
               input-only (`emit: false`) one strips the name from every document, so no \
-              document holds it. Rename all but one"
+              document holds the field the index maps. Rename all but one"
             ],
         );
         assert_eq!(

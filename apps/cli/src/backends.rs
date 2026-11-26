@@ -441,6 +441,7 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         | DiagnosticKind::IdsElementMismatch
         | DiagnosticKind::IdsElementLossy
         | DiagnosticKind::DuplicateFieldName
+        | DiagnosticKind::DuplicateFieldNameWrong
         | DiagnosticKind::TimestampFormat
         | DiagnosticKind::CheckSkipped => false,
     }
@@ -847,6 +848,13 @@ mod tests {
         let printed = starts(DiagnosticKind::DuplicateFieldName);
         assert!(printed.contains("[warning]"), "{printed}");
         assert!(!printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn a_duplicate_whose_documents_differ_from_the_mapping_is_an_error_and_starts() {
+        let printed = starts(DiagnosticKind::DuplicateFieldNameWrong);
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]

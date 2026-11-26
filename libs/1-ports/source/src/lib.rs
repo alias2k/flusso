@@ -13,7 +13,8 @@ pub mod cdc;
 pub mod document;
 
 pub use duplicates::{
-    DuplicateOutcome, NeverIndexed, Rejection, Text, duplicate_outcome, never_indexed,
+    DuplicateOutcome, NeverIndexed, Reach, Rejection, Text, duplicate_is_wrong, duplicate_outcome,
+    never_indexed,
 };
 pub use error::*;
 pub use introspection::*;

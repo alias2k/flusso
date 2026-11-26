@@ -20,9 +20,11 @@
 //! 4. The sink indexes what is left under the last emitted one's mapping, and
 //!    may reject it.
 //!
-//! [`duplicate_outcome`] classifies a set of namesakes, and [`never_indexed`]
-//! says whether they never give an indexed document, which makes the
-//! diagnostic an error that stops `flusso run`. The `duplicate_names`
+//! [`duplicate_outcome`] classifies a set of namesakes, [`duplicate_is_wrong`]
+//! says whether a document then holds something other than the index maps,
+//! which makes the diagnostic an error (issue #485), and [`never_indexed`]
+//! whether they never give an indexed document, which makes it an error that
+//! stops `flusso run`. The `duplicate_names`
 //! live test (`apps/cli/tests/duplicate_names.rs`) builds every ordered pair
 //! of field kinds through the real builder and OpenSearch sink and asserts
 //! both. A pair it can't place with certainty is
@@ -209,7 +211,8 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
                 };
                 format!(
                     "the index maps the last one, but a document keeps none of its child \
-                     fields: #{first} and #{last} declare none in common, so {empty}"
+                     fields: #{first} and #{last} declare none in common, so {empty}, not the \
+                     object the index maps"
                 )
             } else {
                 let kept = kept
@@ -220,7 +223,7 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
                 format!(
                     "the index maps the last one, but a document holds its value cut to the \
                      child fields #{first} declares that #{last} has too ({kept}), read as \
-                     #{first} declares them"
+                     #{first} declares them, not the object the index maps"
                 )
             }
         }
@@ -228,15 +231,15 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
             "none reaches the document".to_owned()
         }
         DuplicateOutcome::Null => format!(
-            "the index maps the last one, but every document holds `null`: #{} is a constant \
-             holding a list or an object, which the document query reads as `null`, and #{} \
-             reads that",
+            "the index maps the last one, but every document holds `null`, not the constant the \
+             schema declares: #{} is a constant holding a list or an object, which the document \
+             query reads as `null`, and #{} reads that",
             position(fields.len() - 1),
             position(0)
         ),
         DuplicateOutcome::Nothing => "the index maps the last emitted one, but the input-only \
                                       (`emit: false`) one strips the name from every document, \
-                                      so no document holds it"
+                                      so no document holds the field the index maps"
             .to_owned(),
         DuplicateOutcome::FailsToBuild { documents } => format!(
             "the index maps the last one, but {documents} fails to build: #{} is an `array: \
@@ -268,13 +271,14 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
                 String::new()
             };
             format!(
-                "the index maps the last one, and a document holds the last one's value as \
-                 text{array}: {what}"
+                "the index maps the last one, but a document holds the last one's value as \
+                 text{array}, not the value the schema declares: {what}"
             )
         }
-        DuplicateOutcome::Wrapped => "the index maps the last one, and a document holds the last \
+        DuplicateOutcome::Wrapped => "the index maps the last one, but a document holds the last \
                                       one's value wrapped in a one-element array (the first one \
-                                      is an `array: true` column)"
+                                      is an `array: true` column): a list where the index maps \
+                                      one value"
             .to_owned(),
         DuplicateOutcome::Rejected { reason, .. } => format!(
             "the index maps the last one, {}, but {}. With `on_error = stop` (the \
@@ -364,21 +368,68 @@ fn holds_message(i: usize, fields: &[&Field], position: usize) -> String {
              (#{position}), which a constant builds whatever the last one reads"
         );
     }
-    let raw = "as raw JSON, not converted to the declared types";
-    let how = if array_column(first) {
+    let how = if holds_raw(i, fields) {
+        " as raw JSON, not converted to the declared types, so its values are not what the \
+         schema declares"
+    } else if array_column(first) {
         ", its elements read as the first one's type"
+    } else if matches!((shape(first), shape(field)), (Shape::Value, Shape::Value)) {
+        ", read as the first one declares it"
     } else {
-        match (shape(first), shape(field)) {
-            (Shape::Value, Shape::Value) => ", read as the first one declares it",
-            (Shape::Object, Shape::Rows) if matches!(first.source, FieldSource::Group(_)) => raw,
-            (Shape::Object | Shape::Rows, Shape::Object | Shape::Rows) => {
-                ", its child fields read as the first one declares them"
-            }
-            _ => raw,
-        }
+        ", its child fields read as the first one declares them"
     };
-    let space = if how.starts_with(',') { "" } else { " " };
-    format!("the index maps the last one, and a document holds the last one's value{space}{how}")
+    format!("the index maps the last one, and a document holds the last one's value{how}")
+}
+
+/// Whether the value [`DuplicateOutcome::Holds`] names at `i` reaches the
+/// document as raw JSON: read through a first declaration of another shape,
+/// so not converted to the types the last one declares.
+fn holds_raw(i: usize, fields: &[&Field]) -> bool {
+    let (Some(first), Some(field)) = (fields.first(), fields.get(i)) else {
+        return false;
+    };
+    if matches!(field.source, FieldSource::Script(_))
+        || (i == 0 && matches!(first.source, FieldSource::Constant(_)))
+        || array_column(first)
+    {
+        return false;
+    }
+    match (shape(first), shape(field)) {
+        (Shape::Value, Shape::Value) => false,
+        (Shape::Object, Shape::Rows) => matches!(first.source, FieldSource::Group(_)),
+        (Shape::Object | Shape::Rows, Shape::Object | Shape::Rows) => false,
+        _ => true,
+    }
+}
+
+/// How far a level of namesakes reaches: what decides which outcomes can
+/// matter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Reach {
+    /// Indexed: the mapping reads every value.
+    Indexed,
+    /// Stored but not indexed (under an `indexed: false` join, or an object
+    /// with `enabled: false`): OpenSearch refuses nothing there.
+    Stored,
+    /// Under an input-only (`emit: false`) field: no document holds it.
+    Absent,
+}
+
+/// Whether the namesakes `same`, at `reach`, leave a document holding
+/// something other than the index maps: every outcome but a value the mapped
+/// field takes ([`DuplicateOutcome::Holds`], not as raw JSON) and one nothing
+/// is known about ([`DuplicateOutcome::Unknown`]); never under an input-only
+/// ancestor, and a refusal never where nothing is indexed. The one place the
+/// severity of a pair is decided (issue #485).
+pub fn duplicate_is_wrong(same: &[&Field], reach: Reach) -> bool {
+    match (reach, duplicate_outcome(same)) {
+        (Reach::Absent, _)
+        | (_, DuplicateOutcome::Unknown)
+        | (Reach::Stored, DuplicateOutcome::Rejected { .. }) => false,
+        (_, DuplicateOutcome::Holds(i)) => holds_raw(i, same),
+        (_, DuplicateOutcome::Nothing) => same.iter().any(|field| field.emit),
+        _ => true,
+    }
 }
 
 /// Whether the document query reads a constant as `null`: it emits only a

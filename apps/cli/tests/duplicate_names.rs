@@ -17,7 +17,10 @@
 //! one's value cut to the first one's child fields, or something else) and
 //! must match [`source::duplicate_outcome`], the classification the warning's
 //! text is built from. Where the classifier says it cannot tell
-//! ([`DuplicateOutcome::Unknown`]), anything goes: its wording says so.
+//! ([`DuplicateOutcome::Unknown`]), anything goes: its wording says so. Each
+//! pair's severity must follow what was seen ([`source::duplicate_is_wrong`]):
+//! the warning for a value the mapping takes or an unknown pair, the error for
+//! everything else.
 //!
 //! Row 1 has related rows and a set `belongs_to` link; row 2 has none, so a
 //! pair whose outcome depends on related rows is seen both ways. The outcome
@@ -325,6 +328,22 @@ async fn the_duplicate_warning_says_what_a_live_pipeline_does() {
         if !agrees {
             mismatches.push(format!(
                 "{} then {}: predicted {predicted:?}, saw {seen:?} ({run:?})",
+                KINDS[a].0, KINDS[b].0
+            ));
+        }
+        // The severity (issue #485): a document that holds what the index maps,
+        // or a pair nothing is known about, is the warning; any other the error.
+        // A value one namesake builds on its own may still reach the document as
+        // raw JSON, which this run can't tell from a converted one.
+        let wrong = source::duplicate_is_wrong(&named, source::Reach::Indexed);
+        let expected_wrong = match (&predicted, &seen) {
+            (DuplicateOutcome::Unknown, _) => Some(false),
+            (_, Seen::Holds(_)) => None,
+            _ => Some(true),
+        };
+        if expected_wrong.is_some_and(|expected| expected != wrong) {
+            mismatches.push(format!(
+                "{} then {}: an error is {wrong}, but saw {seen:?} (predicted {predicted:?})",
                 KINDS[a].0, KINDS[b].0
             ));
         }
