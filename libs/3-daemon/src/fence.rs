@@ -294,10 +294,11 @@ struct Furthest {
     applied: Option<SourcePosition>,
     searchable: Option<SourcePosition>,
     serving: Serving,
-    /// The changes a reattach accepted as missing, `(from, to)`: a position
-    /// after `from` and at or before `to` is refused at once. An end that is
-    /// `None` is unknown and stretches the gap that way. Gone at the seed.
-    gap: Option<(Option<SourcePosition>, Option<SourcePosition>)>,
+    /// The changes each reattach accepted as missing, `(from, to)`: a
+    /// position after a gap's `from` and at or before its `to` is refused at
+    /// once; one between two gaps is vouched as usual. An end that is `None`
+    /// is unknown and stretches its gap that way. Gone at the seed.
+    gaps: Vec<(Option<SourcePosition>, Option<SourcePosition>)>,
     /// What the lane had reached, (applied, searchable), when the live
     /// stream last opened (O29): while its sink's records are unread, a lane
     /// serving its writes vouches no further.
@@ -305,9 +306,12 @@ struct Furthest {
 }
 
 impl Furthest {
-    /// Whether `target` falls inside the lane's gap.
-    fn in_gap(&self, target: SourcePosition) -> bool {
-        self.gap.is_some_and(|(from, to)| {
+    /// The first of the lane's gaps `target` falls inside.
+    fn gap_holding(
+        &self,
+        target: SourcePosition,
+    ) -> Option<(Option<SourcePosition>, Option<SourcePosition>)> {
+        self.gaps.iter().copied().find(|(from, to)| {
             from.is_none_or(|from| target > from) && to.is_none_or(|to| target <= to)
         })
     }
@@ -481,16 +485,20 @@ impl Fence {
         });
     }
 
-    /// `lane` carries a gap a reattach accepted (S3), in the source's text.
-    /// An end that doesn't parse is taken as unknown: the gap only grows.
-    fn gap(&self, lane: &LaneKey, gap: &sink::Gap) {
+    /// `lane` carries the gaps reattaches accepted (S3), in the source's
+    /// text, the whole list. An end that doesn't parse is taken as unknown:
+    /// its gap only grows (the sink engine settles such an end at a start).
+    fn gaps(&self, lane: &LaneKey, gaps: &[sink::Gap]) {
         let parse = |text: &Option<String>| {
             text.as_deref()
                 .and_then(|text| self.inner.source.parse_position(text).ok())
         };
-        let (from, to) = (parse(&gap.from), parse(&gap.to));
+        let gaps = gaps
+            .iter()
+            .map(|gap| (parse(&gap.from), parse(&gap.to)))
+            .collect();
         if let Some(furthest) = self.inner.lanes.get(lane) {
-            lock(furthest).gap = Some((from, to));
+            lock(furthest).gaps = gaps;
         }
         self.moved();
     }
@@ -519,18 +527,14 @@ impl Fence {
     /// every change: a gap a reattach accepted is gone with the rebuild.
     fn seeded(&self, lane: &LaneKey) {
         if let Some(furthest) = self.inner.lanes.get(lane) {
-            lock(furthest).gap = None;
+            lock(furthest).gaps.clear();
         }
         self.serve(lane, |_| Serving::Writes);
     }
 
     /// Whether `target` falls inside a gap `lane` carries; the gap, as text.
     fn gap_holding(&self, lane: &LaneKey, target: SourcePosition) -> Option<FenceGap> {
-        let furthest = lock(self.inner.lanes.get(lane)?);
-        if !furthest.in_gap(target) {
-            return None;
-        }
-        let (from, to) = furthest.gap?;
+        let (from, to) = lock(self.inner.lanes.get(lane)?).gap_holding(target)?;
         let format =
             |at: Option<SourcePosition>| at.map(|at| self.inner.source.format_position(at));
         Some(FenceGap {
@@ -891,8 +895,8 @@ impl Observer for FenceObserver {
         }
     }
 
-    fn on_lane_gap(&self, lane: &LaneKey, gap: &sink::Gap) {
-        self.fence.gap(lane, gap);
+    fn on_lane_gaps(&self, lane: &LaneKey, gaps: &[sink::Gap]) {
+        self.fence.gaps(lane, gaps);
     }
 }
 

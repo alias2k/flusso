@@ -655,28 +655,58 @@ async fn a_reattach_keeps_its_gap_with_the_seed_marker() {
     .unwrap();
     let read = sink.detachment(&mapping()).await.unwrap();
     assert_eq!(read.through.as_deref(), Some("0/10"));
-    assert_eq!(read.gap, None);
+    assert!(read.gaps.is_empty());
 
     let open = sink::Gap {
         from: read.through.clone(),
         to: None,
     };
-    sink.record_gap(&mapping(), &open).await.unwrap();
+    sink.record_gaps(&mapping(), std::slice::from_ref(&open))
+        .await
+        .unwrap();
     sink.forget_detachment(&mapping(), read.version.as_ref().unwrap())
         .await
         .unwrap();
     let read = sink.detachment(&mapping()).await.unwrap();
     assert_eq!(read.record, None, "the record is gone");
-    assert_eq!(read.gap, Some(open), "the gap stays with the marker");
+    assert_eq!(read.gaps, [open], "the gap stays with the marker");
 
-    let whole = sink::Gap {
+    let first = sink::Gap {
         from: Some("0/10".to_owned()),
         to: Some("0/20".to_owned()),
     };
-    sink.record_gap(&mapping(), &whole).await.unwrap();
-    assert_eq!(sink.detachment(&mapping()).await.unwrap().gap, Some(whole));
+    let second = sink::Gap {
+        from: Some("0/30".to_owned()),
+        to: Some("0/40".to_owned()),
+    };
+    let both = [first, second];
+    sink.record_gaps(&mapping(), &both).await.unwrap();
+    assert_eq!(sink.detachment(&mapping()).await.unwrap().gaps, both);
     let mut kept = store.lock().unwrap().doc(ALIAS).unwrap();
-    assert_eq!(kept["gap"], json!({ "from": "0/10", "to": "0/20" }));
-    kept.as_object_mut().unwrap().remove("gap");
+    assert_eq!(
+        kept["gaps"],
+        json!([{ "from": "0/10", "to": "0/20" }, { "from": "0/30", "to": "0/40" }])
+    );
+    let fields = kept.as_object_mut().unwrap();
+    fields.remove("gaps");
+    fields.remove("gap");
     assert_eq!(kept, marker(), "nothing else of the marker changed");
+}
+
+/// The single `gap` an earlier build of step 4 kept is read as a list of one.
+#[tokio::test]
+async fn a_single_gap_an_earlier_build_kept_reads_as_a_list_of_one() {
+    let mut seeded = Store::seeded();
+    let mut kept = marker();
+    kept["gap"] = json!({ "from": "0/10", "to": "0/20" });
+    seeded.put(ALIAS, kept);
+    let store = Arc::new(Mutex::new(seeded));
+    let stub = serve(&store).await;
+    assert_eq!(
+        stub.sink().detachment(&mapping()).await.unwrap().gaps,
+        [sink::Gap {
+            from: Some("0/10".to_owned()),
+            to: Some("0/20".to_owned()),
+        }]
+    );
 }

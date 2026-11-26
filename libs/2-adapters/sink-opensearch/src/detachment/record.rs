@@ -428,20 +428,28 @@ impl OpensearchSink {
 }
 
 impl OpensearchSink {
-    /// Keep a reattach's gap with the seed marker: a partial update touching
-    /// nothing else. A whole-document write of the marker (a reindex, a seed)
-    /// drops it: the index is rebuilt then, and nothing is missing.
-    pub(crate) async fn write_gap(&self, mapping: &IndexMapping, gap: &sink::Gap) -> Result<()> {
+    /// Keep every reattach's gap with the seed marker: a partial update
+    /// touching nothing else, the list replacing an earlier single `gap`. A
+    /// whole-document write of the marker (a reindex, a seed) drops them:
+    /// the index is rebuilt then, and nothing is missing.
+    pub(crate) async fn write_gaps(
+        &self,
+        mapping: &IndexMapping,
+        gaps: &[sink::Gap],
+    ) -> Result<()> {
         let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
         let url = format!(
             "{}/{}/_update/{hash_alias}",
             self.base_url,
             self.meta_index()
         );
-        let request = self
-            .client
-            .post(&url)
-            .json(&json!({ "doc": { "gap": { "from": gap.from, "to": gap.to } } }));
+        let request = self.client.post(&url).json(&json!({ "doc": {
+                "gaps": gaps
+                    .iter()
+                    .map(|gap| json!({ "from": gap.from, "to": gap.to }))
+                    .collect::<Vec<_>>(),
+                "gap": null,
+            } }));
         self.send_ok(request, "recording the reattach's gap failed")
             .await?;
         Ok(())

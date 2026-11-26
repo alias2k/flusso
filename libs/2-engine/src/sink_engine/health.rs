@@ -295,9 +295,9 @@ pub(crate) struct LaneState {
     /// asked for it once the lane is attached.
     pub(crate) rebuild_target: Option<sink::TargetId>,
     /// A reattach (O16) whose record is gone, waiting for its `Attached`:
-    /// the gap it accepted, `to` still unknown. Written with `to` once the
-    /// lane opens.
-    pub(crate) reattach: Option<sink::Gap>,
+    /// every gap kept, the last the one it accepted, its `to` still unknown.
+    /// Written with `to` once the lane opens.
+    pub(crate) reattach: Option<Vec<sink::Gap>>,
 }
 
 /// A reindex whose staging failed, waiting for its retry.

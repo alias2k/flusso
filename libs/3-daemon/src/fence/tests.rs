@@ -1220,7 +1220,7 @@ async fn a_reattached_lane_vouches_only_from_its_attach() {
         .unwrap();
     assert_eq!(to, SourcePosition(20));
     rig.observer
-        .on_lane_gap(&lane("primary"), &gap(Some("10"), Some("20")));
+        .on_lane_gaps(&lane("primary"), &[gap(Some("10"), Some("20"))]);
     rig.observer
         .on_lane_health(&lane("primary"), &engine::LaneHealth::Open);
     let after = rig.source.emit(30);
@@ -1255,7 +1255,7 @@ async fn a_reattached_lane_vouches_only_from_its_attach() {
     // A restart: staging hears the gap from the seed marker.
     let rig = fence_unstaged(&["users"], &["primary"]);
     rig.observer
-        .on_lane_gap(&lane("primary"), &gap(Some("10"), Some("20")));
+        .on_lane_gaps(&lane("primary"), &[gap(Some("10"), Some("20"))]);
     rig.observer.on_sink_started(&sink("primary"));
     let change = rig.source.emit(40);
     rig.route(change);
@@ -1285,7 +1285,7 @@ async fn an_open_gap_refuses_everything_past_its_start_and_a_seed_ends_it() {
     rig.route(change);
     rig.applied("primary", change);
     rig.observer
-        .on_lane_gap(&lane("primary"), &gap(Some("10"), None));
+        .on_lane_gaps(&lane("primary"), &[gap(Some("10"), None)]);
     assert_eq!(
         rig.fence
             .wait(&request("50", FenceLevel::Applied, None))
@@ -1299,7 +1299,7 @@ async fn an_open_gap_refuses_everything_past_its_start_and_a_seed_ends_it() {
         reached("50")
     );
     rig.observer
-        .on_lane_gap(&lane("primary"), &gap(Some("10"), Some("40")));
+        .on_lane_gaps(&lane("primary"), &[gap(Some("10"), Some("40"))]);
     assert_eq!(
         rig.fence
             .wait(&request("50", FenceLevel::Applied, None))
@@ -1481,5 +1481,45 @@ async fn an_unread_lane_keeps_vouching_for_what_it_applied_before_the_slot_reope
         fence.wait(&request("30", FenceLevel::Applied, None)).await,
         unserved("30", &[("users", "primary", Unserved::Starting)]),
         "past it, until the read"
+    );
+}
+
+/// Review of step 4, the gap list: a lane reattached twice refuses a
+/// position inside either gap, each naming its own, and vouches as usual
+/// for one between them.
+#[tokio::test(start_paused = true)]
+async fn a_lane_with_two_gaps_vouches_between_them() {
+    let rig = fence(&["primary"]);
+    let change = rig.source.emit(50);
+    rig.route(change);
+    rig.applied("primary", change);
+    rig.observer.on_lane_gaps(
+        &lane("primary"),
+        &[gap(Some("10"), Some("20")), gap(Some("30"), Some("40"))],
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("15", FenceLevel::Applied, None))
+            .await,
+        in_gap("15", "10", Some("20"))
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("25", FenceLevel::Applied, None))
+            .await,
+        reached("50"),
+        "between the gaps"
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("35", FenceLevel::Applied, None))
+            .await,
+        in_gap("35", "30", Some("40"))
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("45", FenceLevel::Applied, None))
+            .await,
+        reached("50")
     );
 }

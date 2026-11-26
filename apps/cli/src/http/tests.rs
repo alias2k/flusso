@@ -702,13 +702,19 @@ async fn status_lists_detached_lanes_and_rebuilds() {
 #[tokio::test]
 async fn a_wait_inside_a_reattachs_gap_is_refused_with_409() {
     let (base, _source, _waits) = serve_staged(40, |observer| {
-        daemon::Observer::on_lane_gap(
+        daemon::Observer::on_lane_gaps(
             observer,
             &LaneKey::new(index("users"), SinkName::try_new("primary").unwrap()),
-            &sink::Gap {
-                from: Some("10".to_owned()),
-                to: Some("20".to_owned()),
-            },
+            &[
+                sink::Gap {
+                    from: Some("10".to_owned()),
+                    to: Some("20".to_owned()),
+                },
+                sink::Gap {
+                    from: Some("25".to_owned()),
+                    to: Some("28".to_owned()),
+                },
+            ],
         );
     })
     .await;
@@ -728,6 +734,11 @@ async fn a_wait_inside_a_reattachs_gap_is_refused_with_409() {
         body["error"].as_str().unwrap().contains("from 10 to 20"),
         "{body}"
     );
+    let (status, _) = get_wait(&base, "position=22&until=applied").await;
+    assert_eq!(status, 200, "between the two gaps");
+    let (status, body) = get_wait(&base, "position=27&until=applied").await;
+    assert_eq!(status, 409, "inside the second gap: {body}");
+    assert_eq!(body["lanes"][0]["gap"], json!({ "from": "25", "to": "28" }));
     let (status, _) = get_wait(&base, "position=30&until=applied").await;
     assert_eq!(status, 200);
 }
@@ -862,7 +873,7 @@ async fn a_reattach_is_refused_unless_it_applies_and_queued_when_it_does() {
 /// ADR 0012 stage 10, O16: `/status` shows a lane's accepted gap until a
 /// seed rebuilds the index.
 #[tokio::test]
-async fn status_shows_a_lanes_gap_until_a_seed() {
+async fn status_shows_a_lanes_gaps_until_a_seed() {
     use daemon::Observer;
     let primary = SinkName::try_new("primary").unwrap();
     let users = LaneKey::new(index("users"), primary.clone());
@@ -875,23 +886,29 @@ async fn status_shows_a_lanes_gap_until_a_seed() {
         Status::new([index("users")], [primary.clone()], Instant::now()).with_fence(fence),
     );
     let observer = daemon::StatusObserver::new(Arc::clone(&status));
-    observer.on_lane_gap(
+    observer.on_lane_gaps(
         &users,
-        &sink::Gap {
-            from: Some("10".to_owned()),
-            to: None,
-        },
+        &[
+            sink::Gap {
+                from: Some("2".to_owned()),
+                to: Some("5".to_owned()),
+            },
+            sink::Gap {
+                from: Some("10".to_owned()),
+                to: None,
+            },
+        ],
     );
     let snapshot = serde_json::to_value(status.snapshot()).unwrap();
     assert_eq!(
-        snapshot["sinks"]["primary"]["lanes"]["users"]["gap"],
-        json!({ "from": "10", "to": null })
+        snapshot["sinks"]["primary"]["lanes"]["users"]["gaps"],
+        json!([{ "from": "2", "to": "5" }, { "from": "10", "to": null }])
     );
     observer.on_index_seeded(&primary, &index("users"));
     let snapshot = serde_json::to_value(status.snapshot()).unwrap();
     assert!(
         snapshot["sinks"]["primary"]["lanes"]["users"]
-            .get("gap")
+            .get("gaps")
             .is_none()
     );
 }

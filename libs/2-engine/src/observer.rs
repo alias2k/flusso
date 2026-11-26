@@ -510,13 +510,13 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (lane, rebuilding, attaching);
     }
 
-    /// A lane carries a gap a reattach accepted (ADR 0012 stage 10, O16, S3):
-    /// none of the changes after `gap.from` and through `gap.to` reached its
-    /// index. Heard at the attach, and at every staging that finds it. A
-    /// `to` still unknown means everything past `from`, until it is heard
-    /// again completed.
-    fn on_lane_gap(&self, lane: &LaneKey, gap: &sink::Gap) {
-        let _ = (lane, gap);
+    /// A lane carries the gaps reattaches accepted (ADR 0012 stage 10, O16,
+    /// S3), the whole list: none of the changes after a gap's `from` and
+    /// through its `to` reached its index. Heard at an attach, and at every
+    /// staging that finds them. An unknown end stretches its gap that way,
+    /// until heard again completed.
+    fn on_lane_gaps(&self, lane: &LaneKey, gaps: &[sink::Gap]) {
+        let _ = (lane, gaps);
     }
 
     /// One index's own work failed (ADR 0012 stage 8a, slice 8), and is
@@ -724,9 +724,9 @@ impl Observer for FanOut {
         }
     }
 
-    fn on_lane_gap(&self, lane: &LaneKey, gap: &sink::Gap) {
+    fn on_lane_gaps(&self, lane: &LaneKey, gaps: &[sink::Gap]) {
         for observer in &self.observers {
-            observer.on_lane_gap(lane, gap);
+            observer.on_lane_gaps(lane, gaps);
         }
     }
 

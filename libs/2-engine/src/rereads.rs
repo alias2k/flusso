@@ -149,6 +149,9 @@ impl Rereads {
 pub trait SourcePositions: Debug + Send + Sync {
     /// Where `landed` stands in the source's own text.
     fn place(&self, landed: Landed) -> Option<String>;
+
+    /// Whether `text` is a position this source reads.
+    fn parses(&self, text: &str) -> bool;
 }
 
 /// [`SourcePositions`] over a change capture.
@@ -160,5 +163,9 @@ impl SourcePositions for CapturePositions {
         self.0
             .reached(landed)
             .map(|position| self.0.format_position(position))
+    }
+
+    fn parses(&self, text: &str) -> bool {
+        self.0.parse_position(text).is_ok()
     }
 }

@@ -87,10 +87,10 @@ struct Gate {
     demoted: Mutex<Vec<(String, bool)>>,
     /// Each index marked seeded.
     seeded: Mutex<Vec<String>>,
-    /// The gap a reattach keeps with each index's seed marker.
-    marker_gaps: Mutex<BTreeMap<String, sink::Gap>>,
-    /// Each gap written, by index, in order.
-    gaps: Mutex<Vec<(String, sink::Gap)>>,
+    /// The gaps reattaches keep with each index's seed marker.
+    marker_gaps: Mutex<BTreeMap<String, Vec<sink::Gap>>>,
+    /// Each list of gaps written, by index, in order.
+    gaps: Mutex<Vec<(String, Vec<sink::Gap>)>>,
     /// The seed meets a block on the serving generation (#479).
     retire_blocked: Mutex<bool>,
     /// Calls that fail from now on, by method name: the process died
@@ -225,25 +225,26 @@ impl Sink for Gate {
             .get(mapping.index.as_ref())
             .cloned()
             .unwrap_or_default();
-        kept.gap = self
+        kept.gaps = self
             .marker_gaps
             .lock()
             .unwrap()
             .get(mapping.index.as_ref())
-            .cloned();
+            .cloned()
+            .unwrap_or_default();
         Ok(kept)
     }
 
-    async fn record_gap(&self, mapping: &IndexMapping, gap: &sink::Gap) -> sink::Result<()> {
+    async fn record_gaps(&self, mapping: &IndexMapping, gaps: &[sink::Gap]) -> sink::Result<()> {
         self.dies_before("record_gap")?;
         self.gaps
             .lock()
             .unwrap()
-            .push((mapping.index.to_string(), gap.clone()));
+            .push((mapping.index.to_string(), gaps.to_vec()));
         self.marker_gaps
             .lock()
             .unwrap()
-            .insert(mapping.index.to_string(), gap.clone());
+            .insert(mapping.index.to_string(), gaps.to_vec());
         Ok(())
     }
 
@@ -374,8 +375,8 @@ struct Heard {
     /// For each detach heard, whether its lane had already left the
     /// minimum: never, or the fence would freeze where `Free` reaches (R5).
     left_first: Mutex<Vec<bool>>,
-    /// Each gap heard, with how many lane healths were heard before it.
-    gaps: Mutex<Vec<(LaneKey, sink::Gap, usize)>>,
+    /// Each list of gaps heard, with how many lane healths were heard before.
+    gaps: Mutex<Vec<(LaneKey, Vec<sink::Gap>, usize)>>,
 }
 
 impl Heard {
@@ -391,12 +392,12 @@ impl Heard {
 }
 
 impl Observer for Heard {
-    fn on_lane_gap(&self, lane: &LaneKey, gap: &sink::Gap) {
+    fn on_lane_gaps(&self, lane: &LaneKey, gaps: &[sink::Gap]) {
         let heard = self.health.lock().unwrap().len();
         self.gaps
             .lock()
             .unwrap()
-            .push((lane.clone(), gap.clone(), heard));
+            .push((lane.clone(), gaps.to_vec(), heard));
     }
 
     fn on_lane_health(&self, lane: &LaneKey, health: &LaneHealth) {
@@ -448,6 +449,10 @@ impl crate::SourcePositions for Seqs {
                 .covered_seq()
                 .map_or_else(|| "nothing".to_owned(), |seq| seq.to_string()),
         )
+    }
+
+    fn parses(&self, text: &str) -> bool {
+        text == "nothing" || text.parse::<u64>().is_ok()
     }
 }
 
@@ -1964,7 +1969,7 @@ async fn a_reattach_keeps_the_gap_deletes_the_record_and_attaches_the_lane() {
     assert!(rig.sink.ensured.lock().unwrap().len() > ensured);
     assert_eq!(
         *rig.sink.gaps.lock().unwrap(),
-        [("users".to_owned(), gap(Some("1"), None))],
+        [("users".to_owned(), vec![gap(Some("1"), None)])],
         "kept before the record goes"
     );
     assert!(
@@ -1992,7 +1997,10 @@ async fn a_reattach_keeps_the_gap_deletes_the_record_and_attaches_the_lane() {
     let heard = rig.heard.gaps.lock().unwrap().clone();
     assert_eq!(heard.len(), 1);
     let (at, heard_gap, healths) = heard.first().cloned().unwrap();
-    assert_eq!((at, heard_gap), (lane(users()), gap(Some("1"), Some("3"))));
+    assert_eq!(
+        (at, heard_gap),
+        (lane(users()), vec![gap(Some("1"), Some("3"))])
+    );
     assert_eq!(
         rig.heard.kinds(&lane(users())).last(),
         Some(&"open"),
@@ -2009,7 +2017,7 @@ async fn a_reattach_keeps_the_gap_deletes_the_record_and_attaches_the_lane() {
     );
     eventually("the whole gap is kept", || {
         rig.sink.gaps.lock().unwrap().last()
-            == Some(&("users".to_owned(), gap(Some("1"), Some("3"))))
+            == Some(&("users".to_owned(), vec![gap(Some("1"), Some("3"))]))
     })
     .await;
     rig.live(&users(), 4, 4).await;
@@ -2084,7 +2092,7 @@ async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_
         .marker_gaps
         .lock()
         .unwrap()
-        .insert("users".to_owned(), gap(Some("1"), None));
+        .insert("users".to_owned(), vec![gap(Some("1"), None)]);
     rig.positions
         .down
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2099,7 +2107,7 @@ async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_
             .iter()
             .map(|(at, gap, _)| (at.clone(), gap.clone()))
             .collect::<Vec<_>>(),
-        [(lane(users()), gap(Some("1"), None))]
+        [(lane(users()), vec![gap(Some("1"), None)])]
     );
     assert!(rig.sink.gaps.lock().unwrap().is_empty());
 
@@ -2111,7 +2119,7 @@ async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_
     let (task, _control) = spawn(&engine);
     eventually("the gap is completed and kept", || {
         rig.sink.gaps.lock().unwrap().as_slice()
-            == [("users".to_owned(), gap(Some("1"), Some("nothing")))]
+            == [("users".to_owned(), vec![gap(Some("1"), Some("nothing"))])]
     })
     .await;
     assert_eq!(
@@ -2121,7 +2129,7 @@ async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_
             .unwrap()
             .last()
             .map(|(_, gap, _)| gap.clone()),
-        Some(gap(Some("1"), Some("nothing")))
+        Some(vec![gap(Some("1"), Some("nothing"))])
     );
     eventually("the records count as read", || {
         rig.rereads.current(&sink_name("primary"))
@@ -2169,24 +2177,58 @@ async fn a_staging_once_the_slot_is_held_counts_as_the_read() {
     assert!(rig.rereads.current(&sink_name("primary")));
 }
 
-/// A lane reattached, detached again and reattached again keeps one gap
-/// spanning both: the earlier gap's positions are never vouched for again.
+/// Review of step 4, the gap list: a lane reattached, detached again and
+/// reattached again keeps both gaps exactly, the earlier as it was and the
+/// new one added; positions between them are vouched as usual.
 #[tokio::test(start_paused = true)]
-async fn a_second_reattach_keeps_the_first_gaps_start() {
+async fn a_second_reattach_keeps_both_gaps_exactly() {
     let rig = Rig::new(64);
+    let earlier = gap(Some("0"), Some("0"));
     rig.sink
         .marker_gaps
         .lock()
         .unwrap()
-        .insert("users".to_owned(), gap(Some("0"), Some("0")));
+        .insert("users".to_owned(), vec![earlier.clone()]);
     let (_engine, task, control) = detached_live_only(&rig).await;
     control.send(reattach(users())).await.unwrap();
     let _attach = next_request(&rig).await;
     assert_eq!(
         rig.sink.gaps.lock().unwrap().last(),
-        Some(&("users".to_owned(), gap(Some("0"), None)))
+        Some(&("users".to_owned(), vec![earlier, gap(Some("1"), None)]))
     );
     task.abort();
+}
+
+/// Review of step 4, m4: at a start, a gap end the source can't read is
+/// settled and kept: an unreadable `to` becomes where the lane stands
+/// (everything after it reaches the lane), an unreadable `from` unknown (the
+/// gap reaches back from its end, all in the past). Nothing refuses forever.
+#[tokio::test(start_paused = true)]
+async fn a_gap_end_the_source_cannot_read_is_settled_at_a_start() {
+    let rig = Rig::new(64);
+    rig.sink.marker_gaps.lock().unwrap().insert(
+        "users".to_owned(),
+        vec![
+            gap(Some("garbled"), Some("2")),
+            gap(Some("3"), Some("garbled")),
+        ],
+    );
+    let engine = rig.live_only_engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let settled = vec![gap(None, Some("2")), gap(Some("3"), Some("nothing"))];
+    assert_eq!(
+        *rig.sink.gaps.lock().unwrap(),
+        [("users".to_owned(), settled.clone())]
+    );
+    assert_eq!(
+        rig.heard
+            .gaps
+            .lock()
+            .unwrap()
+            .last()
+            .map(|(_, gaps, _)| gaps.clone()),
+        Some(settled)
+    );
 }
 
 /// Review of step 4, S1: a rebuild an operator forced under
@@ -2336,7 +2378,7 @@ async fn a_reattach_killed_before_any_step_comes_back_with_its_gap_or_detached()
             .lock()
             .unwrap()
             .iter()
-            .map(|(_, gap, _)| gap.clone())
+            .flat_map(|(_, gaps, _)| gaps.clone())
             .collect();
         if detached {
             assert!(

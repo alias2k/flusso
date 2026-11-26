@@ -93,17 +93,10 @@ impl OpensearchSink {
             };
             StuckClock::new(text("since"), text("seen_at"))
         });
-        kept.gap = marker
+        kept.gaps = marker
             .as_ref()
-            .and_then(|marker| marker.source.get("gap"))
-            .filter(|gap| gap.is_object())
-            .map(|gap| {
-                let text = |key: &str| gap.get(key).and_then(Value::as_str).map(str::to_owned);
-                sink::Gap {
-                    from: text("from"),
-                    to: text("to"),
-                }
-            });
+            .map(|marker| read_gaps(&marker.source))
+            .unwrap_or_default();
         if kept.record.is_none()
             && let Some(marker) = marker
             && let Some(from) = marker.source.get("detaching_from").filter(|v| !v.is_null())
@@ -319,3 +312,23 @@ mod record;
 
 #[cfg(test)]
 mod tests;
+
+/// The gaps a seed marker keeps: `gaps`, or a single `gap` as an earlier
+/// step 4 wrote it, read as a list of one.
+fn read_gaps(marker: &Value) -> Vec<sink::Gap> {
+    let one = |gap: &Value| {
+        let text = |key: &str| gap.get(key).and_then(Value::as_str).map(str::to_owned);
+        sink::Gap {
+            from: text("from"),
+            to: text("to"),
+        }
+    };
+    match (
+        marker.get("gaps").and_then(Value::as_array),
+        marker.get("gap"),
+    ) {
+        (Some(gaps), _) => gaps.iter().filter(|gap| gap.is_object()).map(one).collect(),
+        (None, Some(gap)) if gap.is_object() => vec![one(gap)],
+        _ => Vec::new(),
+    }
+}

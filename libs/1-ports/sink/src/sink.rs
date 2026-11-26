@@ -340,11 +340,12 @@ pub struct Detachment {
     /// Where reads stood at the detach, in the source's own text: the
     /// record's `through`, the start of a reattach's gap.
     pub through: Option<String>,
-    /// The changes a reattach accepted as missing (O16), as the seed marker
-    /// keeps them: from where reads stood at the detach to where the lane
-    /// was attached, each in the source's own text. `to` is unknown when the
-    /// process died between deleting the record and the attach.
-    pub gap: Option<Gap>,
+    /// The changes each reattach accepted as missing (O16), oldest first, as
+    /// the seed marker keeps them: from where reads stood at the detach to
+    /// where the lane was attached, each in the source's own text. The last
+    /// one's `to` is unknown when the process died between deleting the
+    /// record and the attach.
+    pub gaps: Vec<Gap>,
 }
 
 /// The changes a reattach accepted as missing (ADR 0012 stage 10, O16, S3):
@@ -727,10 +728,12 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         )))
     }
 
-    /// Keep, with `mapping`'s seed marker, the changes a reattach accepted
-    /// as missing (ADR 0012 stage 10, O16): so a fence never vouches inside
-    /// them, after a restart too. The default keeps nothing.
-    async fn record_gap(&self, _: &IndexMapping, _: &Gap) -> Result<()> {
+    /// Keep, with `mapping`'s seed marker, every gap a reattach accepted
+    /// (ADR 0012 stage 10, O16), the whole list replacing the one kept: so a
+    /// fence never vouches inside any of them, after a restart too. A seed
+    /// or a reindex drops them: the index then holds every change. The
+    /// default keeps nothing.
+    async fn record_gaps(&self, _: &IndexMapping, _: &[Gap]) -> Result<()> {
         Ok(())
     }
 

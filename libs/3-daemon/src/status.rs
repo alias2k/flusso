@@ -107,7 +107,7 @@ pub struct Status {
     /// attach is awaited: the rebuilds its record counts, and the attempt.
     lane_rebuild: Mutex<BTreeMap<stream::LaneKey, LaneRebuild>>,
     /// The gap a reattach accepted on each lane, until a seed rebuilds it.
-    lane_gap: Mutex<BTreeMap<stream::LaneKey, LaneGap>>,
+    lane_gap: Mutex<BTreeMap<stream::LaneKey, Vec<LaneGap>>>,
     /// What the ingest engine knows of each index (slice 7), attached once
     /// the engine exists; until then the section shows nothing held.
     index_states: OnceLock<Arc<IndexStates>>,
@@ -315,7 +315,7 @@ impl SinkStatus {
                             reason: None,
                             rebuilding: None,
                             attaching: false,
-                            gap: None,
+                            gaps: Vec::new(),
                         },
                     )
                 })
@@ -583,23 +583,22 @@ impl Status {
         }
     }
 
-    /// Record the gap a reattach accepted on `lane` (O16, S3); `None` once a
+    /// Record the gaps reattaches accepted on `lane` (O16, S3); none once a
     /// seed rebuilt the index.
-    pub(crate) fn set_lane_gap(&self, lane: &stream::LaneKey, gap: Option<&sink::Gap>) {
+    pub(crate) fn set_lane_gaps(&self, lane: &stream::LaneKey, gaps: &[sink::Gap]) {
         let mut lanes = lock(&self.lane_gap);
-        match gap {
-            Some(gap) => {
-                lanes.insert(
-                    lane.clone(),
-                    LaneGap {
+        if gaps.is_empty() {
+            lanes.remove(lane);
+        } else {
+            lanes.insert(
+                lane.clone(),
+                gaps.iter()
+                    .map(|gap| LaneGap {
                         from: gap.from.clone(),
                         to: gap.to.clone(),
-                    },
-                );
-            }
-            None => {
-                lanes.remove(lane);
-            }
+                    })
+                    .collect(),
+            );
         }
     }
 
@@ -1070,12 +1069,12 @@ impl Status {
                         entry.attaching = attaching.is_some();
                     }
                 }
-                for (lane, gap) in lock(&self.lane_gap)
+                for (lane, gaps) in lock(&self.lane_gap)
                     .iter()
                     .filter(|(lane, _)| &lane.sink == name)
                 {
                     if let Some(entry) = snapshot.lanes.get_mut(lane.index.as_ref()) {
-                        entry.gap = Some(gap.clone());
+                        entry.gaps = gaps.clone();
                     }
                 }
                 if let Some(stalls) = &self.stalls {
@@ -1533,11 +1532,11 @@ pub struct LaneSnapshot {
     /// The lane waits for its attach (a rebuild starting, or a reattach).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub attaching: bool,
-    /// The changes a reattach accepted as missing (O16): a fence refuses a
-    /// position inside them. Absent otherwise, and once a reindex rebuilt
-    /// the index.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gap: Option<LaneGap>,
+    /// The changes each reattach accepted as missing (O16), oldest first: a
+    /// fence refuses a position inside any of them. Absent while none, and
+    /// once a reindex rebuilt the index.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<LaneGap>,
 }
 
 /// The changes a reattach accepted as missing on a lane, in the source's own

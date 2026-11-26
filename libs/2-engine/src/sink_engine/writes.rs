@@ -2976,9 +2976,9 @@ impl<'a> Run<'a> {
                 continue;
             };
             match self.engine.reattach(mapping).await {
-                Ok(Ok(gap)) => {
+                Ok(Ok(gaps)) => {
                     if let Some(run) = self.lanes.get_mut(lane) {
-                        run.health.reattach = Some(gap);
+                        run.health.reattach = Some(gaps);
                     }
                     self.ask_attach(&index);
                     reply.send(super::ReattachVerdict::Started);
@@ -3028,8 +3028,11 @@ impl<'a> Run<'a> {
             let through = found.through.clone();
             match super::AtStaging::of(&found) {
                 super::AtStaging::AsBefore | super::AtStaging::Finished(_) => {
-                    if let Some(gap) = found.gap {
-                        self.engine.known_gap(mapping, gap).await.map_err(failed)?;
+                    if !found.gaps.is_empty() {
+                        self.engine
+                            .known_gaps(mapping, found.gaps)
+                            .await
+                            .map_err(failed)?;
                     }
                 }
                 super::AtStaging::Rebuilding(_) if rebuilding => {}
@@ -3146,11 +3149,13 @@ impl<'a> Run<'a> {
             // stands now: attached, and nothing of it landed since.
             if let Some(run) = self.lanes.get_mut(lane)
                 && run.health.health.is_detached()
-                && let Some(mut gap) = run.health.reattach.take()
+                && let Some(mut gaps) = run.health.reattach.take()
             {
-                gap.to = self.engine.place(&run.key);
-                self.engine.observer.on_lane_gap(&run.key, &gap);
-                reattached = Some((run.key.clone(), gap));
+                if let Some(last) = gaps.last_mut() {
+                    last.to = self.engine.place(&run.key);
+                }
+                self.engine.observer.on_lane_gaps(&run.key, &gaps);
+                reattached = Some((run.key.clone(), gaps));
             }
             if let Some(run) = self.lanes.get_mut(lane)
                 && let Some(down) = run.health.attached(Instant::now())
@@ -3165,8 +3170,8 @@ impl<'a> Run<'a> {
                 ));
             }
             self.acknowledged(handle, lane, Some(seq), false).await?;
-            if let Some((key, gap)) = reattached {
-                self.engine.record_reattached(&key, &gap).await?;
+            if let Some((key, gaps)) = reattached {
+                self.engine.record_reattached(&key, &gaps).await?;
             }
             match rebuild {
                 // r3: every page of the rebuild is read after the attach.

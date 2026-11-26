@@ -451,7 +451,7 @@ impl SinkEngine {
     pub(super) async fn reattach(
         &self,
         mapping: &IndexMapping,
-    ) -> sink::Result<std::result::Result<sink::Gap, String>> {
+    ) -> sink::Result<std::result::Result<Vec<sink::Gap>, String>> {
         let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
         let found = self.sink.detachment(mapping).await?;
         let restart = "restart flusso: a start on this backfill = false sink puts the \
@@ -486,58 +486,83 @@ impl SinkEngine {
                 return Ok(Err(why));
             }
         };
-        // A second reattach keeps the first gap's start: the marker holds one
-        // gap, so it spans both, refusing what lies between them too.
-        let gap = sink::Gap {
-            from: match &found.gap {
-                Some(earlier) => earlier.from.clone(),
-                None => found.through.clone(),
-            },
+        // Every earlier gap stays as it was; this one is added (review of
+        // step 4: the gap list).
+        let mut gaps = found.gaps.clone();
+        gaps.push(sink::Gap {
+            from: found.through.clone(),
             to: None,
-        };
+        });
         self.sink.ensure_index(mapping).await?;
-        self.sink.record_gap(mapping, &gap).await?;
+        self.sink.record_gaps(mapping, &gaps).await?;
         self.sink.forget_detachment(mapping, &version).await?;
-        tracing::warn!(%lane, from = ?gap.from, "reattaching: the record is gone; the changes from the detach to the attach are accepted as missing");
-        Ok(Ok(gap))
+        tracing::warn!(%lane, from = ?found.through, "reattaching: the record is gone; the changes from the detach to the attach are accepted as missing");
+        Ok(Ok(gaps))
     }
 
-    /// The reattached `lane`'s gap, both ends known, kept with its index. A
-    /// failure fails the run: the fence heard the gap already, and the
-    /// restarted run's staging finds it still open and completes it where
-    /// the lane stands, which is where it was attached (nothing of it landed).
-    pub(super) async fn record_reattached(&self, lane: &LaneKey, gap: &sink::Gap) -> Result<()> {
+    /// The reattached `lane`'s gaps, the last one's ends both known, kept
+    /// with its index. A failure fails the run: the fence heard them already,
+    /// and the restarted run's staging finds the last still open and
+    /// completes it where the lane stands, which is where it was attached
+    /// (nothing of it landed).
+    pub(super) async fn record_reattached(&self, lane: &LaneKey, gaps: &[sink::Gap]) -> Result<()> {
         let Some(mapping) = self.mappings.iter().find(|m| m.index == lane.index) else {
             return Ok(());
         };
         self.sink
-            .record_gap(mapping, gap)
+            .record_gaps(mapping, gaps)
             .await
             .map_err(|error| staging_failed(&lane.index, error))?;
-        tracing::warn!(%lane, from = ?gap.from, to = ?gap.to, "reattached: written as usual from here; a fence refuses every position inside the accepted gap");
+        tracing::warn!(%lane, gaps = ?gaps, "reattached: written as usual from here; a fence refuses every position inside an accepted gap");
         Ok(())
     }
 
-    /// A gap a reattach accepted on `mapping`'s index, found with its seed
-    /// marker (S3): completed when the source can say where the lane stands
-    /// (the reattach died between deleting its record and the attach; the
-    /// lane has landed nothing since), and heard by the fence either way. A
-    /// gap still open (`to` unknown) refuses every position past `from`
-    /// until it is completed.
-    pub(super) async fn known_gap(
+    /// The gaps reattaches accepted on `mapping`'s index, found with its
+    /// seed marker (S3), heard by the fence. Once the source can say where
+    /// the lane stands, each end that is unknown or that the source can't
+    /// read is settled, loudly, and the list kept again:
+    ///
+    /// - a `to` becomes where the lane stands at this start: everything
+    ///   after it reaches the lane, which has landed nothing since, so the
+    ///   gap covers at least what was dropped (the reattach died between
+    ///   deleting its record and the attach, or the end was corrupt);
+    /// - a `from` becomes unknown: the gap then reaches back from its `to`,
+    ///   refusing only positions at or before it, all in the past.
+    ///
+    /// Until then an unknown `to` refuses every position past `from`.
+    pub(super) async fn known_gaps(
         &self,
         mapping: &IndexMapping,
-        mut gap: sink::Gap,
+        mut gaps: Vec<sink::Gap>,
     ) -> sink::Result<()> {
         let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
-        if gap.to.is_none()
-            && let Some(to) = self.place(&lane)
-        {
-            gap.to = Some(to);
-            self.sink.record_gap(mapping, &gap).await?;
-            tracing::warn!(%lane, from = ?gap.from, to = ?gap.to, "a reattach's gap is completed where the lane stands at this start: a fence refuses every position inside it");
+        let place = self.place(&lane);
+        let readable = |text: &Option<String>| {
+            text.as_deref().is_some_and(|text| {
+                self.positions
+                    .as_ref()
+                    .is_some_and(|positions| positions.parses(text))
+            })
+        };
+        let mut settled = false;
+        if let Some(place) = &place {
+            for gap in &mut gaps {
+                if gap.from.is_some() && !readable(&gap.from) {
+                    tracing::error!(%lane, from = ?gap.from, "a gap's start is not a position the source reads: the gap now reaches back from its end");
+                    gap.from = None;
+                    settled = true;
+                }
+                if !readable(&gap.to) {
+                    tracing::warn!(%lane, to = ?gap.to, at = %place, "a gap's end is unknown or not a position the source reads: it is set where the lane stands at this start; a fence refuses every position inside it");
+                    gap.to = Some(place.clone());
+                    settled = true;
+                }
+            }
         }
-        self.observer.on_lane_gap(&lane, &gap);
+        if settled {
+            self.sink.record_gaps(mapping, &gaps).await?;
+        }
+        self.observer.on_lane_gaps(&lane, &gaps);
         Ok(())
     }
 
@@ -1281,7 +1306,7 @@ impl SinkEngine {
         let detachment = self.sink.detachment(mapping).await?;
         let found = AtStaging::of(&detachment);
         let through = detachment.through.clone();
-        let gap = detachment.gap.clone();
+        let gaps = detachment.gaps.clone();
         let written_rebuildable = matches!(
             detachment.record,
             Some(sink::DetachRecord::Detached { live_only: false })
@@ -1298,8 +1323,8 @@ impl SinkEngine {
         }
         match found {
             AtStaging::AsBefore => {
-                if let Some(gap) = gap {
-                    self.known_gap(mapping, gap).await?;
+                if !gaps.is_empty() {
+                    self.known_gaps(mapping, gaps).await?;
                 }
             }
             AtStaging::Detached(why) => {
