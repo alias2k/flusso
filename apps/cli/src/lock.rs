@@ -78,8 +78,10 @@ pub(crate) enum LockState {
     /// It holds the same config in other bytes (line endings, formatting):
     /// `run --locked` runs this config, and `run` would rewrite it.
     Respelled,
-    /// It holds another config; `differs` names what, at the top level.
-    Stale { differs: Vec<String> },
+    /// It holds another config; `differs` names what, at the top level, and
+    /// `crlf` whether its line endings are Windows ones, which change a
+    /// multi-line value (a script's source) and so can be the whole cause.
+    Stale { differs: Vec<String>, crlf: bool },
     /// No file there: `run` with the config writes one.
     Missing,
     /// It can't be read as a lock; `reason` says why.
@@ -117,6 +119,7 @@ impl LockState {
             Ok(old) if same(&old, &compiled.config) => Self::Respelled,
             Ok(old) => Self::Stale {
                 differs: differences(&old, &compiled.config),
+                crlf: existing.windows(2).any(|pair| pair == b"\r\n"),
             },
             Err(config::CompileError::VersionMismatch { got, expected }) => Self::Unreadable {
                 reason: format!("it is format {got}, and this flusso reads format {expected}"),
@@ -181,16 +184,25 @@ impl LockState {
             Self::NotCompared => {
                 format!("no config to compare {lock} with: the lock is what was checked")
             }
-            Self::Stale { differs } => {
+            Self::Stale { differs, crlf } => {
                 let what = if differs.is_empty() {
                     String::new()
                 } else {
                     format!(" ({})", differs.join("; "))
                 };
+                let endings = if *crlf {
+                    format!(
+                        ". `{lock}` has Windows line endings (CRLF), which change multi-line \
+                         values such as script sources. Rewrite it as above, and mark it `-text` \
+                         in `.gitattributes` (`{lock} -text`) so git does not convert it again"
+                    )
+                } else {
+                    String::new()
+                };
                 format!(
                     "`{lock}` was compiled from another config than this one{what}: `flusso run \
                      --locked`, or an image baked from this lock, would run the older config. {} \
-                     and commit the result",
+                     and commit the result{endings}",
                     at.rewrite()
                 )
             }
@@ -398,7 +410,11 @@ mod tests {
         )
         .unwrap();
         let state = LockState::of(&compiled(&now), &now.join("flusso.lock"));
-        let LockState::Stale { differs } = &state else {
+        let LockState::Stale {
+            differs,
+            crlf: false,
+        } = &state
+        else {
             panic!("{state:?}");
         };
         assert_eq!(
@@ -478,6 +494,67 @@ mod tests {
         );
     }
 
+    /// A CRLF lock holding a multi-line value (a script's source) holds other
+    /// text than the config: stale, and its message names the line endings as
+    /// the cause, with the rewrite and the `.gitattributes` line that keeps
+    /// git from converting it again. A stale lock with LF endings says nothing
+    /// of them.
+    #[test]
+    fn a_crlf_lock_holding_a_script_is_stale_and_names_its_line_endings() {
+        let dir = project("crlf-script", &[], "out");
+        std::fs::write(
+            dir.join("products.schema.yml"),
+            "version: 1\ntable: products\nprimary_key: id\nfields:\n  - integer: id\n    required: true\n\
+             \x20 - keyword: label\n    required: false\n    script: |\n      let name = \"x\";\n      name\n",
+        )
+        .unwrap();
+        let mut toml = std::fs::read_to_string(dir.join("flusso.toml")).unwrap();
+        toml.push_str(
+            "\n[[index]]\nname = \"products\"\nschema = \"products.schema.yml\"\nenabled = true\n",
+        );
+        std::fs::write(dir.join("flusso.toml"), toml).unwrap();
+        let lock = dir.join("flusso.lock");
+        let bytes = config::to_bytes(&compiled(&dir)).unwrap();
+        let crlf = String::from_utf8(bytes).unwrap().replace('\n', "\r\n");
+        std::fs::write(&lock, crlf).unwrap();
+
+        let state = LockState::of(&compiled(&dir), &lock);
+        assert!(
+            matches!(state, LockState::Stale { crlf: true, .. }),
+            "{state:?}"
+        );
+        assert!(state.is_error());
+        assert_eq!(state.as_str(), "lock_stale");
+        let message = state.message(&LockAt::new(Path::new("flusso.lock")));
+        assert!(
+            message.ends_with(
+                " `flusso.lock` has Windows line endings (CRLF), which change multi-line values \
+                 such as script sources. Rewrite it as above, and mark it `-text` in \
+                 `.gitattributes` (`flusso.lock -text`) so git does not convert it again"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("`flusso check --fix`"), "{message}");
+
+        let edited = project("crlf-script-lf", &["users"], "out");
+        config::write(&compiled(&edited), edited.join("flusso.lock")).unwrap();
+        std::fs::write(
+            edited.join("users.schema.yml"),
+            "version: 1\ntable: users\nprimary_key: id\nfields:\n  - integer: id\n    required: false\n",
+        )
+        .unwrap();
+        let state = LockState::of(&compiled(&edited), &edited.join("flusso.lock"));
+        assert!(
+            matches!(state, LockState::Stale { crlf: false, .. }),
+            "{state:?}"
+        );
+        assert!(
+            !state
+                .message(&LockAt::new(Path::new("flusso.lock")))
+                .contains("line endings")
+        );
+    }
+
     /// A lock that fails to parse names where (line and column) and why, never
     /// the text there: a literal secret may sit on that line.
     #[test]
@@ -528,6 +605,7 @@ mod tests {
         let elsewhere = Path::new("deploy/flusso.lock");
         let stale = LockState::Stale {
             differs: Vec::new(),
+            crlf: false,
         };
         let unreadable = LockState::Unreadable {
             reason: "line 1, column 1: invalid key".to_owned(),
@@ -572,6 +650,7 @@ mod tests {
             state,
             LockState::Stale {
                 differs: vec!["the deployment settings `sinks`".to_owned()],
+                crlf: false,
             }
         );
     }

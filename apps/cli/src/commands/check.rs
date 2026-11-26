@@ -943,6 +943,7 @@ mod tests {
         let warning = [finding(source::DiagnosticKind::IgnoredPrimaryKey, "team")];
         let stale = LockState::Stale {
             differs: vec!["the index `products` changed".to_owned()],
+            crlf: false,
         };
         let unreadable = LockState::Unreadable {
             reason: "compiled config format version 2 is not supported".to_owned(),
@@ -1010,6 +1011,7 @@ mod tests {
         let rewritten = LockState::Rewritten {
             was: Box::new(LockState::Stale {
                 differs: Vec::new(),
+                crlf: false,
             }),
         };
         let report = with_lock(&config, &[], None, &rewritten);
