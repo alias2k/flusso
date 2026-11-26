@@ -77,6 +77,10 @@ struct Gate {
     forgotten: Mutex<Vec<String>>,
     /// Indexes `is_seeded` answers unseeded.
     unseeded: Mutex<BTreeSet<String>>,
+    /// Every document written, as `index/id`, in write order.
+    ids: Mutex<Vec<String>>,
+    /// A write holding this id takes this long.
+    slow: Mutex<Option<(String, Duration)>>,
 }
 
 impl Gate {
@@ -126,11 +130,24 @@ impl Sink for Gate {
         parts: &[&[Envelope]],
         _: sink::CaughtUp<'_>,
     ) -> sink::Result<WriteReport> {
+        let slow = self.slow.lock().unwrap().clone();
+        if let Some((id, takes)) = slow
+            && parts
+                .iter()
+                .flat_map(|part| part.iter())
+                .any(|e| e.id == id)
+        {
+            tokio::time::sleep(takes).await;
+        }
         let mut report = WriteReport::clean();
         let mut indexes = Vec::new();
         let mut named = BTreeSet::new();
         for envelope in parts.iter().flat_map(|part| part.iter()) {
             indexes.push(envelope.index.to_string());
+            self.ids
+                .lock()
+                .unwrap()
+                .push(format!("{}/{}", envelope.index, envelope.id));
             if !named.insert(envelope.index.clone()) {
                 continue;
             }
@@ -1219,4 +1236,181 @@ async fn a_lane_held_detached_is_asked_no_backfill_by_a_later_staging() {
     assert!(asked.is_err(), "no backfill asked: {asked:?}");
     assert!(engine.lane_health(&lane(users())).is_detached());
     assert!(rig.progress.is_detached(&lane(users())));
+}
+
+/// The attach request the sink engine sent for `users`: its attempt.
+async fn attach_asked(rig: &Rig) -> u64 {
+    let mut requests = rig.stream.requests().unwrap().consumer;
+    let delivery = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("an attach is asked for")
+        .unwrap()
+        .unwrap();
+    let (request, handle) = delivery.into_parts();
+    handle.ack().await.unwrap();
+    let stream::Request::Attach { index, attempt, .. } = request else {
+        panic!("an attach request, got {request:?}");
+    };
+    assert_eq!(index, users());
+    attempt
+}
+
+/// `users` detached on a block, the block lifted, and an attach asked for:
+/// the engine and the attempt it waits for.
+async fn attaching(
+    rig: &Rig,
+) -> (
+    Arc<SinkEngine>,
+    tokio::task::JoinHandle<crate::Result<()>>,
+    mpsc::Sender<SinkControl>,
+    u64,
+) {
+    rig.sink.block(&users(), true);
+    let engine = rig.engine();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 1, 1).await;
+    eventually("the lane detaches", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    rig.sink.block(&users(), false);
+    control
+        .send(SinkControl::Attach { index: users() })
+        .await
+        .unwrap();
+    let attempt = attach_asked(rig).await;
+    (engine, task, control, attempt)
+}
+
+async fn publish(rig: &Rig, item: LaneItem) {
+    rig.stream
+        .lane(&lane(users()))
+        .unwrap()
+        .producer
+        .publish(item)
+        .await
+        .unwrap();
+}
+
+fn written(rig: &Rig) -> Vec<String> {
+    rig.sink
+        .ids
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|id| id.starts_with("users/"))
+        .cloned()
+        .collect()
+}
+
+/// R6, R8: what reaches the lane before its `Attached` (built while it was
+/// detached) is acknowledged unwritten; the `Attached` of the attempt asked
+/// for opens the lane, and what follows is written.
+#[tokio::test(start_paused = true)]
+async fn items_before_attached_are_discarded_and_after_it_written() {
+    let rig = Rig::new(64);
+    let (engine, task, _control, attempt) = attaching(&rig).await;
+    let before = written(&rig);
+    publish(&rig, item(&users(), 10, 10)).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    publish(&rig, item(&users(), 11, 11)).await;
+    eventually("the item after the attach is written", || {
+        written(&rig).contains(&"users/11".to_owned())
+    })
+    .await;
+    assert!(engine.lane_health(&lane(users())).is_open());
+    let after: Vec<String> = written(&rig).into_iter().skip(before.len()).collect();
+    assert_eq!(
+        after,
+        ["users/11"],
+        "the item before the attach is not written"
+    );
+    task.abort();
+}
+
+/// An `Attached` of another attempt than the one asked for (an older one)
+/// is discarded: the lane stays detached until its own.
+#[tokio::test(start_paused = true)]
+async fn an_older_attempts_attached_is_discarded() {
+    let rig = Rig::new(64);
+    let (engine, task, _control, attempt) = attaching(&rig).await;
+    publish(
+        &rig,
+        LaneItem::Attached {
+            attempt: attempt - 1,
+        },
+    )
+    .await;
+    publish(&rig, item(&users(), 10, 10)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    assert!(!written(&rig).contains(&"users/10".to_owned()));
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    publish(&rig, item(&users(), 11, 11)).await;
+    eventually("its own attach opens the lane", || {
+        written(&rig).contains(&"users/11".to_owned())
+    })
+    .await;
+    task.abort();
+}
+
+/// A second `Attached` of the same attempt (published again by a run that
+/// died between the attach and the first) discards nothing (H2).
+#[tokio::test(start_paused = true)]
+async fn a_second_attached_of_the_same_attempt_discards_nothing() {
+    let rig = Rig::new(64);
+    let (_engine, task, _control, attempt) = attaching(&rig).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    publish(&rig, item(&users(), 11, 11)).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    publish(&rig, item(&users(), 12, 12)).await;
+    eventually("both items are written", || {
+        let written = written(&rig);
+        written.contains(&"users/11".to_owned()) && written.contains(&"users/12".to_owned())
+    })
+    .await;
+    task.abort();
+}
+
+/// A sink run restarted after the `Attached` took effect never writes an
+/// item delivered before it: those were acknowledged in line before the
+/// lane opened, so nothing earlier comes back; what was after it and not
+/// acknowledged is delivered again and written (H3).
+#[tokio::test(start_paused = true)]
+async fn a_run_restart_after_attached_never_writes_a_redelivered_earlier_item() {
+    let rig = Rig::new(64);
+    let (engine, task, _control, attempt) = attaching(&rig).await;
+    *rig.sink.slow.lock().unwrap() = Some(("11".to_owned(), Duration::from_secs(30)));
+    publish(&rig, item(&users(), 10, 10)).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    publish(&rig, item(&users(), 11, 11)).await;
+    eventually("the lane opens", || {
+        engine.lane_health(&lane(users())).is_open()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    task.abort();
+    let _ = task.await;
+    *rig.sink.slow.lock().unwrap() = None;
+    assert!(
+        !written(&rig).contains(&"users/11".to_owned()),
+        "its write was cut by the restart"
+    );
+    let (task, _control) = spawn(&engine);
+    eventually(
+        "the item after the attach is written, delivered again",
+        || written(&rig).contains(&"users/11".to_owned()),
+    )
+    .await;
+    assert!(
+        !written(&rig).contains(&"users/10".to_owned()),
+        "{:?}",
+        written(&rig)
+    );
+    assert!(engine.lane_health(&lane(users())).is_open());
+    task.abort();
 }

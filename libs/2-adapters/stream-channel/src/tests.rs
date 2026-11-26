@@ -30,7 +30,9 @@ fn batch(position: u64) -> LaneItem {
 fn envelopes_of(item: &LaneItem) -> &Arc<[kernel::Envelope]> {
     match item {
         LaneItem::Batch(batch) => &batch.envelopes,
-        LaneItem::SnapshotComplete { .. } => panic!("expected a batch"),
+        LaneItem::SnapshotComplete { .. } | LaneItem::Attached { .. } => {
+            panic!("expected a batch")
+        }
     }
 }
 

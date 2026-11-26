@@ -552,12 +552,14 @@ impl IngestEngine {
             .of_queue(slot);
             let (inbox, delivered) = tokio::sync::mpsc::unbounded_channel();
             let (rebuilds, rebuild_requests) = tokio::sync::mpsc::unbounded_channel();
+            let (attaches, attach_requests) = tokio::sync::mpsc::unbounded_channel();
             let (done, result) = tokio::sync::oneshot::channel();
             futures.push(self.build(
                 Building {
                     runs,
                     inbox: delivered,
                     rebuilds: rebuild_requests,
+                    attaches: attach_requests,
                     signals,
                     reports: &reports,
                     several,
@@ -577,6 +579,7 @@ impl IngestEngine {
                 route: dispatcher::Route {
                     requests: inbox,
                     rebuilds,
+                    attaches,
                 },
                 signals,
                 result,

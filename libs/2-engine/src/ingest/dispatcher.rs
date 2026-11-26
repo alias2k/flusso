@@ -160,6 +160,8 @@ enum Fed {
 pub(super) struct Route {
     pub(super) requests: mpsc::UnboundedSender<Delivery<Request>>,
     pub(super) rebuilds: mpsc::UnboundedSender<Delivery<Request>>,
+    /// Attach requests (ADR 0012 stage 10, R8): read while a walk runs too.
+    pub(super) attaches: mpsc::UnboundedSender<Delivery<Request>>,
 }
 
 /// One builder as the dispatcher sees it: its index's inbox, its signals,
@@ -323,6 +325,7 @@ async fn forward(
         Some((_, route)) => Ok(match delivery.item() {
             Request::Backfill { .. } => route.requests.send(delivery).is_ok(),
             Request::Rebuild { .. } => route.rebuilds.send(delivery).is_ok(),
+            Request::Attach { .. } => route.attaches.send(delivery).is_ok(),
         }),
         None => {
             tracing::warn!(%index, %sink, "a request for an index with no lane here; ignoring");
@@ -473,11 +476,13 @@ mod tests {
         let (inbox, gone) = mpsc::unbounded_channel();
         drop(gone);
         let (rebuilds, _kept) = mpsc::unbounded_channel();
+        let (attaches, _attaches_kept) = mpsc::unbounded_channel();
         let routes = vec![(
             IndexName::try_new("users").unwrap(),
             Route {
                 requests: inbox,
                 rebuilds,
+                attaches,
             },
         )];
         forward_ready(&mut requests, &routes).await.unwrap();

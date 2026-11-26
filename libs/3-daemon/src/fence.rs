@@ -410,6 +410,16 @@ impl Fence {
         });
     }
 
+    /// `lane` is attached again and open (ADR 0012 stage 10, R8): reads see
+    /// its writes from here, so it vouches as it reaches. A lane that was not
+    /// detached keeps what it served.
+    fn attached(&self, lane: &LaneKey) {
+        self.serve(lane, |furthest| match furthest.serving {
+            Serving::Detached { .. } => Serving::Writes,
+            other => other,
+        });
+    }
+
     /// A snapshot was requested for `lane`: a rebuild stays one, and so does
     /// a detached lane (its reads stay frozen); anything else is a seed of an
     /// index that reads see filling.
@@ -745,6 +755,8 @@ impl Observer for FenceObserver {
     fn on_lane_health(&self, lane: &LaneKey, health: &engine::LaneHealth) {
         if health.is_detached() {
             self.fence.detached(lane);
+        } else if health.is_open() {
+            self.fence.attached(lane);
         }
     }
 }

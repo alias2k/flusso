@@ -932,6 +932,7 @@ async fn one_walk_answers_a_lanes_two_requests_under_the_later_ticket() {
                     rows.extend(batch.envelopes.iter().map(row_of));
                 }
                 LaneItem::SnapshotComplete { ticket, .. } => completes.push(ticket),
+                LaneItem::Attached { .. } => panic!("no attach here"),
             }
             handle.ack().await.unwrap();
         }
@@ -1391,6 +1392,7 @@ async fn a_resumed_request_and_a_fresh_one_of_a_lane_are_walked_once_from_the_fi
                 rows.extend(batch.envelopes.iter().map(row_of));
             }
             LaneItem::SnapshotComplete { ticket, .. } => completes.push(ticket),
+            LaneItem::Attached { .. } => panic!("no attach here"),
         }
         handle.ack().await.unwrap();
     }

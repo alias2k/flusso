@@ -44,7 +44,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use kernel::{IndexName, SinkName};
-use stream::{Delivery, Request};
+use stream::{Delivery, LaneItem, LaneKey, Request};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -58,6 +58,7 @@ use super::snapshot::{Snapshot, Step, next_snapshot_step};
 use super::{IdleClock, IngestEngine, Lanes, released};
 use crate::error::Result;
 use crate::observer::{Stage, StageTiming, Wake, Work};
+use crate::progress::Attach;
 
 /// How a builder ended without an error: whether the stop ended it.
 pub(super) struct BuilderEnd {
@@ -84,6 +85,9 @@ pub(super) struct Building<'a> {
     /// Parked lanes' requests for a fresh build (stage 9), apart from the
     /// inbox: they are served while a walk runs.
     pub(super) rebuilds: mpsc::UnboundedReceiver<Delivery<Request>>,
+    /// Attach requests (ADR 0012 stage 10, R8), apart from the inbox: read
+    /// while a walk runs too.
+    pub(super) attaches: mpsc::UnboundedReceiver<Delivery<Request>>,
     pub(super) signals: &'a Signals,
     pub(super) reports: &'a Reports,
     /// Other builders run beside it: a builder held by the budget folds, so
@@ -228,6 +232,11 @@ impl IngestEngine {
         let inbox = &mut building.inbox;
         let rebuilds = &mut building.rebuilds;
         let mut rebuilds_open = true;
+        let attaches = &mut building.attaches;
+        let mut attaches_open = true;
+        // Attach requests waiting for the quiesce: nothing is granted until
+        // nothing of the index is granted and unpublished (R8).
+        let mut attaching: Vec<Delivery<Request>> = Vec::new();
         let signals = building.signals;
         let reports = building.reports;
         let several = building.several;
@@ -270,12 +279,24 @@ impl IngestEngine {
                 self.index_states
                     .budget(index, builds.refused() == Some(Work::Live));
             }
+            if self.progress.any_detached() {
+                self.cut_detached_walk(snapshot, &mut builds).await?;
+            }
+            if !attaching.is_empty() && builds.is_quiet() && !self.stop.is_requested() {
+                self.attach_lanes(std::mem::take(&mut attaching), lanes)
+                    .await?;
+                builds.pause(false);
+                self.grant(runs, snapshot, &mut builds, lanes).await?;
+                mark = Instant::now();
+            }
             if reader_done
                 && !self.stop.is_requested()
                 && snapshot.is_none()
                 && coalescing.is_none()
                 && inbox.is_empty()
                 && rebuilds.is_empty()
+                && attaching.is_empty()
+                && attaches.is_empty()
                 && !builds.rebuilds_waiting()
             {
                 if signals.ended() {
@@ -303,6 +324,10 @@ impl IngestEngine {
                          again on the next start"
                     );
                 }
+                // An attach not made yet is asked again on the next start:
+                // its request goes back to its lane unacknowledged.
+                attaching.clear();
+                builds.pause(false);
                 // The snapshot batch and the requests are gone: so is their
                 // place in the backfill line.
                 builds.leave_lines();
@@ -420,6 +445,20 @@ impl IngestEngine {
                         stale.ack().await?;
                     }
                     self.grant(runs, snapshot, &mut builds, lanes).await?;
+                    mark = Instant::now();
+                }
+                delivery = attaches.recv(), if attaches_open && !self.stop.is_requested() => {
+                    let Some(delivery) = delivery else {
+                        attaches_open = false;
+                        continue;
+                    };
+                    self.waited(mark, None, snapshot, quiet, clock);
+                    signals.received();
+                    attaching.push(delivery);
+                    while let Ok(more) = attaches.try_recv() {
+                        attaching.push(more);
+                    }
+                    builds.pause(true);
                     mark = Instant::now();
                 }
                 delivery = inbox.recv(), if snapshot.is_none() => {
@@ -550,6 +589,74 @@ impl IngestEngine {
                 runs.lead().hold(runs.slot(), false);
             }
         }
+    }
+
+    /// Attach each requested lane (ADR 0012 stage 10, R8), the builder
+    /// quiesced: in the progress first, then `Attached` on the lane, then the
+    /// request acknowledged. The reverse order would let a run dying in
+    /// between leave the lane open with the progress still skipping it. A
+    /// request whose attempt the lane is attached for already publishes
+    /// `Attached` again (a run that died between the two); a stale one
+    /// publishes nothing.
+    async fn attach_lanes(&self, requests: Vec<Delivery<Request>>, lanes: &Lanes) -> Result<()> {
+        for delivery in requests {
+            let (request, handle) = delivery.into_parts();
+            if let Request::Attach {
+                index,
+                sink,
+                attempt,
+            } = request
+            {
+                let lane = LaneKey::new(index, sink);
+                match self.progress.attach(&lane, attempt) {
+                    Attach::Attached | Attach::Again => {
+                        if let Some((key, producer)) = lanes.get_key_value(&lane) {
+                            self.publish_to(key, producer.as_ref(), LaneItem::Attached { attempt })
+                                .await?;
+                        }
+                        tracing::info!(%lane, attempt, "the lane is attached again: it counts in the slot's minimum from here");
+                    }
+                    Attach::Stale => {
+                        tracing::debug!(%lane, attempt, "an attach for an attempt the lane is past; nothing to do");
+                    }
+                }
+            }
+            handle.ack().await?;
+        }
+        Ok(())
+    }
+
+    /// A running walk whose every requesting lane is detached is cut (R7):
+    /// its requests are acknowledged unserved, and its pages stop.
+    async fn cut_detached_walk(
+        &self,
+        snapshot: &mut Option<Snapshot>,
+        builds: &mut Builds,
+    ) -> Result<()> {
+        let all_detached = snapshot.as_ref().is_some_and(|active| {
+            !active.requested.is_empty()
+                && active.requested.iter().all(|(sink, indexes)| {
+                    indexes.keys().all(|index| {
+                        self.progress
+                            .is_detached(&LaneKey::new(index.clone(), sink.clone()))
+                    })
+                })
+        });
+        if !all_detached {
+            return Ok(());
+        }
+        if let Some(mut cut) = snapshot.take() {
+            builds.leave_lines();
+            tracing::info!(
+                indexes = cut.indexes.len(),
+                "every lane that asked for this walk is detached: the walk is cut and its \
+                 requests acknowledged"
+            );
+            for (_, handle) in cut.handles.drain(..) {
+                handle.ack().await?;
+            }
+        }
+        Ok(())
     }
 
     /// Start the gathered requests' snapshot, timed from the first request

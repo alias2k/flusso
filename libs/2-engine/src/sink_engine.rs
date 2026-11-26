@@ -151,6 +151,11 @@ pub enum SinkControl {
     /// it yet: the thresholds that will come in a later slice (there is no
     /// operator command, O12).
     Detach { index: IndexName },
+    /// Attach `index`'s detached lane again (ADR 0012 stage 10, R8): the
+    /// engine asks the index's builder, which quiesces, attaches the lane and
+    /// publishes `Attached` on it; from there the lane is written as an open
+    /// lane. Nothing sends it yet: the rebuild and `reattach` will (step 4).
+    Attach { index: IndexName },
 }
 
 /// What staging does to one index.
@@ -195,6 +200,9 @@ pub struct SinkEngine {
     outstanding: Mutex<BTreeMap<IndexName, Asked>>,
     /// The last ticket a request of this engine carried.
     pub(super) tickets: AtomicU64,
+    /// The last attach attempt this engine asked for (ADR 0012 stage 10,
+    /// R8): increasing for its life.
+    pub(super) attempts: AtomicU64,
     /// The fence levels over the live items received, per lane in key order.
     /// Survives a restart of this engine's run, so a redelivered item keeps
     /// its place and an item written before a failure is still reported once
@@ -266,6 +274,7 @@ impl SinkEngine {
             skip_backfill: false,
             outstanding: Mutex::new(BTreeMap::new()),
             tickets: AtomicU64::new(0),
+            attempts: AtomicU64::new(0),
             detachments: Mutex::new(BTreeMap::new()),
             fences: Mutex::new(Fences::default()),
             progress,

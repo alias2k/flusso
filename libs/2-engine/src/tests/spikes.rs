@@ -51,6 +51,7 @@ fn kind(item: &LaneItem) -> String {
     match item {
         LaneItem::Batch(batch) => format!("item {}", batch.key.map_or(0, |key| key.number())),
         LaneItem::SnapshotComplete { .. } => "boundary".to_owned(),
+        LaneItem::Attached { attempt } => format!("attached {attempt}"),
     }
 }
 

@@ -414,6 +414,12 @@ pub(super) struct Run<'a> {
     /// acknowledged, unwritten, before the next delivery of its lane is
     /// taken (R6).
     discards: Vec<(Box<dyn AckHandle>, usize, u64)>,
+    /// Lanes whose attach request is still to be sent (R8).
+    to_attach: Vec<usize>,
+    /// The `Attached` each attaching lane waits for, taken and held at the
+    /// lane's front until nothing of the lane is unacknowledged: lane,
+    /// receive order, handle.
+    attached: Vec<(usize, u64, Box<dyn AckHandle>)>,
     /// The stop's one probe of every parked lane was scheduled.
     stop_probed: bool,
     /// While live items wait for the writes out to merge: when the wait ends.
@@ -481,6 +487,16 @@ impl<'a> Run<'a> {
             .iter()
             .filter(|lane| lane.health.health.is_detached())
             .count();
+        // A run restarted while a lane waits for its attach asks again: the
+        // builder attaches once per attempt and publishes `Attached` again
+        // for one it attached already (R8).
+        let to_attach = (0..lanes.len())
+            .filter(|lane| {
+                lanes
+                    .get(*lane)
+                    .is_some_and(|run| run.health.attaching.is_some())
+            })
+            .collect();
         // A restarted run keeps applying what the last one's substitutes
         // supersede (B2): the lanes it redelivers may hold older builds.
         let superseding = lanes
@@ -510,6 +526,8 @@ impl<'a> Run<'a> {
             detaching: Vec::new(),
             clearing: Vec::new(),
             discards: Vec::new(),
+            to_attach,
+            attached: Vec::new(),
             stop_probed: false,
             window: VecDeque::new(),
             flights: Flights::new(),
@@ -693,6 +711,12 @@ impl<'a> Run<'a> {
     async fn advance(&mut self) -> Result<()> {
         if !self.discards.is_empty() {
             self.drain_detached().await?;
+        }
+        if !self.attached.is_empty() {
+            self.take_attached().await?;
+        }
+        if !self.to_attach.is_empty() {
+            self.send_attaches()?;
         }
         if !self.unacknowledged_held.is_empty() {
             self.acknowledge_held().await?;
@@ -1051,7 +1075,8 @@ impl<'a> Run<'a> {
         // blocked on it completes, and each discard is acknowledged before
         // the next is taken (R6).
         if self.detached > 0 && run.health.health.is_detached() {
-            return !self.discards.iter().any(|(_, at, _)| *at == lane);
+            return !self.discards.iter().any(|(_, at, _)| *at == lane)
+                && !self.attached.iter().any(|(at, _, _)| *at == lane);
         }
         if run.barrier || !run.health.is_open() || self.ordered() {
             // Once stopping, a restaging lane is released as it is read, even
@@ -1230,6 +1255,23 @@ impl<'a> Run<'a> {
     fn queue(&mut self, lane: usize, delivery: Delivery<LaneItem>) -> Result<()> {
         self.close_idle();
         let (item, handle) = delivery.into_parts();
+        // An `Attached` is the attach's boundary (R8): the one the lane waits
+        // for is held at its front until nothing of the lane is
+        // unacknowledged; any other is acknowledged and dropped (an older
+        // attempt, or one on a lane already open).
+        if let LaneItem::Attached { attempt } = &item {
+            let waited = self.lanes.get(lane).is_some_and(|run| {
+                run.health.health.is_detached() && run.health.attaching == Some(*attempt)
+            });
+            let seq = self.next_seq;
+            self.next_seq += 1;
+            if waited {
+                self.attached.push((lane, seq, handle));
+            } else {
+                self.discards.push((handle, lane, seq));
+            }
+            return Ok(());
+        }
         // Decided before anything else looks at the item: a detached lane's
         // item enters no fence, account or walk (R6).
         if self.detached > 0 && self.lane_detached(lane) {
@@ -1265,6 +1307,7 @@ impl<'a> Run<'a> {
                 Queue::Batch { batch, documents }
             }
             LaneItem::SnapshotComplete { index, ticket } => Queue::Complete { index, ticket },
+            LaneItem::Attached { .. } => return Ok(()),
         };
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -2833,7 +2876,85 @@ impl<'a> Run<'a> {
         match message {
             SinkControl::Reindex { indexes } => self.engine.set_pending_reindex(indexes),
             SinkControl::Detach { index } => self.ask_detach(&index),
+            SinkControl::Attach { index } => self.ask_attach(&index),
         }
+    }
+
+    /// Ask `index`'s builder to attach its detached lane again, under a new
+    /// attempt (R8). A lane not detached, or already waiting for an attach,
+    /// is left as it is.
+    fn ask_attach(&mut self, index: &IndexName) {
+        let Some(lane) = self.lanes.iter().position(|run| run.key.index == *index) else {
+            return;
+        };
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        if !run.health.health.is_detached() || run.health.attaching.is_some() {
+            return;
+        }
+        let attempt = self.engine.attempts.fetch_add(1, Ordering::Relaxed) + 1;
+        run.health.attaching = Some(attempt);
+        tracing::info!(lane = %run.key, attempt, "asking for the lane to be attached again");
+        self.engine.store_lane(&run.key, &run.health, false);
+        if !self.to_attach.contains(&lane) {
+            self.to_attach.push(lane);
+        }
+    }
+
+    /// Send each attach request still to send. Offered, never waited for,
+    /// as a fresh build's: one not taken is sent again on the next turn.
+    fn send_attaches(&mut self) -> Result<()> {
+        let producer = self.engine.stream.requests()?.producer;
+        let mut left = Vec::new();
+        for lane in std::mem::take(&mut self.to_attach) {
+            let Some(run) = self.lanes.get(lane) else {
+                continue;
+            };
+            let Some(attempt) = run.health.attaching else {
+                continue;
+            };
+            let request = Request::Attach {
+                index: run.key.index.clone(),
+                sink: run.key.sink.clone(),
+                attempt,
+            };
+            match producer.publish(request).now_or_never() {
+                Some(published) => published?,
+                None => left.push(lane),
+            }
+        }
+        self.to_attach = left;
+        Ok(())
+    }
+
+    /// Each `Attached` held at its lane's front takes effect once nothing of
+    /// the lane is unacknowledged (R6, H3): the lane opens, and the
+    /// `Attached` is acknowledged, here in the run loop.
+    async fn take_attached(&mut self) -> Result<()> {
+        let mut at = 0;
+        while at < self.attached.len() {
+            let Some(&(lane, _, _)) = self.attached.get(at) else {
+                break;
+            };
+            let blocked = self.discards.iter().any(|(_, of, _)| *of == lane)
+                || self.window.iter().any(|queued| queued.lane == lane)
+                || self.lane_in_flight(lane);
+            if blocked {
+                at += 1;
+                continue;
+            }
+            let (lane, seq, handle) = self.attached.swap_remove(at);
+            if let Some(run) = self.lanes.get_mut(lane)
+                && let Some(down) = run.health.attached(Instant::now())
+            {
+                self.detached = self.detached.saturating_sub(1);
+                tracing::info!(lane = %run.key, after = ?down, "the lane is attached again: written as usual from here");
+                self.engine.store_lane(&run.key, &run.health, true);
+            }
+            self.acknowledged(handle, lane, Some(seq), false).await?;
+        }
+        Ok(())
     }
 
     /// Detach `index`'s lane at its next probe the destination refuses, or

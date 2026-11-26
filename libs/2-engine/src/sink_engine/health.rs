@@ -273,6 +273,9 @@ pub(crate) struct LaneState {
     /// found is deleted and the marker put back, so a lane that opens is
     /// never detached by the next staging (§5).
     pub(crate) detach_unsure: bool,
+    /// The attach attempt the lane waits for (R8): its `Attached` opens it.
+    /// Outlives a run, so a run restarted meanwhile asks again.
+    pub(crate) attaching: Option<u64>,
 }
 
 /// A reindex whose staging failed, waiting for its retry.
@@ -318,6 +321,7 @@ impl LaneState {
             unensured: false,
             detach_asked: false,
             detach_unsure: false,
+            attaching: None,
         }
     }
 
@@ -440,6 +444,18 @@ impl LaneState {
             || !self.held_for_seed.is_empty()
             || self.detach_asked
             || self.detach_unsure
+            || self.attaching.is_some()
+    }
+
+    /// Its `Attached` took effect: the lane is open, written as usual from
+    /// the next item on. How long it was detached.
+    pub(crate) fn attached(&mut self, now: Instant) -> Option<Duration> {
+        let LaneHealth::Detached { since, .. } = &self.health else {
+            return None;
+        };
+        let since = *since;
+        *self = Self::new(self.schedule);
+        Some(now.saturating_duration_since(since))
     }
 
     /// Whether the lane is parked or being staged again: what the run's
