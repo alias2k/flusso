@@ -308,10 +308,7 @@ mod tests {
             sources(&root.join(dir), &mut files);
         }
         // Spelled in parts so this test doesn't find itself.
-        let calls = [
-            [".live", "()"].concat(),
-            ["Capture::", "live"].concat(),
-        ];
+        let calls = [[".live", "()"].concat(), ["Capture::", "live"].concat()];
         let mut callers = Vec::new();
         for file in files {
             let text = std::fs::read_to_string(&file).unwrap();

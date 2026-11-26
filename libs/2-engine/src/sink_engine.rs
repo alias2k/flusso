@@ -486,7 +486,11 @@ impl SinkEngine {
                     })
                 })
                 .await?;
-            tracing::warn!(%lane, ?from, "no detach record is kept for a lane held detached: an earlier reattach's delete landed; finishing it");
+            if from.is_none() {
+                tracing::warn!(%lane, "no detach record is kept for a lane held detached, and no gap is open: an earlier reattach's delete landed unseen. Finishing it with a gap whose start is unknown: once its end is set at the attach, a fence refuses every position at or before the attach on this lane (its whole past) and vouches as usual after it. Only a seed clears it: a reindex on a sink that can rebuild");
+            } else {
+                tracing::warn!(%lane, ?from, "no detach record is kept for a lane held detached: an earlier reattach's delete landed; finishing it with the gap it kept open");
+            }
             return Ok(Ok(gaps));
         }
         let restart = "restart flusso: a start on this backfill = false sink puts the \
