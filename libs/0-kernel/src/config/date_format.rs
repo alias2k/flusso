@@ -16,9 +16,16 @@
 //! pattern reads a time of day only ([`reads_time_of_day_only`]) is left
 //! alone too: over a `time` column it is the documented way to index a time
 //! of day, and over a date or timestamp validation reports it
-//! (`time_of_day_format`), since only the database names the column's type. A `custom` field
-//! mapped as a date over a column that isn't a date or a timestamp is the
-//! user's: flusso writes the column's own value. The user's patterns stay
+//! (`time_of_day_format`), since only the database names the column's type.
+//!
+//! A `custom` field mapped as a date takes the rule only when every type its
+//! `postgres:` list names is `date` or `timestamp…` (by name, `[]` and a
+//! precision aside). Any other list keeps the user's format, as on 0.17: one
+//! naming another type, alone or beside a date (flusso writes the column's
+//! own value), and one naming a domain over a date or a timestamp, which its
+//! name doesn't show.
+//!
+//! The user's patterns stay
 //! first, so OpenSearch prints dates in their form (`key_as_string`,
 //! `docvalue_fields`, the `fields` API) and reads queries in either; `_source`
 //! is unchanged.

@@ -2416,8 +2416,8 @@ unindexed field itself is rejected. Guards: `a_schema_that_never_opts_out_keeps_
 writes** (issue #485's timestamp decision; it replaced the `timestamp_format` error): a mapped
 date-typed field (`MappingType::Date` or `date_nanos`) gets `||strict_date_optional_time` appended last
 only when its `options.format` can't read what flusso writes **into that field** (`DateValues`, from
-the schema: a `date` value `2024-01-02`, a `timestamp` the `T` forms; a `custom` only over `date` /
-`timestamp…` Postgres types, else its own value and no append; a format of time-of-day patterns only is
+the schema: a `date` value `2024-01-02`, a `timestamp` the `T` forms; a `custom` only when every `postgres:` type is `date` /
+`timestamp…` by name, else no append (another type, a domain: the user's, as on 0.17); a format of time-of-day patterns only is
 left alone: over a `time` column it is `time_of_day_as_date`'s workaround, over anything else the
 `TimeOfDayFormat` error; the declared type decides, never the column's: a `date` field over a
 timestamp column is a `TypeMismatch` that says when its `format` refuses the timestamp,
