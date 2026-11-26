@@ -3577,6 +3577,32 @@ mod tests {
         assert!(message.contains("fails to build"), "{message}");
     }
 
+    /// A script namesake under an input-only parent never runs, and a script
+    /// never reads another's output: what a reader can get there is the value
+    /// the build put in place (review 3 of #486). Still the warning.
+    #[test]
+    fn a_script_namesake_under_an_input_only_parent_is_not_said_to_run() {
+        let mut parent = group(
+            "o",
+            json!([column_field("v", "k"), script_field("v", "\"s\"")]),
+        );
+        parent["emit"] = json!(false);
+        let (kind, message) = stated(json!([
+            int_field("id"),
+            script_field("s", "root.o.v"),
+            parent
+        ]));
+        assert_eq!(kind, DiagnosticKind::DuplicateFieldName, "{message}");
+        assert!(!message.contains("script's output (#"), "{message}");
+        assert!(
+            message.contains(
+                "a script can read the value the build put there, not #2's output: a script \
+                 never reads another script's output"
+            ),
+            "{message}"
+        );
+    }
+
     fn group(name: &str, fields: serde_json::Value) -> serde_json::Value {
         json!({ "field": name, "source": { "group": fields } })
     }

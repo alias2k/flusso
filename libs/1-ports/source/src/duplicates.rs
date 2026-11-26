@@ -294,6 +294,18 @@ fn kept_message(
         DuplicateOutcome::Rejected { reason, .. } if reach != Reach::Indexed => {
             return unchecked_message(&reason, fields, position, reach);
         }
+        DuplicateOutcome::Holds(i)
+            if reach == Reach::Scripts
+                && fields
+                    .get(i)
+                    .is_some_and(|field| matches!(field.source, FieldSource::Script(_))) =>
+        {
+            return format!(
+                "{lead}, and a script can read the value the build put there, not #{}'s \
+                 output: a script never reads another script's output",
+                position(i)
+            );
+        }
         _ => {}
     }
     match outcome {
