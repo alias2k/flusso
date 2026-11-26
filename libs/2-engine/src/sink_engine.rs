@@ -413,6 +413,15 @@ impl SinkEngine {
         }
     }
 
+    /// Drop `index`'s outstanding backfill when it is cut: what an attach
+    /// with no backfill leaves (m5 of the review of step 3).
+    pub(super) fn forget_cut(&self, index: &IndexName) {
+        let mut outstanding = self.lock_outstanding();
+        if outstanding.get(index).is_some_and(|asked| asked.cut) {
+            outstanding.remove(index);
+        }
+    }
+
     fn lock_health(
         &self,
     ) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<LaneKey, LaneState>> {
@@ -1063,6 +1072,25 @@ impl SinkEngine {
         match found {
             AtStaging::AsBefore => {}
             AtStaging::Detached(why) => return Ok(self.staged_detached(&mapping.index, why)),
+            AtStaging::Rebuilding(attempts) => {
+                if !self.options.backfill || self.skip_backfill {
+                    // O26 / R14: no backfill to finish it in this process.
+                    self.sink.demote(mapping, !self.options.backfill).await?;
+                    tracing::warn!(index = %mapping.index, sink = %self.name, skip_backfill = self.skip_backfill, "a rebuild under way is put back to detached: this start backfills nothing");
+                    return Ok(self.staged_detached(
+                        &mapping.index,
+                        "a rebuild under way, put back to detached at a start with no backfill"
+                            .to_owned(),
+                    ));
+                }
+                let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
+                let mut state = self.lane_state(&lane);
+                if state.rebuilding.is_none() {
+                    state.rebuilding = Some(attempts);
+                    tracing::info!(%lane, attempts, "a rebuild under way: the lane is attached and its walk resumes");
+                    self.store_lane(&lane, &state, false);
+                }
+            }
             AtStaging::Finished(version) => {
                 self.sink.forget_detachment(mapping, &version).await?;
                 tracing::info!(index = %mapping.index, sink = %self.name, "a detach record outlived the rebuild that finished it; deleted, and the index is staged as before");
@@ -1308,6 +1336,8 @@ impl SinkEngine {
         }
         let outstanding = self.outstanding();
         let mut chosen = Vec::new();
+        let mut rebuild_now: Vec<&IndexMapping> = Vec::new();
+        let mut restart: Vec<IndexName> = Vec::new();
         for index in indexes {
             let Some(mapping) = self.mappings.iter().find(|m| m.index == index) else {
                 tracing::warn!(%index, "reindex requested for an index this sink does not maintain; ignoring");
@@ -1317,9 +1347,24 @@ impl SinkEngine {
             if chosen.iter().any(|m: &&IndexMapping| m.index == index) {
                 continue;
             }
-            let health = self.lane_health(&LaneKey::new(index.clone(), self.name.clone()));
+            let state = self.lane_state(&LaneKey::new(index.clone(), self.name.clone()));
+            let health = state.health.clone();
             if health.is_detached() {
-                tracing::warn!(%index, sink = %self.name, "reindex requested for a detached index; ignoring: this version doesn't rebuild one yet");
+                if state.attaching.is_some() {
+                    tracing::warn!(%index, sink = %self.name, "reindex ignored: the index is being rebuilt (starting)");
+                } else {
+                    tracing::info!(%index, sink = %self.name, "reindex of a detached index: rebuilding it (R13)");
+                    rebuild_now.push(mapping);
+                }
+                continue;
+            }
+            if state.rebuilding.is_some() {
+                if health.is_open() {
+                    tracing::warn!(%index, sink = %self.name, "reindex ignored: the index is being rebuilt");
+                } else {
+                    tracing::info!(%index, sink = %self.name, "reindex of a rebuild that is parked or restaging: it starts again (O20)");
+                    restart.push(index.clone());
+                }
                 continue;
             }
             let open = health.is_open();
@@ -1330,7 +1375,37 @@ impl SinkEngine {
             tracing::info!(%index, "reindex requested; staging a fresh generation");
             chosen.push(mapping);
         }
-        self.stage_reindex(chosen, &outstanding).await
+        let mut reindexed = self.stage_reindex(chosen, &outstanding).await;
+        for mapping in rebuild_now {
+            match self.rebuild(mapping).await {
+                Ok((attempts, target)) => {
+                    reindexed
+                        .rebuilt
+                        .push((mapping.index.clone(), attempts, target));
+                }
+                Err(error) => reindexed
+                    .rebuild_failed
+                    .push((mapping.index.clone(), error.to_string())),
+            }
+        }
+        reindexed.restart = restart;
+        reindexed
+    }
+
+    /// Begin rebuilding `mapping`'s detached index (r1, r2): the sink clears
+    /// the partials, moves the marker and records the rebuild; the new
+    /// generation is ensured; the fence hears the rebuild, so it keeps
+    /// vouching only for what the serving generation held. Its attempts and
+    /// the generation's target.
+    pub(super) async fn rebuild(
+        &self,
+        mapping: &IndexMapping,
+    ) -> sink::Result<(u64, Option<TargetId>)> {
+        let attempts = self.sink.begin_rebuild(mapping).await?;
+        let ensured = self.sink.ensure_index(mapping).await?;
+        self.observer
+            .on_index_rebuilding(&self.name, &mapping.index);
+        Ok((attempts, ensured.target))
     }
 
     /// Retry the reindex `index` is owed (X15): staged, its backfill is
@@ -1364,6 +1439,9 @@ impl SinkEngine {
         let mut reindexed = Reindexed {
             staged: Vec::new(),
             detached: Vec::new(),
+            rebuilt: Vec::new(),
+            rebuild_failed: Vec::new(),
+            restart: Vec::new(),
             failed: tried
                 .failed
                 .into_iter()
@@ -1451,6 +1529,15 @@ pub(super) struct Reindexed {
     pub(super) failed: Vec<(IndexName, String)>,
     /// Staging found these detached: nothing rebuilt, the lane detached.
     pub(super) detached: Vec<IndexName>,
+    /// Detached indexes whose rebuild began (r1, r2): its attempts and the
+    /// target its generation was ensured as. The run attaches each lane.
+    pub(super) rebuilt: Vec<(IndexName, u64, Option<TargetId>)>,
+    /// Detached indexes whose rebuild could not begin, with why: they stay
+    /// detached.
+    pub(super) rebuild_failed: Vec<(IndexName, String)>,
+    /// Rebuilding lanes parked or restaging: detached again, then rebuilt
+    /// at once (O20(c)).
+    pub(super) restart: Vec<IndexName>,
 }
 
 /// What staging learned of an index.
@@ -1484,6 +1571,10 @@ enum AtStaging {
     /// record is deleted and the index staged as before. Never for a
     /// live-only record.
     Finished(sink::RecordVersion),
+    /// A rebuild under way, its marker moved, with the attempts its record
+    /// counts: staged as a rebuild (the process-start attach), or demoted
+    /// under `--skip-backfill` or `backfill = false` (O26, R14).
+    Rebuilding(u64),
     /// Detached or rebuilding, yet the marker is on the generation reads see
     /// (restored by hand, or a late record of a dead process), or a record
     /// this version can't read beside any marker but a newer unseeded one:
@@ -1522,7 +1613,7 @@ impl AtStaging {
         match (detached, live_only, detachment.marker) {
             (false, _, Some(MarkerAt::Serving { .. }))
             | (true, false, Some(MarkerAt::Serving { .. })) => Self::DetachAgain,
-            (false, _, _) => Self::AsBefore,
+            (false, _, _) => Self::Rebuilding(detachment.attempts.unwrap_or(0)),
             (true, live_only, _) => Self::Detached(if live_only {
                 "the detach record says detached, live only".to_owned()
             } else {

@@ -276,6 +276,12 @@ pub(crate) struct LaneState {
     /// The attach attempt the lane waits for (R8): its `Attached` opens it.
     /// Outlives a run, so a run restarted meanwhile asks again.
     pub(crate) attaching: Option<u64>,
+    /// Rebuilding after a detach (ADR 0012 stage 10, R1): the rebuilds its
+    /// record counts as started. Cleared by the seed, or a detach again.
+    pub(crate) rebuilding: Option<u64>,
+    /// The target the rebuild's generation was ensured as: its backfill is
+    /// asked for it once the lane is attached.
+    pub(crate) rebuild_target: Option<sink::TargetId>,
 }
 
 /// A reindex whose staging failed, waiting for its retry.
@@ -322,6 +328,8 @@ impl LaneState {
             detach_asked: false,
             detach_unsure: false,
             attaching: None,
+            rebuilding: None,
+            rebuild_target: None,
         }
     }
 
@@ -330,9 +338,13 @@ impl LaneState {
     fn reset(&mut self) {
         let superseded = std::mem::take(&mut self.superseded);
         let held_for_seed = std::mem::take(&mut self.held_for_seed);
+        let rebuilding = self.rebuilding.take();
+        let rebuild_target = self.rebuild_target.take();
         *self = Self::new(self.schedule);
         self.superseded = superseded;
         self.held_for_seed = held_for_seed;
+        self.rebuilding = rebuilding;
+        self.rebuild_target = rebuild_target;
     }
 }
 
@@ -445,6 +457,7 @@ impl LaneState {
             || self.detach_asked
             || self.detach_unsure
             || self.attaching.is_some()
+            || self.rebuilding.is_some()
     }
 
     /// Its `Attached` took effect: the lane is open, written as usual from
@@ -454,7 +467,11 @@ impl LaneState {
             return None;
         };
         let since = *since;
+        let rebuilding = self.rebuilding.take();
+        let rebuild_target = self.rebuild_target.take();
         *self = Self::new(self.schedule);
+        self.rebuilding = rebuilding;
+        self.rebuild_target = rebuild_target;
         Some(now.saturating_duration_since(since))
     }
 

@@ -959,6 +959,9 @@ impl<'a> Run<'a> {
             staged,
             mut failed,
             detached,
+            rebuilt,
+            rebuild_failed,
+            restart,
         } = reindexed;
         let lanes: Vec<usize> = detached
             .iter()
@@ -966,6 +969,15 @@ impl<'a> Run<'a> {
             .collect();
         for lane in lanes {
             self.adopt_detached(lane).await?;
+        }
+        for (index, reason) in rebuild_failed {
+            tracing::warn!(%index, sink = %self.engine.name, %reason, "the rebuild could not begin; the index stays detached");
+        }
+        for (index, attempts, target) in rebuilt {
+            self.rebuilding(&index, attempts, target);
+        }
+        if !restart.is_empty() && !self.engine.stop.is_requested() {
+            self.restart_rebuilds(restart).await?;
         }
         if self.engine.stop.is_requested() {
             failed.extend(
@@ -1979,6 +1991,15 @@ impl<'a> Run<'a> {
             }
         }
         self.engine.seeded(&seeding.index, seeding.ticket, took);
+        // r4: the rebuild is finished with its seed (the sink deleted its
+        // record).
+        if let Some(run) = self.lanes.get_mut(seeding.lane)
+            && run.health.rebuilding.take().is_some()
+        {
+            run.health.rebuild_target = None;
+            tracing::info!(lane = %run.key, "the rebuild is seeded: the index is current again");
+            self.engine.store_lane(&run.key, &run.health, false);
+        }
         if !self.lane_open(seeding.lane) {
             self.probed(seeding.lane, ProbeOutcome::Landed);
         }
@@ -2950,14 +2971,32 @@ impl<'a> Run<'a> {
                     && !self.lane_in_flight(lane),
                 "R6: an Attached takes effect with nothing of its lane unacknowledged"
             );
+            let mut rebuild = None;
             if let Some(run) = self.lanes.get_mut(lane)
                 && let Some(down) = run.health.attached(Instant::now())
             {
                 self.detached = self.detached.saturating_sub(1);
-                tracing::info!(lane = %run.key, after = ?down, "the lane is attached again: written as usual from here");
+                tracing::info!(lane = %run.key, after = ?down, rebuilding = run.health.rebuilding.is_some(), "the lane is attached again: written as usual from here");
                 self.engine.store_lane(&run.key, &run.health, true);
+                rebuild = Some((
+                    run.key.index.clone(),
+                    run.health.rebuilding.is_some(),
+                    run.health.rebuild_target.clone(),
+                ));
             }
             self.acknowledged(handle, lane, Some(seq), false).await?;
+            match rebuild {
+                // r3: every page of the rebuild is read after the attach.
+                Some((index, true, target)) => {
+                    self.engine
+                        .request_backfill(vec![(index, None, target)])
+                        .await?;
+                }
+                // An attach with no backfill (m5): the cut entry the detach
+                // left would make a later reindex look outstanding.
+                Some((index, false, _)) => self.engine.forget_cut(&index),
+                None => {}
+            }
         }
         Ok(())
     }
@@ -3202,6 +3241,57 @@ impl<'a> Run<'a> {
             }
         }
         self.engine.store_lane(&run.key, &run.health, false);
+    }
+
+    /// `index`'s rebuild began (r1, r2): its lane waits for its attach, under
+    /// a new attempt, and asks its backfill once attached (r3).
+    fn rebuilding(&mut self, index: &IndexName, attempts: u64, target: Option<sink::TargetId>) {
+        let Some(lane) = self.lanes.iter().position(|run| run.key.index == *index) else {
+            return;
+        };
+        let attempt = self.engine.attempts.fetch_add(1, Ordering::Relaxed) + 1;
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        run.health.rebuilding = Some(attempts);
+        run.health.rebuild_target = target;
+        run.health.attaching = Some(attempt);
+        tracing::info!(lane = %run.key, attempts, attempt, "rebuilding: asking for the lane to be attached");
+        self.engine.store_lane(&run.key, &run.health, false);
+        if !self.to_attach.contains(&lane) {
+            self.to_attach.push(lane);
+        }
+    }
+
+    /// O20(c): each rebuild parked or restaging starts again now. The lane
+    /// is detached again (the barrier holds: a reindex stages with nothing in
+    /// flight), then the rebuild begins at once, bypassing the schedule.
+    async fn restart_rebuilds(&mut self, indexes: Vec<IndexName>) -> Result<()> {
+        for index in indexes {
+            let Some(lane) = self.lanes.iter().position(|run| run.key.index == index) else {
+                continue;
+            };
+            let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
+                continue;
+            };
+            let why = "a reindex restarts the rebuild, which was parked or restaging (O20)";
+            let detach = sink::Detach::new(why).live_only(!self.engine.options.backfill);
+            match self.engine.sink.detach(mapping, &detach).await {
+                Ok(sink::Recorded::Kept) => self.detached(lane, why.to_owned()).await?,
+                Ok(_) => continue,
+                Err(error) => {
+                    tracing::warn!(%index, %error, "could not detach the rebuild to restart it; it goes on as it was");
+                    continue;
+                }
+            }
+            match self.engine.rebuild(mapping).await {
+                Ok((attempts, target)) => self.rebuilding(&index, attempts, target),
+                Err(error) => {
+                    tracing::warn!(%index, %error, "the rebuild could not begin again; the index stays detached");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Take `lane` as detached: a staging during the run found it so.

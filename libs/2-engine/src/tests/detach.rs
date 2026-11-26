@@ -81,6 +81,12 @@ struct Gate {
     ids: Mutex<Vec<String>>,
     /// A write holding this id takes this long.
     slow: Mutex<Option<(String, Duration)>>,
+    /// Each rebuild begun, by index.
+    rebuilds: Mutex<Vec<String>>,
+    /// Each demotion, by index, with whether live only.
+    demoted: Mutex<Vec<(String, bool)>>,
+    /// Each index marked seeded.
+    seeded: Mutex<Vec<String>>,
 }
 
 impl Gate {
@@ -211,7 +217,29 @@ impl Sink for Gate {
         }
         let answer = self.records.lock().unwrap().pop_front();
         match answer.unwrap_or(Record::Kept) {
-            Record::Kept => Ok(Recorded::Kept),
+            // Kept as a real sink keeps it: the next staging reads it
+            // (review of step 3, S2).
+            Record::Kept => {
+                let mut kept = self.kept.lock().unwrap();
+                let attempts = kept
+                    .get(mapping.index.as_ref())
+                    .and_then(|kept| kept.attempts);
+                let marker = if detach.live_only {
+                    MarkerAt::Serving { seeded: true }
+                } else {
+                    MarkerAt::Newer { seeded: false }
+                };
+                let mut record = Detachment::recorded(
+                    DetachRecord::Detached {
+                        live_only: detach.live_only,
+                    },
+                    Some(marker),
+                    version(),
+                );
+                record.attempts = attempts;
+                kept.insert(mapping.index.to_string(), record);
+                Ok(Recorded::Kept)
+            }
             Record::NotKept => Ok(Recorded::NotKept),
             Record::Fail => Err(SinkError::Write(
                 "the meta index refused the record".to_owned(),
@@ -228,6 +256,40 @@ impl Sink for Gate {
                 Err(SinkError::Write("the record write timed out".to_owned()))
             }
         }
+    }
+
+    async fn begin_rebuild(&self, mapping: &IndexMapping) -> sink::Result<u64> {
+        let mut kept = self.kept.lock().unwrap();
+        let Some(record) = kept.get_mut(mapping.index.as_ref()) else {
+            return Err(SinkError::Write("no detach record".to_owned()));
+        };
+        let attempts = record.attempts.unwrap_or(0) + 1;
+        record.record = Some(DetachRecord::Rebuilding { live_only: false });
+        record.attempts = Some(attempts);
+        record.marker = Some(MarkerAt::Newer { seeded: false });
+        self.rebuilds
+            .lock()
+            .unwrap()
+            .push(mapping.index.to_string());
+        Ok(attempts)
+    }
+
+    async fn demote(&self, mapping: &IndexMapping, live_only: bool) -> sink::Result<()> {
+        if let Some(record) = self.kept.lock().unwrap().get_mut(mapping.index.as_ref()) {
+            record.record = Some(DetachRecord::Detached { live_only });
+        }
+        self.demoted
+            .lock()
+            .unwrap()
+            .push((mapping.index.to_string(), live_only));
+        Ok(())
+    }
+
+    async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
+        // r4: the seed deletes a finished rebuild's record.
+        self.kept.lock().unwrap().remove(index.as_ref());
+        self.seeded.lock().unwrap().push(index.to_string());
+        Ok(())
     }
 
     async fn forget_detachment(
@@ -773,26 +835,6 @@ async fn a_restarted_run_never_writes_what_a_detached_lane_holds() {
         2,
         "nothing more of users"
     );
-    assert!(engine.lane_health(&lane(users())).is_detached());
-    task.abort();
-}
-
-/// A reindex of a detached index is not staged: this step doesn't rebuild.
-#[tokio::test(start_paused = true)]
-async fn a_reindex_of_a_detached_index_is_ignored() {
-    let rig = Rig::new(64);
-    let (engine, first) = detached_on_a_block(&rig).await;
-    first.abort();
-    let _ = first.await;
-    let (task, control) = spawn(&engine);
-    control
-        .send(SinkControl::Reindex {
-            indexes: vec![users()],
-        })
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    assert!(rig.sink.ensured.lock().unwrap().is_empty());
     assert!(engine.lane_health(&lane(users())).is_detached());
     task.abort();
 }
@@ -1425,4 +1467,321 @@ async fn a_run_restart_after_attached_never_writes_a_redelivered_earlier_item() 
     );
     assert!(engine.lane_health(&lane(users())).is_open());
     task.abort();
+}
+
+/// The next request the sink engine sent.
+async fn next_request(rig: &Rig) -> stream::Request {
+    let mut requests = rig.stream.requests().unwrap().consumer;
+    let delivery = tokio::time::timeout(Duration::from_secs(10), requests.recv())
+        .await
+        .expect("a request is sent")
+        .unwrap()
+        .unwrap();
+    let (request, handle) = delivery.into_parts();
+    handle.ack().await.unwrap();
+    request
+}
+
+/// `users` detached on a block, the block lifted, and a reindex asked:
+/// the rebuild begins and the engine asks for the attach; its attempt.
+async fn rebuilding_on_reindex(
+    rig: &Rig,
+) -> (
+    Arc<SinkEngine>,
+    tokio::task::JoinHandle<crate::Result<()>>,
+    mpsc::Sender<SinkControl>,
+    u64,
+) {
+    let (engine, task) = detached_on_a_block(rig).await;
+    rig.sink.block(&users(), false);
+    task.abort();
+    let _ = task.await;
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    let stream::Request::Attach { attempt, .. } = next_request(rig).await else {
+        panic!("the rebuild asks for its attach");
+    };
+    (engine, task, control, attempt)
+}
+
+/// R13 and r1–r4: a reindex of a detached index rebuilds it. The sink begins
+/// the rebuild (the record says `rebuilding` before the attach is asked:
+/// S2), the generation is ensured, the attach is asked; once `Attached` is
+/// taken the lane is open, rebuilding, and asks its backfill; the backfill's
+/// seed finishes it: the record is gone and the lane is current.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_of_a_detached_index_rebuilds_it_to_the_seed() {
+    let rig = Rig::new(64);
+    let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
+    assert_eq!(*rig.sink.rebuilds.lock().unwrap(), ["users"]);
+    assert!(
+        matches!(
+            rig.sink
+                .kept
+                .lock()
+                .unwrap()
+                .get("users")
+                .and_then(|kept| kept.record.clone()),
+            Some(DetachRecord::Rebuilding { .. })
+        ),
+        "rebuilding is recorded before the attach is asked"
+    );
+    assert!(
+        rig.sink
+            .ensured
+            .lock()
+            .unwrap()
+            .contains(&"users".to_owned())
+    );
+    assert!(
+        engine.lane_health(&lane(users())).is_detached(),
+        "until Attached"
+    );
+
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let stream::Request::Backfill { index, ticket, .. } = next_request(&rig).await else {
+        panic!("the rebuild asks its backfill once attached");
+    };
+    assert_eq!(index, users());
+    assert!(engine.lane_health(&lane(users())).is_open());
+    assert_eq!(engine.lane_state(&lane(users())).rebuilding, Some(1));
+
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    eventually("the rebuild is seeded", || {
+        rig.sink
+            .seeded
+            .lock()
+            .unwrap()
+            .contains(&"users".to_owned())
+    })
+    .await;
+    eventually("the lane is current", || {
+        engine.lane_state(&lane(users())).rebuilding.is_none()
+    })
+    .await;
+    assert!(
+        rig.sink.kept.lock().unwrap().get("users").is_none(),
+        "record gone"
+    );
+    task.abort();
+}
+
+/// Review of step 3, S2: a lane attached by its rebuild stays attached when
+/// the daemon stages the sink again before restarting its run: the record
+/// says `rebuilding`, read through the real staging path, never `detached`.
+#[tokio::test(start_paused = true)]
+async fn an_attached_lane_stays_attached_across_a_sink_run_restart() {
+    let rig = Rig::new(64);
+    let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
+    // What the index's builder does before it publishes `Attached`.
+    rig.progress.attach(&lane(users()), attempt);
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let _backfill = next_request(&rig).await;
+    task.abort();
+    let _ = task.await;
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(engine.lane_health(&lane(users())).is_open());
+    assert!(!rig.progress.is_detached(&lane(users())));
+    assert_eq!(engine.lane_state(&lane(users())).rebuilding, Some(1));
+    let (task, _control) = spawn(&engine);
+    rig.live(&users(), 11, 11).await;
+    eventually("the lane writes after the restart", || {
+        written(&rig).contains(&"users/11".to_owned())
+    })
+    .await;
+    task.abort();
+}
+
+/// Review of step 3, m5: an attach with no backfill (the test path, as
+/// `reattach`) clears the cut backfill entry the detach left, so a later
+/// reindex of the index is staged, not taken for one still outstanding.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_after_an_attach_is_staged() {
+    let rig = Rig::new(64);
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let _backfill = next_request(&rig).await;
+    rig.sink.block(&users(), true);
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 1, 1).await;
+    eventually("the lane detaches", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    rig.sink.block(&users(), false);
+    control
+        .send(SinkControl::Attach { index: users() })
+        .await
+        .unwrap();
+    let stream::Request::Attach { attempt, .. } = next_request(&rig).await else {
+        panic!("an attach");
+    };
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    eventually("the lane opens", || {
+        engine.lane_health(&lane(users())).is_open()
+    })
+    .await;
+    // The record goes with the attach, as `reattach` deletes it before.
+    rig.sink.kept.lock().unwrap().remove("users");
+    let ensured = rig.sink.ensured.lock().unwrap().len();
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    eventually("the reindex is staged", || {
+        rig.sink.ensured.lock().unwrap().len() > ensured
+    })
+    .await;
+    task.abort();
+}
+
+/// O20(c): a reindex of a rebuilding index waiting for its attach, or open,
+/// is ignored; one of a rebuild that parked starts it again: detached
+/// again, then a second rebuild begins.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_of_a_rebuild_is_ignored_unless_it_parked() {
+    let rig = Rig::new(64);
+    let (engine, task, control, attempt) = rebuilding_on_reindex(&rig).await;
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        rig.sink.rebuilds.lock().unwrap().len(),
+        1,
+        "waiting for Attached: ignored"
+    );
+
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let _backfill = next_request(&rig).await;
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        rig.sink.rebuilds.lock().unwrap().len(),
+        1,
+        "open and rebuilding: ignored"
+    );
+
+    rig.sink.block(&users(), true);
+    rig.live(&users(), 2, 2).await;
+    eventually("the rebuilding lane parks", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked { .. }
+        )
+    })
+    .await;
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    eventually("the rebuild starts again", || {
+        rig.sink.rebuilds.lock().unwrap().len() == 2
+    })
+    .await;
+    assert!(
+        engine.lane_health(&lane(users())).is_detached(),
+        "detached again, attaching"
+    );
+    let stream::Request::Attach { attempt: again, .. } = next_request(&rig).await else {
+        panic!("a new attach");
+    };
+    assert!(again > attempt);
+    task.abort();
+}
+
+/// The process-start attach of a `rebuilding` record: the lane starts
+/// attached and rebuilding, its index ensured and its backfill asked; under
+/// `--skip-backfill` it is demoted (O26), and on a sink with `backfill =
+/// false` demoted live only (R14): detached.
+#[tokio::test(start_paused = true)]
+async fn a_start_attaches_a_rebuild_or_demotes_it() {
+    let rebuilding = || {
+        let mut record = Detachment::recorded(
+            DetachRecord::Rebuilding { live_only: false },
+            Some(MarkerAt::Newer { seeded: false }),
+            version(),
+        );
+        record.attempts = Some(3);
+        record
+    };
+    let rig = Rig::new(64);
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), rebuilding());
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(engine.lane_health(&lane(users())).is_open());
+    assert_eq!(engine.lane_state(&lane(users())).rebuilding, Some(3));
+    assert!(
+        rig.sink
+            .ensured
+            .lock()
+            .unwrap()
+            .contains(&"users".to_owned())
+    );
+    let stream::Request::Backfill { index, .. } = next_request(&rig).await else {
+        panic!("its backfill");
+    };
+    assert_eq!(index, users());
+
+    for (skip_backfill, backfill) in [(true, true), (false, false)] {
+        let rig = Rig::new(64);
+        rig.sink
+            .kept
+            .lock()
+            .unwrap()
+            .insert("users".to_owned(), rebuilding());
+        let engine = SinkEngine::new(
+            sink_name("primary"),
+            Arc::clone(&rig.sink) as Arc<dyn Sink>,
+            Arc::clone(&rig.stream) as Arc<dyn Stream>,
+            vec![mapping(orders()), mapping(users())],
+            Arc::clone(&rig.progress),
+        )
+        .skip_backfill(skip_backfill)
+        .with_options(sink::SinkOptions { backfill });
+        engine.stage(Continuity::Resumed).await.unwrap();
+        assert!(
+            engine.lane_health(&lane(users())).is_detached(),
+            "{skip_backfill}"
+        );
+        assert!(rig.progress.is_detached(&lane(users())));
+        assert_eq!(
+            *rig.sink.demoted.lock().unwrap(),
+            [("users".to_owned(), !backfill)]
+        );
+    }
 }

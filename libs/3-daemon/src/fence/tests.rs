@@ -1108,3 +1108,57 @@ async fn a_lane_attached_again_serves_its_writes() {
         reached("20")
     );
 }
+
+/// Review of step 3, S3, for a rebuild: from the rebuild's start to its
+/// seed the fence serves `rebuilding`, keeping what it froze at the detach,
+/// even once the lane is attached and open: a change dropped while detached
+/// is never vouched for; at the seed reads see every write.
+#[tokio::test(start_paused = true)]
+async fn a_fence_on_a_rebuilding_lane_vouches_for_no_change_dropped_while_detached() {
+    let rig = fence(&["primary"]);
+    let before = rig.source.emit(10);
+    rig.route(before);
+    rig.applied("primary", before);
+    rig.searchable("primary", before);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    let dropped = rig.source.emit(20);
+    rig.observer
+        .on_index_rebuilding(&sink("primary"), &index("users"));
+    assert_eq!(
+        rig.progress.attach(&lane("primary"), 1),
+        engine::Attach::Attached
+    );
+    rig.observer
+        .on_lane_health(&lane("primary"), &engine::LaneHealth::Open);
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    let after = rig.source.emit(30);
+    rig.route(after);
+    rig.applied("primary", after);
+    let _ = dropped;
+    assert_eq!(
+        rig.fence
+            .wait(&request("10", FenceLevel::Applied, None))
+            .await,
+        reached("10"),
+        "what the serving generation held"
+    );
+    assert!(
+        matches!(
+            rig.fence
+                .wait(&request("20", FenceLevel::Applied, None))
+                .await,
+            Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Rebuilding)]
+        ),
+        "the change dropped while detached"
+    );
+    rig.observer
+        .on_index_seeded(&sink("primary"), &index("users"));
+    assert_eq!(
+        rig.fence
+            .wait(&request("30", FenceLevel::Applied, None))
+            .await,
+        reached("30")
+    );
+}
