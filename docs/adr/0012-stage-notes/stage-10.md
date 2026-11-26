@@ -556,14 +556,14 @@ Written at the start of slice 2's implementation, after #479 (PR #483) merged. S
 - **When a rebuild meets this.** Only when a block lands on `serving` after r0, or when `reindex` forces a rebuild past a read-only `serving`, since the operator's reindex bypasses the probe.
 - **Until slice 4** there is no R10: a rebuild parked on its seed stays parked, as the slice 2 row says.
 
-**Open, for the owner (O28): is a rebuild parked on `RetireBlocked` exempt from R10?**
+**O28, decided by the owner on 2026-11-26 (§11): is a rebuild parked on `RetireBlocked` exempt from R10?**
 
 - **As written:** the rebuild fails after `rebuild_grace` (10 min), and a complete generation is deleted. An operator who forces `reindex` past a read-only `serving` pays a full rebuild per attempt.
 - **Exempt:** the lane stays parked with the new generation complete until the block on `serving` goes, and holds the slot for `L`'s live items behind the seed meanwhile. R2 still applies: at `stuck_for`, or the WAL half, slice 4 detaches the lane again, and that detach deletes the generation anyway.
 - **The step 2 review agrees with exempting it,** with two additions:
   - `/status` and the log name this park apart from a write refusal: the seed waits for the block on the serving generation;
   - flood stage (`read_only_allow_delete`, O19) never counts toward R10, even under a forced `reindex`.
-- **Recommended:** exempt from R10, under R2, with both additions.
+- **Decided:** exempt from R10, under R2, with both additions. R10 is slice 4's: the rule is recorded here and built there.
 
 ### What S5, S6 and slice 1 changed
 
@@ -674,7 +674,7 @@ None of these can be taken out without the feature. Measured locally (base `efc4
 
 `sinks1` is within ±1% at every size. The CI numbers read as one run's noise. CI's gate on this branch is the authoritative answer.
 
-### Open, for the owner, from the review of step 2
+### Decided by the owner on 2026-11-26, from the review of step 2
 
 **O29: can a process that staged before another one's detach keep the lane attached? (S3)**
 
@@ -692,7 +692,7 @@ None of these can be taken out without the feature. Measured locally (base `efc4
   - (a) the read after the slot is held, as above;
   - (b) the coordinator's re-staging per retry, with the window named;
   - (c) document overlapping processes as unsupported, since they can now lose changes, not only write twice.
-- **Recommended:** (a). Nothing reaches this before slice 4, since only tests detach.
+- **Decided:** (a). Built in step 4, beside the attach at a process start, which reads the records at the same moment (§11). Nothing reaches it before slice 4, since only tests detach.
 
 **O30: what does an unreadable record stage as? (S6)**
 
@@ -704,7 +704,7 @@ None of these can be taken out without the feature. Measured locally (base `efc4
   - A `rebuilding` record with the marker on serving does the same (§4 says so; today it stages as before).
   - Nothing is lost either way. A detach again costs a rebuild, or, for live only, keeps the gap visible until an operator reattaches.
 - **Options:** (a) keep O24 as built; (b) the split.
-- **Recommended:** (b). It narrows O24, which was decided for slice 1, when this version couldn't detach.
+- **Decided:** (b). It narrows O24, which was decided for slice 1, when this version couldn't detach. Built in step 3 (§10a, step 3).
 
 ## 11. Decisions
 
@@ -735,10 +735,13 @@ Decided by the owner on 2026-11-24. Each row gives the decision and one line on 
 | O21 | `committed` in `/status` | counts attached lanes only, and lists the detached ones it leaves out | frozen at the detach: the sink looks stuck while detached |
 | O22 | Stuck clock while `enabled = false` | not written | written: meta writes for an unused feature |
 | O23 | Where the attach happens | the index's builder quiesces (§1) | stopping the whole ingest engine: pauses every index, replays the unconfirmed tail, fails `/readyz` and fences during the restart, and restarts other indexes' backfills from where they were asked |
-| O24 | Slice 1 on a record left by a newer flusso after a rollback | log loudly and stage as today: a rebuild, or for `live_only` resuming over the gap | restaging until upgraded: pins the slot until the WAL limit drops it for every index |
+| O24 | Slice 1 on a record left by a newer flusso after a rollback | log loudly and stage as today: a rebuild, or for `live_only` resuming over the gap. **Narrowed by O30** from slice 2 on: only an unreadable record whose marker is on a newer, unseeded generation stages as today | restaging until upgraded: pins the slot until the WAL limit drops it for every index |
 | O25 | The WAL half | only the lane `pinned_by` names, measuring the WAL its detach would free (its position to the next-least lane's, or to the horizon); no grace. Two lanes pinning the slot at the same position free nothing alone, so neither detaches by the WAL half; each waits for the time half | the lane's WAL behind as measured today: counts WAL not yet read and WAL another sink holds, so an outage causes a storm of rebuilds and detaches that free nothing. After a grace: the slot can be lost within it. A 90% hard bound: one more rule for the same case |
 | O26 | `--skip-backfill` at a start that finds a running rebuild | demote it, with a loud log: the rebuild and its partial are dropped, the lane is detached | keep it attached and paused: pins the slot for the whole run |
 | O27 | The rebuild's walk while another sink's walk of the index runs | it waits for that walk, with the lane attached and live meanwhile, so reads stay on the old generation for up to that walk's length | cut the other walk: costs the other sink its progress since its last mark |
+| O28 | A rebuild whose seed parks on `RetireBlocked` (decided 2026-11-26) | exempt from R10's `rebuild_grace`, kept under R2's detach thresholds; `/status` and the log name this park apart (the seed waits for the block on the serving generation); flood stage never counts toward R10, even under a forced `reindex` | under R10: deletes a complete generation after 10 minutes, and each forced `reindex` past a read-only `serving` pays a full rebuild |
+| O29 | A process that staged before another process's detach (decided 2026-11-26) | once this process's live stream holds the slot, before the first item is published, read every index's detach records again, adopt any lane they say is detached, and do slice 1's put-back only at that read; one `_mget` per index per sink per live start | re-staging before each retry: a window remains, since the other process can write its record until it lets go of the slot. Documenting overlap as unsupported: an overlap would lose changes |
+| O30 | An unreadable record at staging (decided 2026-11-26) | stages as today only when the marker is on a newer, unseeded generation (a rebuild); any other unreadable record, and a `rebuilding` record with the marker on serving, runs `Sink::detach` again | as today for every unreadable record: one beside a seeded marker on serving reads as attached and current over dropped changes |
 
 ## 12. Not verified
 
