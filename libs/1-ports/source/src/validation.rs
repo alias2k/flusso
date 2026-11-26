@@ -3542,10 +3542,18 @@ mod tests {
             } } }),
             "'at 'HH:mm",
         );
+        let either = with_format(
+            json!({ "field": "either", "source": { "column": {
+                "column": "day", "nullable": true,
+                "ty": { "custom": { "postgres": ["date", "timestamptz"], "opensearch": "date" } },
+            } } }),
+            "HH:mm",
+        );
         let fields = json!([
             int_field("id"),
             day,
             custom,
+            either,
             script,
             with_format(timestamp_field("stamped", None), "HH:mm:ss"),
         ]);
@@ -3567,6 +3575,14 @@ mod tests {
                 "zoned".to_owned(),
                 DiagnosticKind::TimeOfDayFormat,
                 reads("time", "a timestamp (`2024-01-02T03:04:05`)"),
+            ),
+            (
+                "either".to_owned(),
+                DiagnosticKind::TimeOfDayFormat,
+                reads(
+                    "HH:mm",
+                    "a date or a timestamp (`2024-01-02`, `2024-01-02T03:04:05`)",
+                ),
             ),
             (
                 "computed".to_owned(),
@@ -3597,6 +3613,7 @@ mod tests {
                 ("stamped", DiagnosticKind::TimeOfDayFormat),
                 ("day", DiagnosticKind::TimeOfDayFormat),
                 ("zoned", DiagnosticKind::TimeOfDayFormat),
+                ("either", DiagnosticKind::TimeOfDayFormat),
                 ("computed", DiagnosticKind::TimeOfDayFormat),
             ],
             "{online:?}"

@@ -2428,7 +2428,9 @@ only). `kernel::iso_date_format` decides per field, `IndexSchema::completed_date
 index maps (no input-only field, nothing under an `indexed: false` join or `enabled: false` object), and
 the projection (never the schema, so an older lock gets it too; `show mapping` notes each) and the
 content hash (`projection.rs`'s `Revised`: `ISO_DATE_FORMAT_REVISION` once, only when that walk finds
-one; `Field`'s `Hash` is `main`'s) follow it, so exactly those indexes move once. A year past 9999 or
+one; `Field`'s `Hash` is `main`'s) follow it, so the hash moves exactly when the mapping does (a few
+indexes that already indexed move too: an all-letter literal read as a named format, a `timestamp`
+field over a `date` column). A year past 9999 or
 before 0 is still refused, as by the default mapping. Guards: the projection tests'
 `a_date_format_that_cannot_read_what_flusso_writes_gets_the_iso_pattern_last` (each pattern, both
 kinds), `a_date_field_whose_format_reads_what_flusso_writes_there_keeps_it_and_its_hash` (pinned to

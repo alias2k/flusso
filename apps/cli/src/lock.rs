@@ -56,6 +56,20 @@ pub(crate) fn plan_config(
     }
 }
 
+/// The headline of a command that has no config `doing` something (`" to
+/// check"`, or `""`) and fell back to the lock at `lock`, which it couldn't
+/// read: a lock that isn't there, or one that is and can't be read.
+pub(crate) fn no_config_headline(lock: &Path, doing: &str) -> String {
+    let config = crate::DEFAULT_CONFIG;
+    let there = lock.exists();
+    let lock = lock.display();
+    if there {
+        format!("no {config}{doing}, and the lock at {lock} can't be read")
+    } else {
+        format!("no {config}{doing} and no compiled lock at {lock}")
+    }
+}
+
 /// How the lock at a path stands against the config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LockState {

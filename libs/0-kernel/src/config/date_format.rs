@@ -39,8 +39,12 @@
 //! (input-only, or under an `indexed: false` join or an `enabled: false`
 //! object) is left alone. The projection
 //! ([`IndexSchema::resolve`](super::IndexSchema::resolve)) and the content hash
-//! follow [`IndexSchema::completed_date_formats`](super::IndexSchema::completed_date_formats), so exactly the indexes with
-//! such a field move to a new physical index, once.
+//! follow [`IndexSchema::completed_date_formats`](super::IndexSchema::completed_date_formats), so the mapping and the hash
+//! always move together: an index with such a field moves to a new physical
+//! index once. The rule leans towards appending, so a few indexes that
+//! already indexed move too: an all-letter literal (`yyyyMMdd`, `HHmmss`) is
+//! read as an unknown named format, and a `timestamp` field over a `date`
+//! column (a type mismatch) holds the bare date its format may read.
 //!
 //! | Named format (also `strict_` and camelCase) | date field | timestamp field |
 //! | --- | --- | --- |
@@ -102,7 +106,9 @@ pub enum DateValues {
     Dates,
     /// Timestamps, naive or with an offset, with a fraction or without.
     Timestamps,
-    /// Either: a `custom` field over columns of both kinds.
+    /// Either: a `custom` field over columns of both kinds. [`reads`] takes it
+    /// as `Timestamps` (a pattern reading every timestamp form reads a bare
+    /// date too); a report names both.
     Both,
 }
 

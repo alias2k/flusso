@@ -110,12 +110,8 @@ fn read(read: &Read) -> anyhow::Result<Config> {
     let config = match &read.config {
         Some(path) => load(path)?,
         None if default.exists() => load(default)?,
-        None => config::load_compiled(&read.lock).with_context(|| {
-            format!(
-                "no {DEFAULT_CONFIG} and no compiled lock at {}",
-                read.lock.display()
-            )
-        })?,
+        None => config::load_compiled(&read.lock)
+            .with_context(|| crate::lock::no_config_headline(&read.lock, ""))?,
     };
     adapters::validate(&config).context("validating the config")?;
     Ok(config)

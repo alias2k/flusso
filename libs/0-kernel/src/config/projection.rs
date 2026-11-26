@@ -36,9 +36,9 @@ fn resolve_index(index: IndexName, schema: &IndexSchema) -> IndexMapping {
 
 /// A schema as its content hash reads it: the schema, then
 /// `ISO_DATE_FORMAT_REVISION` only when a mapped date field's format gets the
-/// ISO pattern ([`IndexSchema::completed_date_formats`]), so exactly those
-/// indexes move to a new physical index, once, and every other keeps its
-/// hash.
+/// ISO pattern ([`IndexSchema::completed_date_formats`]): the hash moves
+/// exactly when the mapping does, so such an index moves to a new physical
+/// index once, and every other keeps its hash.
 struct Revised<'a>(&'a IndexSchema);
 
 impl std::hash::Hash for Revised<'_> {

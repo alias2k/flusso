@@ -587,9 +587,8 @@ fn resolve_config(args: &RunArgs) -> anyhow::Result<Config> {
         }
         ConfigPlan::Fallback => load_lock(&args.lock).with_context(|| {
             format!(
-                "no {} to compile and no compiled lock at {}; create a config or build a lock first",
-                crate::DEFAULT_CONFIG,
-                args.lock.display()
+                "{}; create a config or build a lock first",
+                crate::lock::no_config_headline(&args.lock, " to compile")
             )
         }),
         ConfigPlan::Missing(config_path) => {

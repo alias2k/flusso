@@ -114,12 +114,8 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
             (compiled.config.clone(), Some(compiled), lock, path)
         }
         ConfigPlan::Fallback | ConfigPlan::UseLock => {
-            let config = config::load_compiled(&args.lock).with_context(|| {
-                format!(
-                    "no {DEFAULT_CONFIG} to check and no compiled lock at {}",
-                    args.lock.display()
-                )
-            })?;
+            let config = config::load_compiled(&args.lock)
+                .with_context(|| crate::lock::no_config_headline(&args.lock, " to check"))?;
             (config, None, LockState::NotCompared, args.lock.clone())
         }
         ConfigPlan::Missing(path) => anyhow::bail!("config file {} not found", path.display()),

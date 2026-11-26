@@ -455,3 +455,45 @@ fn check_fix_writes_nothing_when_the_config_fails_to_validate() {
         shown(&fixed)
     );
 }
+
+/// With no config, a lock that exists but can't be read is headlined as
+/// such, never as a missing lock, by every command that falls back to it;
+/// a missing one still says so.
+#[test]
+fn an_unreadable_lock_is_never_headlined_as_missing() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("check_report")
+        .join("unreadable_lock_headline");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("broken.lock"),
+        "format_version = 3\nnot toml at all\n",
+    )
+    .unwrap();
+    for args in [
+        &["check", "--offline", "--lock", "broken.lock"][..],
+        &["show", "mapping", "--lock", "broken.lock"],
+        &["show", "config", "--lock", "broken.lock"],
+        &["run", "--lock", "broken.lock"],
+    ] {
+        let ran = flusso(&dir, args);
+        let stderr = String::from_utf8_lossy(&ran.stderr);
+        assert!(!ran.status.success(), "{args:?}: {}", shown(&ran));
+        assert!(
+            stderr.contains("and the lock at broken.lock can't be read"),
+            "{args:?}: {}",
+            shown(&ran)
+        );
+        assert!(
+            !stderr.contains("no compiled lock"),
+            "{args:?}: {}",
+            shown(&ran)
+        );
+    }
+    let ran = flusso(&dir, &["show", "mapping", "--lock", "missing.lock"]);
+    assert!(
+        String::from_utf8_lossy(&ran.stderr).contains("no compiled lock at missing.lock"),
+        "{}",
+        shown(&ran)
+    );
+}
