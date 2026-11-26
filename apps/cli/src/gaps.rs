@@ -109,6 +109,19 @@ pub(crate) fn of(
         .collect()
 }
 
+/// What `gaps` tell the capture the start reported, so its `prepare` doesn't
+/// warn about them again.
+pub(crate) fn reported(gaps: &[Gap]) -> source_postgres::ReportedGaps {
+    source_postgres::ReportedGaps {
+        publication: gaps.iter().any(|gap| gap.kind == GapKind::Publication),
+        replica_identity: gaps
+            .iter()
+            .filter(|gap| gap.kind == GapKind::ReplicaIdentity)
+            .map(|gap| gap.table.clone())
+            .collect(),
+    }
+}
+
 fn replica_identity_message(gap: &PreImageGap) -> String {
     let names = |columns: &[config::ColumnName]| {
         columns
@@ -181,6 +194,30 @@ mod tests {
             (IndexName::try_new("users").unwrap(), schema("users")),
             (IndexName::try_new("orders").unwrap(), schema("orders")),
         ]))
+    }
+
+    /// What the start reported, so `prepare` doesn't warn about it again:
+    /// the publication when any publication gap was, and each table with a
+    /// replica identity gap.
+    #[test]
+    fn the_reported_gaps_name_the_publication_and_each_replica_identity_table() {
+        let gap = |kind, name| Gap {
+            kind,
+            table: table(name),
+            indexes: Vec::new(),
+            message: String::new(),
+        };
+        let both = reported(&[
+            gap(GapKind::Publication, "orders"),
+            gap(GapKind::ReplicaIdentity, "items"),
+        ]);
+        assert!(both.publication);
+        assert_eq!(
+            both.replica_identity,
+            std::collections::BTreeSet::from([table("items")])
+        );
+        let none = reported(&[gap(GapKind::ReplicaIdentity, "items")]);
+        assert!(!none.publication);
     }
 
     fn coverage(manageable: bool) -> CoverageReport {

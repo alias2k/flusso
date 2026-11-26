@@ -66,8 +66,8 @@ impl Backends for FlussoBackends {
             .context("applying the source TLS settings to the connection URL")?;
 
         let spec = source_spec(&config);
-        let (documents, resolver, column_types) =
-            build_documents(&sql_url, &config, self.strict).await?;
+        let (documents, resolver, column_types, schema) =
+            build_documents(&sql_url, &config).await?;
         let capture = WalChangeCapture::new(replication, sql_url.clone())
             .with_publication_management(spec.all_tables(), postgres.manage_publication)
             .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity)
@@ -92,21 +92,25 @@ impl Backends for FlussoBackends {
             &pre_image,
             postgres.manage_replica_identity,
         );
-        gap_verdict(
+        start_verdict(
             &mut std::io::stderr().lock(),
             print::Pen::detect_stderr(),
-            &Capture {
+            &schema.diagnostics,
+            &|at| schema.refused.get(at).copied().unwrap_or(true),
+            Some(&Capture {
                 gaps: &gaps,
                 coverage: &coverage,
                 manage_publication: postgres.manage_publication,
                 pre_image: &pre_image,
                 manage_replica_identity: postgres.manage_replica_identity,
-            },
+            }),
             self.strict,
             Reader::of_stderr(),
         )?;
+        crate::telemetry::schema_errors::report(&schema.diagnostics);
         crate::telemetry::schema_errors::report_gaps(&gaps);
-        let capture: Arc<dyn ChangeCapture> = Arc::new(capture);
+        let capture: Arc<dyn ChangeCapture> =
+            Arc::new(capture.with_reported_gaps(crate::gaps::reported(&gaps)));
 
         Ok(SourceParts {
             capture,
@@ -185,15 +189,16 @@ fn resolve_connection_url(postgres: &PostgresConfig) -> anyhow::Result<String> {
 }
 
 /// The document builder, scripts applied, beside its column types, which the
-/// capture drops a table's entries from as the table changes.
+/// capture drops a table's entries from as the table changes, and what
+/// checking the schemas against the database found.
 async fn build_documents(
     connection_url: &str,
     config: &Config,
-    strict: bool,
 ) -> anyhow::Result<(
     Arc<dyn DocumentBuilder>,
     Arc<dyn DocumentBuilder>,
     ColumnTypes,
+    SchemaFindings,
 )> {
     let scripts = compile_scripts(config)?;
     let spec = Arc::new(source_spec(config));
@@ -208,7 +213,7 @@ async fn build_documents(
     )
     .await
     .context("connecting to Postgres")?;
-    validate_at_start(&spec, &builder, config, strict).await?;
+    let schema = validate_at_start(&spec, &builder, config).await?;
     let column_types = builder.column_types();
     let resolver = builder
         .on_own_pool(connection_url, 1)
@@ -218,22 +223,27 @@ async fn build_documents(
         ScriptedBuilder::wrap(Arc::new(builder), scripts),
         Arc::new(resolver),
         column_types,
+        schema,
     ))
 }
 
+/// The schemas checked against the database at start, before the verdict.
+struct SchemaFindings {
+    diagnostics: Vec<Diagnostic>,
+    /// Per diagnostic, whether a sink refuses what it reports (see
+    /// [`refused_only_by_a_mapping`]).
+    refused: Vec<bool>,
+}
+
 /// Check the schemas against the database once, before anything is staged,
-/// with `flusso check`'s check: print the diagnostics to stderr and refuse to
-/// start on one that cannot work as written (see [`stops_the_start`]), or,
-/// `strict`, on any error. An error the start goes on with is logged and set
-/// on a gauge ([`schema_errors`](crate::telemetry::schema_errors)). Runs on
-/// the document builder's own connection, so an unreachable database fails
-/// exactly as the connect above does.
+/// with `flusso check`'s check; [`start_verdict`] judges what it finds
+/// beside the capture's gaps. Runs on the document builder's own connection,
+/// so an unreachable database fails exactly as the connect above does.
 async fn validate_at_start(
     spec: &SourceSpec,
     catalog: &dyn Catalog,
     config: &Config,
-    strict: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SchemaFindings> {
     let diagnostics = source::validate_indexes(spec, catalog)
         .await
         .context("validating the schemas against the database")?;
@@ -244,16 +254,10 @@ async fn validate_at_start(
             None => true,
         });
     }
-    start_verdict(
-        &mut std::io::stderr().lock(),
-        print::Pen::detect_stderr(),
-        &diagnostics,
-        &|at| refused.get(at).copied().unwrap_or(true),
-        strict,
-        Reader::of_stderr(),
-    )?;
-    crate::telemetry::schema_errors::report(&diagnostics);
-    Ok(())
+    Ok(SchemaFindings {
+        diagnostics,
+        refused,
+    })
 }
 
 /// For a kind whose documents only the sink's mapping refuses, whether
@@ -352,13 +356,12 @@ fn plain_opensearch(
     }))
 }
 
-/// Print `diagnostics` (nothing when there are none) and fail when any
-/// [stops the start](stops_the_start), or, `strict`, when any is an error.
-/// Every other diagnostic is printed and the start goes on. `refused(i)` says
-/// whether a sink refuses what `diagnostics[i]` describes, for a kind only a
-/// sink's mapping refuses (see [`a_sink_refuses`]).
+/// Judge the start on what checking the schemas and inspecting the capture
+/// found, together, as `check` shows them: refuse on a schema that cannot
+/// work as written (see [`stops_the_start`]) or, `strict`, on any error or
+/// gap, printing everything; otherwise print and go on.
 ///
-/// An error the start goes on with is also an `error` event
+/// An error or gap the start goes on with is also an `error` event
 /// ([`schema_errors`](crate::telemetry::schema_errors)), so each reader gets
 /// one copy: a person at a terminal reads it here and the event stays off
 /// stderr; a deployment's log reads the event, so it is left out here.
@@ -367,10 +370,12 @@ fn start_verdict(
     pen: print::Pen,
     diagnostics: &[Diagnostic],
     refused: &dyn Fn(usize) -> bool,
+    capture: Option<&Capture<'_>>,
     strict: bool,
     reader: Reader,
 ) -> anyhow::Result<()> {
-    if diagnostics.is_empty() {
+    let gaps = capture.map_or(0, |capture| capture.gaps.len());
+    if diagnostics.is_empty() && gaps == 0 {
         return Ok(());
     }
     let blocking = diagnostics
@@ -382,8 +387,9 @@ fn start_verdict(
         .iter()
         .filter(|d| d.severity == Severity::Error)
         .count();
-    let starts = blocking == 0 && (!strict || errors == 0);
-    if starts && reader == Reader::Log {
+    let starts = blocking == 0 && (!strict || errors + gaps == 0);
+    let quiet = starts && reader == Reader::Log;
+    if quiet {
         let warnings: Vec<Diagnostic> = diagnostics
             .iter()
             .filter(|d| d.severity == Severity::Warning)
@@ -393,32 +399,61 @@ fn start_verdict(
             print::diagnostics(out, pen, &warnings)?;
             writeln!(out)?;
         }
-    } else {
+    } else if !diagnostics.is_empty() {
         print::diagnostics(out, pen, diagnostics)?;
         writeln!(out)?;
+    }
+    if let Some(capture) = capture.filter(|_| gaps > 0 && !quiet) {
+        print_gaps(out, pen, capture)?;
     }
     ensure!(
         blocking == 0,
         "the schemas cannot be built against this database ({blocking} problem(s) above); \
          fix them, confirm with `flusso check`, then start again"
     );
+    let counted = [(errors, "error(s)"), (gaps, "gap(s)")]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let what = match (errors > 0, gaps > 0) {
+        (true, true) => "the schemas and the capture do not give a working index",
+        (false, true) => "the source cannot capture every change the indexes need",
+        _ => "the schemas do not give a working index against this database",
+    };
     ensure!(
-        !strict || errors == 0,
-        "the schemas do not give a working index against this database ({errors} error(s) \
-         above, refused under --strict); fix them, confirm with `flusso check`, then start again"
+        !strict || errors + gaps == 0,
+        "{what} ({counted} above, refused under --strict); fix them, confirm with `flusso \
+         check`, then start again"
     );
-    if errors > 0 {
+    if errors + gaps > 0 {
         match reader {
-            Reader::Person => writeln!(
-                out,
-                "starting anyway: the errors above do not stop `flusso run` (`flusso check` still \
-                 fails on them; `--strict` refuses them)\n"
-            )?,
-            Reader::Log => writeln!(
-                out,
-                "starting anyway with {errors} schema error(s) `flusso check` fails on, each \
-                 logged next as an `error` line (`--strict` refuses them)\n"
-            )?,
+            Reader::Person => {
+                let above = match (errors > 0, gaps > 0) {
+                    (true, true) => "the errors and gaps above",
+                    (false, true) => "the gaps above",
+                    _ => "the errors above",
+                };
+                writeln!(
+                    out,
+                    "starting anyway: {above} do not stop `flusso run` (`flusso check` still \
+                     fails on them; `--strict` refuses them)\n"
+                )?;
+            }
+            Reader::Log => {
+                let logged = [(errors, "schema error(s)"), (gaps, "capture gap(s)")]
+                    .iter()
+                    .filter(|(n, _)| *n > 0)
+                    .map(|(n, what)| format!("{n} {what}"))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                writeln!(
+                    out,
+                    "starting anyway with {logged} `flusso check` fails on, each logged next as \
+                     an `error` line (`--strict` refuses them)\n"
+                )?;
+            }
         }
     }
     Ok(())
@@ -434,21 +469,9 @@ struct Capture<'a> {
     manage_replica_identity: bool,
 }
 
-/// Print the gaps in capture `flusso run` won't close, as `check` prints them,
-/// and fail under `strict`. Without it the start goes on: `prepare` still
-/// warns with the SQL, and each gap is an `error` event, so into a log
-/// (`Reader::Log`) the report leaves them to it.
-fn gap_verdict(
-    out: &mut impl Write,
-    pen: print::Pen,
-    capture: &Capture<'_>,
-    strict: bool,
-    reader: Reader,
-) -> anyhow::Result<()> {
-    let gaps = capture.gaps.len();
-    if gaps == 0 || (!strict && reader == Reader::Log) {
-        return Ok(());
-    }
+/// The gaps in capture `flusso run` won't close, as `check` prints them: each
+/// `[error]` line, then the sections that hold their SQL.
+fn print_gaps(out: &mut impl Write, pen: print::Pen, capture: &Capture<'_>) -> anyhow::Result<()> {
     print::gaps(out, pen, capture.gaps)?;
     if print::coverage_status(capture.coverage, capture.manage_publication)
         == print::Status::Problem
@@ -461,16 +484,6 @@ fn gap_verdict(
         print::pre_image(out, pen, capture.pre_image, capture.manage_replica_identity)?;
     }
     writeln!(out)?;
-    ensure!(
-        !strict,
-        "the source cannot capture every change the indexes need ({gaps} gap(s) above, refused \
-         under --strict); fix them, confirm with `flusso check`, then start again"
-    );
-    writeln!(
-        out,
-        "starting anyway: the gaps above do not stop `flusso run` (`flusso check` still fails on \
-         them; `--strict` refuses them)\n"
-    )?;
     Ok(())
 }
 
@@ -658,6 +671,7 @@ mod tests {
             print::Pen::detect_stderr(),
             diagnostics,
             &|_| true,
+            None,
             false,
             Reader::Person,
         );
@@ -671,6 +685,7 @@ mod tests {
             print::Pen::plain(),
             diagnostics,
             &|_| true,
+            None,
             true,
             Reader::Log,
         );
@@ -684,6 +699,7 @@ mod tests {
             print::Pen::plain(),
             diagnostics,
             &|_| true,
+            None,
             false,
             Reader::Log,
         );
@@ -780,22 +796,93 @@ mod tests {
         strict: bool,
         reader: Reader,
     ) -> (anyhow::Result<()>, String) {
+        both_verdict(&[], coverage, gaps, strict, reader)
+    }
+
+    fn both_verdict(
+        diagnostics: &[Diagnostic],
+        coverage: &source::CoverageReport,
+        gaps: &[crate::gaps::Gap],
+        strict: bool,
+        reader: Reader,
+    ) -> (anyhow::Result<()>, String) {
         let pre_image = source::PreImageReport::default();
         let mut out = Vec::new();
-        let result = gap_verdict(
+        let result = start_verdict(
             &mut out,
             print::Pen::plain(),
-            &Capture {
+            diagnostics,
+            &|_| true,
+            Some(&Capture {
                 gaps,
                 coverage,
                 manage_publication: true,
                 pre_image: &pre_image,
                 manage_replica_identity: true,
-            },
+            }),
             strict,
             reader,
         );
         (result, String::from_utf8(out).unwrap())
+    }
+
+    /// Schema errors and capture gaps are judged together, after both are
+    /// inspected: `--strict` refuses once, printing every one, as `check`
+    /// shows them, so fixing one never reveals the other a restart later.
+    #[test]
+    fn strict_prints_schema_errors_and_gaps_together() {
+        let (coverage, gaps) = a_gap(false);
+        let (result, printed) = both_verdict(
+            &[diagnostic(DiagnosticKind::Nullability)],
+            &coverage,
+            &gaps,
+            true,
+            Reader::Log,
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("1 error(s) and 1 gap(s) above, refused under --strict"),
+            "{error}"
+        );
+        assert!(printed.contains("a Nullability finding"), "{printed}");
+        assert!(printed.contains("[error] public.orders"), "{printed}");
+        assert!(
+            printed.contains("ALTER PUBLICATION flusso ADD TABLE public.orders;"),
+            "{printed}"
+        );
+
+        let (result, printed) = both_verdict(
+            &[diagnostic(DiagnosticKind::Nullability)],
+            &coverage,
+            &gaps,
+            false,
+            Reader::Log,
+        );
+        assert!(result.is_ok());
+        assert!(
+            printed.contains(
+                "starting anyway with 1 schema error(s) and 1 capture gap(s) `flusso check` \
+                 fails on, each logged next as an `error` line"
+            ),
+            "{printed}"
+        );
+    }
+
+    /// A stop on a schema that can't be built prints the gaps too: a refused
+    /// start prints everything.
+    #[test]
+    fn a_refused_start_prints_its_gaps_too() {
+        let (coverage, gaps) = a_gap(false);
+        let (result, printed) = both_verdict(
+            &[diagnostic(DiagnosticKind::UnknownColumn)],
+            &coverage,
+            &gaps,
+            false,
+            Reader::Log,
+        );
+        assert!(result.is_err());
+        assert!(printed.contains("a UnknownColumn finding"), "{printed}");
+        assert!(printed.contains("[error] public.orders"), "{printed}");
     }
 
     /// A gap `run` won't close (issue #485): `--strict` refuses it with the
@@ -824,7 +911,11 @@ mod tests {
 
         let (result, printed) = gaps_verdict(&coverage, &gaps, false, Reader::Log);
         assert!(result.is_ok());
-        assert_eq!(printed, "");
+        assert!(!printed.contains("public.orders"), "{printed}");
+        assert!(
+            printed.contains("starting anyway with 1 capture gap(s)"),
+            "{printed}"
+        );
     }
 
     #[test]
@@ -1067,6 +1158,7 @@ mod tests {
             print::Pen::detect_stderr(),
             &diagnostics,
             &|_| false,
+            None,
             false,
             Reader::Person,
         );

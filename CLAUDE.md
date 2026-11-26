@@ -2091,8 +2091,12 @@ fix it or `manage_publication = false`, and a replica identity `gaps` entry (pri
 link) `run` won't set; a gap `run` closes, a `partial` entry (only the #169 skip) and a kept table are
 not (`print::Status`: `ok`/`run_fixes`/`by_hand`/`problem`, the one judge for both formats). `check`
 prints each as an `[error]` line at the bottom with its section's SQL and counts it; `Backends::source`
-inspects the same, read-only, before staging: `--strict` refuses, a plain start reports each gap as
-the schema errors' event and gauge, once per index reading its table. Each `Error` the start goes on with is a `tracing::error!` event
+inspects the same, read-only, before staging, after checking the server; one verdict
+(`backends.rs`'s `start_verdict`) then judges schema findings and gaps together, so `--strict` refuses
+once with both, a refused start printing everything; a plain start reports each gap as the schema
+errors' event and gauge, once per index reading its table, and hands the capture what it reported
+(`WalChangeCapture::with_reported_gaps`), so `prepare` logs those gaps at `debug`, not as a second
+warning. Each `Error` the start goes on with is a `tracing::error!` event
 (target `flusso::schema_errors`; `index`, `kind`, `field`, the message) at every start and a value
 of the `flusso.index.schema_errors{index,kind}` gauge (`telemetry/schema_errors.rs`). Under OTLP the
 event is a span event of the `daemon.start` span: the CLI has no OTel log bridge. One copy per
