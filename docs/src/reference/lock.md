@@ -22,7 +22,7 @@ A deployment ships one file instead of a source tree. The lock needs no database
 | --- | --- |
 | `flusso run` with `flusso.toml` present | Recompile, rewrite the lock if changed, run it. The committed lock stays current. |
 | `flusso run` with no config | Load `flusso.lock` and run it. |
-| `flusso run --locked` | Run the lock as is. No recompile, no rewrite. |
+| `flusso run --locked` | Run the lock as is. No recompile, no rewrite. A lock whose line endings git converted holds other script text, so an index with a script gets another content hash: a new physical index, rebuilt from scratch. Keep the lock `-text` in `.gitattributes`. |
 | `flusso run --config other.toml` | Recompile from that file; an explicit path that doesn't exist is an error. |
 
 A lock-write failure is fatal. A lock in an earlier format (the pre-0.16 `format_version = 2`, or the MessagePack binary before that) is rejected with a regenerate hint: run `flusso build` once and commit the result. `flusso run` without `--locked` regenerates it on its own.
@@ -38,11 +38,29 @@ A lock-write failure is fatal. A lock in an earlier format (the pre-0.16 `format
 | isn't there | `! flusso.lock not found; flusso build writes it` | | `missing` |
 | holds another config | `` `flusso.lock` was compiled from another config than this one (the index `users` changed): … `` | yes | `lock_stale` |
 | can't be read, or is of an older format | `` `flusso.lock` can't be read as a lock, so `flusso run --locked` would fail on it: … `` | yes | `lock_unreadable` |
+| can't be read, and there's no config | `check` stops before the report: `no flusso.toml to check, and the lock at flusso.lock can't be read`, then the reason | yes | none: no report |
 | was checked alone: no config | `! no config to compare flusso.lock with: the lock is what was checked` | | `not_compared` |
 
 - **A stale lock** names what differs at the top level: which indexes changed, are new or are gone, and which deployment settings (`sinks`, `source`, …).
 - **An unreadable lock** names the line, the column and the reason, never the text there, since a secret may sit on that line: ``failed to decode compiled config at line 21, column 24: unexpected key or value, expected newline, `#` ``, or `it is format 2, and this flusso reads format 3`.
-- **Line endings inside a string count.** A script's source is a multi-line string in the lock, so a lock whose line endings were converted (a Windows checkout with `core.autocrlf`) holds other scripts, and reads as stale. Mark it `-text` in `.gitattributes`.
+- **Line endings inside a string count.** A script's source is a multi-line string in the lock, so a lock whose line endings were converted (a Windows checkout with `core.autocrlf`) holds other scripts and reads as stale. The message names the cause and the fix:
+
+  ```text
+  [error] flusso.lock  `flusso.lock` was compiled from another config than this one (the index `products` changed): `flusso run --locked`, or an image baked from this lock, would run the older config. Run `flusso check --offline --fix` or `flusso build` (or `flusso run`, which rewrites it) and commit the result. `flusso.lock` has Windows line endings (CRLF), which change multi-line values such as script sources. Rewrite it as above, and mark it `-text` in `.gitattributes` (`flusso.lock -text`) so git does not convert it again
+  ```
+
+  A converted lock with no multi-line value in it holds the same config and is only a note (`same_config`).
+- **A lock that can't be read, with no config,** stops every command before it starts, naming the lock and the reason, never its text:
+
+  ```text
+  $ flusso check --offline
+  Error: no flusso.toml to check, and the lock at flusso.lock can't be read
+
+  Caused by:
+      failed to decode compiled config at line 1, column 6: key with no value, expected `=`
+  ```
+
+  `flusso show` says `no flusso.toml, and the lock at flusso.lock can't be read`, `flusso run` `no flusso.toml to compile, and the lock at flusso.lock can't be read; create a config or build a lock first`. With no lock at all, the headline is `no flusso.toml to check and no compiled lock at flusso.lock` (and the same for the others).
 - **The advice runs as printed.** It names `--config`, `--offline` and the lock's path when they aren't the defaults: `` Run `flusso check --offline --fix` or `flusso build` (or `flusso run`, which rewrites it) and commit the result ``.
 
 **`--fix`** rewrites a lock that is stale, unreadable, written differently or missing, with exactly what `flusso build` writes (a temporary file beside it, renamed over it), once the config has validated. The report says `✓ lock rewritten: flusso.lock`, and JSON keeps the state found before the fix with `"rewritten": true`. It fixes the lock only: every other finding is reported and decides the exit code as without it. With no config there's nothing to write from, and it says `no config to write flusso.lock from: --fix wrote nothing`. A write that fails is an error naming the path; a failure after the write (an unreachable database) says the lock was rewritten. No environment variable turns it on, so a CI job can't rewrite a lock through an inherited variable.

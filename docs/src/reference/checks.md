@@ -110,7 +110,7 @@ The transform and link checks ask Postgres to try the operation. When it won't (
 | `ids_element_mismatch` | An `ids` `element_type` that holds no key of the related table's type (see [ids](aggregates.md#ids)). | error | | no |
 | `ids_element_lossy` | An `ids` `element_type` that holds only some keys of the related table's type, or changes them. | error | | no |
 | `duplicate_field_name_wrong` | Two fields of one name whose documents hold something other than the schema declares (see [One name per level](identifiers.md#one-name-per-level)). | error | yes | no |
-| `time_of_day_format` | A date-mapped field whose `format` reads only a time of day, over a value that isn't one (see [dates and times](field-types.md#dates-and-times)). | error | all but a `timestamp` column, `min`/`max` or `ids`, which may hold a time of day | no |
+| `time_of_day_format` | A date-mapped field whose `format` reads only a time of day, over a value that isn't one (see [dates and times](field-types.md#dates-and-times)). | error | partly: see [which, when](field-types.md#a-format-of-your-own) | no |
 | `publication_gap` | A table an index reads that the publication doesn't stream, and `run` won't add. | error | | no |
 | `replica_identity_gap` | A table whose replica identity misses its primary key or a parent link, and `run` won't set it. | error | | no |
 | `lock_stale` | A `flusso.lock` compiled from another config. `check` only. | error | yes | not looked at |

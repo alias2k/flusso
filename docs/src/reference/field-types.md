@@ -167,7 +167,12 @@ What reads, per pattern (named formats also with `strict_` and in camelCase):
 
 One pattern that reads is enough: `strict_date_optional_time||epoch_millis` is left alone. The rule leans towards appending, so a few formats that already read get the pattern too, and their index moves: an all-letter pattern such as `yyyyMMdd` reads as an unknown named format, and a `timestamp` field over a `date` column is taken to hold timestamps.
 
-**A time-of-day format over a date is an error.** A format whose every pattern reads a time of day only is kept as written, since over a `time` column it is how a time of day is indexed (above). Over anything else OpenSearch refuses every document holding a value, so [`check`](checks.md#every-finding) reports it as `time_of_day_format`: with no database for a `date` field, a `custom` date, a constant or a script, and once the database names the type for a `timestamp` column, `min`/`max` or `ids`. `run` starts on it.
+**A time-of-day format over a date is an error.** A format whose every pattern reads a time of day only is kept as written, since over a `time` column it is how a time of day is indexed (above). Over anything else OpenSearch refuses every document holding a value, so [`check`](checks.md#every-finding) reports it as `time_of_day_format`, an error `run` starts on. When it is reported depends on what the field reads:
+
+| Field | Reported |
+| --- | --- |
+| a `timestamp` column, a `min`/`max` with `value_type: timestamp`, an `ids` with `element_type: timestamp` | with the database only, once it names the column's type: a `time` or `timetz` column there is the workaround above, not an error |
+| a `date` column, a `min`/`max` or `ids` typed `date`, a `custom` over date or timestamp types, a date or timestamp constant, a script declared `date` or `timestamp` | `--offline` too: the schema alone says flusso writes a date or a timestamp there |
 
 ```text
 [error] users.account.createdAt  the `format` `HH:mm:ss` reads a time of day only, but flusso writes a timestamp (`2024-01-02T03:04:05`) here, from the column's `timestamp with time zone`, so OpenSearch refuses every document whose value is not null. Drop the `format`, or use one that reads it: `strict_date_optional_time`, or yours followed by `||strict_date_optional_time`

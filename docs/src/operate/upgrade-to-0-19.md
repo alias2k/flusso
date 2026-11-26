@@ -520,7 +520,12 @@ The full shape: [JSON output](../reference/checks.md#json-output).
 
 **Who is affected.** A script that reads the config or the mappings from `check`'s output, or parses its human output.
 
-**What to do.** Read them from [`flusso show`](../reference/cli.md#show): `flusso show config --format json` (every literal secret now prints as `***`) and `flusso show mapping --format json` (the same list `mappings` held).
+**What to do.** Read them from [`flusso show`](../reference/cli.md#show): `flusso show config --format json` (every literal secret now prints as `***`) and `flusso show mapping --format json` (the list `mappings` held). In both, a value the schema gives (an `options` entry such as `format`, a `default`, a `constant`) is now plain JSON, no longer tagged with its type, so a script reading the old shape must change:
+
+```text
+0.18, check's mappings:     "format": {"String": "yyyy-MM-dd HH:mm:ss"}
+0.19, show mapping's JSON:  "format": "yyyy-MM-dd HH:mm:ss||strict_date_optional_time"
+```
 
 ## A date format reads what flusso writes
 
