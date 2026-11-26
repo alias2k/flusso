@@ -249,3 +249,126 @@ fn check_says_whether_the_lock_is_current() {
         shown(&alone)
     );
 }
+
+/// What sits at `dir/flusso.lock`: its bytes and modification time, or
+/// nothing.
+fn lock_at(dir: &Path) -> Option<(Vec<u8>, std::time::SystemTime)> {
+    let lock = dir.join("flusso.lock");
+    let bytes = std::fs::read(&lock).ok()?;
+    Some((bytes, std::fs::metadata(&lock).unwrap().modified().unwrap()))
+}
+
+/// The lock states `check` tells apart, each written into `dir`: current,
+/// stale, the same config in CRLF, unreadable, missing.
+fn lock_states(dir: &Path) -> Vec<(&'static str, Option<Vec<u8>>)> {
+    let current = std::fs::read(dir.join("flusso.lock")).unwrap();
+    let crlf = String::from_utf8(current.clone())
+        .unwrap()
+        .replace('\n', "\r\n")
+        .into_bytes();
+    let stale = String::from_utf8(current.clone())
+        .unwrap()
+        .replace("\"stdout\"", "\"stdout\"\npretty = true")
+        .into_bytes();
+    vec![
+        ("current", Some(current)),
+        ("stale", Some(stale)),
+        ("crlf", Some(crlf)),
+        ("unreadable", Some(b"format_version = 2\n".to_vec())),
+        ("missing", None),
+    ]
+}
+
+/// A plain `check` never writes the lock, in any state, with or without a
+/// `FLUSSO_FIX` in its environment (owner decision on #486: `--fix` has no
+/// variable).
+#[test]
+fn a_plain_check_never_writes_the_lock() {
+    let dir = locked_project("never-writes");
+    for (state, written) in lock_states(&dir) {
+        let lock = dir.join("flusso.lock");
+        let _ = std::fs::remove_file(&lock);
+        if let Some(bytes) = &written {
+            std::fs::write(&lock, bytes).unwrap();
+        }
+        let before = lock_at(&dir);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        for fix in [None, Some("true")] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_flusso"));
+            command
+                .current_dir(&dir)
+                .args(["check", "--offline"])
+                .env_remove("FLUSSO_CONFIG")
+                .env_remove("FLUSSO_LOCK")
+                .stdin(Stdio::null());
+            if let Some(value) = fix {
+                command.env("FLUSSO_FIX", value);
+            }
+            let ran = command.output().unwrap();
+            assert_eq!(
+                lock_at(&dir),
+                before,
+                "{state}, FLUSSO_FIX={fix:?}: {}",
+                shown(&ran)
+            );
+        }
+    }
+}
+
+/// `check --fix` rewrites the lock from the config in every state it can
+/// repair, says so in one line, and a plain `check` then finds it current;
+/// with no config there is nothing to write from, and the lock stays.
+#[test]
+fn check_fix_rewrites_the_lock_from_the_config() {
+    let dir = locked_project("fix");
+    let expected = std::fs::read(dir.join("flusso.lock")).unwrap();
+    for (state, written) in lock_states(&dir) {
+        let lock = dir.join("flusso.lock");
+        let _ = std::fs::remove_file(&lock);
+        if let Some(bytes) = &written {
+            std::fs::write(&lock, bytes).unwrap();
+        }
+        let fixed = flusso(&dir, &["check", "--offline", "--fix"]);
+        assert!(fixed.status.success(), "{state}: {}", shown(&fixed));
+        let printed = String::from_utf8_lossy(&fixed.stdout);
+        if state == "current" {
+            assert!(
+                printed.contains("✓ flusso.lock is current"),
+                "{state}: {}",
+                shown(&fixed)
+            );
+        } else {
+            assert!(
+                printed.contains("✓ flusso.lock rewritten: flusso.lock"),
+                "{state}: {}",
+                shown(&fixed)
+            );
+        }
+        assert_eq!(std::fs::read(&lock).unwrap(), expected, "{state}");
+        let again = flusso(&dir, &["check", "--offline"]);
+        assert!(
+            String::from_utf8_lossy(&again.stdout).contains("✓ flusso.lock is current"),
+            "{state}: {}",
+            shown(&again)
+        );
+    }
+
+    let config = std::fs::read(dir.join("flusso.toml")).unwrap();
+    let older = config
+        .iter()
+        .copied()
+        .chain(b"\n[sinks.audit]\ntype = \"stdout\"\n".iter().copied())
+        .collect::<Vec<u8>>();
+    std::fs::write(dir.join("flusso.toml"), older).unwrap();
+    assert!(flusso(&dir, &["build"]).status.success());
+    let written = std::fs::read(dir.join("flusso.lock")).unwrap();
+    std::fs::remove_file(dir.join("flusso.toml")).unwrap();
+    let alone = flusso(&dir, &["check", "--offline", "--fix"]);
+    assert!(
+        String::from_utf8_lossy(&alone.stdout)
+            .contains("no config to write flusso.lock from: --fix wrote nothing"),
+        "{}",
+        shown(&alone)
+    );
+    assert_eq!(std::fs::read(dir.join("flusso.lock")).unwrap(), written);
+}

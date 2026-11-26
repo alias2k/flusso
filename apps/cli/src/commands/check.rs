@@ -11,6 +11,8 @@
 //! `run` does before rewriting it (see [`crate::lock`]): a stale or unreadable
 //! lock is an error, since `run --locked` would run something else. Given no
 //! config, it checks the lock itself and says there was nothing to compare.
+//! `--fix` (a flag only, no variable) rewrites such a lock as `flusso build`
+//! would and reports it rewritten; nothing else is ever written.
 //!
 //! The report only checks: a section that passes is one line, a section with a
 //! problem prints in full, then warnings, then errors, then a summary line.
@@ -74,6 +76,15 @@ pub(crate) struct CheckArgs {
     #[arg(long, env = "FLUSSO_FORMAT", value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 
+    /// Rewrite the `--lock` from the config when it isn't what the config
+    /// compiles to (stale, unreadable, written differently, or missing),
+    /// exactly as `flusso build` writes it. Fixes the lock only: it never
+    /// changes the database, the schemas or the config, and every other
+    /// finding is reported and decides the exit code as without it. No
+    /// environment variable sets it.
+    #[arg(long)]
+    fix: bool,
+
     /// When the human-readable report is coloured: `auto` colours it when
     /// stdout is a terminal and `NO_COLOR` is unset.
     #[arg(long, env = "FLUSSO_COLOR", value_enum, default_value_t = print::ColorChoice::Auto)]
@@ -90,7 +101,7 @@ enum OutputFormat {
 }
 
 pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
-    let (mut config, lock, path) = match plan_config(
+    let (mut config, compiled, lock, path) = match plan_config(
         false,
         args.config.as_deref(),
         Path::new(DEFAULT_CONFIG),
@@ -100,7 +111,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
             let compiled = config::compile(&path)
                 .with_context(|| format!("loading config from {}", path.display()))?;
             let lock = LockState::of(&compiled, &args.lock);
-            (compiled.config, lock, path)
+            (compiled.config.clone(), Some(compiled), lock, path)
         }
         ConfigPlan::Fallback | ConfigPlan::UseLock => {
             let config = config::load_compiled(&args.lock).with_context(|| {
@@ -109,7 +120,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     args.lock.display()
                 )
             })?;
-            (config, LockState::NotCompared, args.lock.clone())
+            (config, None, LockState::NotCompared, args.lock.clone())
         }
         ConfigPlan::Missing(path) => anyhow::bail!("config file {} not found", path.display()),
     };
@@ -133,6 +144,10 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         .with_context(|| format!("validating {}", path.display()))?;
     crate::backends::compile_scripts(&config)
         .with_context(|| format!("compiling the scripts of {}", path.display()))?;
+    let lock = match &compiled {
+        Some(compiled) if args.fix => lock.fixed(compiled, &args.lock)?,
+        _ => lock,
+    };
     let config = Arc::new(config);
 
     let postgres = adapters::source_config(&config)?;
@@ -189,6 +204,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         config: &config,
         lock: &lock,
         lock_path: &args.lock,
+        fix: args.fix,
         diagnostics: &diagnostics,
         online,
     };
@@ -254,6 +270,8 @@ struct Report<'a> {
     /// How the lock stands against the config.
     lock: &'a LockState,
     lock_path: &'a Path,
+    /// `--fix` was asked for.
+    fix: bool,
     diagnostics: &'a [Diagnostic],
     /// `None` under `--offline`.
     online: Option<Online<'a>>,
@@ -324,6 +342,16 @@ impl Report<'_> {
     fn human(&self, out: &mut impl Write, pen: print::Pen) -> anyhow::Result<()> {
         print::config_line(out, pen, self.path, self.config)?;
         print::lock(out, pen, self.lock_path, self.lock)?;
+        if self.fix && *self.lock == LockState::NotCompared {
+            print::note(
+                out,
+                pen,
+                &format!(
+                    "no config to write {} from: --fix wrote nothing",
+                    self.lock_path.display()
+                ),
+            )?;
+        }
         match &self.online {
             None => {
                 print::offline(out, pen)?;
@@ -381,6 +409,7 @@ impl Report<'_> {
                 "status": if self.lock.is_error() { print::Status::Problem } else { print::Status::Ok }.as_str(),
                 "state": self.lock.as_str(),
                 "path": self.lock_path.display().to_string(),
+                "rewritten": matches!(self.lock, LockState::Rewritten { .. }),
                 "message": self.lock.message(self.lock_path),
             },
             "server": online.map(|o| serde_json::json!({
@@ -545,6 +574,7 @@ mod tests {
             config,
             lock,
             lock_path: Path::new("flusso.lock"),
+            fix: false,
             diagnostics,
             online: online.map(|o| {
                 Online::new(
@@ -932,6 +962,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `--fix` rewrote the lock: one passing line saying where, and JSON
+    /// keeps the state it found with `rewritten: true` (owner decision on
+    /// #486). With no config, `--fix` says it had nothing to write from.
+    #[test]
+    fn a_rewritten_lock_is_one_line_and_a_lock_alone_is_not_rewritten() {
+        let config = config();
+        let rewritten = LockState::Rewritten {
+            was: Box::new(LockState::Stale {
+                differs: Vec::new(),
+            }),
+        };
+        let report = with_lock(&config, &[], None, &rewritten);
+        let mut out = Vec::new();
+        report.human(&mut out, print::Pen::plain()).unwrap();
+        let human = String::from_utf8(out).unwrap();
+        assert!(
+            human.contains("✓ flusso.lock rewritten: flusso.lock"),
+            "{human}"
+        );
+        let json = report.json();
+        assert_eq!(json["lock"]["state"], "lock_stale", "{json}");
+        assert_eq!(json["lock"]["rewritten"], true, "{json}");
+        assert_eq!(json["lock"]["status"], "ok", "{json}");
+        assert_eq!(json["lock"]["path"], "flusso.lock", "{json}");
+        assert!(report.failure().is_none());
+
+        let mut alone = with_lock(&config, &[], None, &LockState::NotCompared);
+        alone.fix = true;
+        let mut out = Vec::new();
+        alone.human(&mut out, print::Pen::plain()).unwrap();
+        let human = String::from_utf8(out).unwrap();
+        assert!(
+            human.contains("! no config to write flusso.lock from: --fix wrote nothing"),
+            "{human}"
+        );
+        assert_eq!(alone.json()["lock"]["rewritten"], false);
+    }
+
+    /// `--fix` reads no environment variable: a CI job must not rewrite the
+    /// lock because of a variable it inherited.
+    #[test]
+    fn fix_is_a_flag_only_with_no_environment_variable() {
+        use clap::Args as _;
+        let command = CheckArgs::augment_args(clap::Command::new("check"));
+        let fix = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "fix")
+            .expect("check has --fix");
+        assert_eq!(fix.get_env(), None);
+        let help = fix.get_help().map(ToString::to_string).unwrap_or_default();
+        assert!(help.contains("lock only"), "{help}");
     }
 
     /// `check` fails exactly when its summary says it failed, and the

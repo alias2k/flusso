@@ -563,7 +563,11 @@ runs it, stale (`lock_stale`, naming the indexes or settings that differ) or unr
 (`lock_unreadable`: the line and column, never the text there, which `config::from_bytes`'s
 `CompileError::Decode` holds for `run --locked` too) an error, each advice naming the `--out` /
 `--lock` that writes the path compared; with no config it checks the lock, and says there was
-nothing to compare; `plan_config`, in `lock.rs`, decides for `run` and `check` alike), `show config|mapping [index]` (the deployment,
+nothing to compare; `check --fix` (a flag with **no** `FLUSSO_FIX`, so an inherited variable never
+rewrites a lock; guard `fix_is_a_flag_only_with_no_environment_variable`) rewrites a lock the config
+can repair through `config::write` (temp file beside it, renamed; in place where none can be made, as
+`build`) after the config validated, reported `rewritten` with the state it found, and fixes nothing
+else; a plain `check` never writes (`check_report.rs`'s `a_plain_check_never_writes_the_lock`); `plan_config`, in `lock.rs`, decides for `run` and `check` alike), `show config|mapping [index]` (the deployment,
 secrets redacted, or the typed mapping; no DB; reads `--config` or the `--lock`; `--format json`;
 `commands/show.rs`, reusing `print::config`/`print::resolved`), `run`
 (cargo-style: when a `flusso.toml` is present — the default path, or `--config` — it

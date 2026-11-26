@@ -5,8 +5,9 @@
 //! a `flusso.toml` when one is there (or named), else the compiled lock.
 //! `check` then compares the lock with what the config compiles to
 //! ([`LockState::of`]), byte for byte, as `run` does before it rewrites it: a
-//! lock that differs is stale, and `run --locked`, or an image baked from it,
-//! would run the older config.
+//! lock that holds another config is stale, and `run --locked`, or an image
+//! baked from it, would run the older config. `check --fix` writes it again
+//! ([`LockState::fixed`]) through `flusso build`'s own write.
 //!
 //! ```text
 //! ✓ flusso.lock is current
@@ -16,6 +17,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use config::Compiled;
 
 /// What a command does to obtain its [`Config`](config::Config), decided
@@ -70,6 +72,9 @@ pub(crate) enum LockState {
     Unreadable { reason: String },
     /// There is no config to compare it with: the lock is what is checked.
     NotCompared,
+    /// `check --fix` wrote what the config compiles to over a lock that was
+    /// `was`.
+    Rewritten { was: Box<LockState> },
 }
 
 impl LockState {
@@ -111,6 +116,21 @@ impl LockState {
         }
     }
 
+    /// Write what the config compiles to over this lock when the config can
+    /// repair it (stale, unreadable, respelled, missing), through the write
+    /// `flusso build` uses: a temporary file beside it, renamed over it. A
+    /// lock already current, or one with no config to write from, stays.
+    pub(crate) fn fixed(self, compiled: &Compiled, path: &Path) -> anyhow::Result<Self> {
+        match self {
+            Self::Current | Self::NotCompared | Self::Rewritten { .. } => Ok(self),
+            was => {
+                config::write(compiled, path)
+                    .with_context(|| format!("`check --fix` could not write {}", path.display()))?;
+                Ok(Self::Rewritten { was: Box::new(was) })
+            }
+        }
+    }
+
     /// Whether `check` fails on it.
     pub(crate) fn is_error(&self) -> bool {
         matches!(self, Self::Stale { .. } | Self::Unreadable { .. })
@@ -125,6 +145,7 @@ impl LockState {
             Self::Missing => "missing",
             Self::Unreadable { .. } => "lock_unreadable",
             Self::NotCompared => "not_compared",
+            Self::Rewritten { was } => was.as_str(),
         }
     }
 
@@ -133,6 +154,13 @@ impl LockState {
         let lock = path.display();
         match self {
             Self::Current => format!("{lock} is current"),
+            Self::Rewritten { .. } => format!(
+                "{} rewritten: {lock}",
+                path.file_name().map_or_else(
+                    || lock.to_string(),
+                    |name| name.to_string_lossy().into_owned()
+                )
+            ),
             Self::Respelled => format!(
                 "{lock} holds this config in other bytes than flusso writes (line endings or \
                  formatting); `flusso run` would rewrite it"
@@ -182,14 +210,20 @@ fn build(path: &Path) -> String {
     }
 }
 
-/// How to write the lock at `path` again, by `build` or by `run`.
+/// How to write the lock at `path` again: `check --fix`, `build` or `run`.
 fn rewrite(path: &Path) -> String {
-    let run = if is_default(path) {
-        "flusso run".to_owned()
+    let (fix, run) = if is_default(path) {
+        ("flusso check --fix".to_owned(), "flusso run".to_owned())
     } else {
-        format!("flusso run --lock {}", path.display())
+        (
+            format!("flusso check --fix --lock {}", path.display()),
+            format!("flusso run --lock {}", path.display()),
+        )
     };
-    format!("Run `{}` (or `{run}`, which rewrites it)", build(path))
+    format!(
+        "Run `{fix}` or `{}` (or `{run}`, which rewrites it)",
+        build(path)
+    )
 }
 
 /// Whether the config a lock holds is the config now, value for value.
@@ -330,7 +364,10 @@ mod tests {
         assert_eq!(state.as_str(), "lock_stale");
         let message = state.message(Path::new("flusso.lock"));
         assert!(message.contains("would run the older config"), "{message}");
-        assert!(message.contains("Run `flusso build`"), "{message}");
+        assert!(
+            message.contains("Run `flusso check --fix` or `flusso build`"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -362,7 +399,10 @@ mod tests {
             assert!(state.is_error());
             let message = state.message(Path::new("flusso.lock"));
             assert!(
-                message.contains("Run `flusso build` (or `flusso run`, which rewrites it)"),
+                message.contains(
+                    "Run `flusso check --fix` or `flusso build` (or `flusso run`, which rewrites \
+                     it)"
+                ),
                 "{message}"
             );
         }
@@ -429,16 +469,16 @@ mod tests {
             let message = state.message(elsewhere);
             assert!(
                 message.contains(
-                    "Run `flusso build --out deploy/flusso.lock` (or `flusso run --lock \
-                     deploy/flusso.lock`, which rewrites it)"
+                    "Run `flusso check --fix --lock deploy/flusso.lock` or `flusso build --out \
+                     deploy/flusso.lock` (or `flusso run --lock deploy/flusso.lock`, which \
+                     rewrites it)"
                 ),
                 "{message}"
             );
-            assert!(
-                state
-                    .message(Path::new(crate::DEFAULT_LOCK))
-                    .contains("Run `flusso build` (or `flusso run`, which rewrites it)")
-            );
+            assert!(state.message(Path::new(crate::DEFAULT_LOCK)).contains(
+                "Run `flusso check --fix` or `flusso build` (or `flusso run`, which \
+                         rewrites it)"
+            ));
         }
         assert_eq!(
             LockState::Missing.message(elsewhere),
@@ -463,5 +503,99 @@ mod tests {
                 differs: vec!["the deployment settings `sinks`".to_owned()],
             }
         );
+    }
+
+    /// `check --fix` writes what `flusso build` writes over every lock the
+    /// config can repair (stale, missing, CRLF, unreadable), and a plain
+    /// `check` then finds it current.
+    #[test]
+    fn fix_rewrites_every_lock_the_config_can_repair() {
+        let dir = project("fix", &["users"], "out");
+        let lock = dir.join("flusso.lock");
+        let expected = config::to_bytes(&compiled(&dir)).unwrap();
+        let crlf = String::from_utf8(expected.clone())
+            .unwrap()
+            .replace('\n', "\r\n");
+        let older = project("fix-older", &["users", "orders"], "out");
+        let stale = config::to_bytes(&compiled(&older)).unwrap();
+        for (case, written) in [
+            ("stale", Some(stale)),
+            ("missing", None),
+            ("crlf", Some(crlf.into_bytes())),
+            ("unreadable", Some(b"format_version = 2\n".to_vec())),
+        ] {
+            let _ = std::fs::remove_file(&lock);
+            if let Some(bytes) = written {
+                std::fs::write(&lock, bytes).unwrap();
+            }
+            let before = LockState::of(&compiled(&dir), &lock);
+            let after = before.clone().fixed(&compiled(&dir), &lock).unwrap();
+            assert_eq!(
+                after,
+                LockState::Rewritten {
+                    was: Box::new(before)
+                },
+                "{case}"
+            );
+            assert!(!after.is_error(), "{case}");
+            assert_eq!(std::fs::read(&lock).unwrap(), expected, "{case}");
+            assert_eq!(
+                LockState::of(&compiled(&dir), &lock),
+                LockState::Current,
+                "{case}"
+            );
+            assert_eq!(
+                after.message(&lock),
+                format!("flusso.lock rewritten: {}", lock.display()),
+                "{case}"
+            );
+        }
+    }
+
+    /// A current lock, and a lock with no config to write it from, are left
+    /// as they are by `--fix`.
+    #[test]
+    fn fix_leaves_a_current_lock_and_a_lock_alone_as_they_are() {
+        let dir = project("fix-current", &["users"], "out");
+        let lock = dir.join("flusso.lock");
+        config::write(&compiled(&dir), &lock).unwrap();
+        let modified = std::fs::metadata(&lock).unwrap().modified().unwrap();
+        for state in [LockState::Current, LockState::NotCompared] {
+            let fixed = state.clone().fixed(&compiled(&dir), &lock).unwrap();
+            assert_eq!(fixed, state);
+        }
+        assert_eq!(
+            std::fs::metadata(&lock).unwrap().modified().unwrap(),
+            modified
+        );
+    }
+
+    /// A lock `--fix` can't write is an error naming the path and the cause,
+    /// and the lock keeps its bytes.
+    #[cfg(unix)]
+    #[test]
+    fn fix_that_cannot_write_names_the_path_and_leaves_the_lock_whole() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = project("fix-readonly", &["users"], "out");
+        let lock = dir.join("flusso.lock");
+        std::fs::write(&lock, b"format_version = 2\n").unwrap();
+        let mode = |path: &Path, bits| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits)).unwrap();
+        };
+        mode(&lock, 0o444);
+        mode(&dir, 0o555);
+        let writable = std::fs::OpenOptions::new().write(true).open(&lock).is_ok();
+        let state = LockState::of(&compiled(&dir), &lock);
+        let result = state.fixed(&compiled(&dir), &lock);
+        let bytes = std::fs::read(&lock).unwrap();
+        mode(&dir, 0o755);
+        mode(&lock, 0o644);
+        if writable {
+            return; // run as root: permissions don't stop a write
+        }
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains(&lock.display().to_string()), "{error}");
+        assert!(error.contains("ermission denied"), "{error}");
+        assert_eq!(bytes, b"format_version = 2\n");
     }
 }

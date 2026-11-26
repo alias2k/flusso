@@ -699,7 +699,9 @@ pub(crate) fn lock(
     state: &crate::lock::LockState,
 ) -> Result<()> {
     match state {
-        crate::lock::LockState::Current => passed(out, pen, &state.message(path)),
+        crate::lock::LockState::Current | crate::lock::LockState::Rewritten { .. } => {
+            passed(out, pen, &state.message(path))
+        }
         state if state.is_error() => Ok(()),
         state => note(out, pen, &state.message(path)),
     }
