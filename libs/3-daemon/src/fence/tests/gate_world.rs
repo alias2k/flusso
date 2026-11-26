@@ -23,14 +23,21 @@
 //!   at its first stream from the position the slot confirmed (the source's
 //!   answer for what the last process's progress said landed).
 //!
-//! **The oracle owes nothing to the code under test.**
-//! - *Writes.* The stand-in judges every write the engines make, a seed's
-//!   marker included, as it is made: while an opening the world began has
-//!   not got through (none in flight here, so one that failed: no stream is
-//!   current), on a lane whose records were last read (a read that began)
-//!   under an earlier stream than the one held, or onto a record that says
-//!   detached (this process's, or another's written before the stream
-//!   opened), it is a failure.
+//! Each process has its own capture, as a real one does: it starts closed
+//! at the position the slot confirmed, stays closed after a failed opening,
+//! and answers a lane that routed nothing (`Landed::Idle`) as Postgres does.
+//!
+//! **The oracle owes nothing to the code under test.** The world keeps its
+//! own record of whether this process holds a stream, and of its streams.
+//! - *Records.* No record of another process is erased (a seed, a delete),
+//!   nor rewritten into anything but detached (a rebuild), while this
+//!   process holds no stream (O29, the rule since the fifth re-check).
+//! - *Writes, while it holds a stream.* The stand-in judges every write the
+//!   engines make, a seed's marker included, as it is made: on a lane whose
+//!   records were last read (a read that began) under an earlier stream, or
+//!   onto a record that says detached (this process's, or another's written
+//!   before the stream opened), it is a failure. With no stream held, plain
+//!   writes behave as on `main`.
 //! - *Waits.* A wait for `p` that passes on a lane needs every change at or
 //!   before `p` of the lane's index held there: written by this process,
 //!   applied by another (a jump with no drop on it), or read by a seed whose
@@ -102,6 +109,25 @@ impl Hold {
     }
 }
 
+/// What only the world knows of this process, never read from the code:
+/// whether it holds a stream (an opening it began got through, and the
+/// stream hasn't ended), and how many of its streams opened so far.
+#[derive(Debug, Default)]
+struct Holding {
+    holds: std::sync::atomic::AtomicBool,
+    streams: std::sync::atomic::AtomicU64,
+}
+
+impl Holding {
+    fn holds(&self) -> bool {
+        self.holds.load(Ordering::SeqCst)
+    }
+
+    fn stream(&self) -> u64 {
+        self.streams.load(Ordering::SeqCst)
+    }
+}
+
 /// Who wrote a record, and under which stream.
 #[derive(Debug, Clone)]
 struct Kept {
@@ -116,9 +142,8 @@ struct Kept {
 /// it saw as the writes were made.
 #[derive(Debug)]
 struct Store {
-    /// The running process's rereads, and the openings the world began in
-    /// it, counted by the world.
-    process: Mutex<(Arc<Rereads>, Arc<std::sync::atomic::AtomicU64>)>,
+    /// Whether this process holds a stream, as the world tracks it.
+    holding: Arc<Holding>,
     live_only: bool,
     kept: Mutex<BTreeMap<String, Kept>>,
     gaps: Mutex<BTreeMap<String, Vec<sink::Gap>>>,
@@ -146,9 +171,9 @@ struct Store {
 }
 
 impl Store {
-    fn new(live_only: bool) -> Self {
+    fn new(live_only: bool, holding: Arc<Holding>) -> Self {
         Self {
-            process: Mutex::default(),
+            holding,
             live_only,
             kept: Mutex::default(),
             gaps: Mutex::default(),
@@ -167,23 +192,35 @@ impl Store {
         }
     }
 
-    /// The stream the running process holds.
+    /// The stream this process holds or last held, as the world counts.
     fn held(&self) -> u64 {
-        self.process.lock().unwrap().0.read_begins()
-    }
-
-    /// The openings the world began in the running process.
-    fn begun(&self) -> u64 {
-        self.process.lock().unwrap().1.load(Ordering::SeqCst)
+        self.holding.stream()
     }
 
     /// A new process runs: what the last one read counts for nothing, and
-    /// every record was written before any of its openings.
-    fn enter(&self, rereads: &Arc<Rereads>, attempts: &Arc<std::sync::atomic::AtomicU64>) {
-        *self.process.lock().unwrap() = (Arc::clone(rereads), Arc::clone(attempts));
+    /// every record is another process's to it.
+    fn enter(&self) {
         self.reads.lock().unwrap().clear();
         for kept in self.kept.lock().unwrap().values_mut() {
-            kept.under = 0;
+            kept.ours = false;
+        }
+    }
+
+    /// O29, the rule since the fifth re-check: a record another process may
+    /// rely on is never erased, nor rewritten into anything but detached,
+    /// while this process holds no stream. `what` names the write (a seed, a
+    /// delete, a rebuild); a detach or a demotion only tightens a record.
+    fn touch(&self, of: &str, what: &str) {
+        if self.holding.holds() {
+            return;
+        }
+        if let Some(kept) = self.kept.lock().unwrap().get(of)
+            && !kept.ours
+        {
+            self.violations.lock().unwrap().push(format!(
+                "{what} of {of} over another process's record ({:?}) with no stream held",
+                kept.detachment.record
+            ));
         }
     }
 
@@ -265,18 +302,17 @@ impl Store {
     }
 
     /// Judge a write of `of`'s change at `at` (`None`: its seed) as it is
-    /// made.
+    /// made, while this process holds a stream: plain writes with none held
+    /// behave as on `main` (late writes of what the lanes hold), and what a
+    /// seed would erase is judged by `touch`.
     fn judge(&self, of: &str, at: Option<u64>) {
+        if !self.holding.holds() {
+            return;
+        }
         let held = self.held();
-        let attempts = self.begun();
         let read = self.read_for(of);
         let at = at.map_or_else(|| "seed".to_owned(), |at| at.to_string());
         let mut violations = self.violations.lock().unwrap();
-        if attempts != held {
-            violations.push(format!(
-                "{of}@{at} written while no stream is current: {attempts} openings begun, {held} held"
-            ));
-        }
         if read < held {
             violations.push(format!(
                 "{of}@{at} written with its records last read under stream {read}, while {held} is held"
@@ -409,6 +445,7 @@ impl Sink for Store {
         mapping: &IndexMapping,
         _: &RecordVersion,
     ) -> sink::Result<()> {
+        self.touch(mapping.index.as_ref(), "a delete");
         self.kept.lock().unwrap().remove(mapping.index.as_ref());
         Ok(())
     }
@@ -432,6 +469,7 @@ impl Sink for Store {
 
     async fn begin_rebuild(&self, mapping: &IndexMapping) -> sink::Result<u64> {
         let of = mapping.index.as_ref();
+        self.touch(of, "a rebuild");
         let attempts = self
             .kept
             .lock()
@@ -484,6 +522,7 @@ impl Sink for Store {
         // The seed writes the marker whole: the record and the gaps go, which
         // stands for a read of them under the stream it was made in.
         let name = of.as_ref();
+        self.touch(name, "a seed");
         self.judge(name, None);
         self.kept.lock().unwrap().remove(name);
         self.gaps.lock().unwrap().remove(name);
@@ -621,13 +660,15 @@ fn event() -> impl Strategy<Value = Event> {
 type Run = (JoinHandle<engine::Result<()>>, mpsc::Sender<SinkControl>);
 
 struct World {
-    source: Arc<NumberedSource>,
     stores: Vec<Arc<Store>>,
     lanes: Vec<LaneKey>,
-    /// The running process's pipeline.
+    /// Whether this process holds a stream, kept by the world alone.
+    holding: Arc<Holding>,
+    /// The running process's pipeline: its own capture, as a real process
+    /// has, starting where the slot confirmed.
+    source: Arc<NumberedSource>,
     progress: Arc<Progress>,
     rereads: Arc<Rereads>,
-    attempts: Arc<std::sync::atomic::AtomicU64>,
     fence: Fence,
     tap: Arc<Tap>,
     stream: Arc<ChannelStream>,
@@ -659,9 +700,9 @@ struct World {
 
 /// One process's pipeline over the stores.
 struct Pipeline {
+    source: Arc<NumberedSource>,
     progress: Arc<Progress>,
     rereads: Arc<Rereads>,
-    attempts: Arc<std::sync::atomic::AtomicU64>,
     fence: Fence,
     tap: Arc<Tap>,
     stream: Arc<ChannelStream>,
@@ -669,13 +710,15 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    fn new(source: &Arc<NumberedSource>, stores: &[Arc<Store>]) -> Self {
-        source.close();
+    /// A process's pipeline, its capture starting where the slot `confirmed`.
+    fn new(confirmed: u64, stores: &[Arc<Store>]) -> Self {
+        let source = Arc::new(NumberedSource::starting_at(confirmed));
+        let source = &source;
         let lanes = lanes();
         let progress = Arc::new(Progress::new(lanes.iter().cloned()));
         let rereads = Arc::new(Rereads::default());
+        rereads.will_open();
         progress.hold_while_unread(Arc::clone(&rereads));
-        let attempts = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let fence = Fence::new(
             Arc::clone(source) as Arc<dyn ChangeCapture>,
             Arc::clone(&progress),
@@ -693,7 +736,7 @@ impl Pipeline {
             SINKS.map(sink),
         ));
         for store in stores {
-            store.enter(&rereads, &attempts);
+            store.enter();
         }
         let engines = SINKS
             .iter()
@@ -719,9 +762,9 @@ impl Pipeline {
             })
             .collect();
         Self {
+            source: Arc::clone(source),
             progress,
             rereads,
-            attempts,
             fence,
             tap,
             stream,
@@ -732,19 +775,19 @@ impl Pipeline {
 
 impl World {
     fn new() -> Self {
-        let source = Arc::new(NumberedSource::default());
+        let holding = Arc::new(Holding::default());
         let stores: Vec<Arc<Store>> = SINKS
             .iter()
-            .map(|name| Arc::new(Store::new(*name == "audit")))
+            .map(|name| Arc::new(Store::new(*name == "audit", Arc::clone(&holding))))
             .collect();
-        let pipeline = Pipeline::new(&source, &stores);
+        let pipeline = Pipeline::new(0, &stores);
         Self {
-            source,
             stores,
             lanes: lanes(),
+            holding,
+            source: pipeline.source,
             progress: pipeline.progress,
             rereads: pipeline.rereads,
-            attempts: pipeline.attempts,
             fence: pipeline.fence,
             tap: pipeline.tap,
             stream: pipeline.stream,
@@ -765,7 +808,12 @@ impl World {
     /// Hand the slot what the running process's progress says landed, as
     /// its ingest engine does after each commit.
     fn confirm(&mut self) {
-        if let Some(SourcePosition(at)) = self.source.reached(self.progress.landed()) {
+        if !self.holding.holds() {
+            return;
+        }
+        let landed = self.progress.landed();
+        self.source.confirm(landed);
+        if let Some(SourcePosition(at)) = self.source.reached(landed) {
             self.confirmed = self.confirmed.max(at);
         }
     }
@@ -787,10 +835,11 @@ impl World {
             })
             .collect();
         replay.sort_by_key(|(_, at)| *at);
-        let pipeline = Pipeline::new(&self.source, &self.stores);
+        self.holding.holds.store(false, Ordering::SeqCst);
+        let pipeline = Pipeline::new(confirmed, &self.stores);
+        self.source = pipeline.source;
         self.progress = pipeline.progress;
         self.rereads = pipeline.rereads;
-        self.attempts = pipeline.attempts;
         self.fence = pipeline.fence;
         self.tap = pipeline.tap;
         self.stream = pipeline.stream;
@@ -971,7 +1020,7 @@ impl World {
     /// A change of `index`, published only while the process holds a stream:
     /// none reaches a lane otherwise.
     fn apply(&mut self, at: usize) {
-        if !self.live || self.attempts.load(Ordering::SeqCst) != self.rereads.read_begins() {
+        if !self.holding.holds() {
             return;
         }
         self.horizon += 5;
@@ -1076,18 +1125,29 @@ impl World {
             .collect()
     }
 
+    /// This process opens its stream at `start`; a failed opening leaves its
+    /// capture closed, as a failed `live()` leaves no stream.
     async fn open(&mut self, ok: bool, start: u64) -> std::result::Result<(), ()> {
-        self.attempts.fetch_add(1, Ordering::SeqCst);
+        self.holding.holds.store(false, Ordering::SeqCst);
         let source = Arc::clone(&self.source);
         let opened = self
             .rereads
             .open(async move {
-                source.closed.store(false, Ordering::SeqCst);
-                source.idle_to(start);
-                if ok { Ok(()) } else { Err(()) }
+                if ok {
+                    source.closed.store(false, Ordering::SeqCst);
+                    source.idle_to(start);
+                    Ok(())
+                } else {
+                    source.close();
+                    Err(())
+                }
             })
             .await;
         self.horizon = self.horizon.max(start);
+        if opened.is_ok() {
+            self.holding.streams.fetch_add(1, Ordering::SeqCst);
+            self.holding.holds.store(true, Ordering::SeqCst);
+        }
         if opened.is_ok() && !self.live {
             self.live = true;
             for (index, at) in std::mem::take(&mut self.replay) {
@@ -1167,7 +1227,9 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
             Event::Seed { lane } => world.seed(lane),
             Event::Horizon { by } => {
                 world.horizon += by;
-                world.source.idle_to(world.horizon);
+                if world.holding.holds() {
+                    world.source.idle_to(world.horizon);
+                }
             }
             Event::Status => {
                 let _ = world.fence.positions();

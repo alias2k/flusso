@@ -833,6 +833,20 @@ impl SinkEngine {
                 })
             })
             .await?;
+        // The source answers a lane that routed nothing at or past where its
+        // stream started (`Landed::Idle`'s contract): a settled end is never
+        // below its gap's start.
+        debug_assert!(
+            settled.iter().all(|gap| match (&gap.from, &gap.to) {
+                (Some(from), Some(to)) =>
+                    self.positions
+                        .as_ref()
+                        .and_then(|positions| positions.compare(from, to))
+                        != Some(std::cmp::Ordering::Greater),
+                _ => true,
+            }),
+            "a settled gap ends below its start: {settled:?}"
+        );
         tracing::warn!(%lane, at = %place, gaps = ?settled, "a gap's end was unknown or not a position the source reads: settled where the lane stands while this process holds the slot; a fence refuses every position inside each gap");
         self.observer.on_lane_gaps(&lane, &settled);
         Ok(())

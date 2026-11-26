@@ -535,10 +535,12 @@ fn item(of: &IndexName, id: i64, position: u64) -> LaneItem {
 }
 
 /// A source whose answer for what landed is the `seq` it covers, as text,
-/// once it is live.
+/// once it is live. A lane that routed nothing stands where the stream
+/// started (`start`, `Landed::Idle`'s contract), `nothing` before any.
 #[derive(Debug, Default)]
 struct Seqs {
     down: std::sync::atomic::AtomicBool,
+    start: std::sync::atomic::AtomicU64,
 }
 
 impl crate::SourcePositions for Seqs {
@@ -546,11 +548,14 @@ impl crate::SourcePositions for Seqs {
         if self.down.load(std::sync::atomic::Ordering::SeqCst) {
             return None;
         }
-        Some(
-            landed
-                .covered_seq()
-                .map_or_else(|| "nothing".to_owned(), |seq| seq.to_string()),
-        )
+        let start = self.start.load(std::sync::atomic::Ordering::SeqCst);
+        Some(landed.covered_seq().map_or_else(
+            || match start {
+                0 => "nothing".to_owned(),
+                start => start.to_string(),
+            },
+            |seq| seq.to_string(),
+        ))
     }
 
     fn parses(&self, text: &str) -> bool {
@@ -2226,12 +2231,16 @@ async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_
     rig.positions
         .down
         .store(false, std::sync::atomic::Ordering::SeqCst);
+    // The stream starts at or past the gap's start (`Landed::Idle`).
+    rig.positions
+        .start
+        .store(1, std::sync::atomic::Ordering::SeqCst);
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     assert!(!read_all(&rig));
     let (task, _control) = spawn(&engine);
     eventually("the gap is completed and kept", || {
         rig.sink.gaps.lock().unwrap().as_slice()
-            == [("users".to_owned(), vec![gap(Some("1"), Some("nothing"))])]
+            == [("users".to_owned(), vec![gap(Some("1"), Some("1"))])]
     })
     .await;
     assert_eq!(
@@ -2241,7 +2250,7 @@ async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_
             .unwrap()
             .last()
             .map(|(_, gap, _)| gap.clone()),
-        Some(vec![gap(Some("1"), Some("nothing"))])
+        Some(vec![gap(Some("1"), Some("1"))])
     );
     eventually("the records count as read", || read_all(&rig)).await;
     task.abort();
@@ -2324,9 +2333,13 @@ async fn a_gap_end_the_source_cannot_read_is_settled_at_a_start() {
     );
     let engine = rig.live_only_engine();
     engine.stage(Continuity::Resumed).await.unwrap();
+    // The stream starts at or past what the gaps hold (`Landed::Idle`).
+    rig.positions
+        .start
+        .store(3, std::sync::atomic::Ordering::SeqCst);
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let (task, _control) = spawn(&engine);
-    let settled = vec![gap(None, Some("2")), gap(Some("3"), Some("nothing"))];
+    let settled = vec![gap(None, Some("2")), gap(Some("3"), Some("3"))];
     eventually("settled once the slot is held", || {
         *rig.sink.gaps.lock().unwrap() == [("users".to_owned(), settled.clone())]
     })

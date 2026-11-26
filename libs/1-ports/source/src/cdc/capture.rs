@@ -37,7 +37,11 @@ pub enum Landed {
     /// engine has routed. A change emitted after it may not be routed yet:
     /// only the mechanism, which knows what it emitted, can tell.
     Through(Position),
-    /// The engine has routed nothing yet.
+    /// The engine has routed nothing yet. [`ChangeCapture::reached`] answers
+    /// it at or past where the current stream started, so at or past
+    /// anything an earlier holder of the slot dropped: the engine settles a
+    /// reattach's gap end where a lane that routed nothing stands, and a gap
+    /// must hold what was dropped (ADR 0012 stage 10, the fifth re-check).
     Idle,
     /// No lane needs anything: every lane is detached (ADR 0012 stage 10).
     /// Everything the mechanism has emitted may be confirmed, and the resume
@@ -236,6 +240,8 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
     ///
     /// The answer keeps moving while the watched tables are idle: with nothing
     /// emitted after what landed, it follows what the mechanism has read.
+    /// [`Landed::Idle`] is never answered below where the current stream
+    /// started (the slot's confirmed position at the opening).
     /// Returns `None` while the mechanism cannot tell (no live stream yet, or
     /// no notion of a source position at all — the default).
     fn reached(&self, landed: Landed) -> Option<SourcePosition> {

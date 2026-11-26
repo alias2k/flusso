@@ -34,9 +34,25 @@ impl std::fmt::Debug for NumberedSource {
 struct Numbered {
     next_seq: u64,
     horizon: u64,
+    /// What `confirm` handed over last, in source positions.
+    confirmed: u64,
 }
 
 impl NumberedSource {
+    /// A capture a new process opens, closed until its stream opens, its
+    /// horizon and confirmed position where the slot confirmed (`at`), as
+    /// the Postgres capture starts at the slot's `confirmed_flush_lsn`.
+    fn starting_at(at: u64) -> Self {
+        let source = Self::default();
+        {
+            let mut state = source.state.lock().unwrap();
+            state.horizon = at;
+            state.confirmed = at;
+        }
+        source.close();
+        source
+    }
+
     /// A single-change commit at source position `at`.
     fn emit(&self, at: u64) -> Position {
         let mut state = self.state.lock().unwrap();
@@ -57,6 +73,21 @@ impl NumberedSource {
 
     fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+    }
+
+    /// What `landed` stands for, as the Postgres capture answers it: `Idle`
+    /// is its horizon while it emitted nothing, else what it confirmed
+    /// (`ack.rs`), never below where its stream started.
+    fn answer(&self, landed: Landed) -> u64 {
+        let state = self.state.lock().unwrap();
+        match landed {
+            Landed::Before(oldest) => oldest.fence_before,
+            Landed::Through(last) if last.seq + 1 == state.next_seq => state.horizon,
+            Landed::Through(last) => last.confirm_through,
+            Landed::Idle if state.next_seq == 0 => state.horizon.max(state.confirmed),
+            Landed::Idle => state.confirmed,
+            Landed::Free => state.horizon,
+        }
     }
 }
 
@@ -81,7 +112,14 @@ impl ChangeCapture for NumberedSource {
             .then(|| self.streams.load(Ordering::SeqCst))
     }
 
-    fn confirm(&self, _: Landed) {}
+    fn confirm(&self, landed: Landed) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let at = self.answer(landed);
+        let mut state = self.state.lock().unwrap();
+        state.confirmed = state.confirmed.max(at);
+    }
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {
         text.parse()
@@ -93,15 +131,7 @@ impl ChangeCapture for NumberedSource {
         if self.closed.load(Ordering::SeqCst) {
             return None;
         }
-        let state = self.state.lock().unwrap();
-        Some(SourcePosition(match landed {
-            Landed::Before(oldest) => oldest.fence_before,
-            Landed::Through(last) if last.seq + 1 == state.next_seq => state.horizon,
-            Landed::Through(last) => last.confirm_through,
-            Landed::Idle if state.next_seq == 0 => state.horizon,
-            Landed::Idle => 0,
-            Landed::Free => state.horizon,
-        }))
+        Some(SourcePosition(self.answer(landed)))
     }
 
     fn on_advance(&self, listener: AdvanceListener) {

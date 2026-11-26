@@ -4,4 +4,5 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc fa5148ae18f1d7bc29aa02b20052ae0a1b87915897ca03f99c8c5280e709cdef # shrinks to events = [HoldReads { sink: 0 }, Open { ok: true, jump: 10, drop: Some(2), rebuild: true }, Apply { index: 0 }, Open { ok: false, jump: 0, drop: None, rebuild: false }, Release { sink: 0 }]
+cc 8c8170fca267c138bf6070b4570a74160a88517981f4b6ea28add6e2a4851616 # CI's case on a9c7bd90: a reattach before the new process's first stream settled its gap at the stand-in's Idle answer, 0
+cc 0b57a55b9bba5af87a35c6ff97321ba59327bae9b091436305dfdd743b4027fd # shrinks to events = [Open { ok: true, jump: 10, drop: Some(2), rebuild: true }, NewProcess, Reindex { index: 0 }]
