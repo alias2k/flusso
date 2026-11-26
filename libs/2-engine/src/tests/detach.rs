@@ -4064,3 +4064,175 @@ async fn a_reindex_whose_stream_ends_while_staging_rewrites_nothing() {
     );
     task.abort();
 }
+
+/// Every request `users`' backfill asks, as the ingest engine would see it.
+fn backfill_asks(
+    rig: &Rig,
+) -> (
+    Arc<Mutex<Vec<stream::Request>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let mut requests = rig.stream.requests().unwrap().consumer;
+    let into = Arc::clone(&asked);
+    let task = tokio::spawn(async move {
+        while let Ok(Some(delivery)) = requests.recv().await {
+            let (request, handle) = delivery.into_parts();
+            handle.ack().await.unwrap();
+            into.lock().unwrap().push(request);
+        }
+    });
+    (asked, task)
+}
+
+/// `users` is backfilling (its backfill asked at staging); the slot is held
+/// and the lanes read. Its ticket.
+async fn backfilling_under_a_held_stream(
+    rig: &Rig,
+    engine: &Arc<SinkEngine>,
+) -> (stream::Ticket, tokio::task::JoinHandle<crate::Result<()>>) {
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(engine);
+    let stream::Request::Backfill { ticket, .. } = next_request(rig).await else {
+        panic!("a backfill is asked at staging");
+    };
+    eventually("read under the stream", || read_all(rig)).await;
+    (ticket, task)
+}
+
+/// The sixth re-check, B-2: a seed met while this process holds no slot, on
+/// a lane parked when the next read runs, still lands once the lane opens:
+/// owed per index, whatever the lane's state at the read.
+#[tokio::test(start_paused = true)]
+async fn a_seed_met_without_the_slot_on_a_lane_parked_at_the_read_lands_once_it_opens() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
+    rig.rereads.closed();
+    assert!(rig.rereads.open(async { Err::<(), ()>(()) }).await.is_err());
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    rig.sink.block(&users(), true);
+    rig.live(&users(), 3, 3).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let health = engine.lane_health(&lane(users()));
+    assert!(
+        matches!(health, LaneHealth::Parked { .. }),
+        "parked before the read: {health:?}"
+    );
+    let (asked, asks) = backfill_asks(&rig);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        rig.rereads.current(&lane(users())),
+        "read again under the new stream"
+    );
+    rig.sink.block(&users(), false);
+    eventually("the parked lane opens and writes", || {
+        written(&rig).contains(&"users/3".to_owned())
+    })
+    .await;
+    eventually("the seed lands, or its backfill is asked again", || {
+        rig.sink
+            .seeded
+            .lock()
+            .unwrap()
+            .contains(&"users".to_owned())
+            || !asked.lock().unwrap().is_empty()
+    })
+    .await;
+    task.abort();
+    asks.abort();
+}
+
+/// The sixth re-check, S-1: one process, nothing detached. A backfill's
+/// `SnapshotComplete` is met while the stream reconnects: its documents are
+/// written already, only the seed waits. Once the slot is held and the
+/// records read again show nothing written over the index, the seed lands:
+/// the backfill is not walked again.
+#[tokio::test(start_paused = true)]
+async fn a_seed_met_without_the_slot_lands_once_held_without_a_new_walk() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
+    rig.rereads.closed();
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        rig.sink.seeded.lock().unwrap().is_empty(),
+        "seeded with no slot held"
+    );
+    let (asked, asks) = backfill_asks(&rig);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("the owed seed lands", || {
+        rig.sink
+            .seeded
+            .lock()
+            .unwrap()
+            .contains(&"users".to_owned())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        asked.lock().unwrap().is_empty(),
+        "walked again: {:?}",
+        asked.lock().unwrap()
+    );
+    task.abort();
+    asks.abort();
+}
+
+/// ... and when the records read again show another process kept a gap
+/// over the index meanwhile, the seed would claim what the gap misses: the
+/// backfill is asked again from the first key instead.
+#[tokio::test(start_paused = true)]
+async fn a_seed_owed_over_a_gap_written_meanwhile_asks_the_backfill_again() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
+    rig.rereads.closed();
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), vec![gap(Some("1"), Some("2"))]);
+    let (asked, asks) = backfill_asks(&rig);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("the backfill is asked again", || {
+        asked.lock().unwrap().iter().any(|request| {
+            matches!(request, stream::Request::Backfill { index, after: None, .. } if *index == users())
+        })
+    })
+    .await;
+    assert!(
+        rig.sink.seeded.lock().unwrap().is_empty(),
+        "seeded over the gap"
+    );
+    task.abort();
+    asks.abort();
+}
