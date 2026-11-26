@@ -18,7 +18,7 @@
 //! | `forget_detachment` | gated (the failed-detach clear, a reattach); ungated only for a finished rebuild's record (`forget_finished`) |
 //! | `reindex` | gated; ungated only for a `Fresh` source's staging (`reindex_at_a_fresh_start`) |
 //! | `begin_rebuild` | gated |
-//! | `demote`, `detach` | ungated (`*_ungated`): they only tighten the record |
+//! | `demote`, `detach` | gated: both delete every generation but the serving one, which may be another process's rebuild |
 //!
 //! ```text
 //! caller: read records, ensure, write a gap …   (awaits; the stream may end)
@@ -129,23 +129,29 @@ impl<'a> Erasing<'a> {
         Ok(self.sink.begin_rebuild(mapping).await)
     }
 
-    /// Put a rebuild back to detached, ungated: it only tightens the record
-    /// (the sixth re-check's S-2 decides whether it waits for the slot).
-    pub(super) async fn demote_ungated(
+    /// Put a rebuild back to detached: every generation but the serving one
+    /// deleted, the walk checkpoint with it, the marker and the record
+    /// rewritten. Gated: what it deletes may be the rebuild another process
+    /// holding the slot is walking (the sixth re-check, S-2).
+    pub(super) async fn demote(
         &self,
         mapping: &IndexMapping,
         live_only: bool,
-    ) -> sink::Result<()> {
-        self.sink.demote(mapping, live_only).await
+    ) -> Result<sink::Result<()>, NotHeld> {
+        self.held()?;
+        Ok(self.sink.demote(mapping, live_only).await)
     }
 
-    /// Detach `mapping`'s index, ungated, as [`demote_ungated`](Self::demote_ungated).
-    pub(super) async fn detach_ungated(
+    /// Detach `mapping`'s index: the marker moved, the record written, every
+    /// generation but the serving one deleted. Gated as
+    /// [`demote`](Self::demote) is.
+    pub(super) async fn detach(
         &self,
         mapping: &IndexMapping,
         detach: &Detach,
-    ) -> sink::Result<Recorded> {
-        self.sink.detach(mapping, detach).await
+    ) -> Result<sink::Result<Recorded>, NotHeld> {
+        self.held()?;
+        Ok(self.sink.detach(mapping, detach).await)
     }
 }
 

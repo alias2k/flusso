@@ -347,8 +347,9 @@ enum Outcome {
     Restage(Result<bool>),
     /// The retry of a reindex a lane is owed (X15).
     Reindex(Reindexed),
-    /// A lane's detach, recorded by the sink (ADR 0012 stage 10, R4).
-    Detach(sink::Result<sink::Recorded>),
+    /// A lane's detach, recorded by the sink (ADR 0012 stage 10, R4);
+    /// refused when this process held no slot right before it.
+    Detach(std::result::Result<sink::Result<sink::Recorded>, super::slot::NotHeld>),
     /// A record a failed detach may have left, deleted before the lane's
     /// probe.
     Clear(Result<()>),
@@ -3237,6 +3238,17 @@ impl<'a> Run<'a> {
                         self.drop_rebuild(lane);
                     }
                 }
+                // What the records ask waits for the slot (the stream ended
+                // while reading): taken as detached, the read not counted.
+                super::Acted::Unheld { why, through } => {
+                    if rebuilding {
+                        self.drop_rebuild(lane);
+                    }
+                    if !detached {
+                        self.detached(lane, why, through).await?;
+                    }
+                    continue;
+                }
                 super::Acted::Ours | super::Acted::TookOver(_) => {}
             }
             // The lane's state now follows its records: its read counts.
@@ -3458,7 +3470,7 @@ impl<'a> Run<'a> {
             let erasing = self.engine.erasing();
             let record = async move {
                 let started = Instant::now();
-                let result = erasing.detach_ungated(mapping, &detach).await;
+                let result = erasing.detach(mapping, &detach).await;
                 Landed {
                     flight,
                     outcome: Outcome::Detach(result),
@@ -3479,7 +3491,7 @@ impl<'a> Run<'a> {
     async fn detach_returned(
         &mut self,
         flight: u64,
-        result: sink::Result<sink::Recorded>,
+        result: std::result::Result<sink::Result<sink::Recorded>, super::slot::NotHeld>,
     ) -> Result<()> {
         let Some(at) = self.detaching.iter().position(|(id, _)| *id == flight) else {
             return Ok(());
@@ -3490,6 +3502,18 @@ impl<'a> Run<'a> {
         };
         let why = run.detach_due.take().unwrap_or_default();
         let through = run.detach_through.take();
+        // O29: a detach deletes every generation but the serving one, which
+        // may be another process's rebuild: with no slot held nothing was
+        // sent, and the lane stays as it was, detaching at its next refused
+        // probe or staging once the slot is held.
+        let Ok(result) = result else {
+            if matches!(run.health.health, LaneHealth::Restaging { .. }) {
+                run.health.restage_failed(Instant::now());
+            }
+            tracing::warn!(lane = %run.key, "this process holds no slot: the detach waits; the lane stays as it was");
+            self.engine.store_lane(&run.key, &run.health, false);
+            return Ok(());
+        };
         match result {
             Ok(sink::Recorded::Kept) => return self.detached(lane, why, through).await,
             Ok(_) => {
@@ -3721,10 +3745,14 @@ impl<'a> Run<'a> {
             };
             let why = "a reindex restarts the rebuild, which was parked or restaging (O20)";
             let detach = sink::Detach::new(why).live_only(!self.engine.options.backfill);
-            match self.engine.erasing().detach_ungated(mapping, &detach).await {
-                Ok(sink::Recorded::Kept) => self.detached(lane, why.to_owned(), None).await?,
-                Ok(_) => continue,
-                Err(error) => {
+            match self.engine.erasing().detach(mapping, &detach).await {
+                Err(super::slot::NotHeld) => {
+                    tracing::warn!(%index, "this process holds no slot: the rebuild is not restarted; it goes on as it was");
+                    continue;
+                }
+                Ok(Ok(sink::Recorded::Kept)) => self.detached(lane, why.to_owned(), None).await?,
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => {
                     tracing::warn!(%index, %error, "could not detach the rebuild to restart it; it goes on as it was");
                     continue;
                 }
