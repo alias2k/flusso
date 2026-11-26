@@ -113,7 +113,11 @@ pub(crate) fn of(
 /// warn about them again.
 pub(crate) fn reported(gaps: &[Gap]) -> source_postgres::ReportedGaps {
     source_postgres::ReportedGaps {
-        publication: gaps.iter().any(|gap| gap.kind == GapKind::Publication),
+        publication: gaps
+            .iter()
+            .filter(|gap| gap.kind == GapKind::Publication)
+            .map(|gap| gap.table.clone())
+            .collect(),
         replica_identity: gaps
             .iter()
             .filter(|gap| gap.kind == GapKind::ReplicaIdentity)
@@ -211,13 +215,16 @@ mod tests {
             gap(GapKind::Publication, "orders"),
             gap(GapKind::ReplicaIdentity, "items"),
         ]);
-        assert!(both.publication);
+        assert_eq!(
+            both.publication,
+            std::collections::BTreeSet::from([table("orders")])
+        );
         assert_eq!(
             both.replica_identity,
             std::collections::BTreeSet::from([table("items")])
         );
         let none = reported(&[gap(GapKind::ReplicaIdentity, "items")]);
-        assert!(!none.publication);
+        assert!(none.publication.is_empty());
     }
 
     fn coverage(manageable: bool) -> CoverageReport {
