@@ -2068,8 +2068,12 @@ that starting flusso does not make work as its schema says is an `Error`, whatev
 where it says one value) and `IdsElementLossy` (other ids than the table's) are errors that still
 start without `--strict`; `IgnoredPrimaryKey`, `CheckSkipped`, `DuplicateFieldName` and
 `TimestampFormat` stay warnings. Each `Error` the start goes on with is a `tracing::error!` event
-(`index`, `kind`, `field`, the message) at every start and a value of the
-`flusso.index.schema_errors{index,kind}` gauge (`telemetry/schema_errors.rs`). No opt-out
+(target `flusso::schema_errors`; `index`, `kind`, `field`, the message) at every start and a value
+of the `flusso.index.schema_errors{index,kind}` gauge (`telemetry/schema_errors.rs`). Under OTLP the
+event is a span event of the `daemon.start` span: the CLI has no OTel log bridge. One copy per
+reader of stderr (`schema_errors::Reader`): at a terminal the start's report prints it and the stderr
+log leaves the event out (a per-layer filter in `telemetry/mod.rs`); into a log the event is the copy
+and the report leaves it out; a refused start prints everything. No opt-out
 flag. The stopping kinds apply only where every document carries the value, mapped as declared:
 the root and plain objects (`validation.rs`'s `carries`: a `Group`, emitted, no `options`); a pair
 elsewhere is the plain `DuplicateFieldName`. `TimeOfDayAsDate` (issue #309): a `time`/`timetz`
