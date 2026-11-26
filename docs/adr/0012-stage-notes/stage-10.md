@@ -1,6 +1,6 @@
 # Stage 10 design: detach a stalled index, rebuild it later (#394)
 
-**Status:** decided by the owner on 2026-11-24. Every decision in §11 is taken, and the slice order in §10 is accepted. Slice 1 (reading the records at staging) is built; slice 2 is being built in four steps (§10a); slices 3 to 6 are not.
+**Status:** decided by the owner on 2026-11-24. Every decision in §11 is taken, and the slice order in §10 is accepted. Slice 1 (reading the records at staging) is built; slice 2 is being built in four steps (§10a): steps 1 and 2 are built; slices 3 to 6 are not.
 
 **Three consequences the owner accepted knowingly** (§11):
 
@@ -155,7 +155,7 @@ Two documents in the meta index, besides the seed marker:
   ```json
   { "state": "detached" | "rebuilding", "live_only": false,
     "serving": 3, "why": "blocked: index.blocks.write",
-    "refused_keys": [<RowKey>…], "attempts": 2, "last_attempt": "…", "since": "…" }
+    "refused_keys": "[<RowKey>…]", "attempts": 2, "last_attempt": "…", "since": "…" }
   ```
 
 - **`stuck:{hash_alias}`, the stuck clock:** `{ "since": "…", "seen_at": "…" }`.
@@ -586,6 +586,50 @@ Written at the start of slice 2's implementation, after #479 (PR #483) merged. S
    - a walk of `I` for `L` runs on and is acknowledged as before.
    It costs builds, not correctness.
 6. **The discard is acknowledged one item at a time.** A detached lane takes its next delivery only once the previous discard's acknowledgement returned, in the run loop (R6, H3).
+
+### Step 2 as built
+
+**What it does.**
+
+- **The ask.** `SinkControl::Detach { index }` sets `LaneState.detach_asked`. Only tests send it.
+- **The record.** `Sink::detach` returns `Recorded::Kept` or, by default, `NotKept`. The OpenSearch sink writes d2b, d2a and d2c, each conditional on an `_mget` read just before it; a `409` reads again, at most five rounds.
+- **The lane.** On `Kept`, in this order:
+  1. the health becomes `LaneHealth::Detached`, and the daemon fence hears it first, freezing `Serving::Detached { through }`;
+  2. `Progress::detach`;
+  3. `forget_detached`: the sink's fence entries, a pending reindex of the index, and the outstanding backfill marked cut;
+  4. everything of the lane in the window or held is acknowledged unwritten, then every later delivery.
+- **Staging.** `AtStaging` reads the rows of §4 that a detach can leave:
+  - `detached` → detached;
+  - a seeded marker elsewhere → finished: the record is deleted on the version read (`Sink::forget_detachment`, new), and the index staged as before;
+  - `detached`, not live only, with the marker on `serving` → `Sink::detach` again;
+  - `rebuilding` and unreadable records → staged as before, until step 4.
+- **A staging during a run** (a restage, a reindex) that finds the index detached is adopted by the run, which detaches the lane instead of reopening it.
+
+**Corrections the build made.**
+
+7. **`refused_keys` is stored as JSON text** (§4 corrected). The meta index maps its fields dynamically, and keys of different types across indexes would refuse each other.
+8. **The fence answers `detached` at once with the position it froze.** After a restart that is empty, since nothing was frozen (O2's "detached at once").
+9. **`/status` shows the lane `detached`.** It is left out of `flusso.lane.parked`. `flusso.lane.detached`, the alert and the other §9 fields come with step 4 and slice 4.
+10. **A reindex of a detached index is ignored and logged until step 4,** which makes it force the rebuild (R13).
+11. **A failed record of a restaging lane waits the staging backoff** before its next due staging tries again, so a meta index refusing every write is not a loop.
+
+**What the tests prove, and what they don't.**
+
+- **Proven by the sink's kill matrix** (`detachment::tests::record`): over a stand-in meta store, a detach killed before each of its writes leaves, for the next staging's read:
+  - before d2b: nothing kept, the marker untouched;
+  - after d2b: the marker put back as it was;
+  - after d2a: detached, the marker elsewhere unseeded, the stale generation still there;
+  - after d2c: the same, with the stale generation gone.
+  The serving generation is never touched.
+- **Proven by the engine tests** (`tests::detach`, on paused time, over the real sink engine and channel stream):
+  - the refused probe;
+  - the restaging lane;
+  - the drain through a lane of two;
+  - nothing of a detached index reaching `write`;
+  - a run dying mid-record, which asks again;
+  - a restarted run, which writes nothing of the lane;
+  - every staging row.
+- **Not proven:** the kill matrix against a live OpenSearch (stand-in only), and a detach meeting a running backfill walk of the index on the ingest side (R7 is step 3's).
 
 ## 11. Decisions
 

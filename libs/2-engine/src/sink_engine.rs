@@ -144,6 +144,12 @@ pub enum SinkControl {
     /// Rebuild `indexes` into fresh generations: stage them and request a
     /// snapshot. Handled between two batches; nothing restarts.
     Reindex { indexes: Vec<IndexName> },
+    /// Detach `index`'s lane from the slot's minimum (ADR 0012 stage 10): at
+    /// its next probe the destination refuses, or its next staging, the sink
+    /// records the detach and the lane stops holding the slot. Nothing sends
+    /// it yet: the thresholds that will come in a later slice (there is no
+    /// operator command, O12).
+    Detach { index: IndexName },
 }
 
 /// What staging does to one index.
@@ -309,15 +315,10 @@ impl SinkEngine {
     fn read_detachment(&self, index: &IndexName, detachment: sink::Detachment) {
         let sink = &self.name;
         match &detachment.record {
-            None => {}
-            Some(
-                sink::DetachRecord::Detached { live_only: true }
-                | sink::DetachRecord::Rebuilding { live_only: true },
-            ) => {
+            // Acted on by the staging step (`AtStaging`).
+            None | Some(sink::DetachRecord::Detached { .. }) => {}
+            Some(sink::DetachRecord::Rebuilding { live_only: true }) => {
                 tracing::error!(%index, %sink, "a detach record says a newer flusso detached this index on a sink it can't rebuild (live only); this version can't act on it and stages the index as before, as its seed marker says. Changes made while it was detached are missing from it until their rows change again");
-            }
-            Some(sink::DetachRecord::Detached { .. }) => {
-                tracing::error!(%index, %sink, "a detach record says a newer flusso detached this index; this version can't act on it and stages the index as before, as its seed marker says. Changes made while it was detached reach the index only through a backfill of it");
             }
             Some(sink::DetachRecord::Rebuilding { .. }) => {
                 tracing::error!(%index, %sink, "a detach record says a newer flusso was rebuilding this index after detaching it; this version can't act on it and stages the index as before, as its seed marker says");
@@ -340,6 +341,43 @@ impl SinkEngine {
             detachments.remove(index);
         } else {
             detachments.insert(index.clone(), detachment);
+        }
+    }
+
+    /// Staging found `index` detached (ADR 0012 stage 10): its lane is
+    /// detached for `why`, its fence frozen first (the observers hear the
+    /// health), then out of the slot's minimum (R5). Nothing is ensured or
+    /// asked for.
+    fn staged_detached(&self, index: &IndexName, why: String) -> Staged {
+        let lane = LaneKey::new(index.clone(), self.name.clone());
+        let mut state = self.lane_state(&lane);
+        let changed = state.detach(why.clone(), Instant::now());
+        if changed {
+            tracing::warn!(%lane, %why, "staged detached: nothing of the index is written, and reads of it are frozen at the detach; the other indexes go on");
+        }
+        self.store_lane(&lane, &state, changed);
+        self.progress.detach(&lane);
+        self.forget_detached(&lane);
+        Staged::Detached
+    }
+
+    /// What the engine keeps for a lane it no longer writes (R6): its fence
+    /// entries, a reindex pending for its index; an outstanding backfill
+    /// stays, cut, so nothing of it seeds the index.
+    pub(super) fn forget_detached(&self, lane: &LaneKey) {
+        self.lock_fences().forget_lane(lane);
+        {
+            let mut pending = self.lock_pending_reindex();
+            if let Some(indexes) = pending.as_mut() {
+                indexes.retain(|index| *index != lane.index);
+                if indexes.is_empty() {
+                    *pending = None;
+                    self.reindex_waiting.store(false, Ordering::Release);
+                }
+            }
+        }
+        if let Some(asked) = self.lock_outstanding().get_mut(&lane.index) {
+            asked.cut = true;
         }
     }
 
@@ -638,7 +676,7 @@ impl SinkEngine {
         for (mapping, staged) in seeded {
             let index = mapping.index.clone();
             match staged {
-                Staged::Seeded => {}
+                Staged::Seeded | Staged::Detached => {}
                 Staged::Unseeded { target, .. } if already_requested.contains(&index) => {
                     if self.is_cut(&index) {
                         cut.push((index, target));
@@ -965,7 +1003,24 @@ impl SinkEngine {
         // Before anything else touches the index (ADR 0012 stage 10): a
         // failed read fails the step, never reads as "no record".
         let detachment = self.sink.detachment(mapping).await?;
+        let found = AtStaging::of(&detachment);
         self.read_detachment(&mapping.index, detachment);
+        match found {
+            AtStaging::AsBefore => {}
+            AtStaging::Detached(why) => return Ok(self.staged_detached(&mapping.index, why)),
+            AtStaging::Finished(version) => {
+                self.sink.forget_detachment(mapping, &version).await?;
+                tracing::info!(index = %mapping.index, sink = %self.name, "a detach record outlived the rebuild that finished it; deleted, and the index is staged as before");
+            }
+            AtStaging::DetachAgain => {
+                let why = "the detach record says detached while the seed marker is on the \
+                           generation reads see; detached again at staging";
+                let detach = sink::Detach::new(why).live_only(!self.options.backfill);
+                if self.sink.detach(mapping, &detach).await? == sink::Recorded::Kept {
+                    return Ok(self.staged_detached(&mapping.index, why.to_owned()));
+                }
+            }
+        }
         let (ask_seeded, restaged) = match step {
             Step::Ensure { ask_seeded } => (ask_seeded, false),
             Step::Restage => (self.options.backfill, true),
@@ -1201,9 +1256,12 @@ impl SinkEngine {
             if chosen.iter().any(|m: &&IndexMapping| m.index == index) {
                 continue;
             }
-            let open = self
-                .lane_health(&LaneKey::new(index.clone(), self.name.clone()))
-                .is_open();
+            let health = self.lane_health(&LaneKey::new(index.clone(), self.name.clone()));
+            if health.is_detached() {
+                tracing::warn!(%index, sink = %self.name, "reindex requested for a detached index; ignoring: this version doesn't rebuild one yet");
+                continue;
+            }
+            let open = health.is_open();
             if outstanding.contains(&index) && open {
                 tracing::warn!(%index, "reindex requested while its snapshot is still outstanding; ignoring");
                 continue;
@@ -1272,6 +1330,9 @@ impl SinkEngine {
             let target = match staged {
                 Staged::Unseeded { target, .. } => target,
                 Staged::Seeded => None,
+                // Detached by what staging found: the run takes the lane as
+                // detached, nothing is rebuilt.
+                Staged::Detached => continue,
             };
             let asked = if outstanding.contains(&index) {
                 tracing::warn!(%index, sink = %self.name, "reindex during a backfill: the backfill is cut and asked for again");
@@ -1329,12 +1390,62 @@ pub(super) struct Reindexed {
 #[derive(Debug, Clone, PartialEq)]
 enum Staged {
     Seeded,
+    /// Detached (ADR 0012 stage 10): not ensured, not backfilled, its lane
+    /// out of the slot's minimum.
+    Detached,
     /// Unseeded, with where its last backfill durably got, if recorded, and
     /// the target staging found, if the sink names it.
     Unseeded {
         walked: Option<WalkMark>,
         target: Option<TargetId>,
     },
+}
+
+/// What a staging does with what an index's detach records say (ADR 0012
+/// stage 10, §4). A `rebuilding` record is staged as before until this
+/// version rebuilds (slice 2, step 4): its marker moved first, so that is a
+/// rebuild of the index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AtStaging {
+    /// No record, or one this version doesn't act on: staged as before.
+    AsBefore,
+    /// Detached, for this reason: not ensured, not backfilled.
+    Detached(String),
+    /// A rebuild seeded the marker's generation since (an older flusso's,
+    /// or one that died before deleting the record): the record is deleted
+    /// and the index staged as before.
+    Finished(sink::RecordVersion),
+    /// Detached, yet the marker is on the generation reads see (restored by
+    /// hand, or a late record of a dead process): detached again.
+    DetachAgain,
+}
+
+impl AtStaging {
+    fn of(detachment: &sink::Detachment) -> Self {
+        use sink::{DetachRecord, MarkerAt};
+        let Some(record) = &detachment.record else {
+            return Self::AsBefore;
+        };
+        let detached = match record {
+            DetachRecord::Detached { live_only } => Some(*live_only),
+            DetachRecord::Rebuilding { .. } => None,
+            _ => return Self::AsBefore,
+        };
+        if let (Some(MarkerAt::Elsewhere { seeded: true }), Some(version)) =
+            (detachment.marker, &detachment.version)
+        {
+            return Self::Finished(version.clone());
+        }
+        match (detached, detachment.marker) {
+            (None, _) => Self::AsBefore,
+            (Some(false), Some(MarkerAt::Serving { .. })) => Self::DetachAgain,
+            (Some(live_only), _) => Self::Detached(if live_only {
+                "the detach record says detached, live only".to_owned()
+            } else {
+                "the detach record says detached".to_owned()
+            }),
+        }
+    }
 }
 
 /// A staging step of `index` failed with `error`.

@@ -1846,15 +1846,42 @@ is the one concrete piece.
   with no restart; a generation deleted mid-run staged again alone), and `flusso-cli`'s `shutdown`
   `a_stop_with_a_write_blocked_lane_gives_up_at_the_deadline_naming_the_lane_and_a_restart_converges`.
   Detaching a lane stuck past a threshold and rebuilding its index (#394) is decided in
-  `docs/adr/0012-stage-notes/stage-10.md`; only slice 1 is built. Every staging step reads the
-  detach records first (`Sink::detachment`, before `reindex` and `ensure_index`; OpenSearch:
+  `docs/adr/0012-stage-notes/stage-10.md`; slice 1 and slice 2's step 2 (the detach, §10a) are
+  built, reachable only from tests: nothing sends `SinkControl::Detach` yet. Every staging step reads
+  the detach records first (`Sink::detachment`, before `reindex` and `ensure_index`; OpenSearch:
   `detachment.rs`, one `_mget` of the seed marker, `detach:{alias}` and `stuck:{alias}`). Only a
   missing meta index or document reads as nothing kept; any other answer fails the step (the index
-  restaging alone under `Resumed`, the staging under `Fresh`). A record is logged and the index
-  staged as before (O24), kept in `SinkEngine::detachment`; a marker carrying `detaching_from` with
+  restaging alone under `Resumed`, the staging under `Fresh`). A marker carrying `detaching_from` with
   no record is put back, conditionally, and one this version can't read is logged and staged as
-  before. Each `_mget` entry must answer for the id asked, found or not found. Guards: `tests::records`, `detachment::tests`, and
-  `seeding`'s live cases (`staging_reads_the_records_in_one_request_then_asks_what_it_asked_before`).
+  before. Each `_mget` entry must answer for the id asked, found or not found. What a record means
+  is `sink_engine.rs`'s `AtStaging`: `detached` → `Staged::Detached` (not ensured, not backfilled,
+  the lane detached); a seeded marker elsewhere → the record is deleted (`forget_detachment`, on the
+  version read) and staged as before; `detached` with the marker on serving → `Sink::detach` again;
+  `rebuilding` and unreadable → kept and staged as before (O24) until step 4. **The detach** (R4–R6):
+  `SinkControl::Detach` sets `LaneState.detach_asked`; the lane detaches at its next probe the
+  destination refuses (`hold` with `probe`) or, restaging, when its staging comes due instead of
+  staging; a landed probe or staging drops the ask. Once nothing of the lane is in flight
+  (`start_detaches`) the sink records it (`Sink::detach`, OpenSearch `detachment/record.rs`: the
+  marker moved first past every generation keeping `detaching_from`, then the record created or
+  replaced on its version, then unserved generations deleted, best effort; every write conditional
+  on the `_mget` before it, a 409 reads again; `refused_keys` as JSON text). `Kept` only: the lane's
+  health becomes `LaneHealth::Detached` (stored first, so the daemon fence's `FenceObserver` freezes
+  `Serving::Detached { through }` before the lane moves), then `Progress::detach` (out of every
+  minimum, its backlog too; registrations ignored; kept by `forget_all`; with no attached lane
+  `landed()` is `Landed::Free`), then `forget_detached` (sink `Fences::forget_lane`, a pending
+  reindex of it, its outstanding backfill cut), then every item of it in the window or held is
+  acknowledged unwritten, and each later delivery is too, one at a time (`discards`, acknowledged at
+  the top of `advance` before the next is taken). `NotKept` (the default) drops the ask; an error
+  keeps it. A fence past `through` answers `Unserved::Detached` at once, never "not following";
+  `/status` shows the lane `detached`, not counted in `flusso.lane.parked`. A reindex of a detached
+  index is ignored until step 4. Guards: `tests::records`, `tests::detach` (a refused probe, the
+  drain, a restaging lane, a landed probe dropping the ask, `NotKept`, a failed record, a run dying
+  mid-record, a restarted run, a reindex, every staging pair), `progress::tests::detach`,
+  `detachment::tests` and `detachment::tests::record` (the kill matrix over a stand-in meta store:
+  killed before each write, the next staging reads nothing kept, the marker put back, or detached),
+  the daemon's `fence::tests::a_detached_lane_answers_at_once` /
+  `a_lane_detached_before_the_start_answers_detached_at_once`, and `seeding`'s live cases
+  (`staging_reads_the_records_in_one_request_then_asks_what_it_asked_before`).
 - **A document a script fails on is decided on the ingest side (issue #198).** A
   `DocumentBuilder` may return `Document::Failed { id, failure: BuildFailure }`; the ingest engine
   resolves the index's `FailurePolicies` (the same `on_error` the sink engines use, handed to it by

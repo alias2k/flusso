@@ -225,7 +225,13 @@ fn lane_parked_gauge(
             "1 while an (index, sink) lane is not written: refused, blocked or restaging",
         )
         .with_callback(move |observer| {
-            for (lane, view) in status.unhealthy_lanes() {
+            // A detached lane is not parked: it has its own state, and its
+            // own alert to come (ADR 0012 stage 10).
+            for (lane, view) in status
+                .unhealthy_lanes()
+                .into_iter()
+                .filter(|(_, view)| view.state != daemon::LaneHealthState::Detached)
+            {
                 observer.observe(
                     1,
                     &[

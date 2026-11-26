@@ -1911,6 +1911,7 @@ async fn stop_policy_fails_the_ingest_engine_on_a_failed_document() {
 mod builders;
 mod busy;
 mod concurrent;
+mod detach;
 mod gone;
 mod keys;
 mod lanes;

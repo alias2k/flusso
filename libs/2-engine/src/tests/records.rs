@@ -305,11 +305,14 @@ async fn a_failed_read_fails_a_fresh_staging() {
     assert!(error.to_string().contains("answered 503"), "{error}");
 }
 
-/// A record left by a newer flusso, or one this version can't read, is kept
-/// for its lane and the index is staged as before (O24): ensured, asked
-/// whether seeded, its backfill asked for when unseeded.
+/// A record this version doesn't act on yet (`rebuilding`, until slice 2's
+/// step 4) or can't read is kept for its lane and the index is staged as
+/// before (O24): ensured, asked whether seeded, its backfill asked for when
+/// unseeded. A `detached` record is kept too, and its index staged detached:
+/// neither ensured nor asked for (slice 2, step 2; every pair is in
+/// `detach.rs`).
 #[tokio::test(start_paused = true)]
-async fn a_record_found_is_kept_for_its_lane_and_staged_as_before() {
+async fn a_record_found_is_kept_for_its_lane_and_acted_on_or_staged_as_before() {
     let mut rebuilding = Detachment::default();
     rebuilding.record = Some(DetachRecord::Rebuilding { live_only: false });
     let mut unreadable = Detachment::default();
@@ -333,7 +336,16 @@ async fn a_record_found_is_kept_for_its_lane_and_staged_as_before() {
     let (engine, stream) = engine(Arc::clone(&sink) as Arc<dyn Sink>, 5);
     engine.stage(Continuity::Resumed).await.unwrap();
 
-    for i in 0..5 {
+    for i in 0..2 {
+        assert_eq!(
+            sink.plain.calls.of(&name(i)),
+            ["detachment"],
+            "{} is staged detached",
+            name(i)
+        );
+        assert_eq!(engine.lane_health(&lane(i)).kind(), "detached");
+    }
+    for i in 2..5 {
         assert_eq!(
             sink.plain.calls.of(&name(i)),
             ["detachment", "ensure", "seeded?"],
@@ -349,13 +361,8 @@ async fn a_record_found_is_kept_for_its_lane_and_staged_as_before() {
     assert_eq!(engine.detachment(&index(4)), None, "nothing kept");
     assert_eq!(
         requests(&stream).await,
-        [
-            (name(0), None),
-            (name(2), None),
-            (name(3), None),
-            (name(4), None)
-        ],
-        "every unseeded index is asked for, the seeded one is not"
+        [(name(2), None), (name(3), None), (name(4), None)],
+        "every unseeded index staged as before is asked for; a detached one is not"
     );
 }
 

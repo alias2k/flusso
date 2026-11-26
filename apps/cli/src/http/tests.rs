@@ -564,7 +564,9 @@ async fn a_reindex_is_queued_on_the_index_path() {
         .get_mut(&SinkName::try_new("primary").unwrap())
         .unwrap();
     for expected in ["users", "orders"] {
-        let daemon::SinkControl::Reindex { indexes } = primary.try_recv().unwrap();
+        let daemon::SinkControl::Reindex { indexes } = primary.try_recv().unwrap() else {
+            panic!("a reindex was sent");
+        };
         assert_eq!(indexes, vec![index(expected)]);
     }
     let (code, _) = post_reindex(&base, "/reindex?index=users").await;

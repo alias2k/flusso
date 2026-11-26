@@ -125,7 +125,10 @@ pub enum FenceOutcome {
     TimedOut { position: String },
     /// The timeout passed while some lane the wait needs serves reads from
     /// elsewhere than it writes: it can't be vouched for until it is seeded.
-    /// `lanes` are those lanes; `position` is how far the wait got.
+    /// Or, at once, a lane the wait needs is detached and froze short of the
+    /// position (ADR 0012 stage 10). `lanes` are those lanes; `position` is
+    /// how far the wait got, empty when no lane can say (a lane detached
+    /// before this process started).
     Unserved {
         position: String,
         lanes: Vec<(LaneKey, Unserved)>,
@@ -143,6 +146,9 @@ pub enum Unserved {
     Backfilling,
     /// A fresh generation is being built while reads see the old one.
     Rebuilding,
+    /// Detached (ADR 0012 stage 10): reads are frozen at the detach, and a
+    /// wait past it is answered at once.
+    Detached,
 }
 
 impl Unserved {
@@ -152,6 +158,7 @@ impl Unserved {
             Unserved::Starting => "starting",
             Unserved::Backfilling => "backfilling",
             Unserved::Rebuilding => "rebuilding",
+            Unserved::Detached => "detached",
         }
     }
 }
@@ -281,6 +288,11 @@ enum Serving {
     Rebuilding {
         through: (Option<SourcePosition>, Option<SourcePosition>),
     },
+    /// The index as it stood at the detach, at `through` (applied,
+    /// searchable): nothing since reaches it. `None` after a restart.
+    Detached {
+        through: (Option<SourcePosition>, Option<SourcePosition>),
+    },
 }
 
 impl Serving {
@@ -288,7 +300,7 @@ impl Serving {
     fn vouches(self, level: FenceLevel, reached: Option<SourcePosition>) -> Option<SourcePosition> {
         match self {
             Serving::Writes => reached,
-            Serving::Rebuilding { through } => match level {
+            Serving::Rebuilding { through } | Serving::Detached { through } => match level {
                 FenceLevel::Applied => through.0,
                 FenceLevel::Searchable => through.1,
             },
@@ -302,6 +314,7 @@ impl Serving {
             Serving::Pending => Some(Unserved::Starting),
             Serving::Backfilling => Some(Unserved::Backfilling),
             Serving::Rebuilding { .. } => Some(Unserved::Rebuilding),
+            Serving::Detached { .. } => Some(Unserved::Detached),
         }
     }
 }
@@ -375,7 +388,23 @@ impl Fence {
         self.serve(lane, |furthest| Serving::Rebuilding {
             through: match furthest.serving {
                 Serving::Writes => (furthest.applied, furthest.searchable),
-                Serving::Rebuilding { through } => through,
+                Serving::Rebuilding { through } | Serving::Detached { through } => through,
+                Serving::Pending | Serving::Backfilling => (None, None),
+            },
+        });
+    }
+
+    /// `lane` is detached (ADR 0012 stage 10, R5): reads stay as they were,
+    /// so the lane vouches for what it had reached, frozen, before it leaves
+    /// the slot's minimum; a rebuild under way vouches for what it froze.
+    /// Heard before the lane leaves the minimum, so `through` is read off its
+    /// own answer.
+    fn detached(&self, lane: &LaneKey) {
+        self.reached(lane, FenceLevel::Searchable);
+        self.serve(lane, |furthest| Serving::Detached {
+            through: match furthest.serving {
+                Serving::Writes => (furthest.applied, furthest.searchable),
+                Serving::Rebuilding { through } | Serving::Detached { through } => through,
                 Serving::Pending | Serving::Backfilling => (None, None),
             },
         });
@@ -432,6 +461,14 @@ impl Fence {
     /// over idle WAL. Searchable never runs ahead of applied.
     fn reached(&self, lane: &LaneKey, level: FenceLevel) -> Option<SourcePosition> {
         let mut furthest = lock(self.inner.lanes.get(lane)?);
+        // A detached lane is out of the minimum: what it answers now is not
+        // what reads of it see.
+        if let Serving::Detached { through } = furthest.serving {
+            return match level {
+                FenceLevel::Applied => through.0,
+                FenceLevel::Searchable => through.1,
+            };
+        }
         let applied = self
             .inner
             .progress
@@ -498,8 +535,27 @@ impl Fence {
             let mut vouched: Option<SourcePosition> = None;
             let mut short = false;
             let mut unserved = Vec::new();
+            let mut detached = false;
             for lane in lanes.iter().copied() {
                 let (reached, vouches, why) = self.vouched(lane, request.level);
+                // A detached lane never moves: past what it froze, the wait
+                // is answered at once, and it never reads as "not following".
+                if why == Some(Unserved::Detached) {
+                    if let Some(reached) = reached {
+                        slowest = Some(slowest.map_or(reached, |low| low.min(reached)));
+                    }
+                    match vouches.filter(|vouches| *vouches >= target) {
+                        Some(vouches) => {
+                            vouched = Some(vouched.map_or(vouches, |low| low.min(vouches)));
+                        }
+                        None => {
+                            detached = true;
+                            short = true;
+                            unserved.push((lane.clone(), Unserved::Detached));
+                        }
+                    }
+                    continue;
+                }
                 let Some(reached) = reached else {
                     return Err(FenceError::Unavailable(
                         "the source is not following live changes yet".to_owned(),
@@ -517,6 +573,13 @@ impl Fence {
                         }
                     }
                 }
+            }
+            if detached {
+                let position = slowest.map_or_else(String::new, |at| source.format_position(at));
+                return Ok(FenceOutcome::Unserved {
+                    position,
+                    lanes: unserved,
+                });
             }
             let Some(slowest) = slowest else {
                 return Err(FenceError::Unavailable(
@@ -676,6 +739,12 @@ impl Observer for FenceObserver {
 
     fn on_sink_started(&self, sink: &SinkName) {
         self.fence.started(sink);
+    }
+
+    fn on_lane_health(&self, lane: &LaneKey, health: &engine::LaneHealth) {
+        if health.is_detached() {
+            self.fence.detached(lane);
+        }
     }
 }
 

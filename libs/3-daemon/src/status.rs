@@ -142,16 +142,20 @@ pub enum LaneHealthState {
     Blocked,
     /// Its target was gone: the index is being staged again.
     Restaging,
+    /// Detached from the slot's minimum (ADR 0012 stage 10): nothing of it
+    /// is written, and reads of its index are frozen at the detach.
+    Detached,
 }
 
 impl LaneHealthState {
-    /// `open`, `refused`, `blocked` or `restaging`.
+    /// `open`, `refused`, `blocked`, `restaging` or `detached`.
     pub fn name(self) -> &'static str {
         match self {
             LaneHealthState::Open => "open",
             LaneHealthState::Refused => "refused",
             LaneHealthState::Blocked => "blocked",
             LaneHealthState::Restaging => "restaging",
+            LaneHealthState::Detached => "detached",
         }
     }
 }
@@ -204,6 +208,12 @@ impl LaneHealthView {
             }),
             engine::LaneHealth::Restaging { since, reason } => Some(Self {
                 state: LaneHealthState::Restaging,
+                since: at(*since),
+                next_probe: None,
+                reason: reason.clone(),
+            }),
+            engine::LaneHealth::Detached { since, reason } => Some(Self {
+                state: LaneHealthState::Detached,
                 since: at(*since),
                 next_probe: None,
                 reason: reason.clone(),
@@ -539,7 +549,8 @@ impl Status {
         }
     }
 
-    /// Every lane that is not open: parked, blocked or being staged again.
+    /// Every lane that is not open: parked, blocked, being staged again, or
+    /// detached.
     /// What `flusso.lane.parked` and the stop's deadline message read.
     pub fn unhealthy_lanes(&self) -> Vec<(stream::LaneKey, LaneHealthView)> {
         lock(&self.lane_health)

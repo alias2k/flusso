@@ -161,8 +161,17 @@ fn fence(sinks: &[&str]) -> Rig {
     fence_over(&["users"], sinks)
 }
 
-/// A fence over every lane of `indexes` × `sinks`.
+/// A fence over every lane of `indexes` × `sinks`, every sink staged.
 fn fence_over(indexes: &[&str], sinks: &[&str]) -> Rig {
+    let rig = fence_unstaged(indexes, sinks);
+    for on in sinks {
+        rig.observer.on_sink_started(&sink(on));
+    }
+    rig
+}
+
+/// A fence over every lane of `indexes` × `sinks`, no sink staged yet.
+fn fence_unstaged(indexes: &[&str], sinks: &[&str]) -> Rig {
     let source = Arc::new(NumberedSource::default());
     let lanes: Vec<LaneKey> = indexes
         .iter()
@@ -175,9 +184,6 @@ fn fence_over(indexes: &[&str], sinks: &[&str]) -> Rig {
         lanes.iter().cloned(),
     );
     let observer = FenceObserver::new(fence.clone());
-    for on in sinks {
-        observer.on_sink_started(&sink(on));
-    }
     Rig {
         fence,
         source,
@@ -977,5 +983,86 @@ async fn a_fence_on_a_healthy_sink_passes_while_its_index_build_waits_on_a_full_
         rig.progress.lane(&lane("b"), Level::Applied),
         Some(Landed::Before(change)),
         "the full sibling still holds itself back"
+    );
+}
+
+/// The health a detach gives a lane, as the sink engine reports it.
+fn detached() -> engine::LaneHealth {
+    engine::LaneHealth::Detached {
+        since: Instant::now(),
+        reason: "blocked: index write (api)".to_owned(),
+    }
+}
+
+/// A detached lane (ADR 0012 stage 10, R5, O2): heard before it leaves the
+/// slot's minimum, its fence freezes at what it had reached. A wait at or
+/// before that passes; one past it is answered `detached` at once, not at
+/// its timeout, whatever the progress answers for the lane since.
+#[tokio::test(start_paused = true)]
+async fn a_detached_lane_answers_at_once() {
+    let rig = fence(&["primary"]);
+    let before = rig.source.emit(10);
+    rig.route(before);
+    rig.applied("primary", before);
+    rig.searchable("primary", before);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    rig.source.idle_to(30);
+
+    for level in [FenceLevel::Applied, FenceLevel::Searchable] {
+        assert_eq!(
+            rig.fence.wait(&request("10", level, None)).await,
+            reached("10"),
+            "{level}: frozen at what it had reached"
+        );
+        let started = Instant::now();
+        assert_eq!(
+            rig.fence.wait(&request("20", level, None)).await,
+            unserved("10", &[("users", "primary", Unserved::Detached)]),
+            "{level}: past the detach"
+        );
+        assert_eq!(started.elapsed(), Duration::ZERO, "{level}: at once");
+    }
+}
+
+/// A lane detached before this process started has nothing frozen: every
+/// wait on it is answered `detached` at once, never "not following live
+/// changes", and a wait naming no index fails with it (O14). A wait naming
+/// another index passes.
+#[tokio::test(start_paused = true)]
+async fn a_lane_detached_before_the_start_answers_detached_at_once() {
+    // Staging finds the record before the sink is started.
+    let rig = fence_unstaged(&["users", "orders"], &["primary"]);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    rig.observer.on_sink_started(&sink("primary"));
+    rig.source.close();
+    assert_eq!(
+        rig.fence
+            .wait(&on_indexes("1", FenceLevel::Applied, &["users"]))
+            .await,
+        unserved("", &[("users", "primary", Unserved::Detached)]),
+    );
+
+    let rig = fence_unstaged(&["users", "orders"], &["primary"]);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    rig.observer.on_sink_started(&sink("primary"));
+    let orders = LaneKey::new(index("orders"), sink("primary"));
+    let change = rig.source.emit(20);
+    rig.progress
+        .published(&orders, stream::ItemKey::new(change.seq), change, change);
+    rig.applied_on(&orders, change);
+    assert!(matches!(
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
+        Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Detached)]
+    ));
+    assert_eq!(
+        rig.fence
+            .wait(&on_indexes("20", FenceLevel::Applied, &["orders"]))
+            .await,
+        reached("20")
     );
 }
