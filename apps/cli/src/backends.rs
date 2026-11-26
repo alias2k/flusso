@@ -36,7 +36,11 @@ use crate::commands::print;
 /// The one [`Backends`] implementation: the composition root's choice of
 /// concrete adapters, looked up by each port entry's `type`.
 #[derive(Debug, Default)]
-pub(crate) struct FlussoBackends;
+pub(crate) struct FlussoBackends {
+    /// Refuse to start on any error `flusso check` reports, not only on the
+    /// kinds that stop every start (`run --strict`).
+    pub(crate) strict: bool,
+}
 
 #[async_trait]
 impl Backends for FlussoBackends {
@@ -61,7 +65,8 @@ impl Backends for FlussoBackends {
             .context("applying the source TLS settings to the connection URL")?;
 
         let spec = source_spec(&config);
-        let (documents, resolver, column_types) = build_documents(&sql_url, &config).await?;
+        let (documents, resolver, column_types) =
+            build_documents(&sql_url, &config, self.strict).await?;
         let capture = WalChangeCapture::new(replication, sql_url.clone())
             .with_publication_management(spec.all_tables(), postgres.manage_publication)
             .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity)
@@ -154,6 +159,7 @@ fn resolve_connection_url(postgres: &PostgresConfig) -> anyhow::Result<String> {
 async fn build_documents(
     connection_url: &str,
     config: &Config,
+    strict: bool,
 ) -> anyhow::Result<(
     Arc<dyn DocumentBuilder>,
     Arc<dyn DocumentBuilder>,
@@ -172,7 +178,7 @@ async fn build_documents(
     )
     .await
     .context("connecting to Postgres")?;
-    validate_at_start(&spec, &builder, config).await?;
+    validate_at_start(&spec, &builder, config, strict).await?;
     let column_types = builder.column_types();
     let resolver = builder
         .on_own_pool(connection_url, 1)
@@ -187,13 +193,16 @@ async fn build_documents(
 
 /// Check the schemas against the database once, before anything is staged,
 /// with `flusso check`'s check: print the diagnostics to stderr and refuse to
-/// start on one that cannot work as written (see [`stops_the_start`]). Runs on
+/// start on one that cannot work as written (see [`stops_the_start`]), or,
+/// `strict`, on any error. An error the start goes on with is logged and set
+/// on a gauge ([`schema_errors`](crate::telemetry::schema_errors)). Runs on
 /// the document builder's own connection, so an unreachable database fails
 /// exactly as the connect above does.
 async fn validate_at_start(
     spec: &SourceSpec,
     catalog: &dyn Catalog,
     config: &Config,
+    strict: bool,
 ) -> anyhow::Result<()> {
     let diagnostics = source::validate_indexes(spec, catalog)
         .await
@@ -210,7 +219,10 @@ async fn validate_at_start(
         print::Pen::detect_stderr(),
         &diagnostics,
         &|at| refused.get(at).copied().unwrap_or(true),
-    )
+        strict,
+    )?;
+    crate::telemetry::schema_errors::report(&diagnostics);
+    Ok(())
 }
 
 /// For a kind whose documents only the sink's mapping refuses, whether
@@ -310,15 +322,16 @@ fn plain_opensearch(
 }
 
 /// Print `diagnostics` (nothing when there are none) and fail when any
-/// [stops the start](stops_the_start). Every other diagnostic, error or
-/// warning, is printed and the start goes on. `refused(i)` says whether a sink
-/// refuses what `diagnostics[i]` describes, for a kind only a sink's mapping
-/// refuses (see [`a_sink_refuses`]).
+/// [stops the start](stops_the_start), or, `strict`, when any is an error.
+/// Every other diagnostic is printed and the start goes on. `refused(i)` says
+/// whether a sink refuses what `diagnostics[i]` describes, for a kind only a
+/// sink's mapping refuses (see [`a_sink_refuses`]).
 fn start_verdict(
     out: &mut impl Write,
     pen: print::Pen,
     diagnostics: &[Diagnostic],
     refused: &dyn Fn(usize) -> bool,
+    strict: bool,
 ) -> anyhow::Result<()> {
     if diagnostics.is_empty() {
         return Ok(());
@@ -335,7 +348,16 @@ fn start_verdict(
         "the schemas cannot be built against this database ({blocking} problem(s) above); \
          fix them, confirm with `flusso check`, then start again"
     );
-    if diagnostics.iter().any(|d| d.severity == Severity::Error) {
+    let errors = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .count();
+    ensure!(
+        !strict || errors == 0,
+        "the schemas do not give a working index against this database ({errors} error(s) \
+         above, refused under --strict); fix them, confirm with `flusso check`, then start again"
+    );
+    if errors > 0 {
         writeln!(
             out,
             "starting anyway: the errors above do not stop `flusso run` (`flusso check` still fails on them)\n"
@@ -364,7 +386,8 @@ fn start_verdict(
 /// holds only keys that fit, indexes as before. So does a `[]` column without
 /// `array: true`. So does a root table without a single-column primary key:
 /// its live changes are still indexed, so refusing would stop a deployment
-/// that runs. Each of these is still an error `check` fails on.
+/// that runs. Each of these is still an error `check` fails on, and one
+/// `run --strict` refuses.
 fn stops_the_start(kind: DiagnosticKind) -> bool {
     match kind {
         DiagnosticKind::UnknownTable
@@ -520,10 +543,65 @@ mod tests {
 
     fn verdict(diagnostics: &[Diagnostic]) -> (anyhow::Result<()>, String) {
         let mut out = Vec::new();
-        let result = start_verdict(&mut out, print::Pen::detect_stderr(), diagnostics, &|_| {
-            true
-        });
+        let result = start_verdict(
+            &mut out,
+            print::Pen::detect_stderr(),
+            diagnostics,
+            &|_| true,
+            false,
+        );
         (result, String::from_utf8(out).unwrap())
+    }
+
+    fn strict_verdict(diagnostics: &[Diagnostic]) -> (anyhow::Result<()>, String) {
+        let mut out = Vec::new();
+        let result = start_verdict(&mut out, print::Pen::plain(), diagnostics, &|_| true, true);
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    /// `--strict` (issue #485) refuses every error `flusso check` fails on,
+    /// each printed as `check` prints it, warnings above errors.
+    #[test]
+    fn strict_refuses_every_error_and_prints_them() {
+        for kind in [
+            DiagnosticKind::UndeclaredArrayColumn,
+            DiagnosticKind::Nullability,
+            DiagnosticKind::IdsElementLossy,
+            DiagnosticKind::TypeMismatch,
+            DiagnosticKind::RootPrimaryKey,
+        ] {
+            let (result, printed) = strict_verdict(&[
+                diagnostic(DiagnosticKind::IgnoredPrimaryKey),
+                diagnostic(kind),
+            ]);
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("1 error(s)"), "{kind:?}: {error}");
+            assert!(error.contains("--strict"), "{kind:?}: {error}");
+            assert!(
+                printed.find("[warning]").unwrap() < printed.find("[error]").unwrap(),
+                "{printed}"
+            );
+            assert!(!printed.contains("starting anyway"), "{printed}");
+        }
+    }
+
+    #[test]
+    fn strict_starts_on_warnings_alone() {
+        let (result, printed) = strict_verdict(&[
+            diagnostic(DiagnosticKind::IgnoredPrimaryKey),
+            diagnostic(DiagnosticKind::CheckSkipped),
+            diagnostic(DiagnosticKind::DuplicateFieldName),
+        ]);
+        assert!(result.is_ok(), "{printed}");
+        assert!(printed.contains("[warning]"), "{printed}");
+    }
+
+    /// A kind that stops every start keeps its own words under `--strict`.
+    #[test]
+    fn strict_keeps_the_message_of_a_kind_that_stops_every_start() {
+        let (result, _) = strict_verdict(&[diagnostic(DiagnosticKind::UnknownColumn)]);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("cannot be built"), "{error}");
     }
 
     #[test]
@@ -693,9 +771,13 @@ mod tests {
     fn a_finding_no_sink_refuses_prints_and_starts() {
         let diagnostics = [diagnostic(DiagnosticKind::TimeOfDayAsDate)];
         let mut out = Vec::new();
-        let result = start_verdict(&mut out, print::Pen::detect_stderr(), &diagnostics, &|_| {
-            false
-        });
+        let result = start_verdict(
+            &mut out,
+            print::Pen::detect_stderr(),
+            &diagnostics,
+            &|_| false,
+            false,
+        );
         assert!(result.is_ok());
         let printed = String::from_utf8(out).unwrap();
         assert!(printed.contains("starting anyway"), "{printed}");
@@ -954,7 +1036,7 @@ mod tests {
         for config in [from_file, from_flag] {
             adapters::validate(&config).unwrap();
             assert_eq!(adapters::stream_config(&config).unwrap().capacity, Some(1));
-            let stream = FlussoBackends
+            let stream = FlussoBackends::default()
                 .stream(&config, std::slice::from_ref(&key))
                 .unwrap();
             let lane = stream.lane(&key).unwrap();

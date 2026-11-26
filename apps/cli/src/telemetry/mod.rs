@@ -5,6 +5,7 @@
 
 pub(crate) mod metrics;
 pub(crate) mod observer;
+pub(crate) mod schema_errors;
 pub(crate) mod script_log;
 
 use anyhow::Context;

@@ -89,6 +89,13 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_MANAGE_REPLICA_IDENTITY")]
     manage_replica_identity: Option<bool>,
 
+    /// Refuse to start on any error `flusso check` reports, printed as
+    /// `check` prints it. Without it, only an error no document builds past
+    /// stops the start; the others are logged at `error` and counted on
+    /// `flusso.index.schema_errors`, and the start goes on.
+    #[arg(long, env = "FLUSSO_STRICT")]
+    strict: bool,
+
     /// Skip the initial backfill and resume live capture only. Use after the
     /// index has already been seeded, to avoid re-reading every existing row.
     #[arg(long, env = "FLUSSO_SKIP_BACKFILL")]
@@ -350,7 +357,9 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         lag_poll_interval: Duration::from_secs(args.lag_poll_secs),
     };
 
-    let backends: Arc<dyn daemon::Backends> = Arc::new(FlussoBackends);
+    let backends: Arc<dyn daemon::Backends> = Arc::new(FlussoBackends {
+        strict: args.strict,
+    });
     let otel_observer: Arc<dyn daemon::Observer> = Arc::new(OtelObserver::new(started));
     let running = Daemon::new(config, Arc::clone(&backends))
         .with_options(options)
