@@ -786,17 +786,12 @@ impl<'a> Run<'a> {
             // Grant what is already waiting first, so an item just received
             // starts without another trip to the lane; read more only for a
             // slot still free, then grant what it brought.
-            self.grant().await?;
+            self.grant_once_read().await?;
             if self.wants_more() && self.fill()? {
                 if self.engine.stop.is_requested() {
                     self.skip_backfill().await?;
                 }
-                // What `fill` took may have been published after the slot
-                // opened again: never written before the records are read.
-                if self.engine.reread_due() {
-                    self.reread().await?;
-                }
-                self.grant().await?;
+                self.grant_once_read().await?;
             }
             // A write that returned at its first poll, inside a grant, may
             // have found its target missing: stage it now, not at the next
@@ -2996,6 +2991,17 @@ impl<'a> Run<'a> {
             }
         }
         Ok(())
+    }
+
+    /// [`grant`](Self::grant), once the records are read since the slot last
+    /// opened (O29). The slot can open again across any await of a turn,
+    /// and what a `fill` took may have been published after: nothing is
+    /// written before the read (review of step 4, S5).
+    async fn grant_once_read(&mut self) -> Result<()> {
+        if self.engine.reread_due() {
+            self.reread().await?;
+        }
+        self.grant().await
     }
 
     /// Read every index's detach records again: the slot opened since they

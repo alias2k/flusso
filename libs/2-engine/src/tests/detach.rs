@@ -96,6 +96,8 @@ struct Gate {
     /// Calls that fail from now on, by method name: the process died
     /// before them.
     dead: Mutex<BTreeSet<&'static str>>,
+    /// While set, `ensure_index` waits for a permit here.
+    ensure_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
 }
 
 impl Gate {
@@ -137,6 +139,10 @@ impl Gate {
 impl Sink for Gate {
     async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
         self.dies_before("ensure_index")?;
+        let gate = self.ensure_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
         self.ensured.lock().unwrap().push(mapping.index.to_string());
         Ok(sink::Ensured::default())
     }
@@ -2444,5 +2450,48 @@ async fn a_detached_record_on_a_sink_switched_to_backfill_false_is_put_back_live
     assert!(engine.lane_health(&lane(users())).is_detached());
     let (task, control) = spawn(&engine);
     assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
+    task.abort();
+}
+
+/// Review of step 4, S5: the slot can open again while a turn awaits (here a
+/// reindex's staging of another index), and another process may have
+/// detached a lane meanwhile. What the turn then takes was published after
+/// the opening: it is read again before anything is written.
+#[tokio::test(start_paused = true)]
+async fn a_slot_reopened_while_a_reindex_stages_is_read_before_the_items_it_brought() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (task, control) = spawn(&engine);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *rig.sink.ensure_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let ensured = rig.sink.ensured.lock().unwrap().len();
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![orders()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        rig.sink.ensured.lock().unwrap().len(),
+        ensured,
+        "the reindex waits in ensure_index"
+    );
+    rig.rereads.live_opened();
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), detached_record());
+    rig.live(&users(), 1, 1).await;
+    *rig.sink.ensure_gate.lock().unwrap() = None;
+    gate.add_permits(1);
+    eventually("the lane is taken as detached", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(written(&rig).is_empty(), "nothing of it is written");
     task.abort();
 }
