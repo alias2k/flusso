@@ -1939,14 +1939,27 @@ is the one concrete piece.
   `Rereads::open(source.live())` (tripwire `the_live_stream_is_opened_only_through_rereads_open`;
   `ChangeCapture::streams_opened`, counted by Postgres, makes the fence read every lane as unread
   while the source opened more streams than `Rereads::opened`); reads count per lane, for the
-  stream they began under (`read_begins`). **Record writes:** `Rereads::may_erase_records` (the
-  stream held, or the run ended cleanly: `Held`/`finished`; with no ingest engine wired, `will_open`
-  unset and nothing opened, as on `main`) gates a seed (its `SnapshotComplete` is acknowledged
-  unseeded and its backfill cut, asked again at the next read while held), the failed-detach clear,
-  a reattach (refused with the reason), a reindex (owed, restaging) and a rebuild (owed); detaches,
-  demotions, a finished rebuild's record, gap writes and walk checkpoints are safe without it (the
-  table is in the sink engine's module doc and the stage-10 note §10a). **The read again:** after
-  every opening, while the slot is held, `Run::reread` reads each lane's records and decides with
+  stream they began under (`read_begins`). **Record writes:** every request that may erase or
+  loosen a record goes through `sink_engine/slot.rs`'s `Erasing`, which checks
+  `Rereads::may_erase_records` (the stream held, or the run ended cleanly: `Held`/`finished`, sound
+  because a live stream ends `Ok` only when the deployment is over; with no ingest engine wired,
+  `will_open` unset and nothing opened, as on `main`) **immediately before the request is sent**,
+  never ahead of the awaits before it (tripwire `erasing_requests_go_only_through_the_slot`: the
+  sink's erasing methods are called nowhere else in the engine). Gated: a seed (owed per index,
+  `OwedSeed`: its documents are written and acknowledged, only `mark_seeded` waits; it lands once
+  the slot is held, nothing of the lane in flight and the records read again show no record or gap
+  written over the index (`written_over`), else its backfill is asked again; a parked lane is
+  covered, a detached one drops it), the failed-detach clear, a reattach (refused with the reason;
+  its gap stays and is reused), a reindex (restaging), a rebuild (owed; `retry_rebuilds` waits for
+  the slot so refusals don't grow its backoff), a demotion and a detach (both delete every
+  generation but the serving one: staging and the read again take the lane as detached, its read
+  uncounted, `Acted::Unheld`; a refused lane's detach leaves it as it was). Safe without it, each
+  with its reason in `slot.rs`'s table (the one home of every record, marker and generation write):
+  a finished rebuild's record, the `Fresh` staging's reindex, `ensure_index`'s marker rewrite and
+  auto-created generation delete, the read's put-back of a half-moved marker, gap writes, walk
+  checkpoints. Open (#490, an owner lease): a request already in flight when the stream ends, and
+  the time before this process notices Postgres dropped its walsender. **The read again:** after
+  every opening (due with no slot held too: it only tightens), `Run::reread` reads each lane's records and decides with
   the function staging uses (`decide`/`act_on_records`): another process's rebuild is put back to
   detached before the lane drops anything; it is taken over only at a process's first staging. A
   lane stored open while unread (`store_lane`, `opened_unread`) is read before any grant
@@ -1961,7 +1974,13 @@ is the one concrete piece.
   §10a); `tests::detach`'s `a_stream_that_ended_seeds_nothing_over_a_detach_written_since`,
   `a_stop_while_an_opening_failed_still_drains_the_lanes`, `a_clear_waits_*`,
   `a_reattach_is_refused_while_no_stream_is_held`, `a_reindex_*_while_no_stream_is_held` /
-  `a_reindex_waits_for_the_slot_before_it_rewrites_a_record`,
+  `a_reindex_waits_for_the_slot_before_it_rewrites_a_record`, `*_whose_stream_ends_*` (B-1),
+  `a_seed_met_without_the_slot_*`, `a_seed_owed_over_a_gap_written_meanwhile_asks_the_backfill_again`,
+  `a_staging_without_the_slot_leaves_anothers_rebuild_to_the_holder`,
+  `a_start_staging_before_the_stream_opens_demotes_nothing`, `a_detach_with_no_slot_held_waits_for_the_slot`,
+  `an_owed_rebuild_begins_at_once_when_the_slot_comes_back`, `gate_world`'s pinned
+  `a_reattach_waiting_*_as_the_stream_ends_deletes_no_record` (event lists, not seeds: a seed
+  replays another list once the strategy changes; `PROPTEST_CASES` sets the property's cases),
   `a_process_whose_stream_never_opened_deletes_no_record`, `a_staging_*_demotes_*`,
   `*_that_spans_an_opening_*`, `a_failed_read_of_a_detached_lane_never_fails_the_run`;
   `tests::parking::a_substitute_arriving_with_an_opening_is_written_only_once_read`;
