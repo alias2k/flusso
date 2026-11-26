@@ -1057,46 +1057,188 @@ fn format_of(mapping: &crate::config::Mapping) -> Option<&str> {
 
 const SPACE_ONLY: &str = "yyyy-MM-dd HH:mm:ss";
 
-/// The append rule, pattern by pattern (`with_iso`): only a named pattern that
-/// reads every date form flusso writes leaves a format alone; anything else
-/// gets `||strict_date_optional_time` at the end, the user's patterns first.
+/// The append rule, pattern by pattern (`with_iso`), by what flusso writes
+/// into the field: a date field holds `2024-01-02`; a timestamp field
+/// `2024-01-02T03:04:05`, with a fraction, and with an offset. A format with
+/// a pattern reading every form it holds is left alone, as is one whose every
+/// pattern reads a time of day only (`time_of_day_as_date`'s business); any
+/// other gets `||strict_date_optional_time` last, the user's patterns first.
 #[test]
 fn a_date_format_that_cannot_read_what_flusso_writes_gets_the_iso_pattern_last() {
-    for (format, expected) in [
+    use crate::config::DateValues::{Both, Dates, Timestamps};
+    let appended = |format: &str| Some(format!("{format}||strict_date_optional_time"));
+    for (format, values, expected) in [
+        ("yyyy-MM-dd", Dates, None),
+        ("uuuu-MM-dd", Dates, None),
+        ("date", Dates, None),
+        ("strict_date", Dates, None),
+        ("year_month_day", Dates, None),
+        ("strictYearMonthDay", Dates, None),
+        ("iso8601", Dates, None),
+        ("strict_date_optional_time", Dates, None),
+        ("yyyy/MM/dd", Dates, appended("yyyy/MM/dd")),
+        ("epoch_millis", Dates, appended("epoch_millis")),
+        ("basic_date", Dates, appended("basic_date")),
         (
-            SPACE_ONLY,
-            Some("yyyy-MM-dd HH:mm:ss||strict_date_optional_time"),
+            "date_hour_minute_second",
+            Dates,
+            appended("date_hour_minute_second"),
+        ),
+        ("yyyy-MM-dd", Timestamps, appended("yyyy-MM-dd")),
+        ("date", Timestamps, appended("date")),
+        ("iso8601", Timestamps, None),
+        ("strict_date_optional_time", Timestamps, None),
+        ("date_optional_time||epoch_millis", Timestamps, None),
+        ("strictDateOptionalTime", Timestamps, None),
+        (" strict_date_optional_time_nanos ", Timestamps, None),
+        (
+            "yyyy-MM-dd HH:mm:ss||strict_date_optional_time",
+            Timestamps,
+            None,
+        ),
+        ("date_time", Timestamps, appended("date_time")),
+        (
+            "strict_date_time_no_millis",
+            Timestamps,
+            appended("strict_date_time_no_millis"),
         ),
         (
-            "epoch_millis",
-            Some("epoch_millis||strict_date_optional_time"),
+            "date_hour_minute_second_fraction",
+            Timestamps,
+            appended("date_hour_minute_second_fraction"),
         ),
+        ("epoch_millis", Timestamps, appended("epoch_millis")),
+        (SPACE_ONLY, Timestamps, appended(SPACE_ONLY)),
         (
             "yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss||epoch_second",
-            Some(
-                "yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss||epoch_second||strict_date_optional_time",
-            ),
+            Timestamps,
+            appended("yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss||epoch_second"),
         ),
-        ("yyyy/MM/dd", Some("yyyy/MM/dd||strict_date_optional_time")),
         (
             "yyyy-MM-dd'T'HH:mm:ss",
-            Some("yyyy-MM-dd'T'HH:mm:ss||strict_date_optional_time"),
+            Timestamps,
+            appended("yyyy-MM-dd'T'HH:mm:ss"),
         ),
-        ("date_time", Some("date_time||strict_date_optional_time")),
-        ("strict_date_optional_time", None),
-        ("yyyy-MM-dd HH:mm:ss||strict_date_optional_time", None),
-        ("date_optional_time||epoch_millis", None),
-        ("strictDateOptionalTime", None),
-        (" strict_date_optional_time_nanos ", None),
-        ("", None),
-        ("  ", None),
+        ("HH:mm:ss", Timestamps, None),
+        ("HH:mm:ss.SSS||hour_minute_second", Timestamps, None),
+        ("hour_minute_second", Dates, None),
+        ("strict_t_time", Timestamps, None),
+        (
+            "HH:mm:ss||yyyy-MM-dd HH:mm",
+            Timestamps,
+            appended("HH:mm:ss||yyyy-MM-dd HH:mm"),
+        ),
+        ("yyyy-MM-dd", Both, appended("yyyy-MM-dd")),
+        ("iso8601", Both, None),
+        ("", Timestamps, None),
+        ("  ", Dates, None),
     ] {
         assert_eq!(
-            crate::config::with_iso(format).as_deref(),
+            crate::config::with_iso(format, values),
             expected,
-            "{format:?}"
+            "{format:?} over {values:?}"
         );
     }
+}
+
+fn custom(name: &str, postgres: &[&str], opensearch: &str) -> Field {
+    column_field(
+        name,
+        FlussoType::Custom {
+            postgres: postgres.iter().map(|ty| (*ty).to_owned()).collect(),
+            opensearch: opensearch.to_owned(),
+        },
+    )
+}
+
+/// A field whose format already reads what flusso writes there, or whose
+/// value flusso doesn't write as a date, keeps its format and the schema its
+/// content hash (`main`'s, pinned): a `date` column read by `yyyy-MM-dd`, a
+/// `custom` date over a number or text column (its own value), a
+/// `timestamp` over a time of day read by `HH:mm:ss`, `iso8601`, an
+/// input-only field, a field under an `indexed: false` join.
+#[test]
+fn a_date_field_whose_format_reads_what_flusso_writes_there_keeps_it_and_its_hash() {
+    let mut hidden = with_format(column_field("hidden", FlussoType::Timestamp), SPACE_ONLY);
+    hidden.emit = false;
+    let mut archive = belongs_to_schema(true).fields.remove(0);
+    if let FieldSource::Relation(Relation::Join(join)) = &mut archive.source {
+        join.indexed = false;
+        join.fields = vec![with_format(
+            column_field("placed", FlussoType::Timestamp),
+            SPACE_ONLY,
+        )];
+    }
+    let schema = columns_schema(vec![
+        with_format(column_field("born", FlussoType::Date), "yyyy-MM-dd"),
+        with_format(custom("millis", &["bigint"], "date"), "epoch_millis"),
+        with_format(custom("written", &["text"], "date"), "dd/MM/yyyy"),
+        with_format(column_field("opens", FlussoType::Timestamp), "HH:mm:ss"),
+        with_format(column_field("seen", FlussoType::Timestamp), "iso8601"),
+        hidden,
+        archive,
+    ]);
+    let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+    let formats: Vec<(&str, Option<&str>)> = mapping
+        .fields
+        .iter()
+        .map(|field| (field.name.as_ref(), format_of(&field.mapping)))
+        .collect();
+    assert_eq!(
+        formats,
+        [
+            ("born", Some("yyyy-MM-dd")),
+            ("millis", Some("epoch_millis")),
+            ("written", Some("dd/MM/yyyy")),
+            ("opens", Some("HH:mm:ss")),
+            ("seen", Some("iso8601")),
+            ("author", None),
+        ]
+    );
+    assert_eq!(
+        format_of(&mapping.fields[5].children[0].mapping),
+        Some(SPACE_ONLY),
+        "an unindexed join's children are stored, not mapped"
+    );
+    assert!(schema.completed_date_formats().is_empty());
+    assert_eq!(mapping.hash.to_string(), "ad3ab48b");
+}
+
+/// A `custom` field mapped as `date` or `date_nanos` over a date or timestamp
+/// column takes the rule by what that column holds.
+#[test]
+fn a_custom_date_over_a_date_or_timestamp_column_takes_the_rule() {
+    let schema = columns_schema(vec![
+        with_format(custom("day", &["date"], "date"), "yyyy/MM/dd"),
+        with_format(custom("kept", &["date"], "date"), "yyyy-MM-dd"),
+        with_format(
+            custom("nanos", &["timestamp without time zone"], "date_nanos"),
+            SPACE_ONLY,
+        ),
+        with_format(
+            custom("both", &["date", "timestamptz"], "date"),
+            "yyyy-MM-dd",
+        ),
+    ]);
+    let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+    let formats: Vec<Option<&str>> = mapping
+        .fields
+        .iter()
+        .map(|field| format_of(&field.mapping))
+        .collect();
+    assert_eq!(
+        formats,
+        [
+            Some("yyyy/MM/dd||strict_date_optional_time"),
+            Some("yyyy-MM-dd"),
+            Some("yyyy-MM-dd HH:mm:ss||strict_date_optional_time"),
+            Some("yyyy-MM-dd||strict_date_optional_time"),
+        ]
+    );
+    assert_eq!(
+        schema.completed_date_formats(),
+        ["day".to_owned(), "nanos".to_owned(), "both".to_owned()]
+    );
 }
 
 /// Every date-typed field takes the rule: a `timestamp` or `date` column, an

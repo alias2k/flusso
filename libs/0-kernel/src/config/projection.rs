@@ -29,34 +29,65 @@ fn resolve_index(index: IndexName, schema: &IndexSchema) -> IndexMapping {
         index,
         // Hash the parsed schema, not the file: structural changes (including a
         // declared type) flip the hash; cosmetic file changes do not.
-        hash: ContentHash::of(schema),
-        fields: resolve_fields(&schema.fields, schema.primary_key.as_ref()),
+        hash: ContentHash::of(&Revised(schema)),
+        fields: resolve_fields(&schema.fields, schema.primary_key.as_ref(), true),
     }
 }
+
+/// A schema as its content hash reads it: the schema, then
+/// `ISO_DATE_FORMAT_REVISION` only when a mapped date field's format gets the
+/// ISO pattern ([`IndexSchema::completed_date_formats`]), so exactly those
+/// indexes move to a new physical index, once, and every other keeps its
+/// hash.
+struct Revised<'a>(&'a IndexSchema);
+
+impl std::hash::Hash for Revised<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+        if !self.0.completed_date_formats().is_empty() {
+            ISO_DATE_FORMAT_REVISION.hash(state);
+        }
+    }
+}
+
+/// Bumped when the `format` a date field's mapping is given changes. `1`: a
+/// format that can't read the dates flusso writes into its field gets
+/// `||strict_date_optional_time` appended ([`super::iso_date_format`]).
+const ISO_DATE_FORMAT_REVISION: u8 = 1;
 
 /// Resolve a list of fields. `primary_key` is the root table's key while we are
 /// still on the root row (it passes through groups, which stay on the same row);
 /// it is `None` once we cross into a related table via a join. An input-only
 /// (`emit: false`) field never reaches the document, so it has no mapping.
-fn resolve_fields(fields: &[Field], primary_key: Option<&ColumnName>) -> Vec<ResolvedField> {
+/// `mapped` is false under an `indexed: false` join or an `enabled: false`
+/// object, whose children OpenSearch stores and doesn't map.
+fn resolve_fields(
+    fields: &[Field],
+    primary_key: Option<&ColumnName>,
+    mapped: bool,
+) -> Vec<ResolvedField> {
     fields
         .iter()
         .filter(|field| field.emit)
-        .map(|field| resolve_field(field, primary_key))
+        .map(|field| resolve_field(field, primary_key, mapped))
         .collect()
 }
 
-fn resolve_field(field: &Field, primary_key: Option<&ColumnName>) -> ResolvedField {
+fn resolve_field(field: &Field, primary_key: Option<&ColumnName>, mapped: bool) -> ResolvedField {
     let (child_fields, child_pk): (&[Field], Option<&ColumnName>) = match &field.source {
         FieldSource::Relation(Relation::Join(join)) => (&join.fields, Some(&join.primary_key)),
         FieldSource::Group(fields) => (fields, primary_key),
         _ => (&[], primary_key),
     };
-    let children = resolve_fields(child_fields, child_pk);
+    let children = resolve_fields(
+        child_fields,
+        child_pk,
+        mapped && super::date_format::maps_children(field),
+    );
 
     let (mapping_type, nullable, array) = type_and_nullability(field, primary_key);
     let mut extra = field.options.clone();
-    if let Some(format) = super::iso_date_format(field) {
+    if let Some(format) = super::iso_date_format(field).filter(|_| mapped) {
         extra.insert("format".to_owned(), GenericValue::String(format));
     }
     let mapping = Mapping {

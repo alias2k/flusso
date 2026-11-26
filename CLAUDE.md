@@ -2405,21 +2405,27 @@ renders it `{"type": "object", "enabled": false}` and `collect_enum_sorts`/`coll
 stop at it; descendants' mapping-only settings are accepted and ignored, `options` on the
 unindexed field itself is rejected. Guards: `a_schema_that_never_opts_out_keeps_its_content_hash`,
 `opting_out_of_subfields_or_indexing_changes_the_content_hash`. **A date `format` reads what flusso
-writes** (issue #485's timestamp decision; it replaced the `timestamp_format` error): a date-typed field
-(`MappingType::Date` or `date_nanos`: a date/timestamp column or array, a `min`/`max`, a script, a
-`custom`) whose `options.format` holds no named pattern reading every form flusso writes
-(`strict_date_optional_time`/`date_optional_time` and `_nanos`, any camelCase spelling) resolves with
-`||strict_date_optional_time` appended last (`kernel::iso_date_format` over `with_iso`, in
-`config/date_format.rs`), applied in the projection, never written into the schema, so an older lock
-gets it too and `show mapping` (one note line per such field), the designer and the sink all see it;
-`Field`'s `Hash` adds `ISO_DATE_FORMAT_REVISION` for such a field only, so its index moves once and no
-other does. A year past 9999 or before 0 is still refused, as by the default mapping. Guards: the
-projection tests' `a_date_format_that_cannot_read_what_flusso_writes_gets_the_iso_pattern_last`,
+writes** (issue #485's timestamp decision; it replaced the `timestamp_format` error): a mapped
+date-typed field (`MappingType::Date` or `date_nanos`) gets `||strict_date_optional_time` appended last
+only when its `options.format` can't read what flusso writes **into that field** (`DateValues`, from
+the schema: a `date` value `2024-01-02`, a `timestamp` the `T` forms; a `custom` only over `date` /
+`timestamp…` Postgres types, else its own value and no append; a format of time-of-day patterns only is
+`time_of_day_as_date`'s and left alone); the named formats' table is `config/date_format.rs`'s module
+doc (`iso8601` and the `date_optional_time` family read both kinds, `date`/`year_month_day` dates
+only). `kernel::iso_date_format` decides per field, `IndexSchema::completed_date_formats` walks what the
+index maps (no input-only field, nothing under an `indexed: false` join or `enabled: false` object), and
+the projection (never the schema, so an older lock gets it too; `show mapping` notes each) and the
+content hash (`projection.rs`'s `Revised`: `ISO_DATE_FORMAT_REVISION` once, only when that walk finds
+one; `Field`'s `Hash` is `main`'s) follow it, so exactly those indexes move once. A year past 9999 or
+before 0 is still refused, as by the default mapping. Guards: the projection tests'
+`a_date_format_that_cannot_read_what_flusso_writes_gets_the_iso_pattern_last` (each pattern, both
+kinds), `a_date_field_whose_format_reads_what_flusso_writes_there_keeps_it_and_its_hash` (pinned to
+`main`'s hash), `a_custom_date_over_a_date_or_timestamp_column_takes_the_rule`,
 `every_date_mapping_with_a_refusing_format_resolves_with_the_iso_pattern`,
-`a_schema_whose_date_formats_read_what_flusso_writes_keeps_its_content_hash` /
 `a_schema_whose_date_format_gets_the_iso_pattern_moves_off_its_hash`, and `pipeline`'s
-`a_tuned_timestamp_mapping_meets_the_iso_form` (indexed, a range in either form, `key_as_string` in the
-user's). Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
+`a_tuned_timestamp_mapping_meets_the_iso_form` (indexed, a range in either form, `key_as_string`,
+`docvalue_fields` and `fields` in the user's form, sort values in epoch milliseconds, a `yyyy-MM-dd`
+date column untouched). Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
 `json`/`jsonb` column — `FlussoType::Map { values }` → OS `object` with `dynamic: true`
 injected into options (so runtime keys are accepted); the resolved `Mapping.map_values` is
 the **full `Mapping` every key gets** (what a plain field of `values` resolves to, incl.

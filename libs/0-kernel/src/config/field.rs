@@ -32,8 +32,7 @@ pub struct Field {
 }
 
 /// Hashes `emit` only when it is off, so a schema with no input-only field
-/// keeps the content hash it had before `emit` existed; the revisions only for
-/// the fields they moved.
+/// keeps the content hash it had before `emit` existed.
 impl Hash for Field {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let Self {
@@ -53,18 +52,8 @@ impl Hash for Field {
         {
             CONSTANT_OBJECT_REVISION.hash(state);
         }
-        if super::iso_date_format(self).is_some() {
-            ISO_DATE_FORMAT_REVISION.hash(state);
-        }
     }
 }
-
-/// Bumped when the `format` a date field's mapping is given changes, so only a
-/// schema with such a field moves to a new physical index. `1`: a format that
-/// can't read the dates flusso writes gets `||strict_date_optional_time`
-/// appended ([`iso_date_format`](super::iso_date_format)); its old mapping
-/// refused every document holding a date.
-const ISO_DATE_FORMAT_REVISION: u8 = 1;
 
 /// Bumped when what a `constant` stored unindexed builds changes, so only a
 /// schema with such a constant moves to a new physical index. `1`: the value

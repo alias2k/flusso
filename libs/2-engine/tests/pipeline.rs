@@ -1326,8 +1326,11 @@ fn timestamp_with(options: &[(&str, GenericValue)]) -> Field {
 ///
 /// - a `format` with only space patterns takes it, since flusso appends
 ///   `strict_date_optional_time` to it (issue #485): every document indexes,
-///   a range in the user's form and one in ISO both find it, and a date
-///   histogram prints its keys in the user's form;
+///   a range in the user's form and one in ISO both find it, a date
+///   histogram, `docvalue_fields` and the `fields` API print the user's form,
+///   and a sort value stays the instant in epoch milliseconds;
+/// - a `date` column with `format: yyyy-MM-dd` reads what flusso writes there:
+///   it indexes, and its mapping is the user's format, nothing appended;
 /// - a `format` the user led with `strict_date_optional_time` takes it as
 ///   written;
 /// - `ignore_malformed: true` takes it and `_source` holds the `T` form;
@@ -1339,14 +1342,14 @@ async fn a_tuned_timestamp_mapping_meets_the_iso_form() {
     let pg = start_postgres().await;
     let os = start_opensearch().await;
     for ddl in [
-        "CREATE TABLE stamps (id int PRIMARY KEY, name text, ts timestamp)",
+        "CREATE TABLE stamps (id int PRIMARY KEY, name text, ts timestamp, day date)",
         "CREATE TABLE events (id int PRIMARY KEY, parent_id int, at timestamp, ats timestamp[])",
         "CREATE TABLE parents (id int PRIMARY KEY, name text, latest_id int REFERENCES events(id))",
     ] {
         create_table(&pg.pool, ddl).await;
     }
     for sql in [
-        "INSERT INTO stamps VALUES (1, 'stamped', '2024-01-02 03:04:05.123'), (2, 'blank', NULL)",
+        "INSERT INTO stamps VALUES (1, 'stamped', '2024-01-02 03:04:05.123', '2024-01-02'), (2, 'blank', NULL, NULL)",
         "INSERT INTO events VALUES (1, 1, '2024-01-02 03:04:05', '{\"2024-01-02 03:04:05.5\"}')",
         "INSERT INTO parents VALUES (1, 'parent', 1)",
     ] {
@@ -1378,6 +1381,13 @@ async fn a_tuned_timestamp_mapping_meets_the_iso_form() {
         }
         join
     };
+    let mut day = typed_field("day", FlussoType::Date, false);
+    day.options = [(
+        "format".to_owned(),
+        GenericValue::String("yyyy-MM-dd".to_owned()),
+    )]
+    .into_iter()
+    .collect();
     let mut parents = simple_schema("parents", None);
     parents.fields.extend([
         unindexed(
@@ -1398,6 +1408,7 @@ async fn a_tuned_timestamp_mapping_meets_the_iso_form() {
     let spec = SourceSpec::new(BTreeMap::from([
         stamps("spaced", timestamp_with(&[("format", space_only)])),
         stamps("widened", timestamp_with(&[("format", with_iso)])),
+        stamps("dated", day),
         stamps(
             "lenient",
             timestamp_with(&[("ignore_malformed", GenericValue::Bool(true))]),
@@ -1415,7 +1426,7 @@ async fn a_tuned_timestamp_mapping_meets_the_iso_form() {
     )
     .await;
     let live = spawn_pipeline_with(&pg, &os, spec, FailurePolicies::new(FailurePolicy::Skip)).await;
-    live.await_seeded(4).await;
+    live.await_seeded(5).await;
 
     let ts = |doc: &serde_json::Value| {
         vec![
@@ -1504,6 +1515,64 @@ async fn a_tuned_timestamp_mapping_meets_the_iso_form() {
         keys,
         ["2024-01-02 00:00:00.000", "2024-01-03 00:00:00.000"],
         "dates print in the format's first pattern, the user's: {days}"
+    );
+    let first = |found: &serde_json::Value| found.pointer("/hits/hits/0").cloned();
+    let one = serde_json::json!({ "ids": { "values": ["1"] } });
+    let sorted = search(
+        &live,
+        "spaced",
+        serde_json::json!({ "query": one, "sort": [{ "ts": "asc" }] }),
+    )
+    .await;
+    assert_eq!(
+        first(&sorted).and_then(|hit| hit.pointer("/sort/0").cloned()),
+        Some(serde_json::json!(1_704_164_645_123_u64)),
+        "a sort value is the instant in epoch milliseconds, whatever the format: {sorted}"
+    );
+    for request in ["docvalue_fields", "fields"] {
+        let found = search(
+            &live,
+            "spaced",
+            serde_json::json!({ "query": one, "_source": false, (request): ["ts"] }),
+        )
+        .await;
+        assert_eq!(
+            first(&found).and_then(|hit| hit.pointer("/fields/ts").cloned()),
+            Some(serde_json::json!(["2024-01-02 03:04:05.123"])),
+            "{request} prints the format's first pattern, the user's: {found}"
+        );
+    }
+    live.assert_doc_eventually(
+        "dated",
+        "1",
+        &|doc: &serde_json::Value| {
+            vec![
+                doc.get("day")
+                    .map_or("absent".to_owned(), ToString::to_string),
+            ]
+        },
+        &["\"2024-01-02\""],
+    )
+    .await;
+    let mapping: serde_json::Value = live
+        .http
+        .get(format!("{}/dated/_mapping", live.os_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let formats: Vec<&serde_json::Value> = mapping
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(|index| index.pointer("/mappings/properties/day/format"))
+        .collect();
+    assert_eq!(
+        formats,
+        [&serde_json::json!("yyyy-MM-dd")],
+        "a date column's `yyyy-MM-dd` reads what flusso writes there: no append: {mapping}"
     );
     exec(
         &pg.pool,

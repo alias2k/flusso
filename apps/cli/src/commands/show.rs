@@ -170,7 +170,7 @@ fn mapping_to(
                 let Some(entry) = config.indexes.get(&mapping.index) else {
                     continue;
                 };
-                for path in completed_formats(&entry.schema.fields) {
+                for path in entry.schema.completed_date_formats() {
                     print::note(
                         out,
                         pen,
@@ -190,23 +190,6 @@ fn mapping_to(
             Ok(())
         }
     }
-}
-
-/// The dotted path of every mapped field whose date `format` flusso appends
-/// the ISO pattern to ([`config::iso_date_format`]).
-fn completed_formats(fields: &[config::Field]) -> Vec<String> {
-    let mut paths = Vec::new();
-    for field in fields.iter().filter(|field| field.emit) {
-        if config::iso_date_format(field).is_some() {
-            paths.push(field.field.to_string());
-        }
-        paths.extend(
-            completed_formats(field.children())
-                .into_iter()
-                .map(|path| format!("{}.{path}", field.field)),
-        );
-    }
-    paths
 }
 
 /// Every enabled index's mapping, or the one of `index`, disabled or not; an
