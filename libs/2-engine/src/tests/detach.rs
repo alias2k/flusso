@@ -2121,7 +2121,7 @@ async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_
     rig.positions
         .down
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    rig.rereads.live_opened();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     assert!(!rig.rereads.current(&sink_name("primary")));
     let (task, _control) = spawn(&engine);
     eventually("the gap is completed and kept", || {
@@ -2158,7 +2158,7 @@ async fn a_lane_the_records_say_detached_once_the_slot_is_held_is_taken_as_detac
         .lock()
         .unwrap()
         .insert("users".to_owned(), detached_record());
-    rig.rereads.live_opened();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let (task, _control) = spawn(&engine);
     rig.live(&users(), 1, 1).await;
     eventually("the lane is taken as detached", || {
@@ -2177,7 +2177,7 @@ async fn a_lane_the_records_say_detached_once_the_slot_is_held_is_taken_as_detac
 #[tokio::test(start_paused = true)]
 async fn a_staging_once_the_slot_is_held_counts_as_the_read() {
     let rig = Rig::new(64);
-    rig.rereads.live_opened();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let engine = rig.engine();
     assert!(!rig.rereads.current(&sink_name("primary")));
     engine.stage(Continuity::Resumed).await.unwrap();
@@ -2527,7 +2527,7 @@ async fn a_slot_reopened_while_a_reindex_stages_is_read_before_the_items_it_brou
         ensured,
         "the reindex waits in ensure_index"
     );
-    rig.rereads.live_opened();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     rig.sink
         .kept
         .lock()
@@ -2585,7 +2585,7 @@ async fn a_lane_another_process_began_rebuilding_is_taken_as_detached_once_the_s
             version(),
         ),
     );
-    rig.rereads.live_opened();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let (task, _control) = spawn(&engine);
     rig.live(&users(), 1, 1).await;
     eventually("the lane is taken as detached", || {

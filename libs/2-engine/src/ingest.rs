@@ -432,8 +432,11 @@ impl IngestEngine {
         let scopes: HashSet<IndexName> = self.documents.backfill_indexes().into_iter().collect();
 
         let started = Instant::now();
-        let live: LiveStream = self.source.live().await?;
-        self.rereads.live_opened();
+        // O29: every sink counts as unread from before the new stream can
+        // answer (`Rereads::open` alone orders it), and the slot counts as
+        // held until this run's stream ends.
+        let live: LiveStream = self.rereads.open(self.source.live()).await?;
+        let _held = Held(&self.rereads);
         self.observer
             .on_startup_step(StartupStep::OpenLive, None, started.elapsed());
         tracing::info!("following live changes");
@@ -764,5 +767,15 @@ pub fn document_id(id: &DocumentId) -> String {
 impl From<SourceError> for EngineError {
     fn from(error: SourceError) -> Self {
         EngineError::Source(error)
+    }
+}
+
+/// While alive, this run's live stream holds the slot; dropped, by any end
+/// of the run, it says so ([`Rereads::closed`](crate::Rereads::closed)).
+struct Held<'a>(&'a crate::Rereads);
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.0.closed();
     }
 }

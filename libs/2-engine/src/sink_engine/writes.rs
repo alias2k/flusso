@@ -3017,7 +3017,7 @@ impl<'a> Run<'a> {
     /// written; a reattach's gap is heard, and completed when it is still
     /// open. A failed read fails the run: its restart stages, which reads.
     async fn reread(&mut self) -> Result<()> {
-        let read_at = self.engine.rereads.live_starts();
+        let read_at = self.engine.rereads.read_begins();
         for lane in 0..self.lanes.len() {
             let Some(run) = self.lanes.get(lane) else {
                 continue;

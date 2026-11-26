@@ -911,7 +911,7 @@ impl SinkEngine {
     pub async fn stage(&self, continuity: Continuity) -> Result<()> {
         // A staging reads every index's records: once the slot is held, it is
         // the read O29 asks for.
-        let read_at = self.rereads.live_starts();
+        let read_at = self.rereads.read_begins();
         self.stage_inner(continuity).await?;
         self.records_read(read_at);
         Ok(())

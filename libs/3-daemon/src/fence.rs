@@ -26,6 +26,13 @@
 //! unless the seed lands first. The sink engines' events set the state
 //! ([`FenceObserver`]); they are a few per index per run.
 //!
+//! **A slot opened again vouches nothing new until it is read (ADR 0012
+//! stage 10, O29, B1').** From the moment a new stream may answer until the
+//! sink has read its records, a lane vouches for nothing past what this
+//! process applied under the previous stream: [`Rereads::open`] marks every
+//! sink unread and has the fence freeze that answer before it opens the
+//! stream, the one way the ingest engine opens it.
+//!
 //! The daemon owns the wait; putting it on a wire is the transport's job
 //! (the CLI serves it as `GET /wait`).
 //!
@@ -299,9 +306,11 @@ struct Furthest {
     /// once; one between two gaps is vouched as usual. An end that is `None`
     /// is unknown and stretches its gap that way. Gone at the seed.
     gaps: Vec<(Option<SourcePosition>, Option<SourcePosition>)>,
-    /// What the lane had reached, (applied, searchable), when the live
-    /// stream last opened (O29): while its sink's records are unread, a lane
-    /// serving its writes vouches no further.
+    /// The fence's answer for the lane, (applied, searchable), taken from
+    /// the previous stream as an opening begins (O29): what this process saw
+    /// the lane apply under it, never more (an answer cached lower only
+    /// vouches less). While its sink's records are unread, a lane serving
+    /// its writes vouches no further.
     at_open: (Option<SourcePosition>, Option<SourcePosition>),
 }
 
@@ -415,11 +424,20 @@ impl Fence {
             let Some(inner) = listener.upgrade() else {
                 return;
             };
-            if event == Reread::Opened {
-                for furthest in inner.lanes.values() {
-                    let mut furthest = lock(furthest);
-                    furthest.at_open = (furthest.applied, furthest.searchable);
+            if event == Reread::Opening {
+                // Only the previous stream answers here: what each lane
+                // applied under it, taken fresh, is all it vouches for until
+                // its sink reads its records again (B1').
+                let fence = Fence { inner };
+                for lane in fence.inner.lanes.keys() {
+                    fence.reached(lane, FenceLevel::Searchable);
+                    if let Some(furthest) = fence.inner.lanes.get(lane) {
+                        let mut furthest = lock(furthest);
+                        furthest.at_open = (furthest.applied, furthest.searchable);
+                    }
                 }
+                fence.moved();
+                return;
             }
             inner.moved.notify_waiters();
         }));

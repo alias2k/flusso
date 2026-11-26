@@ -6,17 +6,24 @@
 //! hold the slot then, and detach a lane after this one read its records.
 //! Every read before the slot is held is only advisory. So:
 //!
-//! - the ingest engine calls [`Rereads::live_opened`] each time its live
-//!   stream opens, before it publishes anything;
-//! - a sink engine whose last read of its records began before that reads
-//!   them again before it writes anything ([`Rereads::is_due`]), and says so
-//!   ([`Rereads::read`]);
-//! - a fence vouches for no lane of a sink whose records are not read since
-//!   ([`Rereads::current`]).
+//! - the ingest engine opens its live stream through [`Rereads::open`]:
+//!   every sink counts as unread from before the new stream can answer, and
+//!   only a read begun once the opening returned counts again;
+//! - a sink engine whose last read of its records counts for an earlier
+//!   opening reads them again before it writes anything
+//!   ([`Rereads::is_due`]), and says so ([`Rereads::read`]);
+//! - a fence vouches, for a lane of a sink not read since
+//!   ([`Rereads::current`]), no further than this process applied under the
+//!   previous stream.
+//!
+//! The order lives in [`open`](Rereads::open) alone, so no caller can open
+//! the window between the new stream answering and the sinks counting as
+//! unread. [`Rereads::closed`] says the stream ended: until the next opening
+//! nothing settles a gap end ([`Rereads::holding`]).
 //!
 //! Nothing waits on a sink: one whose destination is down reads again when
-//! its run comes back, and its lanes hold the slot and vouch for nothing
-//! meanwhile. The other sinks go on.
+//! its run comes back, and its lanes hold the slot meanwhile. The other
+//! sinks go on.
 //!
 //! **[`SourcePositions`]: a lane's place in the source's own text.** A
 //! reattach accepts a gap: the changes from where reads stood at the detach
@@ -30,20 +37,26 @@
 //! use engine::Rereads;
 //! use kernel::SinkName;
 //!
+//! # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
 //! let rereads = Rereads::default();
 //! let primary = SinkName::try_new("primary").unwrap();
 //! assert!(rereads.current(&primary), "nothing opened yet");
-//! let read_at = rereads.live_starts();
-//! rereads.live_opened();
+//! let read_at = rereads.read_begins();
+//! rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
 //! assert!(rereads.is_due(read_at));
 //! assert!(!rereads.current(&primary));
-//! rereads.read(&primary, rereads.live_starts());
+//! assert!(rereads.holding());
+//! rereads.read(&primary, rereads.read_begins());
 //! assert!(rereads.current(&primary));
+//! rereads.closed();
+//! assert!(!rereads.holding());
+//! # });
 //! ```
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kernel::SinkName;
@@ -54,7 +67,13 @@ use source::cdc::{ChangeCapture, Landed};
 /// the fence.
 #[derive(Default)]
 pub struct Rereads {
+    /// Openings begun.
     opened: AtomicU64,
+    /// The last opening that returned Ok: a read begun from here counts for
+    /// it.
+    held: AtomicU64,
+    /// The stream of the last opening is open.
+    holding: AtomicBool,
     read: Mutex<BTreeMap<SinkName, u64>>,
     listeners: Mutex<Vec<RereadListener>>,
 }
@@ -62,8 +81,9 @@ pub struct Rereads {
 /// What a [`Rereads`] listener hears.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reread {
-    /// The live stream opened: every sink's records are unread from here.
-    Opened,
+    /// An opening begins: the previous stream still answers, the new one
+    /// not yet; every sink's records are unread from here.
+    Opening,
     /// A sink read its records.
     Read,
 }
@@ -75,17 +95,41 @@ impl std::fmt::Debug for Rereads {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Rereads")
             .field("opened", &self.opened)
+            .field("held", &self.held)
+            .field("holding", &self.holding)
             .field("read", &self.read)
             .finish_non_exhaustive()
     }
 }
 
 impl Rereads {
-    /// The live stream opened: the slot is held. Called before anything is
-    /// published.
-    pub fn live_opened(&self) {
-        self.opened.fetch_add(1, Ordering::AcqRel);
-        self.tell(Reread::Opened);
+    /// Open the live stream with `opening` (the source's `live()`): the one
+    /// way to open it. Before `opening` runs, every sink counts as unread and
+    /// listeners hear [`Reread::Opening`] while only the previous stream can
+    /// answer; once it returns Ok, a read begun from then counts. Failed,
+    /// nothing counts as read until an opening succeeds.
+    pub async fn open<T, E>(&self, opening: impl Future<Output = Result<T, E>>) -> Result<T, E> {
+        let epoch = self.opened.fetch_add(1, Ordering::AcqRel) + 1;
+        self.holding.store(false, Ordering::Release);
+        self.tell(Reread::Opening);
+        let opened = opening.await;
+        if opened.is_ok() {
+            self.held.store(epoch, Ordering::Release);
+            self.holding.store(true, Ordering::Release);
+        }
+        opened
+    }
+
+    /// The stream of the last opening ended: this process may no longer hold
+    /// the slot.
+    pub fn closed(&self) {
+        self.holding.store(false, Ordering::Release);
+    }
+
+    /// Whether the stream of the last opening is open: this process holds
+    /// the slot.
+    pub fn holding(&self) -> bool {
+        self.holding.load(Ordering::Acquire)
     }
 
     /// Hear every opening and every read, for a fence to note and wake on.
@@ -107,19 +151,20 @@ impl Rereads {
         }
     }
 
-    /// How many times the live stream opened. A sink engine reads it before
-    /// it reads its records, and hands it to [`read`](Self::read) after.
-    pub fn live_starts(&self) -> u64 {
-        self.opened.load(Ordering::Acquire)
+    /// What a read of the records beginning now counts for: the last
+    /// opening that returned. A sink engine takes it before it reads, and
+    /// hands it to [`read`](Self::read) after.
+    pub fn read_begins(&self) -> u64 {
+        self.held.load(Ordering::Acquire)
     }
 
-    /// Whether a read of the records that began at `read_at` is older than
-    /// the slot's last opening. One atomic load.
+    /// Whether a read that counts for `read_at` is older than the last
+    /// opening that returned. One atomic load.
     pub fn is_due(&self, read_at: u64) -> bool {
-        self.live_starts() > read_at
+        self.read_begins() > read_at
     }
 
-    /// `sink` read every index's records, the read beginning at `read_at`.
+    /// `sink` read every index's records, the read counting for `read_at`.
     pub fn read(&self, sink: &SinkName, read_at: u64) {
         {
             let mut read = self.read.lock().unwrap_or_else(PoisonError::into_inner);
@@ -129,17 +174,19 @@ impl Rereads {
         self.tell(Reread::Read);
     }
 
-    /// Whether `sink` read its records since the live stream last opened.
-    /// True before it ever opened: nothing vouches before then anyway.
+    /// Whether `sink` read its records since the last opening began, the
+    /// read begun once it returned. True before any opening: nothing
+    /// vouches before then anyway.
     pub fn current(&self, sink: &SinkName) -> bool {
-        let opened = self.live_starts();
+        let opened = self.opened.load(Ordering::Acquire);
         opened == 0
-            || self
-                .read
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(sink)
-                .is_some_and(|at| *at >= opened)
+            || (self.read_begins() == opened
+                && self
+                    .read
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(sink)
+                    .is_some_and(|at| *at >= opened))
     }
 }
 

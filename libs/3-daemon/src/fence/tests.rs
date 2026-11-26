@@ -1366,7 +1366,7 @@ async fn a_sink_that_has_not_read_its_records_since_the_slot_opened_vouches_for_
         reached("20"),
         "the slot never opened: nothing to read again"
     );
-    rereads.live_opened();
+    opened(&rereads).await;
     let after = rig.source.emit(30);
     rig.route(after);
     rig.applied("primary", after);
@@ -1374,7 +1374,7 @@ async fn a_sink_that_has_not_read_its_records_since_the_slot_opened_vouches_for_
         fence.wait(&request("30", FenceLevel::Applied, None)).await,
         unserved("30", &[("users", "primary", Unserved::Starting)])
     );
-    rereads.read(&sink("primary"), rereads.live_starts());
+    rereads.read(&sink("primary"), rereads.read_begins());
     assert_eq!(
         fence.wait(&request("30", FenceLevel::Applied, None)).await,
         reached("30")
@@ -1391,14 +1391,14 @@ async fn a_read_of_the_records_during_a_wait_lets_it_through_at_once() {
     let change = rig.source.emit(20);
     rig.route(change);
     rig.applied("primary", change);
-    rereads.live_opened();
+    opened(&rereads).await;
     let waiting = tokio::spawn({
         let fence = fence.clone();
         async move { fence.wait(&request("20", FenceLevel::Applied, None)).await }
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let started = Instant::now();
-    rereads.read(&sink("primary"), rereads.live_starts());
+    rereads.read(&sink("primary"), rereads.read_begins());
     assert_eq!(waiting.await.unwrap(), reached("20"));
     assert!(started.elapsed() < Duration::from_secs(1), "at once");
 }
@@ -1409,14 +1409,8 @@ async fn a_read_of_the_records_during_a_wait_lets_it_through_at_once() {
 /// which another process's detach can't take back.
 #[tokio::test(start_paused = true)]
 async fn an_unread_sink_still_answers_rebuilding_and_detached() {
-    let unread = |rig: &Rig| {
-        let rereads = Arc::new(Rereads::default());
-        rereads.live_opened();
-        rig.fence.clone().with_rereads(rereads)
-    };
-
     let rig = fence(&["primary"]);
-    let gate = unread(&rig);
+    let gate = unread(&rig).await;
     rig.observer
         .on_index_rebuilding(&sink("primary"), &index("users"));
     assert!(matches!(
@@ -1425,7 +1419,7 @@ async fn an_unread_sink_still_answers_rebuilding_and_detached() {
     ));
 
     let rig = fence(&["primary"]);
-    let gate = unread(&rig);
+    let gate = unread(&rig).await;
     rig.observer
         .on_backfill_requested(&sink("primary"), &[index("users")]);
     assert!(matches!(
@@ -1434,7 +1428,7 @@ async fn an_unread_sink_still_answers_rebuilding_and_detached() {
     ));
 
     let rig = fence(&["primary"]);
-    let gate = unread(&rig);
+    let gate = unread(&rig).await;
     rig.observer.on_lane_health(&lane("primary"), &detached());
     rig.progress.detach(&lane("primary"));
     let started = Instant::now();
@@ -1459,8 +1453,8 @@ async fn an_unread_lane_keeps_vouching_for_what_it_applied_before_the_slot_reope
     let rig = fence(&["primary"]);
     let rereads = Arc::new(Rereads::default());
     let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
-    rereads.live_opened();
-    rereads.read(&sink("primary"), rereads.live_starts());
+    opened(&rereads).await;
+    rereads.read(&sink("primary"), rereads.read_begins());
     let before = rig.source.emit(20);
     rig.route(before);
     rig.applied("primary", before);
@@ -1468,7 +1462,7 @@ async fn an_unread_lane_keeps_vouching_for_what_it_applied_before_the_slot_reope
         fence.wait(&request("20", FenceLevel::Applied, None)).await,
         reached("20")
     );
-    rereads.live_opened();
+    opened(&rereads).await;
     let after = rig.source.emit(30);
     rig.route(after);
     rig.applied("primary", after);
@@ -1521,5 +1515,111 @@ async fn a_lane_with_two_gaps_vouches_between_them() {
             .wait(&request("45", FenceLevel::Applied, None))
             .await,
         reached("50")
+    );
+}
+
+/// The slot opened: an opening whose new stream answers nothing new.
+async fn opened(rereads: &Rereads) {
+    rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+}
+
+/// Review of the step-4 fixes, B1': the new stream starts answering inside
+/// the opening, before it returns. A `/status` read there (which takes the
+/// lane's answer) never lets a wait pass past what this process applied
+/// under the previous stream: here nothing.
+#[tokio::test(start_paused = true)]
+async fn a_reached_answer_taken_before_the_opening_is_counted_never_vouches_past_the_old_stream() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    rereads
+        .open(async {
+            // The new stream answers the slot's confirmed position.
+            rig.source.idle_to(50);
+            let _ = fence.positions();
+            Ok::<(), ()>(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        unserved("50", &[("users", "primary", Unserved::Starting)])
+    );
+}
+
+/// Review of the step-4 fixes, B1': a wait while the opening is under way,
+/// the new stream already answering and the staging's read the last one,
+/// vouches for nothing new.
+#[tokio::test(start_paused = true)]
+async fn a_wait_between_the_stream_answering_and_the_opening_vouches_nothing_new() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    rereads.read(&sink("primary"), rereads.read_begins());
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let opening = tokio::spawn({
+        let rereads = Arc::clone(&rereads);
+        async move {
+            rereads
+                .open(async {
+                    let _ = released.await;
+                    Ok::<(), ()>(())
+                })
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    rig.source.idle_to(50);
+    assert_eq!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        unserved("50", &[("users", "primary", Unserved::Starting)])
+    );
+    let _ = release.send(());
+    opening.await.unwrap().unwrap();
+}
+
+/// Review of the step-4 fixes, B1': a read that began while the opening was
+/// under way doesn't count: only one begun once the slot is held does.
+#[tokio::test(start_paused = true)]
+async fn a_read_begun_during_the_opening_does_not_count() {
+    let rereads = Rereads::default();
+    let primary = sink("primary");
+    let mut during = None;
+    rereads
+        .open(async {
+            during = Some(rereads.read_begins());
+            Ok::<(), ()>(())
+        })
+        .await
+        .unwrap();
+    rereads.read(&primary, during.unwrap());
+    assert!(!rereads.current(&primary));
+    rereads.read(&primary, rereads.read_begins());
+    assert!(rereads.current(&primary));
+}
+
+/// The rig's fence over a sink unread since the slot opened.
+async fn unread(rig: &Rig) -> Fence {
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    opened(&rereads).await;
+    fence
+}
+
+/// Review of the step-4 fixes, m-a: what an unread lane vouches for is taken
+/// fresh from the previous stream as the opening begins, not a cached answer
+/// that nothing asked for since the lane's last landing.
+#[tokio::test(start_paused = true)]
+async fn the_answer_frozen_at_an_opening_is_taken_fresh_from_the_previous_stream() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
+    opened(&rereads).await;
+    assert_eq!(
+        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        reached("20")
     );
 }
