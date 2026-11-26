@@ -2419,7 +2419,10 @@ only when its `options.format` can't read what flusso writes **into that field**
 the schema: a `date` value `2024-01-02`, a `timestamp` the `T` forms; a `custom` only over `date` /
 `timestamp…` Postgres types, else its own value and no append; a format of time-of-day patterns only is
 left alone: over a `time` column it is `time_of_day_as_date`'s workaround, over anything else the
-`TimeOfDayFormat` error); the named formats' table is `config/date_format.rs`'s module
+`TimeOfDayFormat` error; the declared type decides, never the column's: a `date` field over a
+timestamp column is a `TypeMismatch` that says when its `format` refuses the timestamp,
+`Checker::date_format_refuses`, guard `a_date_field_over_a_timestamp_column_says_its_format_refuses_the_timestamp`);
+the named formats' table is `config/date_format.rs`'s module
 doc (`iso8601` and the `date_optional_time` family read both kinds, `date`/`year_month_day` dates
 only). `kernel::iso_date_format` decides per field, `IndexSchema::completed_date_formats` walks what the
 index maps (no input-only field, nothing under an `indexed: false` join or `enabled: false` object), and

@@ -600,7 +600,7 @@ async fn validate_index(
         uncarried: 0,
         date_mapped: false,
         unmapped: 0,
-        time_format: None,
+        date_format: None,
         out: &mut diagnostics,
     };
     checker
@@ -942,9 +942,9 @@ struct Checker<'a> {
     /// How many enclosing fields OpenSearch doesn't map the children of: an
     /// input-only field, an `indexed: false` join, an `enabled: false` object.
     unmapped: usize,
-    /// The field being checked is mapped as a date with a `format` that reads
-    /// a time of day only ([`DiagnosticKind::TimeOfDayFormat`]): that format.
-    time_format: Option<String>,
+    /// The `format` of the field being checked, when OpenSearch maps it as a
+    /// date ([`kernel::date_format`]).
+    date_format: Option<String>,
     out: &'a mut Vec<Diagnostic>,
 }
 
@@ -1195,10 +1195,9 @@ impl Checker<'_> {
         // unshared field is known to be mapped as it declares.
         let shared = self.positions.last().copied().flatten().is_some();
         self.date_mapped = self.uncarried == 0 && field.emit && !shared && field.options.is_empty();
-        self.time_format = (self.unmapped == 0)
+        self.date_format = (self.unmapped == 0)
             .then(|| kernel::date_format(field))
             .flatten()
-            .filter(|format| kernel::reads_time_of_day_only(format))
             .map(str::to_owned);
         let hides = !carries(field);
         if hides {
@@ -1227,6 +1226,30 @@ impl Checker<'_> {
         checked
     }
 
+    /// For a `date` value read from a timestamp column, what its `format`
+    /// does with the timestamp flusso writes there when it refuses it (a
+    /// `TypeMismatch` suffix); empty otherwise. The append rule follows the
+    /// declared type, so no ISO pattern reads it.
+    fn date_format_refuses(&self, ty: &FlussoType, info: &ColumnInfo) -> String {
+        let base = info.base_type.as_deref().unwrap_or(&info.sql_type);
+        let Some(format) = self.date_format.as_deref() else {
+            return String::new();
+        };
+        if *ty != FlussoType::Date
+            || !FlussoType::Timestamp.accepts_pg(base)
+            || time_of_day_type(base).is_some()
+            || kernel::reads(format, kernel::DateValues::Timestamps)
+            || kernel::reads_time_of_day_only(format)
+        {
+            return String::new();
+        }
+        format!(
+            ": flusso writes the column's value, {WRITES_A_TIMESTAMP}, which the `format` \
+             `{format}` refuses, so OpenSearch refuses every document whose value is not null. \
+             Declare the field `timestamp`, or drop the `format`"
+        )
+    }
+
     /// Report a `timestamp`-typed value read from a column that holds no time
     /// of day under a time-of-day `format` ([`DiagnosticKind::TimeOfDayFormat`]).
     fn time_of_day_format(&mut self, ty: &FlussoType, info: &ColumnInfo) {
@@ -1237,7 +1260,11 @@ impl Checker<'_> {
         if time_of_day_type(base).is_some() {
             return;
         }
-        let Some(format) = self.time_format.clone() else {
+        let Some(format) = self
+            .date_format
+            .clone()
+            .filter(|format| kernel::reads_time_of_day_only(format))
+        else {
             return;
         };
         let what = if FlussoType::Date.accepts_pg(base) {
@@ -1751,10 +1778,12 @@ impl Checker<'_> {
                     self.time_of_day_format(value_type, &info);
                 }
                 if !value_type.accepts_pg(&info.sql_type) {
+                    let refused = self.date_format_refuses(value_type, &info);
                     self.report(
                         DiagnosticKind::TypeMismatch,
                         format!(
-                            "declared aggregate type does not accept the column's database type `{}`",
+                            "declared aggregate type does not accept the column's database type \
+                             `{}`{refused}",
                             info.sql_type
                         ),
                     );
@@ -1859,10 +1888,11 @@ impl Checker<'_> {
         let time_of_day = self.time_of_day(&column.ty, &info);
         self.time_of_day_format(&column.ty, &info);
         if !time_of_day && !unknown_elements && !column.ty.accepts_pg(&info.sql_type) {
+            let refused = self.date_format_refuses(&column.ty, &info);
             self.report(
                 DiagnosticKind::TypeMismatch,
                 format!(
-                    "declared type does not accept the column's database type `{}`",
+                    "declared type does not accept the column's database type `{}`{refused}",
                     info.sql_type
                 ),
             );
@@ -3425,6 +3455,64 @@ mod tests {
         assert_eq!(
             DiagnosticKind::TimeOfDayFormat.as_str(),
             "time_of_day_format"
+        );
+    }
+
+    /// A `date` field over a timestamp column holds the column's value, a
+    /// timestamp: a `TypeMismatch` that, under a `format` reading no
+    /// timestamp, says that format refuses every document. The rule follows
+    /// the declared type, so no `||strict_date_optional_time` is appended.
+    #[test]
+    fn a_date_field_over_a_timestamp_column_says_its_format_refuses_the_timestamp() {
+        let date = |name: &str, format: Option<&str>| {
+            let field = json!({ "field": name, "source": { "column": {
+                "column": "stamped", "ty": "date", "nullable": true,
+            } } });
+            match format {
+                Some(format) => with_format(field, format),
+                None => field,
+            }
+        };
+        let plain = "declared type does not accept the column's database type `timestamp without \
+                     time zone`";
+        let refused = |format: &str| {
+            format!(
+                "{plain}: flusso writes the column's value, a timestamp \
+                 (`2024-01-02T03:04:05`), which the `format` `{format}` refuses, so OpenSearch \
+                 refuses every document whose value is not null. Declare the field `timestamp`, \
+                 or drop the `format`"
+            )
+        };
+        assert_eq!(
+            clocks_findings(json!([
+                int_field("id"),
+                date("bare", None),
+                date("day", Some("yyyy-MM-dd")),
+                date("named", Some("strict_date")),
+                date("iso", Some("strict_date_optional_time")),
+                with_format(
+                    events_aggregate("latest", json!({ "max": "at" }), "date"),
+                    "year_month_day"
+                ),
+            ])),
+            problems(&[
+                ("bare", DiagnosticKind::TypeMismatch, plain),
+                ("day", DiagnosticKind::TypeMismatch, &refused("yyyy-MM-dd")),
+                (
+                    "named",
+                    DiagnosticKind::TypeMismatch,
+                    &refused("strict_date")
+                ),
+                ("iso", DiagnosticKind::TypeMismatch, plain),
+                (
+                    "latest",
+                    DiagnosticKind::TypeMismatch,
+                    &refused("year_month_day").replace(
+                        "declared type does not accept",
+                        "declared aggregate type does not accept",
+                    ),
+                ),
+            ]),
         );
     }
 

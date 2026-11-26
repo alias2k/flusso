@@ -23,6 +23,11 @@
 //! `docvalue_fields`, the `fields` API) and reads queries in either; `_source`
 //! is unchanged.
 //!
+//! The rule follows the **declared** type, never the column's: a `date`
+//! field over a timestamp column holds the timestamp, which a date-only
+//! format refuses, and validation reports that column as a type mismatch
+//! saying so.
+//!
 //! [`iso_date_format`] decides it per field; a field the index doesn't map
 //! (input-only, or under an `indexed: false` join or an `enabled: false`
 //! object) is left alone. The projection
