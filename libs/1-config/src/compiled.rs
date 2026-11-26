@@ -214,7 +214,32 @@ fn falls_back(error: &std::io::Error, stage: Stage) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{Stage, falls_back, write_bytes, write_bytes_if_changed};
+    use super::{Stage, falls_back, unquoted, write_bytes, write_bytes_if_changed};
+
+    #[test]
+    fn a_decode_message_keeps_what_was_expected_and_never_the_value() {
+        for (message, said) in [
+            (
+                "invalid type: string \"SecretThree\", expected a boolean",
+                "invalid type: string \"…\", expected a boolean",
+            ),
+            (
+                "invalid value: string \"a\\\"b\", expected a port",
+                "invalid value: string \"…\", expected a port",
+            ),
+            (
+                "unknown variant `hunter2`, expected one of `stop`, `skip`",
+                "unknown variant `…`, expected one of `stop`, `skip`",
+            ),
+            (
+                "unknown field `pw`, expected `type`",
+                "unknown field `…`, expected `type`",
+            ),
+            ("expected `=`", "expected `=`"),
+        ] {
+            assert_eq!(unquoted(message), said, "{message}");
+        }
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("flusso-lock-{}-{name}", std::process::id()));
@@ -442,8 +467,37 @@ fn decode_error(text: &str, error: &toml::de::Error) -> CompileError {
     CompileError::Decode {
         line,
         column,
-        message: error.message().to_owned(),
+        message: unquoted(error.message()),
     }
+}
+
+/// A parser's message without the values it quotes from the lock: a string
+/// of the wrong type (`invalid type: string "…"`), an unknown variant or
+/// field name. What was expected stays.
+fn unquoted(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut chars = message.chars();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '"' {
+            let mut escaped = false;
+            for inner in chars.by_ref() {
+                if inner == '"' && !escaped {
+                    break;
+                }
+                escaped = inner == '\\' && !escaped;
+            }
+            out.push_str("…\"");
+        }
+    }
+    for lead in ["unknown variant `", "unknown field `"] {
+        if let Some(rest) = out.strip_prefix(lead)
+            && let Some(end) = rest.find('`')
+        {
+            out = format!("{lead}…{}", rest.get(end..).unwrap_or_default());
+        }
+    }
+    out
 }
 
 /// Just the version line of a lock, read ahead of the body.

@@ -560,8 +560,8 @@ config or mapping; it compares the `--lock` with what the config compiles to, by
 does before rewriting it (`lock.rs`'s `LockState`, offline too): current is one line, missing a
 note, the same config in other bytes (CRLF, formatting: `same_config`) a note, since `run --locked`
 runs it, stale (`lock_stale`, naming the indexes or settings that differ) or unreadable
-(`lock_unreadable`: the line and column, never the text there, which `config::from_bytes`'s
-`CompileError::Decode` holds for `run --locked` too) an error, each advice naming the `--out` /
+(`lock_unreadable`: the line and column and what was expected, never the text there nor a value the
+parser quotes, which `config::from_bytes`'s `CompileError::Decode` holds for `run --locked` too) an error, each advice naming the `--out` /
 `--lock` that writes the path compared; with no config it checks the lock, and says there was
 nothing to compare; `check --fix` (a flag with **no** `FLUSSO_FIX`, so an inherited variable never
 rewrites a lock; guard `fix_is_a_flag_only_with_no_environment_variable`) rewrites a lock the config

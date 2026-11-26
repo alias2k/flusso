@@ -495,6 +495,23 @@ mod tests {
         assert!(loaded.contains("line "), "{loaded}");
     }
 
+    /// A value of the wrong type isn't quoted either: the error keeps the
+    /// place and the type expected (fourth review of #486).
+    #[test]
+    fn a_lock_value_of_the_wrong_type_is_never_quoted() {
+        let dir = project("typed", &["users"], "out");
+        let text = String::from_utf8(config::to_bytes(&compiled(&dir)).unwrap()).unwrap();
+        assert!(text.contains("enabled = true"), "{text}");
+        let typed = text.replacen("enabled = true", "enabled = \"SecretThree\"", 1);
+        std::fs::write(dir.join("flusso.lock"), typed).unwrap();
+        let loaded = config::load_compiled(dir.join("flusso.lock"))
+            .unwrap_err()
+            .to_string();
+        assert!(!loaded.contains("SecretThree"), "{loaded}");
+        assert!(loaded.contains("line "), "{loaded}");
+        assert!(loaded.contains("expected a boolean"), "{loaded}");
+    }
+
     /// The advice names the command that writes the lock `check` compared:
     /// `flusso build` writes `--out` (default `flusso.lock`), `flusso run`
     /// writes `--lock`.
