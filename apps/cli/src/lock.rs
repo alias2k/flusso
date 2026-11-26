@@ -66,7 +66,7 @@ pub(crate) enum LockState {
     Stale { differs: Vec<String> },
     /// No file there: `run` with the config writes one.
     Missing,
-    /// It can't be read as a lock; `reason` carries the regenerate hint.
+    /// It can't be read as a lock; `reason` says why.
     Unreadable { reason: String },
     /// There is no config to compare it with: the lock is what is checked.
     NotCompared,
@@ -81,7 +81,7 @@ impl LockState {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::Missing,
             Err(error) => {
                 return Self::Unreadable {
-                    reason: format!("{error}; {REGENERATE}"),
+                    reason: error.to_string(),
                 };
             }
         };
@@ -99,14 +99,14 @@ impl LockState {
             Ok(old) => Self::Stale {
                 differs: differences(&old, &compiled.config),
             },
-            Err(
-                error @ (config::CompileError::VersionMismatch { .. }
-                | config::CompileError::LegacyFormat),
-            ) => Self::Unreadable {
-                reason: error.to_string(),
+            Err(config::CompileError::VersionMismatch { got, expected }) => Self::Unreadable {
+                reason: format!("it is format {got}, and this flusso reads format {expected}"),
+            },
+            Err(config::CompileError::LegacyFormat) => Self::Unreadable {
+                reason: "it is not a text lock (the binary format older flusso wrote)".to_owned(),
             },
             Err(error) => Self::Unreadable {
-                reason: format!("{error}; {REGENERATE}"),
+                reason: error.to_string(),
             },
         }
     }
@@ -137,7 +137,10 @@ impl LockState {
                 "{lock} holds this config in other bytes than flusso writes (line endings or \
                  formatting); `flusso run` would rewrite it"
             ),
-            Self::Missing => format!("{lock} not found; flusso build writes it"),
+            Self::Missing if is_default(path) => {
+                format!("{lock} not found; flusso build writes it")
+            }
+            Self::Missing => format!("{lock} not found; `{}` writes it", build(path)),
             Self::NotCompared => {
                 format!("no config to compare {lock} with: the lock is what was checked")
             }
@@ -149,22 +152,45 @@ impl LockState {
                 };
                 format!(
                     "`{lock}` was compiled from another config than this one{what}: `flusso run \
-                     --locked`, or an image baked from this lock, would run the older config. \
-                     Run `flusso build` (or `flusso run`, which rewrites it) and commit the result"
+                     --locked`, or an image baked from this lock, would run the older config. {} \
+                     and commit the result",
+                    rewrite(path)
                 )
             }
             Self::Unreadable { reason } => {
                 format!(
                     "`{lock}` can't be read as a lock, so `flusso run --locked` would fail on it: \
-                     {reason}"
+                     {reason}. {} to regenerate it",
+                    rewrite(path)
                 )
             }
         }
     }
 }
 
-const REGENERATE: &str =
-    "re-run `flusso build` (or `flusso run` without `--locked`) to regenerate the lock";
+/// Whether `path` is the lock `build` and `run` write when not told another.
+fn is_default(path: &Path) -> bool {
+    path == Path::new(crate::DEFAULT_LOCK)
+}
+
+/// The `build` that writes the lock at `path`.
+fn build(path: &Path) -> String {
+    if is_default(path) {
+        "flusso build".to_owned()
+    } else {
+        format!("flusso build --out {}", path.display())
+    }
+}
+
+/// How to write the lock at `path` again, by `build` or by `run`.
+fn rewrite(path: &Path) -> String {
+    let run = if is_default(path) {
+        "flusso run".to_owned()
+    } else {
+        format!("flusso run --lock {}", path.display())
+    };
+    format!("Run `{}` (or `{run}`, which rewrites it)", build(path))
+}
 
 /// Whether the config a lock holds is the config now, value for value.
 fn same(old: &config::Config, new: &config::Config) -> bool {
@@ -323,9 +349,9 @@ mod tests {
     fn a_lock_of_an_older_format_or_garbage_is_unreadable_with_the_regenerate_hint() {
         let dir = project("unreadable", &["users"], "out");
         for (written, says) in [
-            (&b"format_version = 2\n[config]\n"[..], "format version 2"),
+            (&b"format_version = 2\n[config]\n"[..], "format 2"),
             (&b"\xff\x00binary"[..], "not a text lock"),
-            (&b"this is = not [a lock"[..], "flusso build"),
+            (&b"this is = not [a lock"[..], "line 1"),
         ] {
             std::fs::write(dir.join("flusso.lock"), written).unwrap();
             let state = LockState::of(&compiled(&dir), &dir.join("flusso.lock"));
@@ -334,13 +360,10 @@ mod tests {
                 "{state:?}"
             );
             assert!(state.is_error());
+            let message = state.message(Path::new("flusso.lock"));
             assert!(
-                state
-                    .message(Path::new("flusso.lock"))
-                    .contains("regenerate")
-                    || state
-                        .message(Path::new("flusso.lock"))
-                        .contains("flusso build")
+                message.contains("Run `flusso build` (or `flusso run`, which rewrites it)"),
+                "{message}"
             );
         }
     }
@@ -388,5 +411,38 @@ mod tests {
             .to_string();
         assert!(!loaded.contains("OsSecretBBB"), "{loaded}");
         assert!(loaded.contains("line "), "{loaded}");
+    }
+
+    /// The advice names the command that writes the lock `check` compared:
+    /// `flusso build` writes `--out` (default `flusso.lock`), `flusso run`
+    /// writes `--lock`.
+    #[test]
+    fn the_advice_names_a_lock_path_other_than_the_default() {
+        let elsewhere = Path::new("deploy/flusso.lock");
+        let stale = LockState::Stale {
+            differs: Vec::new(),
+        };
+        let unreadable = LockState::Unreadable {
+            reason: "line 1, column 1: invalid key".to_owned(),
+        };
+        for state in [&stale, &unreadable] {
+            let message = state.message(elsewhere);
+            assert!(
+                message.contains(
+                    "Run `flusso build --out deploy/flusso.lock` (or `flusso run --lock \
+                     deploy/flusso.lock`, which rewrites it)"
+                ),
+                "{message}"
+            );
+            assert!(
+                state
+                    .message(Path::new(crate::DEFAULT_LOCK))
+                    .contains("Run `flusso build` (or `flusso run`, which rewrites it)")
+            );
+        }
+        assert_eq!(
+            LockState::Missing.message(elsewhere),
+            "deploy/flusso.lock not found; `flusso build --out deploy/flusso.lock` writes it"
+        );
     }
 }
