@@ -1039,3 +1039,206 @@ fn a_constant_list_mixing_kinds_is_stored_unindexed() {
         assert!(!field.array);
     }
 }
+
+fn with_format(mut field: Field, format: &str) -> Field {
+    field.options.insert(
+        "format".to_owned(),
+        crate::common::GenericValue::String(format.to_owned()),
+    );
+    field
+}
+
+fn format_of(mapping: &crate::config::Mapping) -> Option<&str> {
+    match mapping.extra.get("format") {
+        Some(crate::common::GenericValue::String(format)) => Some(format),
+        _ => None,
+    }
+}
+
+const SPACE_ONLY: &str = "yyyy-MM-dd HH:mm:ss";
+
+/// The append rule, pattern by pattern (`with_iso`): only a named pattern that
+/// reads every date form flusso writes leaves a format alone; anything else
+/// gets `||strict_date_optional_time` at the end, the user's patterns first.
+#[test]
+fn a_date_format_that_cannot_read_what_flusso_writes_gets_the_iso_pattern_last() {
+    for (format, expected) in [
+        (
+            SPACE_ONLY,
+            Some("yyyy-MM-dd HH:mm:ss||strict_date_optional_time"),
+        ),
+        (
+            "epoch_millis",
+            Some("epoch_millis||strict_date_optional_time"),
+        ),
+        (
+            "yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss||epoch_second",
+            Some(
+                "yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss||epoch_second||strict_date_optional_time",
+            ),
+        ),
+        ("yyyy/MM/dd", Some("yyyy/MM/dd||strict_date_optional_time")),
+        (
+            "yyyy-MM-dd'T'HH:mm:ss",
+            Some("yyyy-MM-dd'T'HH:mm:ss||strict_date_optional_time"),
+        ),
+        ("date_time", Some("date_time||strict_date_optional_time")),
+        ("strict_date_optional_time", None),
+        ("yyyy-MM-dd HH:mm:ss||strict_date_optional_time", None),
+        ("date_optional_time||epoch_millis", None),
+        ("strictDateOptionalTime", None),
+        (" strict_date_optional_time_nanos ", None),
+        ("", None),
+        ("  ", None),
+    ] {
+        assert_eq!(
+            crate::config::with_iso(format).as_deref(),
+            expected,
+            "{format:?}"
+        );
+    }
+}
+
+/// Every date-typed field takes the rule: a `timestamp` or `date` column, an
+/// array of them, a `min`/`max` of a date type, a timestamp script; any other
+/// type keeps its options as written, and a field with no `format` is left
+/// alone.
+#[test]
+fn every_date_mapping_with_a_refusing_format_resolves_with_the_iso_pattern() {
+    let appended = "yyyy-MM-dd HH:mm:ss||strict_date_optional_time";
+    let mut array = column_field("days", FlussoType::Date);
+    if let FieldSource::Column(column) = &mut array.source {
+        column.array = true;
+    }
+    let latest = Field {
+        field: FieldName::try_new("latest").unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Relation(Relation::Aggregate(Aggregate {
+            table: TableName::try_new("orders").unwrap(),
+            op: AggregateOp::Max(crate::config::Expression::Column(
+                ColumnName::try_new("placed_at").unwrap(),
+            )),
+            key: AggregateKey::Direct(ColumnName::try_new("user_id").unwrap()),
+            value_type: Some(FlussoType::Timestamp),
+            filters: None,
+            distinct: false,
+            via: vec![],
+            on: vec![],
+        })),
+    };
+    let script = Field {
+        field: FieldName::try_new("computed").unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Script(crate::config::Script {
+            source: "this.placed".to_owned(),
+            ty: FlussoType::Timestamp,
+            nullable: true,
+            array: false,
+            enum_order: vec![],
+            subfields: true,
+        }),
+    };
+    let schema = columns_schema(vec![
+        with_format(column_field("placed", FlussoType::Timestamp), SPACE_ONLY),
+        with_format(column_field("born", FlussoType::Date), SPACE_ONLY),
+        with_format(array, SPACE_ONLY),
+        with_format(latest, SPACE_ONLY),
+        with_format(script, SPACE_ONLY),
+        with_format(
+            column_field("kept", FlussoType::Timestamp),
+            "strict_date_optional_time",
+        ),
+        column_field("plain", FlussoType::Timestamp),
+        with_format(column_field("name", FlussoType::Keyword), SPACE_ONLY),
+    ]);
+    let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+    let formats: Vec<(&str, Option<&str>)> = mapping
+        .fields
+        .iter()
+        .map(|field| (field.name.as_ref(), format_of(&field.mapping)))
+        .collect();
+    assert_eq!(
+        formats,
+        [
+            ("placed", Some(appended)),
+            ("born", Some(appended)),
+            ("days", Some(appended)),
+            ("latest", Some(appended)),
+            ("computed", Some(appended)),
+            ("kept", Some("strict_date_optional_time")),
+            ("plain", None),
+            ("name", Some(SPACE_ONLY)),
+        ]
+    );
+}
+
+/// A date field inside an object or a join resolves with the rule too, and a
+/// `map` of timestamps (whose keys take no `format`) keeps its key mapping.
+#[test]
+fn a_nested_date_field_takes_the_iso_pattern_and_a_map_of_dates_is_untouched() {
+    let placed = with_format(column_field("placed", FlussoType::Timestamp), SPACE_ONLY);
+    let group = Field {
+        field: FieldName::try_new("meta").unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Group(vec![placed.clone()]),
+    };
+    let mut join = belongs_to_schema(true).fields.remove(0);
+    if let FieldSource::Relation(Relation::Join(join)) = &mut join.source {
+        join.fields = vec![placed];
+    }
+    let schema = columns_schema(vec![
+        group,
+        join,
+        column_field("stamps", map_of(FlussoType::Timestamp)),
+    ]);
+    let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+    for field in &mapping.fields[..2] {
+        assert_eq!(
+            format_of(&field.children[0].mapping),
+            Some("yyyy-MM-dd HH:mm:ss||strict_date_optional_time"),
+            "{}",
+            field.name
+        );
+    }
+    let keys = mapping.fields[2].mapping.map_values.as_ref().unwrap();
+    assert_eq!(keys.mapping_type, MappingType::Date);
+    assert_eq!(format_of(keys), None);
+}
+
+/// Every schema the rule doesn't touch keeps its content hash, so its
+/// physical index: a date field with no format or one reading ISO, any other
+/// field with a `format` option.
+#[test]
+fn a_schema_whose_date_formats_read_what_flusso_writes_keeps_its_content_hash() {
+    let schema = columns_schema(vec![
+        column_field("plain", FlussoType::Timestamp),
+        with_format(
+            column_field("kept", FlussoType::Timestamp),
+            "yyyy-MM-dd HH:mm:ss||strict_date_optional_time",
+        ),
+        with_format(column_field("name", FlussoType::Keyword), SPACE_ONLY),
+    ]);
+    let hash = schema.resolve(IndexName::try_new("products").unwrap()).hash;
+    assert_eq!(hash.to_string(), "f20b4f60");
+}
+
+/// A schema whose date format gets the pattern moves to a new physical index
+/// once: its old mapping refused every document holding a date.
+#[test]
+fn a_schema_whose_date_format_gets_the_iso_pattern_moves_off_its_hash() {
+    let refusing = columns_schema(vec![with_format(
+        column_field("placed", FlussoType::Timestamp),
+        SPACE_ONLY,
+    )]);
+    let hash = refusing
+        .resolve(IndexName::try_new("products").unwrap())
+        .hash;
+    assert_ne!(
+        hash.to_string(),
+        "41d45db2",
+        "the hash it had before the pattern was appended"
+    );
+}
