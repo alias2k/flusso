@@ -4255,9 +4255,9 @@ async fn a_seed_owed_over_a_gap_written_meanwhile_asks_the_backfill_again() {
 /// serving one and the walk checkpoint, so without the slot it would destroy
 /// the rebuild another process holding the slot is walking. This process's
 /// run restarts while its stream is down and stages: the rebuild is left as
-/// it is and the lane taken as detached. The next opening makes its records
-/// unread (nothing is confirmed meanwhile), and the read again, now holding
-/// the slot, demotes it.
+/// it is, and the lane stands in, awaiting the slot (B-1 of the seventh
+/// re-check: nothing of it written or dropped). The next opening makes its
+/// records unread, and the read again, now holding the slot, demotes it.
 #[tokio::test(start_paused = true)]
 async fn a_staging_without_the_slot_leaves_anothers_rebuild_to_the_holder() {
     let rig = Rig::new(64);
@@ -4300,7 +4300,11 @@ async fn a_staging_without_the_slot_leaves_anothers_rebuild_to_the_holder() {
         Some("k"),
         "the holder's checkpoint stays"
     );
-    assert!(engine.lane_health(&lane(users())).is_detached());
+    assert!(
+        awaits_slot(&engine),
+        "{:?}",
+        engine.lane_health(&lane(users()))
+    );
     let (task, _control) = spawn(&engine);
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     eventually("demoted once the slot is held", || {
@@ -4314,8 +4318,9 @@ async fn a_staging_without_the_slot_leaves_anothers_rebuild_to_the_holder() {
 /// engine (`will_open`) before the first staging, so that staging holds no
 /// slot. A live-only sink demotes a rebuild it finds (a backfilling one takes
 /// it over, which writes no record); one another process may be walking is
-/// not demoted there: the lane is taken as detached, which freezes its fence, and the
-/// first opening's read again demotes it once the slot is held.
+/// not demoted there: the lane stands in, awaiting the slot (nothing of it
+/// written or dropped, so its fence vouches no further), and the first
+/// opening's read again demotes it once the slot is held.
 #[tokio::test(start_paused = true)]
 async fn a_start_staging_before_the_stream_opens_demotes_nothing() {
     let rig = Rig::new(64);
@@ -4340,7 +4345,11 @@ async fn a_start_staging_before_the_stream_opens_demotes_nothing() {
     engine.stage(Continuity::Resumed).await.unwrap();
     assert!(rig.sink.demoted.lock().unwrap().is_empty());
     assert!(rig.sink.walked.lock().unwrap().contains_key("users"));
-    assert!(engine.lane_health(&lane(users())).is_detached());
+    assert!(
+        awaits_slot(&engine),
+        "{:?}",
+        engine.lane_health(&lane(users()))
+    );
     let (task, _control) = spawn(&engine);
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     eventually("demoted once the slot is held", || {
@@ -4575,5 +4584,122 @@ async fn a_lane_held_detached_whose_record_another_process_removed_is_recorded_a
     eventually("recorded detached again", || rig.sink.detaches().len() == 2).await;
     assert!(rig.sink.kept.lock().unwrap().contains_key("users"));
     assert!(engine.lane_health(&lane(users())).is_detached());
+    task.abort();
+}
+
+/// Whether `users`' lane stands in for what waits for the slot (B-1).
+fn awaits_slot(engine: &SinkEngine) -> bool {
+    matches!(
+        engine.lane_health(&lane(users())),
+        LaneHealth::Parked {
+            reason: crate::ParkReason::AwaitingSlot { .. },
+            ..
+        }
+    )
+}
+
+/// A lane holding items of a stream that ended, unwritten (parked on a
+/// block), whose records then ask for a demotion with no slot held: B-1's
+/// stand-in keeps them. The holder finishes; once this process holds the
+/// slot and reads no record, the lane opens and writes every item it held.
+#[tokio::test(start_paused = true)]
+async fn a_stand_in_writes_what_it_held_once_the_records_ask_nothing() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    eventually("read under the stream", || read_all(&rig)).await;
+    rig.sink.block(&users(), true);
+    rig.live(&users(), 1, 1).await;
+    rig.live(&users(), 2, 2).await;
+    eventually("parked on the block", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked { .. }
+        )
+    })
+    .await;
+    let mut record = Detachment::recorded(
+        DetachRecord::Rebuilding { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    );
+    record.attempts = Some(1);
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), record);
+    // An opening whose stream ends before the run reads under it.
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.rereads.closed();
+    eventually("the lane stands in", || awaits_slot(&engine)).await;
+    rig.sink.block(&users(), false);
+    let tried = rig.sink.writes_of(&users()).len();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(
+        rig.sink.writes_of(&users()).len(),
+        tried,
+        "nothing written, nor probed, while it stands in"
+    );
+    rig.sink.kept.lock().unwrap().remove("users");
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("both held items land", || {
+        rig.applied(&users()) == through(2)
+    })
+    .await;
+    assert!(engine.lane_health(&lane(users())).is_open());
+    assert!(rig.sink.demoted.lock().unwrap().is_empty());
+    task.abort();
+}
+
+/// A stop while a lane stands in for what waits for the slot doesn't wait
+/// out its deadline on it: its items are released unapplied, as a
+/// restaging lane's are, and the next start's read of the records decides.
+#[tokio::test(start_paused = true)]
+async fn a_stop_while_a_lane_awaits_the_slot_drains_at_once() {
+    let rig = Rig::new(64);
+    let stop = crate::Stop::new();
+    let engine = Arc::new(
+        rig.built("primary", Arc::clone(&rig.sink))
+            .with_stop(stop.clone()),
+    );
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    eventually("read under the stream", || read_all(&rig)).await;
+    rig.sink.block(&users(), true);
+    rig.live(&users(), 1, 1).await;
+    eventually("parked on the block", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked { .. }
+        )
+    })
+    .await;
+    let mut record = Detachment::recorded(
+        DetachRecord::Rebuilding { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    );
+    record.attempts = Some(1);
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), record);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.rereads.closed();
+    eventually("the lane stands in", || awaits_slot(&engine)).await;
+    let tried = rig.sink.writes_of(&users()).len();
+    stop.request();
+    eventually("drained", || rig.stream.is_idle()).await;
+    assert_eq!(
+        rig.sink.writes_of(&users()).len(),
+        tried,
+        "released unwritten"
+    );
+    assert_ne!(rig.applied(&users()), through(1), "nor applied");
     task.abort();
 }

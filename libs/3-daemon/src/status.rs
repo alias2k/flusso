@@ -207,13 +207,16 @@ impl LaneHealthView {
                 next_probe,
             } => Some(Self {
                 state: match reason {
-                    engine::ParkReason::Blocked { .. } | engine::ParkReason::SeedBlocked { .. } => {
-                        LaneHealthState::Blocked
-                    }
+                    engine::ParkReason::Blocked { .. }
+                    | engine::ParkReason::SeedBlocked { .. }
+                    | engine::ParkReason::AwaitingSlot { .. } => LaneHealthState::Blocked,
                     _ => LaneHealthState::Refused,
                 },
                 since: at(*since),
-                next_probe: Some(at(*next_probe)),
+                // A lane awaiting the slot is never probed: an opening's
+                // read of its records decides it.
+                next_probe: (!matches!(reason, engine::ParkReason::AwaitingSlot { .. }))
+                    .then(|| at(*next_probe)),
                 reason: reason.to_string(),
                 seed_blocked: matches!(reason, engine::ParkReason::SeedBlocked { .. }),
             }),

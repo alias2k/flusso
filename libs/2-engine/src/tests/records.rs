@@ -381,9 +381,11 @@ async fn each_staging_keeps_what_it_read_last() {
     engine.stage(Continuity::Resumed).await.unwrap();
     assert_eq!(engine.detachment(&index(0)), Some(detached(false)));
 
-    sink.reads.lock().unwrap().clear();
+    // Another record now: what the next staging read is what is kept. (A
+    // lane held detached whose records vanished is recorded again, B-1.)
+    *sink.reads.lock().unwrap() = [(name(0), Read::Kept(detached(true)))].into();
     engine.stage(Continuity::Resumed).await.unwrap();
-    assert_eq!(engine.detachment(&index(0)), None);
+    assert_eq!(engine.detachment(&index(0)), Some(detached(true)));
 }
 
 /// With nothing kept, staging calls the sink exactly as a sink keeping no

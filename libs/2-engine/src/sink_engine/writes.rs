@@ -348,7 +348,7 @@ enum Outcome {
     Refresh(sink::Result<WriteReport>),
     /// A lane's index staged again after its target went missing.
     /// `true`: staging found the index detached.
-    Restage(Result<bool>),
+    Restage(Result<super::Restaged>),
     /// The retry of a reindex a lane is owed (X15).
     Reindex(Reindexed),
     /// A lane's detach, recorded by the sink (ADR 0012 stage 10, R4);
@@ -858,6 +858,14 @@ impl<'a> Run<'a> {
             .is_some_and(|run| matches!(run.health.health, LaneHealth::Restaging { .. }))
     }
 
+    /// Whether `lane` stands in for a demotion or a detach that waits for the
+    /// slot (B-1).
+    fn lane_awaits_slot(&self, lane: usize) -> bool {
+        self.lanes
+            .get(lane)
+            .is_some_and(|run| run.health.awaits_slot())
+    }
+
     /// Whether `lane` is written as usual (not parked, not being staged).
     fn lane_open(&self, lane: usize) -> bool {
         self.lanes.get(lane).is_some_and(|run| run.health.is_open())
@@ -871,6 +879,12 @@ impl<'a> Run<'a> {
         };
         match &run.health.health {
             LaneHealth::Open => true,
+            // A stand-in for what waits for the slot: decided by a read of
+            // the records while it is held, never by a probe (B-1).
+            LaneHealth::Parked {
+                reason: ParkReason::AwaitingSlot { .. },
+                ..
+            } => false,
             LaneHealth::Parked { .. } => {
                 run.health.due <= now
                     && run.detach_due.is_none()
@@ -1065,7 +1079,7 @@ impl<'a> Run<'a> {
     /// written again; failed, it is tried again after its backoff. Either
     /// way, how far the lane's walk got in a missing target means nothing in
     /// the new one; a lane a staging left out keeps its walk (#471).
-    fn restage_returned(&mut self, flight: u64, result: Result<bool>) -> Option<usize> {
+    fn restage_returned(&mut self, flight: u64, result: Result<super::Restaged>) -> Option<usize> {
         let at = self.restaging.iter().position(|(id, _)| *id == flight)?;
         let (_, lane) = self.restaging.swap_remove(at);
         let now = Instant::now();
@@ -1073,8 +1087,18 @@ impl<'a> Run<'a> {
         // The staging found the index detached: the lane is taken as such,
         // never reopened. Its own answer decides, not the shared state, which
         // the run may have stored over meanwhile (review m4).
-        if matches!(result, Ok(true)) {
-            return Some(lane);
+        match result {
+            Ok(super::Restaged::Detached) => return Some(lane),
+            // What the records ask waits for the slot (B-1): the lane stays
+            // restaging, its items held, and is staged again after its
+            // backoff; each staging reads the records again.
+            Ok(super::Restaged::AwaitingSlot) => {
+                run.health.restage_failed(now);
+                tracing::warn!(lane = %run.key, retry_in = ?run.health.due.saturating_duration_since(now), "the records ask for a demotion or a detach, which waits until this process holds the slot; the lane stays restaging, nothing of it dropped");
+                self.engine.store_lane(&run.key, &run.health, false);
+                return None;
+            }
+            _ => {}
         }
         let result = result.map(|_| ());
         if !run.health.unensured {
@@ -2581,7 +2605,8 @@ impl<'a> Run<'a> {
     }
 
     /// Once stopping, the live items and the completion of a `restaging`
-    /// lane (its target gone, or owed its reindex) are acknowledged unwritten
+    /// lane (its target gone, or owed its reindex), or of one awaiting the
+    /// slot (B-1: its records decide at the next start), are acknowledged unwritten
     /// and unapplied, as held items are (X10): it is not staged again, so the
     /// drain doesn't wait for it, its applied mark (so the slot) stays before
     /// their changes, its index stays unseeded, and the next start stages it
@@ -2594,7 +2619,8 @@ impl<'a> Run<'a> {
                     Queue::Batch { batch, .. } => batch.position.is_some(),
                     Queue::Complete { .. } => true,
                 };
-                positioned && self.lane_restaging(queued.lane)
+                positioned
+                    && (self.lane_restaging(queued.lane) || self.lane_awaits_slot(queued.lane))
             });
             if !release {
                 index += 1;
@@ -3203,6 +3229,7 @@ impl<'a> Run<'a> {
             }
             let key = run.key.clone();
             let detached = run.health.health.is_detached();
+            let awaiting = run.health.awaits_slot();
             let runs = run.health.rebuilding;
             let rebuilding = runs.is_some();
             let index = run.key.index.clone();
@@ -3247,24 +3274,61 @@ impl<'a> Run<'a> {
                         self.drop_rebuild(lane);
                     }
                 }
-                // What the records ask waits for the slot (the stream ended
-                // while reading): taken as detached, the read not counted.
-                super::Acted::Unheld { why, through } => {
+                // What the records ask waits for the slot: the lane stands
+                // in for it, nothing of it written or dropped, the read not
+                // counted (B-1). A lane held detached stays so.
+                super::Acted::Unheld { why, .. } => {
                     if rebuilding {
                         self.drop_rebuild(lane);
                     }
-                    if !detached {
-                        self.detached(lane, why, through).await?;
-                    }
+                    self.await_slot(lane, why);
                     continue;
                 }
                 super::Acted::Ours | super::Acted::TookOver(_) => {}
+            }
+            // Read while held, the records ask nothing of a lane awaiting
+            // the slot (it wasn't detached above): it opens, nothing dropped.
+            if awaiting {
+                self.release_awaiting(lane);
             }
             // The lane's state now follows its records: its read counts.
             self.engine.rereads.read(&key, read_at);
         }
         self.engine.records_read(read_at);
         Ok(())
+    }
+
+    /// `lane` stands in for what the records ask, which waits for the slot
+    /// (B-1): parked awaiting it, its items held unacknowledged, never
+    /// probed. A lane held detached or restaging stays as it is.
+    fn await_slot(&mut self, lane: usize, why: String) {
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        let was_open = run.health.is_open();
+        if run.health.await_slot(why, Instant::now()) {
+            if was_open {
+                self.unhealthy += 1;
+            }
+            tracing::warn!(lane = %run.key, "this process holds no slot: the lane waits for it, nothing of it written or dropped");
+            self.engine.store_lane(&run.key, &run.health, true);
+        }
+    }
+
+    /// `lane` awaited the slot and its records, read while it is held, ask
+    /// nothing of it: it opens, with every item it held still to write.
+    fn release_awaiting(&mut self, lane: usize) {
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        if !run.health.awaits_slot() {
+            return;
+        }
+        if let Some(down) = run.health.open(Instant::now()) {
+            self.unhealthy = self.unhealthy.saturating_sub(1);
+            tracing::info!(lane = %run.key, after = ?down, "read while this process holds the slot, the records ask nothing of the lane: it opens, nothing dropped");
+            self.engine.store_lane(&run.key, &run.health, true);
+        }
     }
 
     /// Drop the rebuild a detached lane waits to attach for: its records

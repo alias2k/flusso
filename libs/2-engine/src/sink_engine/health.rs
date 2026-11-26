@@ -164,14 +164,26 @@ pub enum ParkReason {
         /// The block, and what lifts it.
         reason: String,
     },
+    /// The index's records ask for a demotion or a detach, which waits for
+    /// the slot (ADR 0012 stage 10, the seventh re-check B-1): the lane
+    /// stands in, its items held unacknowledged and never probed, until a
+    /// read of the records while this process holds the slot decides. It
+    /// detaches then under the record, or opens with nothing dropped.
+    AwaitingSlot {
+        /// What the records ask, and why it waits.
+        reason: String,
+    },
 }
 
 impl ParkReason {
-    /// `refused` or `blocked`: the lane's health in `/status`.
+    /// `refused` or `blocked`: the lane's health in `/status`. A lane
+    /// awaiting the slot is `blocked`: nothing of it is written for now.
     pub fn kind(&self) -> &'static str {
         match self {
             ParkReason::Refused { .. } => "refused",
-            ParkReason::Blocked { .. } | ParkReason::SeedBlocked { .. } => "blocked",
+            ParkReason::Blocked { .. }
+            | ParkReason::SeedBlocked { .. }
+            | ParkReason::AwaitingSlot { .. } => "blocked",
         }
     }
 
@@ -179,7 +191,9 @@ impl ParkReason {
     pub fn label(&self) -> &'static str {
         match self {
             ParkReason::Refused { .. } => "refused",
-            ParkReason::Blocked { .. } | ParkReason::SeedBlocked { .. } => "blocked",
+            ParkReason::Blocked { .. }
+            | ParkReason::SeedBlocked { .. }
+            | ParkReason::AwaitingSlot { .. } => "blocked",
         }
     }
 }
@@ -197,6 +211,7 @@ impl std::fmt::Display for ParkReason {
             ParkReason::Blocked { reason } | ParkReason::SeedBlocked { reason } => {
                 write!(f, "blocked: {reason}")
             }
+            ParkReason::AwaitingSlot { reason } => write!(f, "waiting for the slot: {reason}"),
         }
     }
 }
@@ -408,6 +423,44 @@ impl LaneState {
             | LaneHealth::Restaging { .. }
             | LaneHealth::Detached { .. } => false,
         }
+    }
+
+    /// Stand in for what the records ask, which waits for the slot (the
+    /// seventh re-check, B-1): an open or parked lane parks
+    /// [`AwaitingSlot`](ParkReason::AwaitingSlot), keeping what it holds
+    /// unacknowledged and its schedule. A detached lane already dropped
+    /// under a record and stays so; a restaging one stays restaging, its
+    /// staging (which reads the records) the read that decides. Whether the
+    /// health changed.
+    pub(crate) fn await_slot(&mut self, reason: String, now: Instant) -> bool {
+        let since = match &self.health {
+            LaneHealth::Open => now,
+            LaneHealth::Parked {
+                reason: ParkReason::AwaitingSlot { .. },
+                ..
+            }
+            | LaneHealth::Restaging { .. }
+            | LaneHealth::Detached { .. } => return false,
+            LaneHealth::Parked { since, .. } => *since,
+        };
+        self.health = LaneHealth::Parked {
+            reason: ParkReason::AwaitingSlot { reason },
+            since,
+            next_probe: self.due,
+        };
+        true
+    }
+
+    /// Whether the lane stands in for a demotion or a detach that waits for
+    /// the slot: never granted, never probed.
+    pub(crate) fn awaits_slot(&self) -> bool {
+        matches!(
+            self.health,
+            LaneHealth::Parked {
+                reason: ParkReason::AwaitingSlot { .. },
+                ..
+            }
+        )
     }
 
     /// The index's target is gone: stage it again, at once when a write of
