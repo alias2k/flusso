@@ -100,6 +100,8 @@ struct Gate {
     ensure_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     /// While set, a read of the records waits for a permit here.
     read_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// Each index a reindex moved to a new generation.
+    reindexed: Mutex<Vec<String>>,
     /// `forget_detachment` deletes the record, then fails (a timeout after
     /// the delete landed).
     forget_lands_then_fails: Mutex<bool>,
@@ -423,6 +425,14 @@ impl Sink for Gate {
             .lock()
             .unwrap()
             .push((mapping.index.to_string(), live_only));
+        Ok(())
+    }
+
+    async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
+        self.reindexed
+            .lock()
+            .unwrap()
+            .push(mapping.index.to_string());
         Ok(())
     }
 
@@ -3930,5 +3940,127 @@ async fn a_failed_read_of_a_detached_lane_never_fails_the_run() {
     assert!(!task.is_finished(), "the run goes on");
     assert!(engine.lane_health(&lane(users())).is_detached());
     assert!(!rig.rereads.current(&lane(users())), "left unread");
+    task.abort();
+}
+
+/// A gate held until released: what passes it meanwhile waits.
+fn held_gate(slot: &Mutex<Option<Arc<tokio::sync::Semaphore>>>) -> Arc<tokio::sync::Semaphore> {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *slot.lock().unwrap() = Some(Arc::clone(&gate));
+    gate
+}
+
+fn release(slot: &Mutex<Option<Arc<tokio::sync::Semaphore>>>, gate: &tokio::sync::Semaphore) {
+    *slot.lock().unwrap() = None;
+    gate.add_permits(64);
+}
+
+/// The sixth re-check, B-1: the slot is checked immediately before each
+/// request that may erase a record, not once ahead of the awaits before it.
+/// A reattach that passed its check with the slot held waits in
+/// `ensure_index` while the stream ends: its delete is refused, and the
+/// record stays.
+#[tokio::test(start_paused = true)]
+async fn a_reattach_whose_stream_ends_mid_way_deletes_no_record() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (_engine, task, control) = detached_live_only(&rig).await;
+    let gate = held_gate(&rig.sink.ensure_gate);
+    let (reply, verdict) = crate::Reply::new();
+    control
+        .send(SinkControl::Reattach {
+            index: users(),
+            reply,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    rig.rereads.closed();
+    release(&rig.sink.ensure_gate, &gate);
+    let verdict = tokio::time::timeout(Duration::from_secs(10), verdict)
+        .await
+        .expect("a verdict")
+        .expect("answered");
+    assert!(
+        matches!(verdict, crate::ReattachVerdict::Refused(ref why) if why.contains("doesn't hold the slot")),
+        "{verdict:?}"
+    );
+    assert!(
+        rig.sink.kept.lock().unwrap().get("users").is_some(),
+        "the record stays"
+    );
+    task.abort();
+}
+
+/// ... a clear whose read of the records returns after the stream ended
+/// deletes nothing, though another process wrote its record meanwhile.
+#[tokio::test(start_paused = true)]
+async fn a_clear_whose_stream_ends_after_its_read_deletes_nothing() {
+    let rig = Rig::new(64);
+    rig.sink
+        .records
+        .lock()
+        .unwrap()
+        .push_back(Record::FailAfterWriting);
+    rig.sink.block(&users(), true);
+    let engine = rig.engine();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 1, 1).await;
+    eventually("the record was written and the call failed", || {
+        rig.sink.detaches().len() == 1
+    })
+    .await;
+    let gate = held_gate(&rig.sink.read_gate);
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    rig.rereads.closed();
+    rig.sink.kept.lock().unwrap().insert(
+        "users".to_owned(),
+        Detachment::recorded(
+            DetachRecord::Detached { live_only: false },
+            Some(MarkerAt::Newer { seeded: false }),
+            Some(RecordVersion::new("9:9")),
+        ),
+    );
+    release(&rig.sink.read_gate, &gate);
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let forgotten = rig.sink.forgotten.lock().unwrap().clone();
+    let kept = rig.sink.kept.lock().unwrap().get("users").cloned();
+    task.abort();
+    assert!(
+        kept.is_some() && !forgotten.contains(&"users@9:9".to_owned()),
+        "no stream held at the delete, yet: forgotten {forgotten:?}, record after {kept:?}"
+    );
+}
+
+/// ... a reindex whose staging reads the records while the stream ends
+/// moves the index to no new generation.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_whose_stream_ends_while_staging_rewrites_nothing() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, control) = spawn(&engine);
+    eventually("read under the stream", || read_all(&rig)).await;
+    let gate = held_gate(&rig.sink.read_gate);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    rig.rereads.closed();
+    release(&rig.sink.read_gate, &gate);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        rig.sink.reindexed.lock().unwrap().is_empty(),
+        "a reindex with no stream held"
+    );
     task.abort();
 }

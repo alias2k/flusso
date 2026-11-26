@@ -6,3 +6,5 @@
 # everyone who runs the test benefits from these saved cases.
 cc 8c8170fca267c138bf6070b4570a74160a88517981f4b6ea28add6e2a4851616 # CI's case on a9c7bd90: a reattach before the new process's first stream settled its gap at the stand-in's Idle answer, 0
 cc 0b57a55b9bba5af87a35c6ff97321ba59327bae9b091436305dfdd743b4027fd # shrinks to events = [Open { ok: true, jump: 10, drop: Some(2), rebuild: true }, NewProcess, Reindex { index: 0 }]
+cc 6d852a8c1fcb272790c37990536ad2c9148aafb4960d89a1865a3a92f684ab6d # the sixth re-check's B-1: a reattach waiting in ensure_index past the stream's end deleted another process's record
+cc 512dc941332a1b341e233faba3699ee4f8aa1d3b449d13a3f4fd814a216f9c6a # the sixth re-check's B-1: the same with its read held
