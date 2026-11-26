@@ -259,13 +259,7 @@ pub(crate) fn coverage(
         }
     }
 
-    if report.manageable && manage {
-        writeln!(
-            out,
-            "  {}",
-            pen.green("→ will be fixed automatically on the next `flusso run`"),
-        )?;
-    } else if report.manageable {
+    if report.manageable {
         writeln!(
             out,
             "  {}",
@@ -846,7 +840,7 @@ fn pen_pad(pen: Pen, text: &str) -> usize {
 mod tests {
     use config::{FlussoType, Mapping};
 
-    use super::{Pen, pre_image, type_label};
+    use super::{Pen, coverage, pre_image, type_label};
 
     fn gap(table: &str, kept: Option<&str>) -> source::PreImageGap {
         source::PreImageGap {
@@ -904,6 +898,34 @@ mod tests {
         );
         assert!(!out.contains("re-parenting"), "{out}");
         assert!(out.contains("ALTER TABLE logs"), "{out}");
+    }
+
+    /// A gap the role could close is printed in full only while management is
+    /// off; with it on, the section is one line (`check::tests`).
+    #[test]
+    fn a_gap_the_role_could_close_with_management_off_prints_its_sql() {
+        let users = source::QualifiedTable::new(
+            config::DatabaseSchema::try_new("public").unwrap(),
+            config::TableName::try_new("users").unwrap(),
+        );
+        let report = source::CoverageReport {
+            satisfied: false,
+            present: Vec::new(),
+            missing: vec![users],
+            misrouted: Vec::new(),
+            manageable: true,
+            blockers: Vec::new(),
+            remediation: vec!["ALTER PUBLICATION flusso ADD TABLE public.users;".to_owned()],
+        };
+        let mut out = Vec::new();
+        coverage(&mut out, Pen { color: false }, &report, false).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("automatic management is disabled"), "{out}");
+        assert!(
+            out.contains("ALTER PUBLICATION flusso ADD TABLE public.users;"),
+            "{out}"
+        );
+        assert!(!out.contains("will be fixed automatically"), "{out}");
     }
 
     #[test]
