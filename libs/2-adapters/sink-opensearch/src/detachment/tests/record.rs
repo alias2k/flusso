@@ -250,7 +250,7 @@ async fn a_detach_killed_after_any_step_comes_back_correct() {
                     Some(DetachRecord::Detached { live_only: false }),
                     "after {done} writes"
                 );
-                assert_eq!(read.marker, Some(MarkerAt::Elsewhere { seeded: false }));
+                assert_eq!(read.marker, Some(MarkerAt::Newer { seeded: false }));
                 assert!(read.version.is_some());
                 assert_eq!(
                     read.restored, None,
@@ -428,6 +428,26 @@ async fn a_marker_moved_meanwhile_is_read_again_and_left_alone() {
     let store = store.lock().unwrap();
     assert_eq!(store.doc(ALIAS).unwrap(), moved);
     assert_eq!(store.doc(DETACH).unwrap()["serving"], 3);
+}
+
+/// A sink that can't rebuild, detached while nothing holds the hash alias
+/// (its lane restaging): the marker stays seeded where it was, and staging
+/// can't read that as a rebuild that finished (review S2).
+#[tokio::test]
+async fn a_live_only_detach_with_nothing_serving_reads_as_no_known_serving() {
+    let store = Arc::new(Mutex::new(Store::seeded()));
+    store.lock().unwrap().holder = None;
+    let stub = serve(&store).await;
+    stub.sink()
+        .detach(&mapping(), &blocked().live_only(true))
+        .await
+        .unwrap();
+    let read = stub.sink().detachment(&mapping()).await.unwrap();
+    assert_eq!(
+        read.record,
+        Some(DetachRecord::Detached { live_only: true })
+    );
+    assert_eq!(read.marker, Some(MarkerAt::Elsewhere { seeded: true }));
 }
 
 /// With nothing serving reads, the record says so and no generation is

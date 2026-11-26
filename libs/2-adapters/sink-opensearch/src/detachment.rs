@@ -221,10 +221,10 @@ fn marker_at(marker: &Value, serving: Option<u64>) -> Option<MarkerAt> {
         .get("seeded")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    Some(if serving == Some(generation) {
-        MarkerAt::Serving { seeded }
-    } else {
-        MarkerAt::Elsewhere { seeded }
+    Some(match serving {
+        Some(serving) if serving == generation => MarkerAt::Serving { seeded },
+        Some(serving) if serving < generation => MarkerAt::Newer { seeded },
+        _ => MarkerAt::Elsewhere { seeded },
     })
 }
 

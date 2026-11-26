@@ -749,6 +749,7 @@ async fn staging_classifies_every_record_and_marker_pair() {
     let rebuilding = DetachRecord::Rebuilding { live_only: false };
     let elsewhere = |seeded| Some(MarkerAt::Elsewhere { seeded });
     let serving = |seeded| Some(MarkerAt::Serving { seeded });
+    let newer = |seeded| Some(MarkerAt::Newer { seeded });
     // (what staging reads, ensured, detached after, detach recorded, forgotten)
     let cases: Vec<(&str, Detachment, bool, bool, bool, bool)> = vec![
         (
@@ -761,7 +762,31 @@ async fn staging_classifies_every_record_and_marker_pair() {
         ),
         (
             "detached, marker unseeded elsewhere",
-            Detachment::recorded(detached(false), elsewhere(false), version()),
+            Detachment::recorded(detached(false), newer(false), version()),
+            false,
+            true,
+            false,
+            false,
+        ),
+        (
+            "detached, a seeded marker on no known serving copy: not finished",
+            Detachment::recorded(detached(false), elsewhere(true), version()),
+            false,
+            true,
+            false,
+            false,
+        ),
+        (
+            "live only, detached while restaging, nothing serving (review S2)",
+            Detachment::recorded(detached(true), elsewhere(true), version()),
+            false,
+            true,
+            false,
+            false,
+        ),
+        (
+            "live only never reads as finished (O16)",
+            Detachment::recorded(detached(true), newer(true), version()),
             false,
             true,
             false,
@@ -793,7 +818,7 @@ async fn staging_classifies_every_record_and_marker_pair() {
         ),
         (
             "detached, a rebuild seeded the marker's generation",
-            Detachment::recorded(detached(false), elsewhere(true), version()),
+            Detachment::recorded(detached(false), newer(true), version()),
             true,
             false,
             false,
@@ -801,7 +826,7 @@ async fn staging_classifies_every_record_and_marker_pair() {
         ),
         (
             "rebuilding, finished",
-            Detachment::recorded(rebuilding.clone(), elsewhere(true), version()),
+            Detachment::recorded(rebuilding.clone(), newer(true), version()),
             true,
             false,
             false,

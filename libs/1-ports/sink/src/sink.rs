@@ -363,14 +363,17 @@ impl Detachment {
 }
 
 /// Where an index's seed marker stands against its detach record: on the
-/// copy the record says serves reads, or on another (the one a detach moved
-/// it to, or one a rebuild seeded since).
+/// copy the record says serves reads, on a newer one (the one a detach moved
+/// it to, or one a rebuild seeded since), or elsewhere: an older copy, or
+/// the record names no serving copy (nothing served reads at the detach).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MarkerAt {
     /// On the serving copy.
     Serving { seeded: bool },
-    /// On another copy.
+    /// On a copy newer than the serving one.
+    Newer { seeded: bool },
+    /// On another copy, or the serving one is not known.
     Elsewhere { seeded: bool },
 }
 

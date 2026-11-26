@@ -1411,9 +1411,10 @@ enum AtStaging {
     AsBefore,
     /// Detached, for this reason: not ensured, not backfilled.
     Detached(String),
-    /// A rebuild seeded the marker's generation since (an older flusso's,
-    /// or one that died before deleting the record): the record is deleted
-    /// and the index staged as before.
+    /// A rebuild seeded a generation newer than the serving one since (an
+    /// older flusso's, or one that died before deleting the record): the
+    /// record is deleted and the index staged as before. Never for a
+    /// live-only record.
     Finished(sink::RecordVersion),
     /// Detached, yet the marker is on the generation reads see (restored by
     /// hand, or a late record of a dead process): detached again.
@@ -1426,16 +1427,21 @@ impl AtStaging {
         let Some(record) = &detachment.record else {
             return Self::AsBefore;
         };
-        let detached = match record {
-            DetachRecord::Detached { live_only } => Some(*live_only),
-            DetachRecord::Rebuilding { .. } => None,
+        let (detached, live_only) = match record {
+            DetachRecord::Detached { live_only } => (true, *live_only),
+            DetachRecord::Rebuilding { live_only } => (false, *live_only),
             _ => return Self::AsBefore,
         };
-        if let (Some(MarkerAt::Elsewhere { seeded: true }), Some(version)) =
-            (detachment.marker, &detachment.version)
+        // Finished only when a newer copy than the serving one was seeded: a
+        // live-only index is never rebuilt, so its record stays until an
+        // operator reattaches it (O16).
+        if !live_only
+            && let (Some(MarkerAt::Newer { seeded: true }), Some(version)) =
+                (detachment.marker, &detachment.version)
         {
             return Self::Finished(version.clone());
         }
+        let detached = detached.then_some(live_only);
         match (detached, detachment.marker) {
             (None, _) => Self::AsBefore,
             (Some(false), Some(MarkerAt::Serving { .. })) => Self::DetachAgain,
