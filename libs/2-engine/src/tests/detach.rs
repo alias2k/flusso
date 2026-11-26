@@ -98,6 +98,8 @@ struct Gate {
     dead: Mutex<BTreeSet<&'static str>>,
     /// While set, `ensure_index` waits for a permit here.
     ensure_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// While set, a read of the records waits for a permit here.
+    read_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     /// `forget_detachment` deletes the record, then fails (a timeout after
     /// the delete landed).
     forget_lands_then_fails: Mutex<bool>,
@@ -244,6 +246,10 @@ impl Sink for Gate {
     }
 
     async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
+        let gate = self.read_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
         {
             let mut fails = self.reads_fail.lock().unwrap();
             if *fails > 0 {
@@ -3389,4 +3395,33 @@ async fn a_rebuild_another_process_began_is_demoted_before_its_lane_drops_anythi
         next.lane_health(&lane(users())).is_detached(),
         "the next start finds it detached, not a rebuild to resume"
     );
+}
+
+/// The fourth re-check, S-1: a read is tied to the stream it began under.
+/// A staging whose read of the records is held open while the slot opens
+/// again counts no read for the new stream, though it returns after the
+/// opening.
+#[tokio::test(start_paused = true)]
+async fn a_step_whose_read_spans_an_opening_counts_no_read_for_it() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *rig.sink.read_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let engine = rig.engine();
+    let staging = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        async move { engine.stage(Continuity::Resumed).await }
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!staging.is_finished(), "the reads are held");
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    *rig.sink.read_gate.lock().unwrap() = None;
+    gate.add_permits(16);
+    staging.await.unwrap().unwrap();
+    for of in [orders(), users()] {
+        assert!(
+            !rig.rereads.current(&lane(of.clone())),
+            "{of}: a read begun before the opening counts for it"
+        );
+    }
 }
