@@ -428,6 +428,7 @@ impl Daemon {
         // read their records again after each, and the fence vouches for no
         // sink that hasn't.
         let rereads = Arc::new(engine::Rereads::default());
+        progress.hold_while_unread(Arc::clone(&rereads));
         let fence = Fence::new(
             Arc::clone(&capture),
             Arc::clone(&progress),

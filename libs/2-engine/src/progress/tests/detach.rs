@@ -195,3 +195,26 @@ fn an_attached_lane_answers_through_what_was_routed_even_after_forget_all() {
         "registrations count again"
     );
 }
+
+/// The fourth re-check, B-2 at the slot: a detached lane leaves the minimum
+/// only once its records were read under the current stream. Until then the
+/// source is handed `Idle`, which keeps what it confirmed: another process
+/// may have begun a rebuild of the index meanwhile, and a later start would
+/// resume its walk over whatever this one let the slot pass.
+#[test]
+fn a_detached_lane_holds_confirmation_until_its_records_are_read_again() {
+    let rereads = Arc::new(crate::Rereads::default());
+    let progress = Progress::new([sink("a"), sink("b")]);
+    progress.hold_while_unread(Arc::clone(&rereads));
+    assert!(progress.detach(&sink("a")));
+    publish(&progress, &[&sink("b")], 0, 0);
+    progress.applied(&sink("b"), ItemKey::new(0));
+    assert_eq!(progress.landed(), Landed::Through(p(0)), "nothing opened");
+    futures::executor::block_on(rereads.open(async { Ok::<(), ()>(()) })).unwrap();
+    rereads.read(&sink("b"), rereads.read_begins());
+    assert_eq!(progress.landed(), Landed::Idle, "a unread: held");
+    rereads.read(&sink("a"), rereads.read_begins());
+    assert_eq!(progress.landed(), Landed::Through(p(0)), "both read");
+    assert!(progress.detach(&sink("b")));
+    assert_eq!(progress.landed(), Landed::Free);
+}

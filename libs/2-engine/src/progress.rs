@@ -213,6 +213,9 @@ pub struct Progress {
     registrations: Registrations,
     /// How many lanes are detached.
     detached: AtomicUsize,
+    /// When set, a detached lane leaves the minimum only once its records
+    /// were read under the current stream (O29, B-2).
+    rereads: OnceLock<Arc<crate::Rereads>>,
 }
 
 /// A flag raised after every registration, and the waker of whoever waits on
@@ -340,7 +343,19 @@ impl Progress {
             listener: OnceLock::new(),
             registrations: Registrations::default(),
             detached: AtomicUsize::new(0),
+            rereads: OnceLock::new(),
         }
+    }
+
+    /// Hold confirmation while a detached lane's records are unread under
+    /// the current stream (O29, B-2): what another process wrote meanwhile
+    /// may say it rebuilds the index, and a later start would resume that
+    /// rebuild's walk over the changes this one let the slot pass. The read
+    /// puts such a rebuild back to detached first; then the lane leaves the
+    /// minimum again. Set once, by whoever opens the stream through
+    /// `rereads`.
+    pub fn hold_while_unread(&self, rereads: Arc<crate::Rereads>) {
+        let _ = self.rereads.set(rereads);
     }
 
     /// Nothing routed, over one lane per pair of `indexes` and `sinks`.
@@ -665,8 +680,27 @@ impl Progress {
     /// What every lane has landed: what the source may confirm. The lane
     /// that covers least decides.
     pub fn landed(&self) -> Landed {
+        if self.unread_detached() {
+            return Landed::Idle;
+        }
         self.over(self.marks.keys(), Level::Applied)
             .unwrap_or(Landed::Idle)
+    }
+
+    /// Some detached lane's records are unread under the current stream:
+    /// confirmation holds ([`hold_while_unread`](Self::hold_while_unread)).
+    /// One atomic load while no lane is detached.
+    fn unread_detached(&self) -> bool {
+        let Some(rereads) = self.rereads.get().filter(|_| self.any_detached()) else {
+            return false;
+        };
+        let detached: Vec<LaneKey> = lock(&self.registry)
+            .lanes
+            .iter()
+            .filter(|(_, registered)| registered.detached)
+            .map(|(lane, _)| lane.clone())
+            .collect();
+        detached.iter().any(|lane| !rereads.current(lane))
     }
 
     /// What decides [`landed`](Self::landed) while it holds something back
