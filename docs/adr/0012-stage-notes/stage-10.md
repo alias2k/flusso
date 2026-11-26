@@ -870,6 +870,70 @@ A reindex naming no sink goes on where it applies, and its `202` lists the lanes
 - the reattach's refusals and steps;
 - O29's adopt and its put-back.
 
+### Step 4 as built
+
+Every item of the design above is built: the rebuild to the seed, the process-start attach, O26, O27, O20(c) with its `409`s, `reattach --accept-gap` (endpoint, CLI, `DaemonControl::reattach`), S2, S3 for both, m5, O29 and m7. What the code changed in the design:
+
+**S3's two ends need no new source method.**
+
+- **The rule.** Both ends are `ChangeCapture::reached` of what the lane landed (`Progress::lane`), at one moment. `engine::SourcePositions` prints it as text, and the daemon's `CapturePositions` wraps the source.
+- **`from`** is read when the detach starts, before the lane leaves the minimum. It goes into the record (`Detach.through`, `Detachment.through`) and onto `LaneHealth::Detached { through }`. The fence freezes there, at the lower of that and its own answer. So what a reattach later refuses starts exactly where vouching stopped.
+- **`to`** is read when the sink engine takes `Attached`, before the lane opens. `Progress::attach` makes the lane answer through the newest change routed, or before its first item since: exactly "everything at or before it was dropped, everything after it reaches the lane".
+- **At a restart** the lane starts attached, with nothing landed: `reached(Idle)` is the source's horizon at the stream's start, which is the slot's `confirmed_flush_lsn`. That is the same rule, so `ChangeCapture::resume_point()` was not needed.
+- **When the restart completes it.** The source only answers once `live()` opened, so the read again of O29 completes the gap (`known_gap`), before the lane writes anything.
+
+**The gap is a `Sink` method after all.**
+
+- `Sink::record_gap` is a partial `_update` of the seed marker, `gap: {from, to}`. It is read back as `Detachment.gap`.
+- `ensure_index` of an existing generation never rewrites the marker, so the gap outlives restarts. A seed or a reindex rewrites the marker whole and drops it, which is right: the index then holds every change.
+- §6a's "no new `Sink` method" predates S3.
+
+**The reattach's steps** grew one write each side of the commit point:
+
+1. read the records;
+2. `ensure_index`;
+3. `record_gap { from, to: None }`;
+4. `forget_detachment`;
+5. attach.
+
+At `Attached`, `to` is set, the fence hears the whole gap (`Observer::on_lane_gap`) before the lane opens, and the sink keeps it. A failure there fails the run, and the restage completes the gap at the same `to`, since nothing of the lane landed.
+
+- **A second reattach** keeps the first gap's `from`. The marker holds one gap, which then spans both and also refuses what lies between them. That is sound but not exact; see the report's options.
+- **The fence answers a gap with `FenceOutcome::InGap`, and `/wait` with `409`, `reason: "gap"`,** each lane naming its gap. It is not `503`, since no retry helps. The query SDK already refuses a `409` at once (`FenceRefused`) with the body, so it needs no change.
+- **An unknown `to`** refuses everything past `from`, and an unknown `from` everything up to `to`. The seed clears the gap.
+
+**O29 is a counter, not a control the ingest engine waits on.**
+
+- **Why.** Waiting on every sink engine would stall every sink behind one whose destination is down: its run never answers, and it can't be told from a slow one.
+- **The counter.** `engine::Rereads` counts the slot's openings. The ingest engine calls `live_opened` after `live()` and before publishing.
+- **The read.** A sink engine whose last full read of the records began before then (`reread_due`, one atomic load) reads them again in `advance`, before any grant, and again before the grant after `fill`. `Run::reread`:
+  - takes as detached a lane the records say detached, or rebuilding by another process;
+  - detaches again on O30's rows;
+  - completes a gap.
+- **Staging counts as the read** (`records_read`).
+- **The fence** vouches for no lane of a sink that hasn't read since (`Rereads::current`), and answers `Unserved::Starting` meanwhile. A sink that is down holds the slot and vouches for nothing until it reads; the others go on.
+- **The put-back stays at staging.** `Sink::detachment` takes no `put_back` argument. Undoing another process's half-moved marker is healed by this read: that process's record, written after, sits beside a marker on serving, and O30's row detaches again.
+
+**The edge.**
+
+- The reattach refusals `409` "the lane is not detached" and "being attached already" come from `Status::reattach_refusal`. "Can rebuild" comes from `DaemonControl`, which now knows the `backfill = false` sinks (`ControlError::CanRebuild`).
+- The record checks of §6a (not `live_only`, marker not on serving seeded) are made by the engine only. The edge reads no record, so it answers `202`; the engine logs the refusal and the lane stays detached.
+- `/status` shows the gap per lane (`gap: {from, to}`) until a seed, across restarts, instead of §6a's `reattached: {at, gap_since}`.
+
+**Tests**, beyond those the design listed:
+
+- the engine's `a_reattach_keeps_the_gap_deletes_the_record_and_attaches_the_lane`, `a_reattach_is_refused_where_it_does_not_apply`, `a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_is_held`, `a_second_reattach_keeps_the_first_gaps_start`, `a_lane_the_records_say_detached_once_the_slot_is_held_is_taken_as_detached` and `a_staging_once_the_slot_is_held_counts_as_the_read`;
+- the fence's `a_reattached_lane_vouches_only_from_its_attach` (in the process and after a restart), `an_open_gap_refuses_everything_past_its_start_and_a_seed_ends_it`, `a_detach_freezes_where_the_sink_recorded_it` and `a_sink_that_has_not_read_its_records_since_the_slot_opened_vouches_for_nothing`;
+- the OpenSearch sink's `a_reattach_keeps_its_gap_with_the_seed_marker`;
+- the CLI's `a_wait_inside_a_reattachs_gap_is_refused_with_409`, `a_reattach_is_refused_unless_it_applies_and_queued_when_it_does`, `status_shows_a_lanes_gap_until_a_seed` and `a_reattach_without_accept_gap_is_refused_before_any_request`.
+
+**Not proven:**
+
+- No live run: there is no Postgres or OpenSearch e2e of a rebuild, a reattach, the gap's `_update`, or two overlapping processes (O29). Every test runs over stand-ins.
+- The restart's `to` relies on the Postgres capture seeding its horizon from `confirmed_flush_lsn` at the stream's start, and on the read happening before the lane lands anything. Both are argued above and tested only with stand-ins.
+- The second read-again check, before the grant after `fill`, has no test that fails without it: the first check catches every case the tests make.
+- A `record_gap` failure at `Attached`, and a gap end that doesn't parse (read as unknown), are untested.
+
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
 **O29: can a process that staged before another one's detach keep the lane attached? (S3)**

@@ -413,8 +413,13 @@ impl SinkEngine {
             tracing::warn!(%lane, record = ?found.record, marker = ?found.marker, "not reattached: the records must say detached, live only, with the seed marker on the seeded generation reads see");
             return Ok(None);
         };
+        // A second reattach keeps the first gap's start: the marker holds one
+        // gap, so it spans both, refusing what lies between them too.
         let gap = sink::Gap {
-            from: found.through.clone(),
+            from: match &found.gap {
+                Some(earlier) => earlier.from.clone(),
+                None => found.through.clone(),
+            },
             to: None,
         };
         self.sink.ensure_index(mapping).await?;

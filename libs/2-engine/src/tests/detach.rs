@@ -2137,3 +2137,26 @@ async fn a_staging_once_the_slot_is_held_counts_as_the_read() {
     engine.stage(Continuity::Resumed).await.unwrap();
     assert!(rig.rereads.current(&sink_name("primary")));
 }
+
+/// A lane reattached, detached again and reattached again keeps one gap
+/// spanning both: the earlier gap's positions are never vouched for again.
+#[tokio::test(start_paused = true)]
+async fn a_second_reattach_keeps_the_first_gaps_start() {
+    let rig = Rig::new(64);
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), gap(Some("0"), Some("0")));
+    let (_engine, task, control) = detached_live_only(&rig).await;
+    control
+        .send(SinkControl::Reattach { index: users() })
+        .await
+        .unwrap();
+    let _attach = next_request(&rig).await;
+    assert_eq!(
+        rig.sink.gaps.lock().unwrap().last(),
+        Some(&("users".to_owned(), gap(Some("0"), None)))
+    );
+    task.abort();
+}

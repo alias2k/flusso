@@ -1846,8 +1846,9 @@ is the one concrete piece.
   with no restart; a generation deleted mid-run staged again alone), and `flusso-cli`'s `shutdown`
   `a_stop_with_a_write_blocked_lane_gives_up_at_the_deadline_naming_the_lane_and_a_restart_converges`.
   Detaching a lane stuck past a threshold and rebuilding its index (#394) is decided in
-  `docs/adr/0012-stage-notes/stage-10.md`; slice 1 and slice 2's step 2 (the detach, §10a) are
-  built, reachable only from tests: nothing sends `SinkControl::Detach` yet. Every staging step reads
+  `docs/adr/0012-stage-notes/stage-10.md`; slice 1 and slice 2 (§10a: the detach, the attach, the
+  rebuild and `reattach`) are built. No threshold detaches yet (slice 4): only tests send
+  `SinkControl::Detach`, while a reindex of a detached index and `flusso reattach` are operator-reachable. Every staging step reads
   the detach records first (`Sink::detachment`, before `reindex` and `ensure_index`; OpenSearch:
   `detachment.rs`, one `_mget` of the seed marker, `detach:{alias}` and `stuck:{alias}`). Only a
   missing meta index or document reads as nothing kept; any other answer fails the step (the index
@@ -1860,8 +1861,11 @@ is the one concrete piece.
   on the version read) and staged as before; `detached` with the marker on serving → `Sink::detach`
   again (one the sink keeps no record of fails the step), and so is a `rebuilding` record beside a
   marker on serving, and an unreadable record beside any marker but a newer unseeded one (O30);
-  `rebuilding` with its marker moved, and unreadable beside a newer unseeded marker → kept and staged
-  as before until step 4. A lane the process holds detached stays so at any later
+  `rebuilding` with its marker moved → `AtStaging::Rebuilding(attempts)`, the process-start attach (the
+  lane `rebuilding`, its backfill asked, its walk resuming from its mark), or under `--skip-backfill` /
+  `backfill = false` `Sink::demote` and staged detached (O26); a `rebuilding` record beside a marker
+  seeded on a newer generation is a finished rebuild (`Finished`: record deleted); unreadable beside a
+  newer unseeded marker → staged as before. A lane the process holds detached stays so at any later
   staging; a staging during a run says itself it found the index detached (`Outcome::Restage(Ok(true))`,
   `Reindexed.detached`) and the run adopts the lane. **The detach** (R4–R6):
   `SinkControl::Detach` sets `LaneState.detach_asked`; the lane detaches at its next probe the
@@ -1880,8 +1884,37 @@ is the one concrete piece.
   acknowledges and takes again until none is pending, so no discard waits for the run's next wake-up).
   `NotKept` (the default) drops the ask; an error keeps it and sets `detach_unsure`: before the lane's
   next probe a `detached` record found is deleted and the marker put back (`clear_failed_detach`). A fence past `through` answers `Unserved::Detached` at once, never "not following";
-  `/status` shows the lane `detached`, not counted in `flusso.lane.parked`. A reindex of a detached
-  index is ignored until step 4. **The attach** (R7, R8, step 3; nothing sends
+  `/status` shows the lane `detached`, not counted in `flusso.lane.parked`. **The rebuild** (R13, r1–r4,
+  step 4): a reindex of a detached index calls `Sink::begin_rebuild` (OpenSearch: partials deleted, the
+  marker moved past every generation, the record `rebuilding` with `attempts + 1`, all conditional;
+  the record says `rebuilding` before `Attach` is sent, S2), `ensure_index`, `on_index_rebuilding`
+  (the fence `Rebuilding`, frozen until the seed, S3), then attaches; at `Attached` the lane opens
+  `rebuilding` and asks its backfill; the seed's `mark_seeded` deletes the record after the marker.
+  O20(c): a reindex of a rebuild waiting for its attach or open is ignored (`409` at the edge,
+  `Status::reindex_refusal`), one parked or restaging detaches again and rebuilds. **`reattach
+  --accept-gap`** (O16, step 4): only on a `backfill = false` sink (`DaemonControl::reattach`,
+  `ControlError::CanRebuild` otherwise; `POST /indexes/<name>/reattach?sink=&accept_gap=true`; `flusso
+  reattach <index> --sink <name> --accept-gap`); `SinkEngine::reattach` reads the records (detached,
+  live only, marker on serving seeded), `ensure_index`, `Sink::record_gap` (`from` = the record's
+  `through`, `to` unknown), `forget_detachment` (the commit point), attach; `take_attached` sets `to`
+  where the lane stands (`SinkEngine::place`: `progress.lane` through `SourcePositions`, the daemon's
+  `CapturePositions`), tells the fence (`Observer::on_lane_gap`) **before** the lane opens, then keeps
+  it (`record_reattached`; a failure fails the run and the restage completes it). The gap lives in the
+  seed marker (`gap: {from, to}`, OpenSearch `_update`, read back as `Detachment.gap`; a seed or a
+  reindex drops it). Every detach records `through` (`Detach.through`, the lane's place before it
+  leaves the minimum) and carries it on `LaneHealth::Detached`, where the fence freezes (S3: what is
+  refused after a reattach starts where vouching stopped). The fence refuses a position in `(from,
+  to]` at once (`FenceOutcome::InGap`, `/wait` `409` `reason: gap`); an unknown `to` stretches it; the
+  seed clears it. A staging that finds a gap with `to` unknown completes it where the lane stands once
+  the source answers (`known_gap`: the reattach died between deleting its record and the attach; the
+  lane has landed nothing since). **O29**: `engine::Rereads` — the ingest engine calls
+  `live_opened` after `live()`, before publishing; a sink engine whose last full read began before
+  (`reread_due`, one atomic) reads every index's records again in `advance` before any grant
+  (`Run::reread`: adopts a lane the records say detached or rebuilding by another process, detaches
+  again on O30's rows, completes a gap); a staging counts as the read; the fence vouches for no lane
+  of a sink not read since (`Rereads::current`, `Unserved::Starting`). Nothing waits on a sink: one
+  that is down holds the slot and vouches for nothing until it reads. The staging read keeps its
+  put-back (a record written after it is found by this read). **The attach** (R7, R8, step 3; nothing sends
   `SinkControl::Attach` yet): the sink engine numbers an attempt (`SinkEngine::attempts`), keeps it in
   `LaneState.attaching` and sends `Request::Attach { index, sink, attempt }` (again after a run
   restart); the dispatcher routes it on the builder's third channel (`Route.attaches`, read while a
@@ -1900,7 +1933,25 @@ is the one concrete piece.
   stale attempts, R7, a cut walk, m6), `progress::tests::detach`'s attach cases, and `tests::detach`'s
   `items_before_attached_*`, `an_older_attempts_attached_is_discarded`,
   `a_second_attached_of_the_same_attempt_discards_nothing`,
-  `a_run_restart_after_attached_never_writes_a_redelivered_earlier_item`.
+  `a_run_restart_after_attached_never_writes_a_redelivered_earlier_item`. Guards (step 4):
+  `tests::detach`'s rebuild cases (`a_reindex_of_a_detached_index_rebuilds_it_to_the_seed`,
+  `an_attached_lane_stays_attached_across_a_sink_run_restart`, `a_reindex_after_an_attach_is_staged`,
+  `a_reindex_of_a_rebuild_is_ignored_unless_it_parked`, `a_start_attaches_a_rebuild_or_demotes_it`),
+  the reattach cases (`a_reattach_keeps_the_gap_deletes_the_record_and_attaches_the_lane`,
+  `a_reattach_is_refused_where_it_does_not_apply`,
+  `a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_is_held`) and O29's
+  (`a_lane_the_records_say_detached_once_the_slot_is_held_is_taken_as_detached`,
+  `a_staging_once_the_slot_is_held_counts_as_the_read`); `ingest::tests::attach`'s O27 case; the
+  OpenSearch `detachment::tests::record` rebuild kill matrix, demotion, seed and
+  `a_reattach_keeps_its_gap_with_the_seed_marker`; the daemon's `fence::tests`
+  (`a_fence_on_a_rebuilding_lane_vouches_for_no_change_dropped_while_detached`,
+  `a_reattached_lane_vouches_only_from_its_attach`,
+  `an_open_gap_refuses_everything_past_its_start_and_a_seed_ends_it`,
+  `a_detach_freezes_where_the_sink_recorded_it`,
+  `a_sink_that_has_not_read_its_records_since_the_slot_opened_vouches_for_nothing`); the CLI's
+  `http::tests` (`a_reindex_of_a_rebuild_starting_or_running_is_refused_with_409`,
+  `a_wait_inside_a_reattachs_gap_is_refused_with_409`,
+  `a_reattach_is_refused_unless_it_applies_and_queued_when_it_does`, `status_shows_a_lanes_gap_until_a_seed`).
   Guards (the detach): `tests::records`, `tests::detach` (a refused probe, the
   drain and a healthy sibling sink within 100 ms, a restaging lane, a landed probe dropping the ask,
   `NotKept` with the parked item still written, a failed record, one that landed although its call
@@ -2265,12 +2316,16 @@ at `/metrics`, and an OTLP periodic push when the standard
 attached via `with_observer`; metric names/labels/buckets live here because they're a presentation
 choice), serves **two** HTTP surfaces (`http/mod.rs`): a **public** one (`/healthz` `/readyz`
 `/status` `/metrics` `/wait`, unauthenticated; `/wait` long-polls the daemon's `Fence`, default
-5 s, capped at 60 s: `200` reached, `408` timed out, `400`/`404` refused, `503` before the source
-is live or once flusso is stopping; `/status` adds the process `pid`; `GET /indexes/{name}/status`
+5 s, capped at 60 s: `200` reached, `408` timed out, `400`/`404` refused, `409` inside a gap a
+reattach accepted, `503` before the source is live or once flusso is stopping; `/status` adds the process `pid`; `GET /indexes/{name}/status`
 is one index's `ingest.indexes.<name>` entry, `404` naming the known indexes for an unknown or
 disabled one, `400` for no index name) and a **private** one (`GET /indexes`, `POST
 /indexes/{name}/reindex[?sink=]`: `202` `{"index", "sink", "queued": true}`, `400` an invalid index
-or sink name, `404` an unknown one, `503` stopping or not running; `POST /reindex` is gone since slice 7; HTTP Basic auth in
+or sink name, `404` an unknown one, `409` a rebuild starting or running (O20, `skipped` lists the lanes
+an unnamed reindex left out), `503` stopping or not running; `POST
+/indexes/{name}/reattach?sink=&accept_gap=true` (O16): `202`, `400` without the sink or `accept_gap`,
+`404` unknown, `409` the lane not detached or being attached or its sink can rebuild, `503` stopping
+or busy; `POST /reindex` is gone since slice 7; HTTP Basic auth in
 `http/auth.rs`, default `admin`/`flusso` with a loud startup warning; each listener answers `404` for
 the other's `/indexes/…` routes), both reading the daemon's `Status`, and owns the process signals.
 **Per-index ingest state (ADR 0012 stage 8a, slice 7)**: `/status`'s `ingest.indexes.<name>`
@@ -3235,7 +3290,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
 | Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
-| CLI subcommands (`build`/`run`/`check`/`show`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs` (the report: one `Report`, rendered human or JSON), `show.rs` (`show config`/`show mapping`), `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport (`telemetry/schema_errors.rs`: the schema errors and capture gaps a start goes on with), `gaps.rs` the capture gaps `run` won't close, `lock.rs` which file a command reads and whether the lock is current, `backends.rs` the backend assembly |
+| CLI subcommands (`build`/`run`/`check`/`show`/`schema`/`indexes`/`reindex`/`reattach`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs` (the report: one `Report`, rendered human or JSON), `show.rs` (`show config`/`show mapping`), `schema_cmd.rs`, the `indexes`/`reindex`/`reattach` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport (`telemetry/schema_errors.rs`: the schema errors and capture gaps a start goes on with), `gaps.rs` the capture gaps `run` won't close, `lock.rs` which file a command reads and whether the lock is current, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /indexes/{name}/reindex?sink=`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
 | Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position; `rules/`: read-time fields — `condition.rs` the two-sided tests, `date.rs`, `handles.rs` the rule handles, `list.rs` `Rules`/`Plan`, `field.rs` `RuleField`, `computation.rs`) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `read_time.rs` (what `context`/`rules`/`computed` generate, and which stored fields get a rule handle), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
