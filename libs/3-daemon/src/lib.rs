@@ -31,8 +31,8 @@ use supervise::ControlReceivers;
 
 pub use engine::{
     BuildStats, CommitStats, EngineId, ExemptionState, IndexStates, LaneHealth, Observer,
-    ParkReason, ProbeOutcome, ReaderBound, SinkControl, Stage, StageTiming, StartupStep, Stop,
-    Wake, Work,
+    ParkReason, ProbeOutcome, ReaderBound, ReattachVerdict, Reply, SinkControl, Stage, StageTiming,
+    StartupStep, Stop, Wake, Work,
 };
 pub use kernel::{IndexName, SinkName};
 

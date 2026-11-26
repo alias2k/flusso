@@ -160,10 +160,61 @@ pub enum SinkControl {
     /// Reattach `index`'s detached lane on a sink that can't rebuild it,
     /// accepting the changes dropped while it was detached (O16, `flusso
     /// reattach --accept-gap`): the sink keeps the gap with the index, the
-    /// record goes, and the lane is attached. Ignored, and logged, on a sink
-    /// that can rebuild (a reindex does that) and on a lane not detached.
-    Reattach { index: IndexName },
+    /// record goes, and the lane is attached. `reply` hears the verdict once
+    /// the record is gone, or why not: a sink that can rebuild (a reindex
+    /// does that), a lane not detached, records that don't allow it. Dropped
+    /// unanswered when the run ends first (a stop): nothing changed.
+    Reattach {
+        index: IndexName,
+        reply: Reply<ReattachVerdict>,
+    },
 }
+
+/// What a sink engine answers a reattach (O16).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReattachVerdict {
+    /// The gap is kept and the record gone: the lane is being attached.
+    Started,
+    /// Not done, and why, naming what works instead: nothing changed.
+    Refused(String),
+    /// The sink failed a step before the record was deleted: nothing the
+    /// operator accepted is lost; ask again.
+    Failed(String),
+}
+
+/// A one-shot answer carried in a control message: cloneable and
+/// comparable (by identity), as the messages are. The first `send` wins.
+#[derive(Debug, Clone)]
+pub struct Reply<T>(Arc<Mutex<Option<tokio::sync::oneshot::Sender<T>>>>);
+
+impl<T> Reply<T> {
+    /// A reply and the receiver that hears it.
+    pub fn new() -> (Self, tokio::sync::oneshot::Receiver<T>) {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        (Self(Arc::new(Mutex::new(Some(send)))), receive)
+    }
+
+    /// A reply nobody hears.
+    pub fn ignored() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+
+    /// Answer, once; later answers are dropped.
+    pub fn send(&self, answer: T) {
+        let sender = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(sender) = sender {
+            let _ = sender.send(answer);
+        }
+    }
+}
+
+impl<T> PartialEq for Reply<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<T> Eq for Reply<T> {}
 
 /// What staging does to one index.
 #[derive(Debug, Clone, Copy)]
@@ -395,23 +446,45 @@ impl SinkEngine {
     /// marker on the generation reads see, seeded. Then the index is
     /// ensured, the gap kept with the marker (its `from` where reads stood
     /// at the detach), and the record deleted: the commit point, after which
-    /// no staging detaches the lane again (S2). `None`: the records say
-    /// otherwise, logged; nothing changed.
-    pub(super) async fn reattach(&self, mapping: &IndexMapping) -> sink::Result<Option<sink::Gap>> {
+    /// no staging detaches the lane again (S2). The records saying otherwise:
+    /// `Err` with why, naming what works; nothing changed.
+    pub(super) async fn reattach(
+        &self,
+        mapping: &IndexMapping,
+    ) -> sink::Result<std::result::Result<sink::Gap, String>> {
         let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
         let found = self.sink.detachment(mapping).await?;
-        let detached_live_only = matches!(
-            found.record,
-            Some(sink::DetachRecord::Detached { live_only: true })
-        );
-        let serving = matches!(found.marker, Some(sink::MarkerAt::Serving { seeded: true }));
-        let Some(version) = found
-            .version
-            .clone()
-            .filter(|_| detached_live_only && serving)
-        else {
-            tracing::warn!(%lane, record = ?found.record, marker = ?found.marker, "not reattached: the records must say detached, live only, with the seed marker on the seeded generation reads see");
-            return Ok(None);
+        let restart = "restart flusso: a start on this backfill = false sink puts the \
+                       records back to detached, live only, on the generation reads see; \
+                       then reattach again";
+        let refusal = match (&found.record, found.marker, &found.version) {
+            (
+                Some(sink::DetachRecord::Detached { live_only: true }),
+                Some(sink::MarkerAt::Serving { seeded: true }),
+                Some(_),
+            ) => None,
+            (None, _, _) => {
+                Some("the sink keeps no detach record of the index: it is not detached".to_owned())
+            }
+            (Some(sink::DetachRecord::Detached { live_only: true }), _, _) => Some(format!(
+                "the seed marker is not on the seeded generation reads see (a demotion not \
+                 finished); {restart}"
+            )),
+            (Some(sink::DetachRecord::Detached { live_only: false }), _, _) => Some(format!(
+                "the record was written while this sink could rebuild; {restart}"
+            )),
+            (Some(record), _, _) => Some(format!(
+                "the record says {record:?}, not detached; {restart}"
+            )),
+        };
+        let version = match (refusal, found.version.clone()) {
+            (None, Some(version)) => version,
+            (refusal, _) => {
+                let why =
+                    refusal.unwrap_or_else(|| "the record was read without its version".to_owned());
+                tracing::warn!(%lane, %why, "not reattached");
+                return Ok(Err(why));
+            }
         };
         // A second reattach keeps the first gap's start: the marker holds one
         // gap, so it spans both, refusing what lies between them too.
@@ -426,7 +499,7 @@ impl SinkEngine {
         self.sink.record_gap(mapping, &gap).await?;
         self.sink.forget_detachment(mapping, &version).await?;
         tracing::warn!(%lane, from = ?gap.from, "reattaching: the record is gone; the changes from the detach to the attach are accepted as missing");
-        Ok(Some(gap))
+        Ok(Ok(gap))
     }
 
     /// The reattached `lane`'s gap, both ends known, kept with its index. A
@@ -1209,6 +1282,10 @@ impl SinkEngine {
         let found = AtStaging::of(&detachment);
         let through = detachment.through.clone();
         let gap = detachment.gap.clone();
+        let written_rebuildable = matches!(
+            detachment.record,
+            Some(sink::DetachRecord::Detached { live_only: false })
+        );
         self.read_detachment(&mapping.index, detachment);
         // Inside a process the lane's own state decides (R8, H1): a lane
         // held detached stays so whatever the records now say, and is
@@ -1226,6 +1303,14 @@ impl SinkEngine {
                 }
             }
             AtStaging::Detached(why) => {
+                // R14 for a detached record: written while the sink could
+                // rebuild, found on one that can't, it is put back live only,
+                // its marker on the generation reads see, so a reattach
+                // applies (review of step 4, S4(b)).
+                if written_rebuildable && !self.options.backfill {
+                    self.sink.demote(mapping, true).await?;
+                    tracing::warn!(index = %mapping.index, sink = %self.name, "a detach record written while this sink could rebuild is put back to detached, live only: flusso reattach --accept-gap applies");
+                }
                 return Ok(self.staged_detached(&mapping.index, why, through));
             }
             AtStaging::Rebuilding(attempts) => {

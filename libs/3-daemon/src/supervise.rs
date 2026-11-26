@@ -75,7 +75,7 @@ pub enum ControlError {
     /// The sink can rebuild the index: a reindex does, with nothing missing.
     /// A reattach is only for a sink with `backfill = false` (O16).
     #[error(
-        "sink `{0}` can rebuild the index: reindex it instead (reattach is for a sink with backfill = false)"
+        "sink `{0}` can rebuild the index (backfill = true), with nothing missing: reindex it instead (flusso reindex <index> --sink {0})"
     )]
     CanRebuild(String),
     /// The sink's engine ended for good, so nothing would act on the operation.
@@ -116,11 +116,27 @@ impl DaemonControl {
         self
     }
 
+    /// Whether the deployment is stopping: every operation is refused.
+    pub fn is_stopping(&self) -> bool {
+        self.stop.is_requested()
+    }
+
+    /// Whether `sink` has `backfill = false`: it can't rebuild an index, so
+    /// a detached one is reattached, not reindexed.
+    pub fn is_live_only(&self, sink: &SinkName) -> bool {
+        self.live_only.contains(sink)
+    }
+
     /// Reattach `index`'s detached lane on `sink`, accepting the changes it
     /// missed while detached (ADR 0012 stage 10, O16): only on a sink that
-    /// can't rebuild. The engine checks the records between two batches;
-    /// one that says otherwise is logged and the lane stays detached.
-    pub fn reattach(&self, index: IndexName, sink: &SinkName) -> Result<(), ControlError> {
+    /// can't rebuild. The engine checks the records between two batches and
+    /// answers its verdict on the returned receiver; dropped unanswered, the
+    /// engine's run ended first and nothing changed.
+    pub fn reattach(
+        &self,
+        index: IndexName,
+        sink: &SinkName,
+    ) -> Result<tokio::sync::oneshot::Receiver<engine::ReattachVerdict>, ControlError> {
         if self.stop.is_requested() {
             return Err(ControlError::Stopping);
         }
@@ -131,12 +147,14 @@ impl DaemonControl {
         if !self.live_only.contains(sink) {
             return Err(ControlError::CanRebuild(sink.to_string()));
         }
+        let (reply, verdict) = engine::Reply::new();
         sender
-            .try_send(SinkControl::Reattach { index })
+            .try_send(SinkControl::Reattach { index, reply })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => ControlError::Busy(sink.to_string()),
                 mpsc::error::TrySendError::Closed(_) => ControlError::Closed(sink.to_string()),
-            })
+            })?;
+        Ok(verdict)
     }
 
     /// A control over `sinks` with no deployment behind it: each operation

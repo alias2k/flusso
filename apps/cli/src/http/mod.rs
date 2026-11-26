@@ -600,12 +600,28 @@ async fn reindex(
         Some(sink) => vec![sink.clone()],
         None => state.control.sinks().cloned().collect(),
     };
+    if state.control.is_stopping() {
+        return stopping_refusal();
+    }
+    let detached = state.status.detached_lanes();
     let skipped: Vec<(SinkName, String)> = targets
         .iter()
         .filter_map(|target| {
+            let lane = LaneKey::new(index.clone(), target.clone());
+            // A detached index on a sink that can't rebuild is reattached
+            // (O16): a reindex there is ignored, so name what works.
+            if state.control.is_live_only(target) && detached.contains(&lane) {
+                return Some((
+                    target.clone(),
+                    format!(
+                        "this sink can't rebuild the index (backfill = false): \
+                         flusso reattach {index} --sink {target} --accept-gap"
+                    ),
+                ));
+            }
             state
                 .status
-                .reindex_refusal(&LaneKey::new(index.clone(), target.clone()))
+                .reindex_refusal(&lane)
                 .map(|reason| (target.clone(), reason))
         })
         .collect();
@@ -715,11 +731,11 @@ async fn reattach(
     if !state.control.sinks().any(|known| *known == sink) {
         return refuse(StatusCode::NOT_FOUND, format!("unknown sink {sink}"));
     }
-    if let Some(reason) = state
-        .status
-        .reattach_refusal(&LaneKey::new(index.clone(), sink.clone()))
-    {
-        return (
+    if state.control.is_stopping() {
+        return stopping_refusal();
+    }
+    let conflict = |reason: &str| {
+        (
             StatusCode::CONFLICT,
             Json(json!({
                 "error": reason,
@@ -728,24 +744,74 @@ async fn reattach(
                 "sink": sink.as_ref(),
             })),
         )
-            .into_response();
+            .into_response()
+    };
+    if !state.control.is_live_only(&sink) {
+        return conflict(&format!(
+            "this sink can rebuild the index (backfill = true), with nothing missing: \
+             flusso reindex {index} --sink {sink}"
+        ));
     }
-    match state.control.reattach(index.clone(), &sink) {
-        Ok(()) => (
+    if let Some(reason) = state
+        .status
+        .reattach_refusal(&LaneKey::new(index.clone(), sink.clone()))
+    {
+        return conflict(reason);
+    }
+    let verdict = match state.control.reattach(index.clone(), &sink) {
+        Ok(verdict) => verdict,
+        Err(ControlError::UnknownSink(name)) => {
+            return refuse(StatusCode::NOT_FOUND, format!("unknown sink {name}"));
+        }
+        Err(ControlError::Stopping) => return stopping_refusal(),
+        Err(error @ ControlError::CanRebuild(_)) => return conflict(&error.to_string()),
+        Err(error) => return refuse(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+    };
+    // The engine answers between two batches: the operator hears its
+    // verdict, not a blind "queued" (review of step 4, S4).
+    match tokio::time::timeout(REATTACH_VERDICT, verdict).await {
+        Ok(Ok(daemon::ReattachVerdict::Started)) => (
             StatusCode::ACCEPTED,
             Json(json!({
                 "index": index.as_ref(),
                 "sink": sink.as_ref(),
-                "queued": true,
+                "started": true,
             })),
         )
             .into_response(),
-        Err(ControlError::UnknownSink(name)) => {
-            refuse(StatusCode::NOT_FOUND, format!("unknown sink {name}"))
-        }
-        Err(error @ ControlError::CanRebuild(_)) => refuse(StatusCode::CONFLICT, error.to_string()),
-        Err(error) => refuse(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+        Ok(Ok(daemon::ReattachVerdict::Refused(reason))) => conflict(&reason),
+        Ok(Ok(daemon::ReattachVerdict::Failed(error))) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "the reattach failed before the record was deleted; nothing changed: ask again ({error})"
+            ),
+        ),
+        Ok(Err(_)) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the sink engine's run ended before the reattach started (a stop or a failure); \
+             nothing changed: ask again"
+                .to_owned(),
+        ),
+        Err(_) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "no verdict within {}s: the sink engine is busy; the reattach may still \
+                 start, and /status shows the lane when it does",
+                REATTACH_VERDICT.as_secs()
+            ),
+        ),
     }
+}
+
+/// How long a reattach waits for its sink engine's verdict.
+const REATTACH_VERDICT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `503` `stopping`: the deployment takes no operation while it stops.
+fn stopping_refusal() -> Response {
+    unavailable(
+        "stopping",
+        "flusso is stopping and takes no operation; ask the next process".to_owned(),
+    )
 }
 
 #[cfg(test)]

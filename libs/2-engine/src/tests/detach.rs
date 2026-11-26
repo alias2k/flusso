@@ -317,6 +317,10 @@ impl Sink for Gate {
     async fn demote(&self, mapping: &IndexMapping, live_only: bool) -> sink::Result<()> {
         if let Some(record) = self.kept.lock().unwrap().get_mut(mapping.index.as_ref()) {
             record.record = Some(DetachRecord::Detached { live_only });
+            // R14: live only, the marker is back on the generation reads see.
+            if live_only {
+                record.marker = Some(MarkerAt::Serving { seeded: true });
+            }
         }
         self.demoted
             .lock()
@@ -1883,6 +1887,14 @@ async fn a_start_attaches_a_rebuild_or_demotes_it() {
     }
 }
 
+/// A reattach of `index` whose verdict nobody hears.
+fn reattach(index: IndexName) -> SinkControl {
+    SinkControl::Reattach {
+        index,
+        reply: crate::Reply::ignored(),
+    }
+}
+
 fn gap(from: Option<&str>, to: Option<&str>) -> sink::Gap {
     sink::Gap {
         from: from.map(str::to_owned),
@@ -1939,10 +1951,7 @@ async fn a_reattach_keeps_the_gap_deletes_the_record_and_attaches_the_lane() {
     ));
 
     let ensured = rig.sink.ensured.lock().unwrap().len();
-    control
-        .send(SinkControl::Reattach { index: users() })
-        .await
-        .unwrap();
+    control.send(reattach(users())).await.unwrap();
     let stream::Request::Attach { attempt, .. } = next_request(&rig).await else {
         panic!("the reattach asks for its attach");
     };
@@ -2022,10 +2031,7 @@ async fn a_reattach_is_refused_where_it_does_not_apply() {
     task.abort();
     let _ = task.await;
     let (task, control) = spawn(&engine);
-    control
-        .send(SinkControl::Reattach { index: users() })
-        .await
-        .unwrap();
+    control.send(reattach(users())).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(quiet(&rig), "a sink that can rebuild");
     assert!(engine.lane_health(&lane(users())).is_detached());
@@ -2036,10 +2042,7 @@ async fn a_reattach_is_refused_where_it_does_not_apply() {
     let engine = rig.live_only_engine();
     engine.stage(Continuity::Resumed).await.unwrap();
     let (task, control) = spawn(&engine);
-    control
-        .send(SinkControl::Reattach { index: users() })
-        .await
-        .unwrap();
+    control.send(reattach(users())).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(quiet(&rig), "a lane not detached");
     task.abort();
@@ -2055,10 +2058,7 @@ async fn a_reattach_is_refused_where_it_does_not_apply() {
         .get_mut("users")
         .unwrap()
         .marker = Some(MarkerAt::Newer { seeded: false });
-    control
-        .send(SinkControl::Reattach { index: users() })
-        .await
-        .unwrap();
+    control.send(reattach(users())).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(quiet(&rig), "records that don't allow it");
     assert!(engine.lane_health(&lane(users())).is_detached());
@@ -2174,10 +2174,7 @@ async fn a_second_reattach_keeps_the_first_gaps_start() {
         .unwrap()
         .insert("users".to_owned(), gap(Some("0"), Some("0")));
     let (_engine, task, control) = detached_live_only(&rig).await;
-    control
-        .send(SinkControl::Reattach { index: users() })
-        .await
-        .unwrap();
+    control.send(reattach(users())).await.unwrap();
     let _attach = next_request(&rig).await;
     assert_eq!(
         rig.sink.gaps.lock().unwrap().last(),
@@ -2309,10 +2306,7 @@ async fn a_reattach_killed_before_any_step_comes_back_with_its_gap_or_detached()
         if died_before != "attached" {
             rig.sink.dead.lock().unwrap().insert(died_before);
         }
-        control
-            .send(SinkControl::Reattach { index: users() })
-            .await
-            .unwrap();
+        control.send(reattach(users())).await.unwrap();
         if died_before == "attached" {
             let _attach = next_request(&rig).await;
         } else {
@@ -2355,4 +2349,100 @@ async fn a_reattach_killed_before_any_step_comes_back_with_its_gap_or_detached()
             );
         }
     }
+}
+
+/// Send a reattach of `users` on `control` and wait for its verdict.
+async fn verdict(control: &mpsc::Sender<SinkControl>) -> crate::ReattachVerdict {
+    let (reply, verdict) = crate::Reply::new();
+    control
+        .send(SinkControl::Reattach {
+            index: users(),
+            reply,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), verdict)
+        .await
+        .expect("a verdict")
+        .expect("answered")
+}
+
+/// Review of step 4, S4: the operator hears the truth. A reattach answers
+/// `Started` once the record is gone; a refusal, with why and what works
+/// instead; a sink failing a step before the record's delete, `Failed`.
+#[tokio::test(start_paused = true)]
+async fn a_reattach_answers_its_verdict() {
+    let rig = Rig::new(64);
+    let (engine, task) = detached_on_a_block(&rig).await;
+    task.abort();
+    let _ = task.await;
+    let (task, control) = spawn(&engine);
+    let crate::ReattachVerdict::Refused(why) = verdict(&control).await else {
+        panic!("a sink that can rebuild refuses");
+    };
+    assert!(why.contains("flusso reindex users --sink primary"), "{why}");
+    task.abort();
+
+    let rig = Rig::new(64);
+    let engine = rig.live_only_engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (task, control) = spawn(&engine);
+    assert_eq!(
+        verdict(&control).await,
+        crate::ReattachVerdict::Refused("the lane is not detached".to_owned())
+    );
+    task.abort();
+
+    let rig = Rig::new(64);
+    let (_engine, task, control) = detached_live_only(&rig).await;
+    rig.sink.dead.lock().unwrap().insert("ensure_index");
+    assert!(matches!(
+        verdict(&control).await,
+        crate::ReattachVerdict::Failed(_)
+    ));
+    rig.sink.dead.lock().unwrap().clear();
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .get_mut("users")
+        .unwrap()
+        .marker = Some(MarkerAt::Newer { seeded: false });
+    let crate::ReattachVerdict::Refused(why) = verdict(&control).await else {
+        panic!("records that don't allow it refuse");
+    };
+    assert!(why.contains("restart flusso"), "{why}");
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .get_mut("users")
+        .unwrap()
+        .marker = Some(MarkerAt::Serving { seeded: true });
+    assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
+    task.abort();
+}
+
+/// Review of step 4, S4(b): a `detached` record written while the sink could
+/// rebuild, found by a start on a sink now `backfill = false`, is put back
+/// to detached live only (R14) with its marker on the generation reads see:
+/// a reattach then applies.
+#[tokio::test(start_paused = true)]
+async fn a_detached_record_on_a_sink_switched_to_backfill_false_is_put_back_live_only() {
+    let rig = Rig::new(64);
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), detached_record());
+    let engine = rig.live_only_engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(
+        *rig.sink.demoted.lock().unwrap(),
+        [("users".to_owned(), true)]
+    );
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    let (task, control) = spawn(&engine);
+    assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
+    task.abort();
 }

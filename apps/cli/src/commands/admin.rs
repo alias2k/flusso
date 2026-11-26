@@ -107,8 +107,10 @@ pub(crate) struct ReattachArgs {
     index: String,
 
     /// The sink the lane writes to: one with `backfill = false`, which can't
-    /// rebuild the index.
-    #[arg(long, env = "FLUSSO_SINK")]
+    /// rebuild the index. Always given on the command line, never read from
+    /// the environment: a reattach accepts lost changes on exactly the lane
+    /// named.
+    #[arg(long)]
     sink: String,
 
     /// Accept that the changes made while the lane was detached never reach
@@ -202,7 +204,8 @@ pub(crate) async fn reattach(args: ReattachArgs) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     writeln!(
         out,
-        "reattach of {} on {} queued: `flusso indexes` or /status shows the lane open, with its gap",
+        "reattach of {} on {} started: the record is gone and the lane is being attached; \
+         /status shows it open, with its gap",
         args.index, args.sink
     )?;
     Ok(())

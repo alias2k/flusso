@@ -793,7 +793,11 @@ async fn a_reattach_is_refused_unless_it_applies_and_queued_when_it_does() {
     )
     .await;
     assert_eq!(got, 409, "{body}");
-    assert!(body.contains("reindex it instead"), "{body}");
+    assert!(
+        body.contains("flusso reindex users --sink primary"),
+        "{body}"
+    );
+    assert!(body.contains("\"reason\""), "{body}");
 
     observer.on_lane_rebuild(&users, None, Some(3));
     let (got, body) = post_reindex(
@@ -805,18 +809,54 @@ async fn a_reattach_is_refused_unless_it_applies_and_queued_when_it_does() {
     assert!(body.contains("being attached already"), "{body}");
 
     observer.on_lane_rebuild(&users, None, None);
-    let (got, body) = post_reindex(
-        &base,
-        "/indexes/users/reattach?sink=primary&accept_gap=true",
-    )
-    .await;
-    assert_eq!(got, 202, "{body}");
-    assert_eq!(
-        receivers.get_mut(&primary).unwrap().try_recv().unwrap(),
-        daemon::SinkControl::Reattach {
-            index: index("users")
+    // The engine's verdict decides the answer (review of step 4, S4).
+    let mut engine = receivers.remove(&primary).unwrap();
+    let answers = tokio::spawn(async move {
+        for verdict in [
+            Some(daemon::ReattachVerdict::Started),
+            Some(daemon::ReattachVerdict::Refused(
+                "the seed marker is not on the seeded generation reads see; restart flusso"
+                    .to_owned(),
+            )),
+            None,
+        ] {
+            let Some(daemon::SinkControl::Reattach { index, reply }) = engine.recv().await else {
+                panic!("a reattach");
+            };
+            assert_eq!(index, kernel::IndexName::try_new("users").unwrap());
+            match verdict {
+                Some(verdict) => reply.send(verdict),
+                None => drop(reply),
+            }
         }
+        engine
+    });
+    let path = "/indexes/users/reattach?sink=primary&accept_gap=true";
+    let (got, body) = post_reindex(&base, path).await;
+    assert_eq!(got, 202, "{body}");
+    assert!(body.contains("\"started\":true"), "{body}");
+    let (got, body) = post_reindex(&base, path).await;
+    assert_eq!(got, 409, "the engine refused: {body}");
+    assert!(body.contains("restart flusso"), "{body}");
+    let (got, body) = post_reindex(&base, path).await;
+    assert_eq!(got, 503, "no verdict, the run ended: {body}");
+    let _engine = answers.await.unwrap();
+
+    // A detached index on a sink that can't rebuild: a reindex names reattach.
+    let (got, body) = post_reindex(&base, "/indexes/users/reindex?sink=primary").await;
+    assert_eq!(got, 409, "{body}");
+    assert!(
+        body.contains("flusso reattach users --sink primary --accept-gap"),
+        "{body}"
     );
+
+    // Stopping: every operation is 503, before any other refusal.
+    stop.request();
+    for path in [path, "/indexes/users/reindex?sink=primary"] {
+        let (got, body) = post_reindex(&base, path).await;
+        assert_eq!(got, 503, "{path}: {body}");
+        assert!(body.contains("stopping"), "{body}");
+    }
 }
 
 /// ADR 0012 stage 10, O16: `/status` shows a lane's accepted gap until a

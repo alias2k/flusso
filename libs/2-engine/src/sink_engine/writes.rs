@@ -212,8 +212,9 @@ struct LaneRun {
     /// Where reads of the index stood as its detach started, in the source's
     /// own text: recorded with the detach, and where the fence freezes (S3).
     detach_through: Option<String>,
-    /// A reattach was asked for (O16): its steps run at the next turn.
-    reattach_due: bool,
+    /// A reattach was asked for (O16): its steps run at the next turn, and
+    /// its verdict goes to this reply.
+    reattach_due: Option<super::Reply<super::ReattachVerdict>>,
 }
 
 impl LaneRun {
@@ -484,7 +485,7 @@ impl<'a> Run<'a> {
                     account,
                     detach_due: None,
                     detach_through: None,
-                    reattach_due: false,
+                    reattach_due: None,
                 }
             })
             .collect();
@@ -2924,7 +2925,7 @@ impl<'a> Run<'a> {
             SinkControl::Reindex { indexes } => self.engine.set_pending_reindex(indexes),
             SinkControl::Detach { index } => self.ask_detach(&index),
             SinkControl::Attach { index } => self.ask_attach(&index),
-            SinkControl::Reattach { index } => self.ask_reattach(&index),
+            SinkControl::Reattach { index, reply } => self.ask_reattach(&index, reply),
         }
     }
 
@@ -2932,20 +2933,33 @@ impl<'a> Run<'a> {
     /// (O16). Only a sink that can't rebuild reattaches: on one that can, a
     /// reindex rebuilds the index with nothing missing. A lane not detached,
     /// or one being attached already, is left as it is.
-    fn ask_reattach(&mut self, index: &IndexName) {
+    fn ask_reattach(&mut self, index: &IndexName, reply: super::Reply<super::ReattachVerdict>) {
         let backfill = self.engine.options.backfill;
+        let sink = self.engine.name.clone();
         let Some(run) = self.lanes.iter_mut().find(|run| run.key.index == *index) else {
+            reply.send(super::ReattachVerdict::Refused(format!(
+                "sink {sink} doesn't maintain {index}"
+            )));
             return;
         };
-        if backfill {
-            tracing::warn!(lane = %run.key, "not reattached: this sink can rebuild the index (a reindex does, with nothing missing); reattach is for a sink with backfill = false");
+        let refusal = if backfill {
+            Some(format!(
+                "this sink can rebuild the index (backfill = true), with nothing missing: \
+                 flusso reindex {index} --sink {sink}"
+            ))
+        } else if !run.health.health.is_detached() {
+            Some("the lane is not detached".to_owned())
+        } else if run.health.attaching.is_some() {
+            Some("the lane is being attached already".to_owned())
+        } else {
+            None
+        };
+        if let Some(why) = refusal {
+            tracing::warn!(lane = %run.key, %why, "not reattached");
+            reply.send(super::ReattachVerdict::Refused(why));
             return;
         }
-        if !run.health.health.is_detached() || run.health.attaching.is_some() {
-            tracing::warn!(lane = %run.key, "not reattached: the lane is not detached, or is being attached already");
-            return;
-        }
-        run.reattach_due = true;
+        run.reattach_due = Some(reply);
         self.reattaches = true;
     }
 
@@ -2959,23 +2973,25 @@ impl<'a> Run<'a> {
             let Some(run) = self.lanes.get_mut(lane) else {
                 continue;
             };
-            if !std::mem::take(&mut run.reattach_due) {
+            let Some(reply) = run.reattach_due.take() else {
                 continue;
-            }
+            };
             let index = run.key.index.clone();
             let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
                 continue;
             };
             match self.engine.reattach(mapping).await {
-                Ok(Some(gap)) => {
+                Ok(Ok(gap)) => {
                     if let Some(run) = self.lanes.get_mut(lane) {
                         run.health.reattach = Some(gap);
                     }
                     self.ask_attach(&index);
+                    reply.send(super::ReattachVerdict::Started);
                 }
-                Ok(None) => {}
+                Ok(Err(why)) => reply.send(super::ReattachVerdict::Refused(why)),
                 Err(error) => {
                     tracing::warn!(%index, sink = %self.engine.name, %error, "the reattach failed; the lane stays detached: ask again");
+                    reply.send(super::ReattachVerdict::Failed(error.to_string()));
                 }
             }
         }

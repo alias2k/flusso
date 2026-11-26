@@ -102,3 +102,18 @@ async fn a_reattach_without_accept_gap_is_refused_before_any_request() {
     .to_string();
     assert!(error.contains("--accept-gap"), "{error}");
 }
+
+/// Review of step 4, m5: `reattach --sink` is given on the command line
+/// only; `FLUSSO_SINK` never picks the lane a reattach drops changes on.
+#[test]
+fn reattach_reads_its_sink_from_the_command_line_only() {
+    use clap::CommandFactory;
+    let cli = crate::Cli::command();
+    let reattach = cli.find_subcommand("reattach").unwrap();
+    let sink = reattach
+        .get_arguments()
+        .find(|arg| arg.get_id() == "sink")
+        .unwrap();
+    assert!(sink.get_env().is_none());
+    assert!(sink.is_required_set());
+}
