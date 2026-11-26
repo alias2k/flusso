@@ -1,6 +1,6 @@
 # Stage 10 design: detach a stalled index, rebuild it later (#394)
 
-**Status:** decided by the owner on 2026-11-24. Every decision in §11 is taken, and the slice order in §10 is accepted. Slice 1 (reading the records at staging) is built; slice 2 is being built in four steps (§10a): steps 1 and 2 are built; slices 3 to 6 are not.
+**Status:** decided by the owner on 2026-11-24. Every decision in §11 is taken, and the slice order in §10 is accepted. Slice 1 (reading the records at staging) is built; slice 2 is being built in four steps (§10a): steps 1 to 3 are built; slices 3 to 6 are not.
 
 **Three consequences the owner accepted knowingly** (§11):
 
@@ -720,6 +720,33 @@ None of these can be taken out without the feature. Measured locally (base `efc4
   - a second `Attached` of the same attempt discards nothing;
   - the attach waits for the discards.
 - m6's failing test, then its fix.
+
+### Step 3 as built
+
+Built as designed above, with these corrections from the code:
+
+1. **No `LaneState.attached`.** An `Attached` reaching a lane that isn't detached and waiting for it is acknowledged and dropped, whatever its attempt. That covers H2's second `Attached` and H3's redelivered one, with nothing to remember.
+2. **The attach's own wait for discards is redundant by construction.** `take_attached` runs right after `drain_detached`, which leaves no discard pending, and a detached lane has nothing in the window or in flight. A mutation removing the check survives every test for that reason; the check stays as the rule's statement (R6, second point).
+3. **The fence.** A lane that opens after being detached serves `Writes` (`FenceObserver::on_lane_health`). Step 4's rebuild must turn that into `Rebuilding` until its seed (O2), since the open there comes with a backfill.
+4. **R7's walk.** A walk that other lanes asked for too keeps going and sends the detached lane nothing, its completion included. A walk only detached lanes asked for is cut at the builder's next turn, its requests acknowledged. A `Backfill` asked for a detached lane is acknowledged unserved when its snapshot starts.
+5. **The request lane.** The attach request is offered (`now_or_never`) and sent again on the next turn when not taken, as a fresh build's request is. A stop drops a pending attach unacknowledged: the request is served on the next start.
+6. **m6.** `IngestEngine::confirm` measures from the new answer when the source's answer leaves `Free`, so a landing after the attach counts as an advance.
+7. **Where O29 and O30 went.** O30 was built at the start of step 3. O29 waits for step 4, beside the attach at a process start.
+
+**What the tests prove.**
+
+- **`ingest::tests::attach`, the quiesce.** A lone builder holds the build of change 1. An attach asked then waits for it: nothing else is granted, and nothing reaches the detached lane. Once released, the lane is attached and `Attached` is its first item; the changes that waited follow it, and change 1, built while detached, never reaches it.
+- **`ingest::tests::attach`, H2 and stale attempts.** A run that died between the attach and `Attached` gets `Attached` published again. Stale attempts publish nothing. A detached lane gets no item, no completion, and its backfill acknowledged unserved. A walk only it asked for is cut. m6 holds.
+- **`progress::tests::detach`, the attach cases.** Attempts, `Again`, `Stale`, and `routed_ever` across `forget_all`.
+- **`tests::detach`, the sink engine.** Items before `Attached` are dropped and those after it written. An older attempt's `Attached` is dropped. A second `Attached` of the same attempt drops nothing. A run restarted after the lane opened never writes the earlier item, and writes the later one, delivered again.
+
+**Not proven.**
+
+- The quiesce with several builders and the budget's fold.
+- An attach while another sink's walk of the index runs (its grants pause; untested).
+- An attach request lane that stays full.
+- Any of it against a live Postgres or OpenSearch.
+- That a lone builder keeps its batching after an attach (W2), beyond the quiesce test's three changes.
 
 ### Decided by the owner on 2026-11-26, from the review of step 2
 

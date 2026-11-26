@@ -1881,7 +1881,27 @@ is the one concrete piece.
   `NotKept` (the default) drops the ask; an error keeps it and sets `detach_unsure`: before the lane's
   next probe a `detached` record found is deleted and the marker put back (`clear_failed_detach`). A fence past `through` answers `Unserved::Detached` at once, never "not following";
   `/status` shows the lane `detached`, not counted in `flusso.lane.parked`. A reindex of a detached
-  index is ignored until step 4. Guards: `tests::records`, `tests::detach` (a refused probe, the
+  index is ignored until step 4. **The attach** (R7, R8, step 3; nothing sends
+  `SinkControl::Attach` yet): the sink engine numbers an attempt (`SinkEngine::attempts`), keeps it in
+  `LaneState.attaching` and sends `Request::Attach { index, sink, attempt }` (again after a run
+  restart); the dispatcher routes it on the builder's third channel (`Route.attaches`, read while a
+  walk runs). The builder pauses its grants (`Builds::pause`; `choose` grants nothing), publishes what
+  is ready, and once `Builds::is_quiet` (no slot, no running build) calls `Progress::attach` (a detached
+  lane, for an attempt above its last: `newest` from `routed_ever`, which `forget_all` keeps; the same
+  attempt on an attached lane is `Again`, anything else `Stale`), then publishes `LaneItem::Attached`,
+  then acknowledges. The sink engine holds the `Attached` it waits for at the lane's front
+  (`take_attached`, after `drain_detached` acknowledged every discard) and opens the lane; any other
+  `Attached` is acknowledged and dropped. The daemon fence goes from `Detached` to `Writes` on the open.
+  R7, with `Progress::any_detached` (one atomic) gating every look-up: `publish_live` registers a skip on
+  a detached lane, `publish_backfill` and `finish_snapshot` send it nothing, `start_snapshot`
+  acknowledges its `Backfill` unserved, and `cut_detached_walk` cuts a walk only detached lanes asked
+  for. `IngestEngine::confirm` measures advances afresh when the answer leaves `Free` (m6). Guards:
+  `ingest::tests::attach` (the quiesce over a held build, a run dying between attach and `Attached`,
+  stale attempts, R7, a cut walk, m6), `progress::tests::detach`'s attach cases, and `tests::detach`'s
+  `items_before_attached_*`, `an_older_attempts_attached_is_discarded`,
+  `a_second_attached_of_the_same_attempt_discards_nothing`,
+  `a_run_restart_after_attached_never_writes_a_redelivered_earlier_item`.
+  Guards (the detach): `tests::records`, `tests::detach` (a refused probe, the
   drain and a healthy sibling sink within 100 ms, a restaging lane, a landed probe dropping the ask,
   `NotKept` with the parked item still written, a failed record, one that landed although its call
   failed, a run dying mid-record, a restarted run, a reindex, every staging pair, a staging during a
