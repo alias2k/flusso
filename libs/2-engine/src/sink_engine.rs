@@ -1515,11 +1515,22 @@ impl SinkEngine {
         self.read_detachment(&mapping.index, detachment);
         // Inside a process the lane's own state decides (R8, H1): a lane
         // held detached stays so whatever the records now say, and is
-        // neither ensured nor asked for.
-        if self
-            .lane_health(&LaneKey::new(mapping.index.clone(), self.name.clone()))
-            .is_detached()
-        {
+        // neither ensured nor asked for. A rebuild it waits to attach for
+        // that the records no longer show (another process put it back to
+        // detached, or began its own) is dropped: its attach would open the
+        // lane onto a generation nobody rebuilds (O29).
+        let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
+        let mut state = self.lane_state(&lane);
+        if state.health.is_detached() {
+            if let Some(ours) = state.rebuilding
+                && found != AtStaging::Rebuilding(ours)
+            {
+                tracing::warn!(%lane, attempts = ours, "the records no longer show the rebuild this process began: it is dropped, the lane stays detached (O29)");
+                state.rebuilding = None;
+                state.rebuild_target = None;
+                state.attaching = None;
+                self.store_lane(&lane, &state, true);
+            }
             return Ok(Staged::Detached);
         }
         match found {
@@ -1540,11 +1551,10 @@ impl SinkEngine {
                 return Ok(self.staged_detached(&mapping.index, why, through));
             }
             AtStaging::Rebuilding(attempts) => {
-                let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
                 // O26 demotes at a process's start only: a rebuild this
                 // process runs survives its sink's re-staging (review of
-                // step 4, S1).
-                let running_here = self.lane_state(&lane).rebuilding.is_some();
+                // step 4, S1). Whose it is, the attempts say.
+                let running_here = state.rebuilding == Some(attempts);
                 if !running_here && (!self.options.backfill || self.skip_backfill) {
                     // O26 / R14: no backfill to finish it in this process.
                     self.sink.demote(mapping, !self.options.backfill).await?;
@@ -1556,8 +1566,7 @@ impl SinkEngine {
                         through,
                     ));
                 }
-                let mut state = self.lane_state(&lane);
-                if state.rebuilding.is_none() {
+                if !running_here {
                     // O2: reads see the old generation until the seed; the
                     // fence hears it before the backfill is asked (review of
                     // step 4, m1).

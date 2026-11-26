@@ -3055,7 +3055,8 @@ impl<'a> Run<'a> {
             }
             let key = run.key.clone();
             let detached = run.health.health.is_detached();
-            let rebuilding = run.health.rebuilding.is_some();
+            let runs = run.health.rebuilding;
+            let rebuilding = runs.is_some();
             let index = run.key.index.clone();
             let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
                 continue;
@@ -3075,15 +3076,13 @@ impl<'a> Run<'a> {
             let mut found = found;
             // B-2: a rebuild another process began is put back to detached
             // before its lane drops anything, or a later start would resume
-            // its walk over the changes this one drops. The demotion is
-            // conditional on what it read; what the records say after it is
-            // decided again.
-            if !rebuilding
-                && matches!(
-                    super::AtStaging::of(&found),
-                    super::AtStaging::Rebuilding(_)
-                )
-            {
+            // its walk over the changes this one drops. Whose it is, the
+            // attempts say: one this process runs counts the attempts it
+            // began or took over, and a rebuild begun since counts more. The
+            // demotion is conditional on what it read; what the records say
+            // after it is decided again.
+            let anothers = |found: &sink::Detachment| matches!(super::AtStaging::of(found), super::AtStaging::Rebuilding(attempts) if runs != Some(attempts));
+            if anothers(&found) {
                 self.engine
                     .sink
                     .demote(mapping, !self.engine.options.backfill)
@@ -3091,10 +3090,7 @@ impl<'a> Run<'a> {
                     .map_err(failed)?;
                 tracing::warn!(%index, sink = %self.engine.name, "read again once the slot is held, the records say another process began a rebuild: put back to detached before anything of it is dropped (O29)");
                 found = self.engine.sink.detachment(mapping).await.map_err(failed)?;
-                if matches!(
-                    super::AtStaging::of(&found),
-                    super::AtStaging::Rebuilding(_)
-                ) {
+                if anothers(&found) {
                     return Err(failed(sink::SinkError::Write(format!(
                         "{index}: the records still say another process rebuilds it after the demotion"
                     ))));

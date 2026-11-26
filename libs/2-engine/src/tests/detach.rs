@@ -3457,3 +3457,61 @@ async fn a_failed_opening_writes_nothing_until_one_gets_through() {
     assert!(rig.sink.unread_writes.lock().unwrap().is_empty());
     task.abort();
 }
+
+/// The world property: whose rebuild a `rebuilding` record is, its attempts
+/// say. A lane rebuilding here under attempt 1 whose record, read again once
+/// the slot is held, counts attempt 2 (another process put this one back
+/// and began its own) is not taken as ours: the record is put back to
+/// detached before the lane drops anything (B-2).
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_another_process_began_since_ours_is_demoted() {
+    let rig = Rig::new(64);
+    let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    eventually("the rebuild is attached", || {
+        engine.lane_health(&lane(users())).is_open()
+    })
+    .await;
+    if let Some(record) = rig.sink.kept.lock().unwrap().get_mut("users") {
+        record.attempts = Some(2);
+    }
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("taken as detached", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    assert_eq!(
+        *rig.sink.demoted.lock().unwrap(),
+        [("users".to_owned(), false)]
+    );
+    task.abort();
+}
+
+/// The world property: a lane held detached while its rebuild waits to
+/// attach, whose record a staging reads put back to detached (another process
+/// took the rebuild as its own), drops the rebuild: the attach it asked for
+/// opens nothing.
+#[tokio::test(start_paused = true)]
+async fn a_staging_drops_a_rebuild_the_records_no_longer_show() {
+    let rig = Rig::new(64);
+    let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
+    task.abort();
+    let _ = task.await;
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), detached_record());
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let (task, _control) = spawn(&engine);
+    rig.live(&users(), 99, 99).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        engine.lane_health(&lane(users())).is_detached(),
+        "the dropped rebuild's attach opened the lane"
+    );
+    assert!(!written(&rig).contains(&"users/99".to_owned()));
+    task.abort();
+}
