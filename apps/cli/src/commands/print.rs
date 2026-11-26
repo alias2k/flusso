@@ -690,6 +690,42 @@ pub(crate) fn gaps(out: &mut impl Write, pen: Pen, gaps: &[crate::gaps::Gap]) ->
     Ok(())
 }
 
+/// Where the lock stands, when that is no problem: one line, `✓` when it is
+/// current, a note when there is none or nothing to compare it with.
+pub(crate) fn lock(
+    out: &mut impl Write,
+    pen: Pen,
+    path: &std::path::Path,
+    state: &crate::lock::LockState,
+) -> Result<()> {
+    match state {
+        crate::lock::LockState::Current => passed(out, pen, &state.message(path)),
+        state if state.is_error() => Ok(()),
+        state => note(out, pen, &state.message(path)),
+    }
+}
+
+/// A lock `check` fails on, as an `[error]` line of its own section.
+pub(crate) fn lock_error(
+    out: &mut impl Write,
+    pen: Pen,
+    path: &std::path::Path,
+    state: &crate::lock::LockState,
+) -> Result<()> {
+    if !state.is_error() {
+        return Ok(());
+    }
+    section(out, pen, "Lock")?;
+    writeln!(
+        out,
+        "  {} {}  {}",
+        pen.paint("1;31", "[error]"),
+        pen.bold(&path.display().to_string()),
+        state.message(path),
+    )?;
+    Ok(())
+}
+
 /// What `flusso check` concluded: the counts, and whether it passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Summary {
@@ -703,11 +739,12 @@ pub(crate) struct Summary {
 }
 
 impl Summary {
-    /// The summary of `diagnostics` and `gaps` (each an error), `offline` or
-    /// not, with the server refused or not.
+    /// The summary of `diagnostics` and `others` (gaps and a lock `check`
+    /// fails on, each an error), `offline` or not, with the server refused or
+    /// not.
     pub(crate) fn of(
         diagnostics: &[Diagnostic],
-        gaps: usize,
+        others: usize,
         offline: bool,
         server_refused: bool,
     ) -> Self {
@@ -718,7 +755,7 @@ impl Summary {
                 .count()
         };
         Self {
-            errors: count(Severity::Error) + gaps,
+            errors: count(Severity::Error) + others,
             warnings: count(Severity::Warning),
             offline,
             server_refused,

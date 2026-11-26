@@ -39,6 +39,7 @@ mod backends;
 mod commands;
 mod gaps;
 mod http;
+mod lock;
 mod memory;
 mod shutdown;
 mod telemetry;

@@ -7,6 +7,11 @@
 //! `--offline` still reports the findings that need no database. `flusso run`
 //! runs the same database validation at start.
 //!
+//! It also compares the `flusso.lock` with what the config compiles to, as
+//! `run` does before rewriting it (see [`crate::lock`]): a stale or unreadable
+//! lock is an error, since `run --locked` would run something else. Given no
+//! config, it checks the lock itself and says there was nothing to compare.
+//!
 //! The report only checks: a section that passes is one line, a section with a
 //! problem prints in full, then warnings, then errors, then a summary line.
 //! `--format json` is the same report (one `Report` value rendered twice):
@@ -26,14 +31,21 @@ use source_postgres::PgDocumentBuilder;
 use crate::adapters;
 use crate::backends::source_spec;
 
-use crate::DEFAULT_CONFIG;
 use crate::commands::print;
+use crate::lock::{ConfigPlan, LockState, plan_config};
+use crate::{DEFAULT_CONFIG, DEFAULT_LOCK};
 
 #[derive(Debug, Args)]
 pub(crate) struct CheckArgs {
-    /// Path to the configuration file.
-    #[arg(short, long, env = "FLUSSO_CONFIG", default_value = DEFAULT_CONFIG)]
-    config: std::path::PathBuf,
+    /// Path to the configuration file. Defaults to `flusso.toml` when it
+    /// exists; otherwise the compiled `--lock` is checked.
+    #[arg(short, long, env = "FLUSSO_CONFIG")]
+    config: Option<std::path::PathBuf>,
+
+    /// The compiled lock to compare with what the config compiles to (as
+    /// `flusso run` resolves it), or to check when there is no config.
+    #[arg(long, env = "FLUSSO_LOCK", default_value = DEFAULT_LOCK)]
+    lock: std::path::PathBuf,
 
     /// Validate the files only; do not connect to the database: skips the
     /// database validation, the source server, and the publication and
@@ -72,14 +84,35 @@ pub(crate) struct CheckArgs {
 enum OutputFormat {
     /// A colored, human-readable report (default).
     Human,
-    /// The same report as one JSON document: `config_file`, `server`,
-    /// `coverage`, `pre_image`, `diagnostics`, `summary`.
+    /// The same report as one JSON document: `config_file`, `lock`, `server`,
+    /// `coverage`, `pre_image`, `gaps`, `diagnostics`, `summary`.
     Json,
 }
 
 pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
-    let mut config = config::load(&args.config)
-        .with_context(|| format!("loading config from {}", args.config.display()))?;
+    let (mut config, lock, path) = match plan_config(
+        false,
+        args.config.as_deref(),
+        Path::new(DEFAULT_CONFIG),
+        |path| path.exists(),
+    ) {
+        ConfigPlan::Compile(path) => {
+            let compiled = config::compile(&path)
+                .with_context(|| format!("loading config from {}", path.display()))?;
+            let lock = LockState::of(&compiled, &args.lock);
+            (compiled.config, lock, path)
+        }
+        ConfigPlan::Fallback | ConfigPlan::UseLock => {
+            let config = config::load_compiled(&args.lock).with_context(|| {
+                format!(
+                    "no {DEFAULT_CONFIG} to check and no compiled lock at {}",
+                    args.lock.display()
+                )
+            })?;
+            (config, LockState::NotCompared, args.lock.clone())
+        }
+        ConfigPlan::Missing(path) => anyhow::bail!("config file {} not found", path.display()),
+    };
     adapters::apply_overrides(
         &mut config,
         &adapters::Overrides {
@@ -91,16 +124,15 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     );
     // Every entry must instantiate its adapter config, offline or not: a
     // misspelled sink option is a config error, and `check` exists to catch it.
-    adapters::validate(&config).with_context(|| format!("validating {}", args.config.display()))?;
-    daemon::backoff(&config).with_context(|| format!("validating {}", args.config.display()))?;
+    adapters::validate(&config).with_context(|| format!("validating {}", path.display()))?;
+    daemon::backoff(&config).with_context(|| format!("validating {}", path.display()))?;
     daemon::index_budget_share(&config)
-        .with_context(|| format!("validating {}", args.config.display()))?;
-    daemon::max_waiting(&config)
-        .with_context(|| format!("validating {}", args.config.display()))?;
+        .with_context(|| format!("validating {}", path.display()))?;
+    daemon::max_waiting(&config).with_context(|| format!("validating {}", path.display()))?;
     daemon::max_pending_documents(&config)
-        .with_context(|| format!("validating {}", args.config.display()))?;
+        .with_context(|| format!("validating {}", path.display()))?;
     crate::backends::compile_scripts(&config)
-        .with_context(|| format!("compiling the scripts of {}", args.config.display()))?;
+        .with_context(|| format!("compiling the scripts of {}", path.display()))?;
     let config = Arc::new(config);
 
     let postgres = adapters::source_config(&config)?;
@@ -153,8 +185,10 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         _ => None,
     };
     let report = Report {
-        path: &args.config,
+        path: &path,
         config: &config,
+        lock: &lock,
+        lock_path: &args.lock,
         diagnostics: &diagnostics,
         online,
     };
@@ -217,6 +251,9 @@ impl<'a> Online<'a> {
 struct Report<'a> {
     path: &'a Path,
     config: &'a Config,
+    /// How the lock stands against the config.
+    lock: &'a LockState,
+    lock_path: &'a Path,
     diagnostics: &'a [Diagnostic],
     /// `None` under `--offline`.
     online: Option<Online<'a>>,
@@ -226,7 +263,7 @@ impl Report<'_> {
     fn summary(&self) -> print::Summary {
         print::Summary::of(
             self.diagnostics,
-            self.online.as_ref().map_or(0, |o| o.gaps.len()),
+            self.online.as_ref().map_or(0, |o| o.gaps.len()) + usize::from(self.lock.is_error()),
             self.online.is_none(),
             self.online.as_ref().is_some_and(|o| o.server.is_some()),
         )
@@ -245,6 +282,7 @@ impl Report<'_> {
             ));
         }
         let gaps = self.online.as_ref().map_or(0, |o| o.gaps.len());
+        let lock = usize::from(self.lock.is_error());
         let plural = |n: usize, one: &str| {
             if n == 1 {
                 format!("1 {one}")
@@ -253,13 +291,23 @@ impl Report<'_> {
             }
         };
         let mut failed = Vec::new();
-        if summary.errors > gaps {
-            failed.push(plural(summary.errors - gaps, "schema error"));
+        if summary.errors > gaps + lock {
+            failed.push(plural(summary.errors - gaps - lock, "schema error"));
         }
         if gaps > 0 {
             failed.push(format!(
                 "{} `flusso run` won't close",
                 plural(gaps, "capture gap")
+            ));
+        }
+        if lock > 0 {
+            failed.push(format!(
+                "{} is {}",
+                self.lock_path.display(),
+                match self.lock {
+                    LockState::Stale { .. } => "stale",
+                    _ => "unreadable",
+                }
             ));
         }
         let mut failure = failed.join(" and ");
@@ -275,10 +323,12 @@ impl Report<'_> {
     /// screen.
     fn human(&self, out: &mut impl Write, pen: print::Pen) -> anyhow::Result<()> {
         print::config_line(out, pen, self.path, self.config)?;
+        print::lock(out, pen, self.lock_path, self.lock)?;
         match &self.online {
             None => {
                 print::offline(out, pen)?;
                 print::offline_diagnostics(out, pen, self.diagnostics)?;
+                print::lock_error(out, pen, self.lock_path, self.lock)?;
             }
             Some(online) => {
                 let coverage_fails =
@@ -296,6 +346,7 @@ impl Report<'_> {
                 }
                 print::diagnostics(out, pen, self.diagnostics)?;
                 print::gaps(out, pen, &online.gaps)?;
+                print::lock_error(out, pen, self.lock_path, self.lock)?;
                 if coverage_fails {
                     print::coverage(out, pen, online.coverage, online.manage_publication)?;
                 }
@@ -325,6 +376,12 @@ impl Report<'_> {
                 "indexes": self.config.indexes.len(),
                 "disabled_indexes": disabled,
                 "sinks": self.config.sinks.len(),
+            },
+            "lock": {
+                "status": if self.lock.is_error() { print::Status::Problem } else { print::Status::Ok }.as_str(),
+                "state": self.lock.as_str(),
+                "path": self.lock_path.display().to_string(),
+                "message": self.lock.message(self.lock_path),
             },
             "server": online.map(|o| serde_json::json!({
                 "status": if o.server.is_none() { print::Status::Ok } else { print::Status::Problem }.as_str(),
@@ -474,9 +531,20 @@ mod tests {
         diagnostics: &'a [Diagnostic],
         online: Option<&Online<'a>>,
     ) -> Report<'a> {
+        with_lock(config, diagnostics, online, &LockState::Current)
+    }
+
+    fn with_lock<'a>(
+        config: &'a Config,
+        diagnostics: &'a [Diagnostic],
+        online: Option<&Online<'a>>,
+        lock: &'a LockState,
+    ) -> Report<'a> {
         Report {
             path: Path::new("flusso.toml"),
             config,
+            lock,
+            lock_path: Path::new("flusso.lock"),
             diagnostics,
             online: online.map(|o| {
                 Online::new(
@@ -538,6 +606,7 @@ mod tests {
         assert_eq!(
             printed,
             "✓ config valid: flusso.toml: 2 indexes (1 disabled), 1 sink\n\
+             ✓ flusso.lock is current\n\
              ✓ source server: the primary, and flusso is not a synchronous standby of it\n\
              ✓ publication covers all 2 tables the indexes read\n\
              ✓ replica identity: every table an index reads logs its whole old row\n\
@@ -795,6 +864,76 @@ mod tests {
 
     /// Both formats render the one report: the same sections, the same
     /// findings and the same counts, and no config or mapping in JSON.
+    /// The lock's place in the report (issue #485): current, missing or not
+    /// compared is one line and no error; stale or unreadable is an error in
+    /// the error block at the bottom, counted in the summary and the exit, and
+    /// the JSON `lock` section says the same.
+    #[test]
+    fn the_lock_is_one_line_unless_check_fails_on_it() {
+        let config = config();
+        let clean = satisfied();
+        let pre_image = PreImageReport::default();
+        let warning = [finding(source::DiagnosticKind::IgnoredPrimaryKey, "team")];
+        let stale = LockState::Stale {
+            differs: vec!["the index `products` changed".to_owned()],
+        };
+        let unreadable = LockState::Unreadable {
+            reason: "compiled config format version 2 is not supported".to_owned(),
+        };
+        for (lock, line, error) in [
+            (LockState::Current, "✓ flusso.lock is current", false),
+            (
+                LockState::Missing,
+                "! flusso.lock not found; flusso build writes it",
+                false,
+            ),
+            (
+                LockState::NotCompared,
+                "! no config to compare flusso.lock with: the lock is what was checked",
+                false,
+            ),
+            (
+                stale,
+                "[error] flusso.lock  `flusso.lock` was compiled from another config than this one (the index `products` changed)",
+                true,
+            ),
+            (
+                unreadable,
+                "[error] flusso.lock  `flusso.lock` can't be read as a lock",
+                true,
+            ),
+        ] {
+            for online in [Some(online(&clean, &pre_image, None)), None] {
+                let report = with_lock(&config, &warning, online.as_ref(), &lock);
+                let mut out = Vec::new();
+                report.human(&mut out, print::Pen::plain()).unwrap();
+                let human = String::from_utf8(out).unwrap();
+                assert!(
+                    human.contains(line),
+                    "{lock:?}: {line} missing from\n{human}"
+                );
+                let json = report.json();
+                assert_eq!(json["lock"]["state"], lock.as_str(), "{lock:?}");
+                assert_eq!(
+                    json["lock"]["status"],
+                    if error { "problem" } else { "ok" },
+                    "{lock:?}"
+                );
+                assert_eq!(json["summary"]["errors"], usize::from(error), "{lock:?}");
+                assert_eq!(report.failure().is_some(), error, "{lock:?}");
+                if error {
+                    let at = human.find("[error] flusso.lock").unwrap();
+                    assert!(
+                        at > human.find("[warning]").unwrap(),
+                        "errors last:\n{human}"
+                    );
+                    let failure = report.failure().unwrap();
+                    assert!(failure.contains("flusso.lock is"), "{failure}");
+                }
+            }
+        }
+    }
+
     /// `check` fails exactly when its summary says it failed, and the
     /// failure names everything that counts: one judge for the exit code and
     /// the last line.

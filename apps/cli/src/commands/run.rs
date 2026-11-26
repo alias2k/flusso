@@ -32,6 +32,7 @@ use crate::DEFAULT_LOCK;
 use crate::adapters;
 use crate::backends::FlussoBackends;
 use crate::http::{self, BasicAuth, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USER};
+use crate::lock::{ConfigPlan, plan_config};
 use crate::shutdown::{self, Cause, Drained, Progress, Signals};
 use crate::telemetry::observer::OtelObserver;
 use crate::telemetry::script_log::ScriptFailureLog;
@@ -553,41 +554,6 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
             waits.end_before_exit().await;
             std::process::exit(signal.exit_code());
         }
-    }
-}
-
-/// What `run` does to obtain its [`Config`], decided purely from the flags plus
-/// whether the candidate config file exists. Split out from the IO in
-/// [`resolve_config`] so the branching is unit-testable without a filesystem.
-#[derive(Debug, PartialEq, Eq)]
-enum ConfigPlan {
-    /// `--locked`: load the existing lock as-is, no compile, no write.
-    UseLock,
-    /// Compile this config path, (re)write the lock, then run the result.
-    Compile(PathBuf),
-    /// No config to compile: fall back to loading the existing lock.
-    Fallback,
-    /// An explicit `--config` was given but does not exist — fatal.
-    Missing(PathBuf),
-}
-
-/// Decide the [`ConfigPlan`] cargo-style: `--locked` wins; otherwise an explicit
-/// `--config` is compiled when it exists and is an error when it doesn't, while a
-/// missing default `flusso.toml` is allowed and falls back to the lock.
-fn plan_config(
-    locked: bool,
-    config: Option<&Path>,
-    default_config: &Path,
-    exists: impl Fn(&Path) -> bool,
-) -> ConfigPlan {
-    if locked {
-        return ConfigPlan::UseLock;
-    }
-    match config {
-        Some(path) if exists(path) => ConfigPlan::Compile(path.to_path_buf()),
-        Some(path) => ConfigPlan::Missing(path.to_path_buf()),
-        None if exists(default_config) => ConfigPlan::Compile(default_config.to_path_buf()),
-        None => ConfigPlan::Fallback,
     }
 }
 

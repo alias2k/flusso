@@ -53,6 +53,7 @@ fn check(name: &str, args: &[&str], env: &[(&str, &str)]) -> Checked {
         .env_remove("FLUSSO_COLOR")
         .env_remove("FLUSSO_FORMAT")
         .env_remove("FLUSSO_CONFIG")
+        .env_remove("FLUSSO_LOCK")
         .stdin(Stdio::null());
     for (var, value) in env {
         command.env(var, value);
@@ -154,4 +155,97 @@ fn the_json_report_holds_no_config_mapping_or_secret() {
         run.whole
     );
     assert!(document["server"].is_null(), "{}", run.whole);
+}
+
+/// A project of its own whose index passes, with its lock built.
+fn locked_project(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("check_report")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("t.schema.yml"),
+        "version: 1\ntable: t\nprimary_key: id\nfields:\n  - integer: id\n    required: true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("flusso.toml"),
+        "[source]\ntype = \"postgres\"\n\n[sinks.out]\ntype = \"stdout\"\n\n[[index]]\nname = \"t\"\n\
+         schema = \"t.schema.yml\"\nenabled = true\n",
+    )
+    .unwrap();
+    let built = flusso(&dir, &["build"]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    dir
+}
+
+fn flusso(dir: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_flusso"))
+        .current_dir(dir)
+        .args(args)
+        .env_remove("FLUSSO_CONFIG")
+        .env_remove("FLUSSO_LOCK")
+        .env_remove("FLUSSO_FORMAT")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+fn shown(output: &Output) -> String {
+    format!(
+        "{}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// `check` compares the lock with what the config compiles to (issue #485):
+/// a current one is a line, a stale one fails the check as an error, and with
+/// no config the lock alone is checked, with nothing to compare.
+#[test]
+fn check_says_whether_the_lock_is_current() {
+    let dir = locked_project("lock");
+    let current = flusso(&dir, &["check", "--offline"]);
+    assert!(current.status.success(), "{}", shown(&current));
+    assert!(
+        String::from_utf8_lossy(&current.stdout).contains("✓ flusso.lock is current"),
+        "{}",
+        shown(&current)
+    );
+
+    std::fs::write(
+        dir.join("t.schema.yml"),
+        "version: 1\ntable: t\nprimary_key: id\nfields:\n  - integer: id\n    required: true\n\
+         \x20 - keyword: name\n    required: false\n",
+    )
+    .unwrap();
+    let stale = flusso(&dir, &["check", "--offline"]);
+    assert!(!stale.status.success(), "{}", shown(&stale));
+    let printed = String::from_utf8_lossy(&stale.stdout);
+    assert!(
+        printed.contains("[error] flusso.lock") && printed.contains("the index `t` changed"),
+        "{}",
+        shown(&stale)
+    );
+    let json = flusso(&dir, &["check", "--offline", "--format", "json"]);
+    let document: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(document["lock"]["state"], "lock_stale", "{document}");
+    assert_eq!(document["summary"]["errors"], 1, "{document}");
+
+    std::fs::remove_file(dir.join("flusso.toml")).unwrap();
+    let alone = flusso(&dir, &["check", "--offline"]);
+    assert!(alone.status.success(), "{}", shown(&alone));
+    assert!(
+        String::from_utf8_lossy(&alone.stdout)
+            .contains("no config to compare flusso.lock with: the lock is what was checked"),
+        "{}",
+        shown(&alone)
+    );
 }
