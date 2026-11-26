@@ -52,10 +52,32 @@ use source::cdc::{ChangeCapture, Landed};
 /// How many times the live stream opened, and how far each sink read its
 /// detach records since. Shared by the ingest engine, the sink engines and
 /// the fence.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Rereads {
     opened: AtomicU64,
     read: Mutex<BTreeMap<SinkName, u64>>,
+    listeners: Mutex<Vec<RereadListener>>,
+}
+
+/// What a [`Rereads`] listener hears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reread {
+    /// The live stream opened: every sink's records are unread from here.
+    Opened,
+    /// A sink read its records.
+    Read,
+}
+
+/// Called on each [`Reread`]: cheap, it only wakes or notes something.
+pub type RereadListener = Arc<dyn Fn(Reread) + Send + Sync>;
+
+impl std::fmt::Debug for Rereads {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Rereads")
+            .field("opened", &self.opened)
+            .field("read", &self.read)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Rereads {
@@ -63,6 +85,26 @@ impl Rereads {
     /// published.
     pub fn live_opened(&self) {
         self.opened.fetch_add(1, Ordering::AcqRel);
+        self.tell(Reread::Opened);
+    }
+
+    /// Hear every opening and every read, for a fence to note and wake on.
+    pub fn subscribe(&self, listener: RereadListener) {
+        self.listeners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(listener);
+    }
+
+    fn tell(&self, event: Reread) {
+        let listeners = self
+            .listeners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for listener in listeners {
+            listener(event);
+        }
     }
 
     /// How many times the live stream opened. A sink engine reads it before
@@ -79,9 +121,12 @@ impl Rereads {
 
     /// `sink` read every index's records, the read beginning at `read_at`.
     pub fn read(&self, sink: &SinkName, read_at: u64) {
-        let mut read = self.read.lock().unwrap_or_else(PoisonError::into_inner);
-        let at = read.entry(sink.clone()).or_default();
-        *at = (*at).max(read_at);
+        {
+            let mut read = self.read.lock().unwrap_or_else(PoisonError::into_inner);
+            let at = read.entry(sink.clone()).or_default();
+            *at = (*at).max(read_at);
+        }
+        self.tell(Reread::Read);
     }
 
     /// Whether `sink` read its records since the live stream last opened.

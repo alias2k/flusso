@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
-use engine::{Level, Observer, Progress, Rereads};
+use engine::{Level, Observer, Progress, Reread, Rereads};
 use kernel::{IndexName, Position, SinkName};
 use serde::Serialize;
 use source::cdc::{ChangeCapture, SourcePosition};
@@ -298,6 +298,10 @@ struct Furthest {
     /// after `from` and at or before `to` is refused at once. An end that is
     /// `None` is unknown and stretches the gap that way. Gone at the seed.
     gap: Option<(Option<SourcePosition>, Option<SourcePosition>)>,
+    /// What the lane had reached, (applied, searchable), when the live
+    /// stream last opened (O29): while its sink's records are unread, a lane
+    /// serving its writes vouches no further.
+    at_open: (Option<SourcePosition>, Option<SourcePosition>),
 }
 
 impl Furthest {
@@ -402,6 +406,19 @@ impl Fence {
     /// the slot last opened (ADR 0012 stage 10, O29): the `rereads` its
     /// engines and the ingest engine share. Set once.
     pub fn with_rereads(self, rereads: Arc<Rereads>) -> Self {
+        let listener: Weak<Inner> = Arc::downgrade(&self.inner);
+        rereads.subscribe(Arc::new(move |event| {
+            let Some(inner) = listener.upgrade() else {
+                return;
+            };
+            if event == Reread::Opened {
+                for furthest in inner.lanes.values() {
+                    let mut furthest = lock(furthest);
+                    furthest.at_open = (furthest.applied, furthest.searchable);
+                }
+            }
+            inner.moved.notify_waiters();
+        }));
         let _ = self.inner.rereads.set(rereads);
         self
     }
@@ -549,12 +566,23 @@ impl Fence {
             .rereads
             .get()
             .is_none_or(|rereads| rereads.current(&lane.sink));
-        let serving = match self.inner.lanes.get(lane) {
-            // O29: what the sink read before the slot opened is advisory.
-            Some(_) if !read => Serving::Pending,
-            Some(furthest) => lock(furthest).serving,
-            None => Serving::Pending,
+        let Some(furthest) = self.inner.lanes.get(lane) else {
+            return (reached, None, Serving::Pending.unserved());
         };
+        let furthest = lock(furthest);
+        // O29, review of step 4 B1: an unread record can make only `Writes`
+        // false (another process may have detached the lane since). It still
+        // vouches for what this process saw it apply before the slot opened:
+        // no detach takes those writes back. The other states vouch for
+        // nothing new, so they answer as themselves.
+        if !read && furthest.serving == Serving::Writes {
+            let vouches = match level {
+                FenceLevel::Applied => furthest.at_open.0,
+                FenceLevel::Searchable => furthest.at_open.1,
+            };
+            return (reached, vouches, Some(Unserved::Starting));
+        }
+        let serving = furthest.serving;
         (reached, serving.vouches(level, reached), serving.unserved())
     }
 
