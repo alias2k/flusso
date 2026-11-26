@@ -16,9 +16,10 @@
 //!   ([`Rereads::current`]), no further than this process applied under the
 //!   previous stream.
 //!
-//! The order lives in [`open`](Rereads::open) alone, so no caller can open
-//! the window between the new stream answering and the sinks counting as
-//! unread. [`Rereads::closed`] says the stream ended: until the next opening
+//! The order lives in [`open`](Rereads::open) alone, the one place outside
+//! tests that opens a live stream (a test here fails if another appears), so
+//! nothing opens the window between the new stream answering and the sinks
+//! counting as unread. [`Rereads::closed`] says the stream ended: until the next opening
 //! nothing settles a gap end ([`Rereads::holding`]).
 //!
 //! Nothing waits on a sink: one whose destination is down reads again when
@@ -124,7 +125,7 @@ impl std::fmt::Debug for Rereads {
 
 impl Rereads {
     /// Open the live stream with `opening` (the source's `live()`): the one
-    /// way to open it. Before `opening` runs, every sink counts as unread and
+    /// place it is opened outside tests. Before `opening` runs, every sink counts as unread and
     /// listeners hear [`Reread::Opening`] while only the previous stream can
     /// answer; once it returns Ok, a read begun from then counts. Failed,
     /// nothing counts as read until an opening succeeds.
@@ -255,5 +256,64 @@ impl SourcePositions for CapturePositions {
         let a = self.0.parse_position(a).ok()?;
         let b = self.0.parse_position(b).ok()?;
         Some(a.cmp(&b))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::path::Path;
+
+    /// Every `.rs` file under `dir`, test and bench code left out.
+    fn sources(dir: &Path, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !matches!(
+                    name.as_str(),
+                    "target" | "tests" | "benches" | "fuzz" | "node_modules" | "dist"
+                ) {
+                    sources(&path, found);
+                }
+            } else if name.ends_with(".rs") && name != "tests.rs" {
+                found.push(path);
+            }
+        }
+    }
+
+    /// Review of the second fix round, m-h: the one place outside tests that
+    /// opens a live stream does it through `Rereads::open`, so no caller can
+    /// open the window between a new stream answering and the sinks counting
+    /// as unread. A second caller fails here.
+    #[test]
+    fn the_live_stream_is_opened_only_through_rereads_open() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        for dir in ["libs", "apps", "sdk", "dev"] {
+            sources(&root.join(dir), &mut files);
+        }
+        // Spelled in two so this test doesn't find itself.
+        let call = [".live", "()"].concat();
+        let mut callers = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            for (at, line) in text.lines().enumerate() {
+                if line.contains(&call) {
+                    callers.push((file.clone(), at + 1, line.trim().to_owned()));
+                }
+            }
+        }
+        assert!(!callers.is_empty(), "the ingest engine opens the stream");
+        for (file, line, text) in &callers {
+            assert!(
+                text.contains("rereads.open("),
+                "{}:{line} opens a live stream outside `Rereads::open`: {text}",
+                file.display()
+            );
+        }
     }
 }
