@@ -18,6 +18,10 @@
 //! - changes published on both lanes of an index;
 //! - reattaches (`audit`) and reindexes (`primary`), the attach answered at
 //!   once, the backfill only at a `Seed`;
+//! - this process's stream ending, another process acting before its next
+//!   opening begins (as at an opening);
+//! - this process detaching a lane itself (its writes refused), its detach
+//!   sometimes writing the record and then failing (what a clear undoes);
 //! - `/status` reads; waits at both levels, on one lane or a whole sink;
 //! - a new process: a fresh pipeline over the same destination, redelivered
 //!   at its first stream from the position the slot confirmed (the source's
@@ -150,6 +154,10 @@ struct Store {
     unreadable: Mutex<BTreeSet<String>>,
     unseeded: Mutex<BTreeSet<String>>,
     missing: Mutex<BTreeSet<String>>,
+    /// Indexes whose writes are refused (a block): what parks a lane.
+    blocked: Mutex<BTreeSet<String>>,
+    /// Indexes whose next detach writes its record, then fails.
+    detach_fails: Mutex<BTreeSet<String>>,
     /// Each index's target, as OpenSearch's generations: a rebuild, a
     /// reindex or a target gone makes a new one, which cuts a backfill asked
     /// for the old one (#428).
@@ -180,6 +188,8 @@ impl Store {
             unreadable: Mutex::default(),
             unseeded: Mutex::default(),
             missing: Mutex::default(),
+            blocked: Mutex::default(),
+            detach_fails: Mutex::default(),
             generation: Mutex::default(),
             walked: Mutex::default(),
             completing: Mutex::default(),
@@ -366,6 +376,13 @@ impl Sink for Store {
                     report.missing_target(envelope.index.clone(), format!("no such index [{of}]"));
                 continue;
             }
+            if self.blocked.lock().unwrap().contains(of) {
+                report = report.blocking(
+                    envelope.index.clone(),
+                    format!("index [{of}] blocked by: [FORBIDDEN/8/index write (api)]"),
+                );
+                continue;
+            }
             let at: u64 = envelope.id.parse().unwrap();
             self.judge(of, Some(at));
             self.written.lock().unwrap().insert((of.to_owned(), at));
@@ -437,6 +454,16 @@ impl Sink for Store {
             marker,
             true,
         );
+        if self
+            .detach_fails
+            .lock()
+            .unwrap()
+            .remove(mapping.index.as_ref())
+        {
+            return Err(sink::SinkError::Write(
+                "the record landed, the call timed out".to_owned(),
+            ));
+        }
         Ok(sink::Recorded::Kept)
     }
 
@@ -575,6 +602,24 @@ enum Event {
         drop: Option<usize>,
         rebuild: bool,
     },
+    /// This process's stream ends (its walsender dropped), and another
+    /// process holds the slot over `jump` before this one's next opening
+    /// begins: it applied every lane, but `drop`'s (as `Open`'s).
+    StreamEnds {
+        jump: u64,
+        drop: Option<usize>,
+        rebuild: bool,
+    },
+    /// `lane`'s writes are refused (a block), and this process asks to
+    /// detach it; with `fails`, its detach writes the record, then fails.
+    Detach {
+        lane: usize,
+        fails: bool,
+    },
+    /// `lane`'s writes land again.
+    Unblock {
+        lane: usize,
+    },
     /// A restart of `sink`'s run: staging, the indexes in `unreadable`
     /// failing their read (and keep failing until `Readable`).
     Restart {
@@ -638,6 +683,11 @@ fn event() -> impl Strategy<Value = Event> {
         // Another process took a `primary` lane over: dropped, then began its
         // rebuild (B-2's ground), given its own weight.
         1 => (2usize..4).prop_map(|lane| Event::Open { ok: true, jump: 10, drop: Some(lane), rebuild: true }),
+        2 => (0u64..3, prop::option::of(0usize..4), any::<bool>()).prop_map(
+            |(jump, drop, rebuild)| Event::StreamEnds { jump: jump * 10, drop, rebuild }
+        ),
+        1 => (0usize..4, any::<bool>()).prop_map(|(lane, fails)| Event::Detach { lane, fails }),
+        1 => (0usize..4).prop_map(|lane| Event::Unblock { lane }),
         3 => (0usize..2, 0u8..4).prop_map(|(sink, unreadable)| Event::Restart { sink, unreadable }),
         2 => (0usize..2).prop_map(|sink| Event::Readable { sink }),
         1 => (0usize..2).prop_map(|sink| Event::HoldReads { sink }),
@@ -1197,6 +1247,41 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
                 let opened = world.open(ok, start).await;
                 prop_assert_eq!(opened.is_ok(), ok);
             }
+            Event::StreamEnds {
+                jump,
+                drop,
+                rebuild,
+            } => {
+                world.rereads.closed();
+                world.holding.holds.store(false, Ordering::SeqCst);
+                world.source.close();
+                let start = world.horizon + jump;
+                if jump > 0 {
+                    world.another_process(world.horizon, start, drop, rebuild);
+                }
+                world.horizon = start;
+            }
+            Event::Detach { lane, fails } => {
+                let store = &world.stores[World::sink_of(lane)];
+                let of = World::index_of(lane).to_owned();
+                store.blocked.lock().unwrap().insert(of.clone());
+                if fails {
+                    store.detach_fails.lock().unwrap().insert(of);
+                }
+                world.control(
+                    World::sink_of(lane),
+                    SinkControl::Detach {
+                        index: index(World::index_of(lane)),
+                    },
+                );
+            }
+            Event::Unblock { lane } => {
+                world.stores[World::sink_of(lane)]
+                    .blocked
+                    .lock()
+                    .unwrap()
+                    .remove(World::index_of(lane));
+            }
             Event::Restart {
                 sink: at,
                 unreadable,
@@ -1325,6 +1410,7 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
     // completed.
     for store in &world.stores {
         store.unreadable.lock().unwrap().clear();
+        store.blocked.lock().unwrap().clear();
         store.read_hold.release();
         store.ensure_hold.release();
     }
