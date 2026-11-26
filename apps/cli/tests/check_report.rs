@@ -51,7 +51,7 @@ fn errors_are_printed_last_and_counted() {
     assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let error = stdout.find("[error] t.tags").expect(&stdout);
-    for before in ["\nIndexes\n", "[offline]", "[warning] t.name"] {
+    for before in ["✓ config valid", "! offline", "[warning] t.name"] {
         assert!(
             stdout.find(before).expect(&stdout) < error,
             "{before}:\n{stdout}"
@@ -61,6 +61,10 @@ fn errors_are_printed_last_and_counted() {
         stdout.trim_end().lines().last(),
         Some("✗ check failed: 1 error, 1 warning"),
         "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Index  t"),
+        "no mapping in check: {stdout}"
     );
 }
 

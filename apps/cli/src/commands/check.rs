@@ -1,11 +1,16 @@
 //! `flusso check` — validate the config and schemas without running the
-//! pipeline. The mapping is projected from the self-describing schema with no
-//! database, so the fully-typed shape is shown either way. Unless `--offline`,
-//! the command also connects and confirms the declared types and nullability
-//! agree with the live database, reporting any disagreement; an `Error`-level
-//! disagreement fails the check. `--offline` still reports the disagreements
-//! that need no database (a `soft_delete` `field` that names no column).
-//! `flusso run` runs the same database validation at start.
+//! pipeline. Unless `--offline`, it connects and confirms the declared types
+//! and nullability agree with the live database, that the source server is
+//! one `flusso run` accepts, and that the publication and replica identities
+//! cover what the indexes read. An `Error`-level finding fails the check: one
+//! that leaves an index not working as its schema says, whatever the cause.
+//! `--offline` still reports the findings that need no database. `flusso run`
+//! runs the same database validation at start.
+//!
+//! The human report only checks: a section that passes is one line, a section
+//! with a problem prints in full, then warnings, then errors, then a summary
+//! line. What the config declares is `flusso show`'s. `--format json` stays
+//! complete (config, mappings, every section), since tools read it.
 
 use std::io::Write;
 use std::path::Path;
@@ -13,7 +18,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, ensure};
 use clap::{Args, ValueEnum};
-use config::{Config, IndexMapping};
+use config::Config;
 use source::{CoverageReport, Diagnostic, PreImageReport, Severity};
 use source_postgres::PgDocumentBuilder;
 
@@ -29,9 +34,9 @@ pub(crate) struct CheckArgs {
     #[arg(short, long, env = "FLUSSO_CONFIG", default_value = DEFAULT_CONFIG)]
     config: std::path::PathBuf,
 
-    /// Validate the files only; do not connect to the database. The mapping is
-    /// shown either way; `--offline` skips confirming it against the database
-    /// and skips the publication-coverage report.
+    /// Validate the files only; do not connect to the database: skips the
+    /// database validation, the source server, and the publication and
+    /// replica-identity reports.
     #[arg(long, env = "FLUSSO_OFFLINE")]
     offline: bool,
 
@@ -207,7 +212,6 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                 pen,
                 &args.config,
                 &config,
-                &mappings,
                 &diagnostics,
                 online.as_ref(),
             )?;
@@ -238,36 +242,28 @@ struct Online<'a> {
     manage_replica_identity: bool,
 }
 
-/// The human-readable report: the deployment, every index's fields, what the
-/// source server, the publication and the replica identities say, then the
-/// schema diagnostics, warnings before errors, and a summary line. What
-/// failed is always on the last screen.
+/// The human-readable report: one line per section that passes, a section
+/// with a problem in full (with its SQL), then the schema findings, warnings
+/// above errors, and a summary line. What failed is always on the last screen.
+/// The config and the mapping are `flusso show`'s.
 fn human_report(
     out: &mut impl Write,
     pen: print::Pen,
     path: &Path,
     config: &Config,
-    mappings: &[IndexMapping],
     diagnostics: &[Diagnostic],
     online: Option<&Online<'_>>,
 ) -> anyhow::Result<()> {
-    print::success(out, pen, &format!("config valid: {}", path.display()))?;
-    print::config(out, pen, config)?;
-    print::resolved(out, pen, mappings)?;
+    print::config_line(out, pen, path, config)?;
     match online {
         None => {
-            print::warning(
-                out,
-                pen,
-                "offline",
-                "skipped database validation — types and nullability not checked",
-            )?;
+            print::offline(out, pen)?;
             print::offline_diagnostics(out, pen, diagnostics)?;
         }
         Some(online) => {
+            print::server(out, pen, online.server)?;
             print::coverage(out, pen, online.coverage, online.manage_publication)?;
             print::pre_image(out, pen, online.pre_image, online.manage_replica_identity)?;
-            print::server(out, pen, online.server)?;
             print::diagnostics(out, pen, diagnostics)?;
         }
     }
@@ -289,18 +285,47 @@ mod tests {
 
     use super::*;
 
+    /// A deployment of one stdout sink and the indexes `products` and
+    /// `users`, `users` disabled.
     fn config() -> Config {
-        let draft = ConfigToml::try_parse(
+        let mut draft = ConfigToml::try_parse(
             r#"
             [source]
             type = "postgres"
 
             [sinks.out]
             type = "stdout"
+
+            [[index]]
+            name = "products"
+            schema = "products.schema.yml"
+            enabled = true
+
+            [[index]]
+            name = "users"
+            schema = "users.schema.yml"
+            enabled = false
             "#,
         )
         .unwrap();
-        Config::from(draft)
+        let entries = std::mem::take(&mut draft.index);
+        let mut config = Config::from(draft);
+        for entry in entries {
+            let schema = serde_json::from_value(serde_json::json!({
+                "version": 1, "table": entry.name.as_ref(), "db_schema": "public", "fields": []
+            }))
+            .unwrap();
+            config.indexes.insert(
+                entry.name,
+                config::Index {
+                    enabled: entry.enabled,
+                    schema,
+                    on_error: None,
+                    sinks: entry.sinks,
+                },
+            );
+        }
+        config
     }
 
     fn finding(kind: source::DiagnosticKind, field: &str) -> Diagnostic {
@@ -321,7 +346,6 @@ mod tests {
             pen,
             Path::new("flusso.toml"),
             &config,
-            &config.resolve_mappings(),
             diagnostics,
             online,
         )
@@ -343,16 +367,118 @@ mod tests {
         }
     }
 
+    fn table(name: &str) -> source::QualifiedTable {
+        source::QualifiedTable::new(
+            config::DatabaseSchema::try_new("public").unwrap(),
+            config::TableName::try_new(name).unwrap(),
+        )
+    }
+
     fn satisfied() -> CoverageReport {
         CoverageReport {
             satisfied: true,
-            present: Vec::new(),
+            present: vec![table("products"), table("users")],
             missing: Vec::new(),
             misrouted: Vec::new(),
             manageable: true,
             blockers: Vec::new(),
             remediation: Vec::new(),
         }
+    }
+
+    /// Issue #485: a clean check is a handful of lines, one per section.
+    #[test]
+    fn a_clean_report_is_one_line_per_section() {
+        let coverage = satisfied();
+        let pre_image = PreImageReport::default();
+        let printed = report(
+            &[],
+            Some(&online(&coverage, &pre_image, None)),
+            print::Pen::plain(),
+        );
+        assert_eq!(
+            printed,
+            "✓ config valid: flusso.toml: 2 indexes (1 disabled), 1 sink\n\
+             ✓ source server: the primary, and flusso is not a synchronous standby of it\n\
+             ✓ publication covers all 2 tables the indexes read\n\
+             ✓ replica identity: every table an index reads logs its whole old row\n\
+             \n\
+             ✓ check passed\n"
+        );
+    }
+
+    /// A section with a problem prints in full, its SQL included; the others
+    /// stay one line each.
+    #[test]
+    fn a_failing_section_prints_in_full_and_the_others_in_one_line() {
+        let coverage = CoverageReport {
+            satisfied: false,
+            present: vec![table("products")],
+            missing: vec![table("users")],
+            misrouted: Vec::new(),
+            manageable: false,
+            blockers: vec!["role does not own table public.users".to_owned()],
+            remediation: vec!["ALTER PUBLICATION flusso ADD TABLE public.users;".to_owned()],
+        };
+        let pre_image = PreImageReport::default();
+        let printed = report(
+            &[],
+            Some(&online(&coverage, &pre_image, None)),
+            print::Pen::plain(),
+        );
+        for line in [
+            "\nPublication coverage\n",
+            "1 table(s) the indexes read are not yet streamed:",
+            "role does not own table public.users",
+            "  ALTER PUBLICATION flusso ADD TABLE public.users;\n",
+            "✓ source server: the primary, and flusso is not a synchronous standby of it\n",
+            "✓ replica identity: every table an index reads logs its whole old row\n",
+        ] {
+            assert!(printed.contains(line), "{line:?} missing from:\n{printed}");
+        }
+        assert!(!printed.contains("Indexes"), "no config dump:\n{printed}");
+    }
+
+    /// What `flusso run` fixes on its own, or keeps on purpose, is one line:
+    /// nothing to do by hand.
+    #[test]
+    fn what_run_sets_itself_is_one_line() {
+        let coverage = CoverageReport {
+            satisfied: false,
+            present: vec![table("products")],
+            missing: vec![table("users")],
+            misrouted: Vec::new(),
+            manageable: true,
+            blockers: Vec::new(),
+            remediation: vec!["ALTER PUBLICATION flusso ADD TABLE public.users;".to_owned()],
+        };
+        let gap = |name: &str, kept: Option<&str>| source::PreImageGap {
+            table: table(name),
+            missing: Vec::new(),
+            missing_key: Vec::new(),
+            manageable: true,
+            blockers: Vec::new(),
+            remediation: format!("ALTER TABLE {name} REPLICA IDENTITY FULL;"),
+            kept: kept.map(str::to_owned),
+        };
+        let pre_image = PreImageReport {
+            gaps: Vec::new(),
+            partial: vec![gap("teams", None), gap("orders", Some("on an index"))],
+        };
+        let printed = report(
+            &[],
+            Some(&online(&coverage, &pre_image, None)),
+            print::Pen::plain(),
+        );
+        assert!(
+            printed.contains(
+                "✓ publication: the next `flusso run` covers the 1 table it misses\n\
+                 ✓ replica identity: the next `flusso run` sets REPLICA IDENTITY FULL on 1 table; \
+                 1 table kept as is (updates there always rebuild)\n"
+            ),
+            "{printed}"
+        );
+        assert!(!printed.contains("ALTER"), "{printed}");
     }
 
     /// Issue #485: errors are the last thing printed before the summary,
@@ -379,12 +505,10 @@ mod tests {
         };
         let first_error = at("[error]");
         for section in [
-            "\nSource\n",
-            "\nSinks\n",
-            "\nIndexes\n",
-            "\nPublication coverage\n",
-            "\nReplica identity\n",
-            "\nSource server\n",
+            "✓ config valid",
+            "✓ source server",
+            "✓ publication",
+            "✓ replica identity",
             "[warning] products.team",
             "[warning] products.label",
         ] {
@@ -449,7 +573,7 @@ mod tests {
             None,
             print::Pen::plain(),
         );
-        let offline = printed.find("[offline]").unwrap();
+        let offline = printed.find("! offline").unwrap();
         let warning = printed.find("[warning]").unwrap();
         let error = printed.find("[error]").unwrap();
         assert!(offline < warning && warning < error, "{printed}");
