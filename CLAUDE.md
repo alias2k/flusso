@@ -558,9 +558,12 @@ among them), and a summary line, whose verdict is the exit code (`Report::failur
 auto|always|never`; `--format json` is the same report, one `Report` value rendered twice, with no
 config or mapping; it compares the `--lock` with what the config compiles to, byte for byte as `run`
 does before rewriting it (`lock.rs`'s `LockState`, offline too): current is one line, missing a
-note, stale (`lock_stale`, naming the indexes or settings that differ) or unreadable
-(`lock_unreadable`, the regenerate hint) an error; with no config it checks the lock, and says
-there was nothing to compare; `plan_config`, in `lock.rs`, decides for `run` and `check` alike), `show config|mapping [index]` (the deployment,
+note, the same config in other bytes (CRLF, formatting: `same_config`) a note, since `run --locked`
+runs it, stale (`lock_stale`, naming the indexes or settings that differ) or unreadable
+(`lock_unreadable`: the line and column, never the text there, which `config::from_bytes`'s
+`CompileError::Decode` holds for `run --locked` too) an error, each advice naming the `--out` /
+`--lock` that writes the path compared; with no config it checks the lock, and says there was
+nothing to compare; `plan_config`, in `lock.rs`, decides for `run` and `check` alike), `show config|mapping [index]` (the deployment,
 secrets redacted, or the typed mapping; no DB; reads `--config` or the `--lock`; `--format json`;
 `commands/show.rs`, reusing `print::config`/`print::resolved`), `run`
 (cargo-style: when a `flusso.toml` is present — the default path, or `--config` — it
@@ -2081,8 +2084,9 @@ outcome (`Holds` as raw JSON, `Wrapped`, `FirstsChildren`, `Nothing` beside an e
 `indexed: false` join or an `enabled: false` object declares another shape) is
 `DuplicateFieldNameWrong`. The `Reach` says what holds the level: `Indexed`, `Stored` (under an
 unindexed parent: a refusal is worded as stored, never as a refusal), `Scripts` (the pair is, or is
-under, an input-only field and a running script reads it: one at that level or above through `this`,
-one anywhere naming `root`; judged by what the script reads, as if every namesake were emitted) and
+under, an input-only field and a running script can read it: one at that level or above through
+`this`, one anywhere whose text names `root`, as the scripts crate decides who gets `root`; judged by
+what the script reads, as if every namesake were emitted, a script namesake's own output never) and
 `Absent` (nothing reads it: only `FailsToBuild` is wrong); `validation.rs`'s `Level` decides it. The
 live `duplicate_names` matrix asserts each pair's severity against what it saw, except a pair seen
 holding one namesake's value (raw JSON can't be told apart there), and the designer counts the kind
@@ -2098,9 +2102,10 @@ prints each as an `[error]` line at the bottom with its section's SQL and counts
 inspects the same, read-only, before staging, after checking the server; one verdict
 (`backends.rs`'s `start_verdict`) then judges schema findings and gaps together, so `--strict` refuses
 once with both, a refused start printing everything; a plain start reports each gap as the schema
-errors' event and gauge, once per index reading its table, and hands the capture what it reported
-(`WalChangeCapture::with_reported_gaps`), so `prepare` logs those gaps at `debug`, not as a second
-warning. Each `Error` the start goes on with is a `tracing::error!` event
+errors' event and gauge, once per index reading its table, and hands the capture the tables it
+reported (`WalChangeCapture::with_reported_gaps`), so `prepare` logs those gaps at `debug`, not as a
+second warning, while a table that falls out of the publication later still warns
+(`ReportedGaps::covers_publication`). Each `Error` the start goes on with is a `tracing::error!` event
 (target `flusso::schema_errors`; `index`, `kind`, `field`, the message) at every start and a value
 of the `flusso.index.schema_errors{index,kind}` gauge (`telemetry/schema_errors.rs`). Under OTLP the
 event is a span event of the `daemon.start` span: the CLI has no OTel log bridge. One copy per
