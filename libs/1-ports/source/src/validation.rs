@@ -70,6 +70,16 @@
 //! join or a `min`/`max` is refused only where a related row holds a time,
 //! so neither is reported.
 //!
+//! A date mapping whose `format` reads a time of day only (`HH:mm:ss`,
+//! `hour_minute_second`, …) over a value that is no time of day is
+//! [`DiagnosticKind::TimeOfDayFormat`]: OpenSearch refuses every document
+//! holding one. The mapping keeps such a format as written (see
+//! [`kernel::with_iso`]), since a `timestamp` field may sit over a `time`
+//! column, the documented way to index a time of day: so a `timestamp`
+//! column, a `min`/`max` or `ids` of one is reported only once the database
+//! names the column's type; a `date` field, a `custom` over date or
+//! timestamp types, a constant or a script with no database.
+//!
 //! The same rule decides where a duplicate pair that never indexes gets its
 //! own kind: under a join, an input-only or unindexed ancestor, or an object
 //! with `options`, it does not stop the start. Its severity is then decided
@@ -380,6 +390,10 @@ pub enum DiagnosticKind {
     /// `options`, at the root or in plain objects: OpenSearch refuses every
     /// document holding a non-null value.
     TimeOfDayAsDate,
+    /// A field mapped as a date whose `format` reads a time of day only, over
+    /// a value that is no time of day (a date, a timestamp): OpenSearch
+    /// refuses every document whose value is not null.
+    TimeOfDayFormat,
     /// A check the store refused to run (e.g. the transform or link check,
     /// under a role without USAGE on a type's schema): the message names what
     /// was not checked and the store's reason. Nothing is known either way.
@@ -406,6 +420,7 @@ impl DiagnosticKind {
             | Self::DuplicateFieldNameFailsToBuild
             | Self::DuplicateFieldNameRefused
             | Self::TimeOfDayAsDate
+            | Self::TimeOfDayFormat
             | Self::Nullability
             | Self::UndeclaredArrayColumn
             | Self::IdsElementLossy
@@ -443,6 +458,7 @@ impl DiagnosticKind {
             Self::DuplicateFieldNameFailsToBuild => "duplicate_field_name_fails_to_build",
             Self::DuplicateFieldNameRefused => "duplicate_field_name_refused",
             Self::TimeOfDayAsDate => "time_of_day_as_date",
+            Self::TimeOfDayFormat => "time_of_day_format",
             Self::CheckSkipped => "check_skipped",
         }
     }
@@ -583,12 +599,15 @@ async fn validate_index(
         anchor: Anchor::Field,
         uncarried: 0,
         date_mapped: false,
+        unmapped: 0,
+        time_format: None,
         out: &mut diagnostics,
     };
     checker
         .fields(&schema.table, &schema.fields, schema.primary_key.as_ref())
         .await?;
     checker.root(schema).await?;
+    time_of_day_formats(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
     duplicate_names(
         name,
         &schema.fields,
@@ -618,6 +637,7 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
                 message,
             ));
         }
+        time_of_day_formats(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
         duplicate_names(
             name,
             &schema.fields,
@@ -627,6 +647,83 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
         );
     }
     diagnostics
+}
+
+/// One [`DiagnosticKind::TimeOfDayFormat`] per mapped field whose `format`
+/// reads a time of day only where the schema alone says flusso writes a date
+/// or a timestamp there. A `timestamp` column, and a `min`/`max` or `ids` of
+/// one, may hold a time of day: the database-backed walk decides those.
+fn time_of_day_formats(
+    index: &IndexName,
+    fields: &[Field],
+    path: &mut Vec<(FieldName, Option<usize>)>,
+    out: &mut Vec<Diagnostic>,
+) {
+    for (at, field) in fields.iter().enumerate() {
+        if !field.emit {
+            continue;
+        }
+        path.push((field.field.clone(), position(fields, at)));
+        if let Some(format) =
+            kernel::date_format(field).filter(|f| kernel::reads_time_of_day_only(f))
+            && !decided_by_its_column(field)
+            && let Some(values) = kernel::date_values(field)
+        {
+            let what = match values {
+                kernel::DateValues::Dates => WRITES_A_DATE,
+                kernel::DateValues::Timestamps => WRITES_A_TIMESTAMP,
+                kernel::DateValues::Both => WRITES_EITHER,
+            };
+            out.push(Diagnostic {
+                index: index.clone(),
+                field: field.field.clone(),
+                path: path.iter().map(|(name, _)| name.clone()).collect(),
+                positions: path.iter().map(|(_, at)| *at).collect(),
+                anchor: Anchor::Field,
+                kind: DiagnosticKind::TimeOfDayFormat,
+                severity: DiagnosticKind::TimeOfDayFormat.severity(),
+                message: time_of_day_format_message(format, what, None),
+            });
+        }
+        if kernel::maps_children(field) {
+            time_of_day_formats(index, field.children(), path, out);
+        }
+        path.pop();
+    }
+}
+
+/// Whether what flusso writes into `field` is a column's value that may be a
+/// time of day: a `timestamp` column, or a `min`/`max` or `ids` typed so.
+fn decided_by_its_column(field: &Field) -> bool {
+    match &field.source {
+        FieldSource::Column(column) => column.ty == FlussoType::Timestamp,
+        FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
+            AggregateOp::Min(_) | AggregateOp::Max(_) => {
+                aggregate.value_type == Some(FlussoType::Timestamp)
+            }
+            AggregateOp::Ids { element_type } => *element_type == FlussoType::Timestamp,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+const WRITES_A_DATE: &str = "a date (`2024-01-02`)";
+const WRITES_A_TIMESTAMP: &str = "a timestamp (`2024-01-02T03:04:05`)";
+const WRITES_EITHER: &str = "a date or a timestamp (`2024-01-02`, `2024-01-02T03:04:05`)";
+
+/// What [`DiagnosticKind::TimeOfDayFormat`] says: `format` refuses `what`
+/// flusso writes, read from a column of `sql_type` when known.
+fn time_of_day_format_message(format: &str, what: &str, sql_type: Option<&str>) -> String {
+    let from = sql_type
+        .map(|ty| format!(", from the column's `{ty}`"))
+        .unwrap_or_default();
+    format!(
+        "the `format` `{format}` reads a time of day only, but flusso writes {what} here{from}, \
+         so OpenSearch refuses every document whose value is not null. Drop the `format`, or \
+         use one that reads it: `strict_date_optional_time`, or yours followed by \
+         `||strict_date_optional_time`"
+    )
 }
 
 /// Where a level of fields sits, for [`duplicate_names`].
@@ -842,6 +939,12 @@ struct Checker<'a> {
     /// so a time of day under a `date` mapping is refused
     /// ([`DiagnosticKind::TimeOfDayAsDate`]).
     date_mapped: bool,
+    /// How many enclosing fields OpenSearch doesn't map the children of: an
+    /// input-only field, an `indexed: false` join, an `enabled: false` object.
+    unmapped: usize,
+    /// The field being checked is mapped as a date with a `format` that reads
+    /// a time of day only ([`DiagnosticKind::TimeOfDayFormat`]): that format.
+    time_format: Option<String>,
     out: &'a mut Vec<Diagnostic>,
 }
 
@@ -1092,9 +1195,18 @@ impl Checker<'_> {
         // unshared field is known to be mapped as it declares.
         let shared = self.positions.last().copied().flatten().is_some();
         self.date_mapped = self.uncarried == 0 && field.emit && !shared && field.options.is_empty();
+        self.time_format = (self.unmapped == 0)
+            .then(|| kernel::date_format(field))
+            .flatten()
+            .filter(|format| kernel::reads_time_of_day_only(format))
+            .map(str::to_owned);
         let hides = !carries(field);
         if hides {
             self.uncarried += 1;
+        }
+        let unmaps = !field.emit || !kernel::maps_children(field);
+        if unmaps {
+            self.unmapped += 1;
         }
         let checked = match &field.source {
             FieldSource::Column(column) => self.column_field(table, column, primary_key).await,
@@ -1109,7 +1221,34 @@ impl Checker<'_> {
         if hides {
             self.uncarried -= 1;
         }
+        if unmaps {
+            self.unmapped -= 1;
+        }
         checked
+    }
+
+    /// Report a `timestamp`-typed value read from a column that holds no time
+    /// of day under a time-of-day `format` ([`DiagnosticKind::TimeOfDayFormat`]).
+    fn time_of_day_format(&mut self, ty: &FlussoType, info: &ColumnInfo) {
+        if *ty != FlussoType::Timestamp {
+            return;
+        }
+        let base = info.base_type.as_deref().unwrap_or(&info.sql_type);
+        if time_of_day_type(base).is_some() {
+            return;
+        }
+        let Some(format) = self.time_format.clone() else {
+            return;
+        };
+        let what = if FlussoType::Date.accepts_pg(base) {
+            WRITES_A_DATE
+        } else {
+            WRITES_A_TIMESTAMP
+        };
+        self.report(
+            DiagnosticKind::TimeOfDayFormat,
+            time_of_day_format_message(&format, what, Some(&info.sql_type)),
+        );
     }
 
     /// Report a `timestamp` or `date` field over a `time`/`timetz` column
@@ -1403,6 +1542,7 @@ impl Checker<'_> {
         let Some(info) = self.quiet_column((table, &key)).await? else {
             return Ok(());
         };
+        self.time_of_day_format(element, &info);
         let key_type = info.base_type.as_deref().unwrap_or(&info.sql_type);
         let element_name = element::name(element);
         let sql_type = &info.sql_type;
@@ -1607,6 +1747,9 @@ impl Checker<'_> {
                 let Some(info) = self.column(&aggregate.table, column, None).await? else {
                     return Ok(());
                 };
+                if matches!(aggregate.op, AggregateOp::Min(_) | AggregateOp::Max(_)) {
+                    self.time_of_day_format(value_type, &info);
+                }
                 if !value_type.accepts_pg(&info.sql_type) {
                     self.report(
                         DiagnosticKind::TypeMismatch,
@@ -1714,6 +1857,7 @@ impl Checker<'_> {
             && holds_json
             && !matches!(column.ty, FlussoType::Json | FlussoType::Custom { .. });
         let time_of_day = self.time_of_day(&column.ty, &info);
+        self.time_of_day_format(&column.ty, &info);
         if !time_of_day && !unknown_elements && !column.ty.accepts_pg(&info.sql_type) {
             self.report(
                 DiagnosticKind::TypeMismatch,
@@ -3142,6 +3286,232 @@ mod tests {
                 ),
             ])),
             problems(&[]),
+        );
+    }
+
+    /// `clocks(id integer, stamped timestamp, opens time, closes timetz, day
+    /// date)`, `events(id integer, clock_id integer, at timestamp, opens_at
+    /// time)` and `stamps(id timestamp, clock_id integer)`, each keyed by `id`.
+    struct Clocks;
+
+    #[async_trait]
+    impl Catalog for Clocks {
+        async fn column(
+            &self,
+            schema: &DatabaseSchema,
+            table: &TableName,
+            column: &ColumnName,
+        ) -> Result<ColumnInfo> {
+            let sql_type = match (table.as_ref(), column.as_ref()) {
+                ("stamps", "id") | (_, "stamped" | "at") => "timestamp without time zone",
+                (_, "id" | "clock_id") => "integer",
+                (_, "opens" | "opens_at") => "time without time zone",
+                (_, "closes") => "time with time zone",
+                (_, "day") => "date",
+                _ => {
+                    return Err(SourceError::UnknownColumn(format!(
+                        "{schema}.{table}.{column}"
+                    )));
+                }
+            };
+            Ok(ColumnInfo {
+                sql_type: sql_type.to_owned(),
+                base_type: None,
+                nullable: true,
+            })
+        }
+
+        async fn has_table(&self, _: &DatabaseSchema, _: &TableName) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn primary_key(
+            &self,
+            _: &DatabaseSchema,
+            _: &TableName,
+        ) -> Result<Option<Vec<ColumnName>>> {
+            Ok(Some(vec![ColumnName::try_new("id").unwrap()]))
+        }
+    }
+
+    fn clocks_findings(fields: serde_json::Value) -> Vec<Found> {
+        let schema: IndexSchema = serde_json::from_value(json!({
+            "version": 1, "table": "clocks", "db_schema": "public", "primary_key": "id",
+            "fields": fields,
+        }))
+        .unwrap();
+        let spec = SourceSpec::new(BTreeMap::from([(
+            IndexName::try_new("clocks").unwrap(),
+            schema,
+        )]));
+        located(futures::executor::block_on(validate_indexes(&spec, &Clocks)).unwrap())
+    }
+
+    fn events_aggregate(field: &str, op: serde_json::Value, ty: &str) -> serde_json::Value {
+        json!({ "field": field, "source": { "relation": { "aggregate": {
+            "table": if op.get("ids").is_some() { "stamps" } else { "events" },
+            "op": op, "key": { "direct": "clock_id" }, "value_type": ty,
+        } } } })
+    }
+
+    /// A date mapping whose `format` reads a time of day only refuses every
+    /// timestamp flusso writes: reported over a timestamp column, a `max` of
+    /// one, or `ids` of timestamp keys. Over a `time`/`timetz` column (the
+    /// documented way to index a time of day), input-only or under an
+    /// unindexed join it is no finding.
+    #[test]
+    fn a_time_of_day_format_over_a_timestamp_column_is_reported() {
+        let mut hidden = with_format(timestamp_field("stamped", None), "HH:mm:ss");
+        hidden["emit"] = json!(false);
+        hidden["field"] = json!("hidden");
+        let mut unindexed = json!({ "field": "events", "source": { "relation": { "join": {
+            "table": "events", "kind": { "has_many": { "foreign_key": "clock_id" } },
+            "primary_key": "id", "indexed": false,
+            "fields": [with_format(timestamp_field("at", None), "HH:mm:ss")],
+        } } } });
+        unindexed["options"] = json!({});
+        let message = |format: &str, sql_type: &str| {
+            format!(
+                "the `format` `{format}` reads a time of day only, but flusso writes a timestamp \
+                 (`2024-01-02T03:04:05`) here, from the column's `{sql_type}`, so OpenSearch \
+                 refuses every document whose value is not null. Drop the `format`, or use one \
+                 that reads it: `strict_date_optional_time`, or yours followed by \
+                 `||strict_date_optional_time`"
+            )
+        };
+        assert_eq!(
+            clocks_findings(json!([
+                int_field("id"),
+                with_format(timestamp_field("stamped", None), "HH:mm:ss"),
+                with_format(timestamp_field("opens", None), "HH:mm:ss"),
+                with_format(timestamp_field("closes", None), "hh:mm a"),
+                with_format(
+                    events_aggregate("latest", json!({ "max": "at" }), "timestamp"),
+                    "hour_minute_second"
+                ),
+                with_format(
+                    events_aggregate("earliest_open", json!({ "min": "opens_at" }), "timestamp"),
+                    "hour_minute_second"
+                ),
+                with_format(
+                    json!({ "field": "stamp_ids", "source": { "relation": { "aggregate": {
+                        "table": "stamps", "op": { "ids": { "element_type": "timestamp" } },
+                        "key": { "direct": "clock_id" },
+                    } } } }),
+                    "strict_t_time"
+                ),
+                hidden,
+                unindexed,
+            ])),
+            problems(&[
+                (
+                    "stamped",
+                    DiagnosticKind::TimeOfDayFormat,
+                    &message("HH:mm:ss", "timestamp without time zone"),
+                ),
+                (
+                    "latest",
+                    DiagnosticKind::TimeOfDayFormat,
+                    &message("hour_minute_second", "timestamp without time zone"),
+                ),
+                (
+                    "stamp_ids",
+                    DiagnosticKind::TimeOfDayFormat,
+                    &message("strict_t_time", "timestamp without time zone"),
+                ),
+            ]),
+        );
+        assert_eq!(DiagnosticKind::TimeOfDayFormat.severity(), Severity::Error);
+        assert_eq!(
+            DiagnosticKind::TimeOfDayFormat.as_str(),
+            "time_of_day_format"
+        );
+    }
+
+    /// Where what flusso writes is known from the schema alone (a `date`
+    /// field, a `custom` over date or timestamp types, a constant, a script),
+    /// a time-of-day `format` is reported with no database, and once with
+    /// one. A `timestamp` column may hold a time of day: only the database
+    /// tells.
+    #[test]
+    fn a_time_of_day_format_where_flusso_writes_a_date_is_reported_with_no_database() {
+        let day = with_format(
+            json!({ "field": "day", "source": { "column": {
+                "column": "day", "ty": "date", "nullable": true,
+            } } }),
+            "HH:mm",
+        );
+        let custom = with_format(
+            json!({ "field": "zoned", "source": { "column": {
+                "column": "stamped", "nullable": true,
+                "ty": { "custom": { "postgres": ["timestamptz"], "opensearch": "date" } },
+            } } }),
+            "time",
+        );
+        let script = with_format(
+            json!({ "field": "computed", "source": { "script": {
+                "source": "this.stamped", "ty": "timestamp", "nullable": true,
+            } } }),
+            "'at 'HH:mm",
+        );
+        let fields = json!([
+            int_field("id"),
+            day,
+            custom,
+            script,
+            with_format(timestamp_field("stamped", None), "HH:mm:ss"),
+        ]);
+        let reads = |format: &str, what: &str| {
+            format!(
+                "the `format` `{format}` reads a time of day only, but flusso writes {what} \
+                 here, so OpenSearch refuses every document whose value is not null. Drop the \
+                 `format`, or use one that reads it: `strict_date_optional_time`, or yours \
+                 followed by `||strict_date_optional_time`"
+            )
+        };
+        let offline = vec![
+            (
+                "day".to_owned(),
+                DiagnosticKind::TimeOfDayFormat,
+                reads("HH:mm", "a date (`2024-01-02`)"),
+            ),
+            (
+                "zoned".to_owned(),
+                DiagnosticKind::TimeOfDayFormat,
+                reads("time", "a timestamp (`2024-01-02T03:04:05`)"),
+            ),
+            (
+                "computed".to_owned(),
+                DiagnosticKind::TimeOfDayFormat,
+                reads("'at 'HH:mm", "a timestamp (`2024-01-02T03:04:05`)"),
+            ),
+        ];
+        assert_eq!(
+            located(validate_spec(&SourceSpec::new(BTreeMap::from([(
+                IndexName::try_new("clocks").unwrap(),
+                serde_json::from_value(json!({
+                    "version": 1, "table": "clocks", "db_schema": "public",
+                    "primary_key": "id", "fields": fields.clone(),
+                }))
+                .unwrap(),
+            )])))),
+            offline,
+        );
+        let online = clocks_findings(fields);
+        let kinds: Vec<(&str, DiagnosticKind)> = online
+            .iter()
+            .filter(|found| found.1 == DiagnosticKind::TimeOfDayFormat)
+            .map(|found| (found.0.as_str(), found.1))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("stamped", DiagnosticKind::TimeOfDayFormat),
+                ("day", DiagnosticKind::TimeOfDayFormat),
+                ("zoned", DiagnosticKind::TimeOfDayFormat),
+                ("computed", DiagnosticKind::TimeOfDayFormat),
+            ],
+            "{online:?}"
         );
     }
 

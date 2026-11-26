@@ -13,8 +13,10 @@
 //! format can't read what flusso writes **into that field**
 //! ([`DateValues`]): a date field needs a pattern reading `2024-01-02`, a
 //! timestamp field one reading every timestamp form. A format whose every
-//! pattern reads a time of day only is left alone too: a `time` column under
-//! a date mapping is `time_of_day_as_date`'s business. A `custom` field
+//! pattern reads a time of day only ([`reads_time_of_day_only`]) is left
+//! alone too: over a `time` column it is the documented way to index a time
+//! of day, and over a date or timestamp validation reports it
+//! (`time_of_day_format`), since only the database names the column's type. A `custom` field
 //! mapped as a date over a column that isn't a date or a timestamp is the
 //! user's: flusso writes the column's own value. The user's patterns stay
 //! first, so OpenSearch prints dates in their form (`key_as_string`,
@@ -166,21 +168,34 @@ fn unquoted_letters(pattern: &str) -> Vec<char> {
         .collect()
 }
 
-/// `format` with [`ISO_DATE_PATTERN`] appended, or `None` when a pattern of it
-/// reads every form of `values` flusso writes, when every pattern reads a
-/// time of day only, or when it is empty.
-pub fn with_iso(format: &str, values: DateValues) -> Option<String> {
-    if format.trim().is_empty() {
-        return None;
-    }
-    let patterns: Vec<Pattern> = format.split("||").map(str::trim).map(pattern).collect();
-    let reads = patterns.iter().any(|p| match p {
+fn patterns(format: &str) -> Vec<Pattern> {
+    format.split("||").map(str::trim).map(pattern).collect()
+}
+
+/// Whether a pattern of `format` reads every form of `values` flusso writes.
+pub fn reads(format: &str, values: DateValues) -> bool {
+    patterns(format).iter().any(|p| match p {
         Pattern::All => true,
         Pattern::Dates => values == DateValues::Dates,
         Pattern::TimeOfDay | Pattern::Other => false,
-    });
-    let time_of_day = patterns.iter().all(|p| *p == Pattern::TimeOfDay);
-    (!reads && !time_of_day).then(|| format!("{format}||{ISO_DATE_PATTERN}"))
+    })
+}
+
+/// Whether every pattern of a non-empty `format` reads a time of day only
+/// (`HH:mm:ss`, `hour_minute_second`, …): such a format reads no date or
+/// timestamp flusso writes, and is left as written by [`with_iso`].
+pub fn reads_time_of_day_only(format: &str) -> bool {
+    !format.trim().is_empty() && patterns(format).iter().all(|p| *p == Pattern::TimeOfDay)
+}
+
+/// `format` with [`ISO_DATE_PATTERN`] appended, or `None` when a pattern of it
+/// reads every form of `values` flusso writes ([`reads`]), when every pattern
+/// reads a time of day only ([`reads_time_of_day_only`]), or when it is empty.
+pub fn with_iso(format: &str, values: DateValues) -> Option<String> {
+    if format.trim().is_empty() || reads(format, values) || reads_time_of_day_only(format) {
+        return None;
+    }
+    Some(format!("{format}||{ISO_DATE_PATTERN}"))
 }
 
 /// The `format` the mapping of `field` uses in place of its own: its
@@ -190,6 +205,12 @@ pub fn with_iso(format: &str, values: DateValues) -> Option<String> {
 /// `indexed: false` ancestor) is the caller's: see
 /// [`IndexSchema::completed_date_formats`](super::IndexSchema::completed_date_formats).
 pub fn iso_date_format(field: &Field) -> Option<String> {
+    with_iso(date_format(field)?, date_values(field)?)
+}
+
+/// The `options.format` of an emitted field mapped as `date` or
+/// `date_nanos`; `None` for any other field.
+pub fn date_format(field: &Field) -> Option<&str> {
     if !field.emit {
         return None;
     }
@@ -197,16 +218,15 @@ pub fn iso_date_format(field: &Field) -> Option<String> {
         return None;
     };
     match super::projection::mapping_type(field) {
-        MappingType::Date => {}
-        MappingType::Other(name) if name == "date_nanos" => {}
-        _ => return None,
+        MappingType::Date => Some(format),
+        MappingType::Other(name) if name == "date_nanos" => Some(format),
+        _ => None,
     }
-    with_iso(format, written(field)?)
 }
 
 /// What flusso writes into a date-typed `field`, from what the schema
 /// declares; `None` when that isn't a date or a timestamp.
-fn written(field: &Field) -> Option<DateValues> {
+pub fn date_values(field: &Field) -> Option<DateValues> {
     let of = |ty: &FlussoType| match ty {
         FlussoType::Date => Some(DateValues::Dates),
         FlussoType::Timestamp => Some(DateValues::Timestamps),
@@ -286,7 +306,7 @@ fn collect(fields: &[Field], prefix: &str, paths: &mut Vec<String>) {
 
 /// Whether OpenSearch maps what is under `field`: not under an
 /// `indexed: false` join, nor an object with `enabled: false`.
-pub(crate) fn maps_children(field: &Field) -> bool {
+pub fn maps_children(field: &Field) -> bool {
     let unindexed_join =
         matches!(&field.source, FieldSource::Relation(Relation::Join(join)) if !join.indexed);
     !unindexed_join && field.options.get("enabled") != Some(&GenericValue::Bool(false))

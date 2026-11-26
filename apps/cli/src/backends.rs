@@ -505,7 +505,8 @@ fn print_gaps(out: &mut impl Write, pen: print::Pen, capture: &Capture<'_>) -> a
 /// `run` validated, so it only prints. So does an `ids` `element_type` that
 /// holds no key, or only some: a document whose `ids` array is empty, or
 /// holds only keys that fit, indexes as before. So does a `[]` column without
-/// `array: true`. So does a root table without a single-column primary key:
+/// `array: true`, and a date `format` that reads a time of day only over a
+/// date or a timestamp (0.17 started it; a row whose value is null indexes). So does a root table without a single-column primary key:
 /// its live changes are still indexed, so refusing would stop a deployment
 /// that runs. Each of these is still an error `check` fails on, and one
 /// `run --strict` refuses.
@@ -534,6 +535,7 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         | DiagnosticKind::IdsElementLossy
         | DiagnosticKind::DuplicateFieldName
         | DiagnosticKind::DuplicateFieldNameWrong
+        | DiagnosticKind::TimeOfDayFormat
         | DiagnosticKind::CheckSkipped => false,
     }
 }
@@ -1115,6 +1117,13 @@ mod tests {
     #[test]
     fn a_duplicate_whose_documents_differ_from_the_mapping_is_an_error_and_starts() {
         let printed = starts(DiagnosticKind::DuplicateFieldNameWrong);
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn a_time_of_day_format_over_a_timestamp_is_an_error_and_starts() {
+        let printed = starts(DiagnosticKind::TimeOfDayFormat);
         assert!(printed.contains("[error]"), "{printed}");
         assert!(printed.contains("starting anyway"), "{printed}");
     }

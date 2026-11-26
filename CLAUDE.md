@@ -2072,7 +2072,7 @@ plain: an allow-list (no `pipeline`, only `PLAIN_SETTINGS` index settings, plus
 by name, so a new option must be decided) — any state it doesn't model means no stop
 (`refused_only_by_a_mapping`);
 type, numeric, nullability (and `NullabilityUntracked`), ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementMismatch` (an empty
-`ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `DuplicateFieldNameWrong`, `RootPrimaryKey`
+`ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `DuplicateFieldNameWrong`, `TimeOfDayFormat`, `RootPrimaryKey`
 and `CheckSkipped` findings print and start, as they built or ran in 0.17), so a new kind forces a decision there. A kind
 that stops a deployment the previous release started is a breaking change: allowed in a minor or major release when it is the correct behaviour, marked breaking, with an entry on that release's upgrade page (`docs/src/operate/upgrade-to-*.md`) saying what stops and how to fix it. `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
 `#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. **An index
@@ -2120,7 +2120,15 @@ flag. The stopping kinds apply only where every document carries the value, mapp
 the root and plain objects (`validation.rs`'s `carries`: a `Group`, emitted, no `options`); a pair
 elsewhere is the plain `DuplicateFieldName`. `TimeOfDayAsDate` (issue #309): a `time`/`timetz`
 column under a `timestamp`/`date` field there (`Checker.date_mapped`: no namesake, no `options`
-at all); not a `min`/`max` or a field in a join (a parent with no related row indexes). Guards:
+at all); not a `min`/`max` or a field in a join (a parent with no related row indexes).
+`TimeOfDayFormat` (an error that starts): a mapped date field whose `format` reads a time of day only
+(`kernel::reads_time_of_day_only`, the append rule's own classifier, which leaves such a format as
+written) over a value that is none: a `timestamp` column, `min`/`max` or `ids` key whose base type
+isn't `time`/`timetz` is decided by the database walk (`Checker::time_of_day_format`, `time_format`
+set per field while nothing above unmaps it), anything the schema alone types (a `date` field, a
+`custom` over date/timestamp types, a constant, a script) by `time_of_day_formats`, which
+`validate_spec` runs too (guards `a_time_of_day_format_over_a_timestamp_column_is_reported`,
+`a_time_of_day_format_where_flusso_writes_a_date_is_reported_with_no_database`). Guards:
 `backends::tests` (one per kind, the `strict_*` cases, plus `only_an_opensearch_sink_that_maps_the_value_as_written_refuses_it`),
 `validation::tests`' `an_index_that_differs_from_its_schema_is_an_error`, `schema_errors::tests`,
 `check::tests` (`both_formats_render_the_same_report`, `a_partial_replica_identity_set_by_hand_is_no_error`),
@@ -2410,7 +2418,8 @@ date-typed field (`MappingType::Date` or `date_nanos`) gets `||strict_date_optio
 only when its `options.format` can't read what flusso writes **into that field** (`DateValues`, from
 the schema: a `date` value `2024-01-02`, a `timestamp` the `T` forms; a `custom` only over `date` /
 `timestamp…` Postgres types, else its own value and no append; a format of time-of-day patterns only is
-`time_of_day_as_date`'s and left alone); the named formats' table is `config/date_format.rs`'s module
+left alone: over a `time` column it is `time_of_day_as_date`'s workaround, over anything else the
+`TimeOfDayFormat` error); the named formats' table is `config/date_format.rs`'s module
 doc (`iso8601` and the `date_optional_time` family read both kinds, `date`/`year_month_day` dates
 only). `kernel::iso_date_format` decides per field, `IndexSchema::completed_date_formats` walks what the
 index maps (no input-only field, nothing under an `indexed: false` join or `enabled: false` object), and
