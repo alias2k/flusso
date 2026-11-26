@@ -51,7 +51,7 @@ You have a table whose rows should become search documents and you're writing th
    flusso check --config flusso.toml --offline
    ```
 
-   The output prints the source, the sinks, and the fully typed OpenSearch mapping flusso would create. A grammar mistake (two type keys, a sibling the type doesn't take, an unknown key) fails here with the field named.
+   A grammar mistake (two type keys, a sibling the type doesn't take, an unknown key) fails here with the field named. To see the typed OpenSearch mapping flusso would create, run `flusso show mapping --config flusso.toml`.
 
 5. **Validate against the database.** Drop `--offline` and `check` confirms each declared type against the column's SQL type and each `required` against its `NOT NULL`, then reports publication coverage.
 
@@ -59,7 +59,7 @@ You have a table whose rows should become search documents and you're writing th
    flusso check --config flusso.toml
    ```
 
-   A disagreement (a `required: true` over a nullable column, an `integer` over a `bigint`) is reported per field. Fix the schema, or fix the column.
+   A disagreement (a `required: true` over a nullable column, an `integer` over a `bigint`) is reported per field as an error, with what to change, and `check` exits non-zero. Fix the schema, or fix the column. Every finding is listed in [Checks and findings](../reference/checks.md).
 
 ## Options and variations
 

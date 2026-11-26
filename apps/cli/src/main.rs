@@ -37,8 +37,11 @@ use {flusso_query as _, sqlx as _, test_postgres as _, testcontainers_modules as
 mod adapters;
 mod backends;
 mod commands;
+mod gaps;
 mod http;
+mod lock;
 mod memory;
+mod plain_json;
 mod shutdown;
 mod telemetry;
 
@@ -52,6 +55,7 @@ use commands::design::DesignArgs;
 use commands::run::RunArgs;
 use commands::schema_cmd::SchemaArgs;
 use commands::script::ScriptArgs;
+use commands::show::ShowArgs;
 
 /// The default config-file path, by convention `flusso.toml`.
 pub(crate) const DEFAULT_CONFIG: &str = "flusso.toml";
@@ -76,6 +80,8 @@ enum Command {
     Run(Box<RunArgs>),
     /// Validate the config and schemas without running the pipeline.
     Check(CheckArgs),
+    /// Print what the config declares: the deployment, or the typed mapping.
+    Show(ShowArgs),
     /// Open the visual schema designer (a local web UI).
     #[cfg(feature = "design")]
     Design(DesignArgs),
@@ -108,6 +114,7 @@ async fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::Build(args) => commands::build::execute(args),
         Command::Run(args) => commands::run::execute(*args).await,
         Command::Check(args) => commands::check::execute(args).await,
+        Command::Show(args) => commands::show::execute(args),
         #[cfg(feature = "design")]
         Command::Design(args) => commands::design::execute(args).await,
         Command::Schema(args) => commands::schema_cmd::execute(args),

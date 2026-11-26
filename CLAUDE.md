@@ -236,8 +236,9 @@ after a live update; constants land as written), and `date_and_time_columns_are_
 (issue #304: `date`/`timestamp`/`timestamptz` and their arrays land as ISO 8601 a default `date`
 mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` and a sort over each;
 `sink::Json` writes a naive timestamp with a `T`) and `a_tuned_timestamp_mapping_meets_the_iso_form`
-(a space-only `format` rejects each document holding a value, `strict_date_optional_time` or
-`ignore_malformed` takes it, an `indexed: false` join stores the `T` form), and
+(a space-only `format` now indexes, since flusso appends `strict_date_optional_time`: a range in the
+user's form and in ISO both match, a date histogram's `key_as_string` prints the user's form; an
+`indexed: false` join stores the `T` form), and
 `a_numeric_keeps_every_digit_as_a_json_number` (issue #327: a `decimal` scalar, array element,
 `sum`/`max` and `map` value hold every digit as a JSON number, past `rust_decimal`'s range too, an
 exponent form as written, on backfill and live; asserted on `_source`'s raw text) and
@@ -551,12 +552,29 @@ and the container at once (same replication slot).
 
 `default-members = ["apps/cli"]`, so bare `cargo run` is the `flusso` binary. CLI
 subcommands: `build` (compile config+schemas → portable `flusso.lock`, no DB, no secrets
-baked in), `check` (validate + print typed mapping; `--offline` skips the DB), `run`
+baked in), `check` (validate only; `--offline` skips the DB; a passing section is one line, a
+failing one prints in full with its SQL, then warnings, errors last (a capture gap `run` won't close
+among them), and a summary line, whose verdict is the exit code (`Report::failure`); `--color
+auto|always|never`; `--format json` is the same report, one `Report` value rendered twice, with no
+config or mapping; it compares the `--lock` with what the config compiles to, byte for byte as `run`
+does before rewriting it (`lock.rs`'s `LockState`, offline too): current is one line, missing a
+note, the same config in other bytes (CRLF, formatting: `same_config`) a note, since `run --locked`
+runs it, stale (`lock_stale`, naming the indexes or settings that differ) or unreadable
+(`lock_unreadable`: the line and column and what was expected, never the text there nor a value the
+parser quotes, which `config::from_bytes`'s `CompileError::Decode` holds for `run --locked` too) an error, each advice naming the `--out` /
+`--lock` that writes the path compared; with no config it checks the lock, and says there was
+nothing to compare; `check --fix` (a flag with **no** `FLUSSO_FIX`, so an inherited variable never
+rewrites a lock; guard `fix_is_a_flag_only_with_no_environment_variable`) rewrites a lock the config
+can repair through `config::write` (temp file beside it, renamed; in place where none can be made, as
+`build`) after the config validated, reported `rewritten` with the state it found, and fixes nothing
+else; a plain `check` never writes (`check_report.rs`'s `a_plain_check_never_writes_the_lock`); `plan_config`, in `lock.rs`, decides for `run` and `check` alike), `show config|mapping [index]` (the deployment,
+secrets redacted, or the typed mapping; no DB; reads `--config` or the `--lock`; `--format json`;
+`commands/show.rs`, reusing `print::config`/`print::resolved`), `run`
 (cargo-style: when a `flusso.toml` is present — the default path, or `--config` — it
 recompiles and **rewrites the `flusso.lock`** (skipped when byte-identical) then runs that,
 so the committed lock stays current; with no config it loads the existing `--lock`;
 `--locked` runs the lock as-is with no recompile; a lock-write failure is fatal;
-`--skip-backfill` resumes live only — see
+`--skip-backfill` resumes live only; `--strict` refuses to start on any error `check` reports — see
 `resolve_config`/`plan_config` in `apps/cli/src/commands/run.rs`), `schema` (print an embedded
 editor-assist JSON Schema: `schema config` or `schema index`; no DB), `script run` (build one
 document — `--id`, the first row, or `--input` JSON with no DB — run its index's scripts, print input,
@@ -1986,7 +2004,7 @@ whatever the related rows hold — issue #313; pairs that compare across
 types, at any value, never stop the engine: a link no key can equal matches no parent — issue #312,
 `wal`'s `linked_by_a_value_no_key_equals!` cases; an `ids` `element_type` is checked against the
 related key's type by `validation/element.rs`'s `fit` (verdicts measured on OpenSearch 2):
-`IdsElementMismatch` when it holds no key, `IdsElementLossy` (a warning) when it holds only some or
+`IdsElementMismatch` when it holds no key, `IdsElementLossy` (an error since issue #485; it still starts) when it holds only some or
 changes them — issue #299; guards: `config_coverage`'s
 `validation_reports_a_link_postgres_cannot_compare_with_its_key` and
 `validation_checks_an_ids_element_type_against_the_related_key`; and "does *this* table exist": `validate_indexes` walks every
@@ -2010,7 +2028,7 @@ key a missing declared column is `UnknownColumn` only when a relation reads it, 
 designer tells a key from a same-named field; every relation table also needs a single-column
 primary key; a `field` that reads no column — `source::soft_delete_column` is `None`,
 which the document query silently skips — is an error that `validate_spec` reports with no
-database, so `check --offline` shows it; so is `DuplicateFieldName` (issue #284), a warning: two
+database, so `check --offline` shows it; so is `DuplicateFieldName` (issue #284), a warning while a document still holds what the index maps (else `DuplicateFieldNameWrong`, an error; see above): two
 fields sharing a `FieldName` at one level still load (format freeze), but the OpenSearch mapping
 keeps the last, the Postgres document holds the last one's value coerced through the first one's
 declaration (`coerce_document`; a first constant builds its own value, a last one reaches the
@@ -2042,8 +2060,9 @@ junctions. Postgres backs it over `pg_catalog`/`information_schema`; the visual 
 (`apps/design`) is its first consumer. **`run` validates at start** (issue #211):
 `backends.rs`'s `build_documents` runs `validate_indexes` on the document builder's own connection
 inside `Backends::source`, before anything is staged (`--locked` included; an unreachable database
-still fails as `connecting to Postgres`), prints every diagnostic to stderr with `check`'s printer,
-and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
+still fails as `connecting to Postgres`), prints every diagnostic to stderr with `check`'s printer
+(warnings above errors), and refuses to start only on a kind that cannot work as written (under
+`--strict` / `FLUSSO_STRICT`, on any `Error`; issue #485): `stops_the_start` matches
 `DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
 `RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`UnsupportedKeyType`/
 `NotAnArrayColumn`/`LinkTypeMismatch`/`DuplicateFieldNameFailsToBuild`/`DuplicateFieldNameRefused`/`TimeOfDayAsDate`
@@ -2052,18 +2071,74 @@ plain: an allow-list (no `pipeline`, only `PLAIN_SETTINGS` index settings, plus
 `ignore_malformed` where it doesn't lift the refusal; every `OpensearchConfig` field is destructured
 by name, so a new option must be decided) — any state it doesn't model means no stop
 (`refused_only_by_a_mapping`);
-type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementMismatch` (an empty
-`ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `RootPrimaryKey`
-and `TimestampFormat` (issue #304: a timestamp `options.format` no pattern of which reads the ISO
-form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) and `CheckSkipped` findings print and start, as they built or ran in 0.17), so a new kind forces a decision there. A kind
+type, numeric, nullability (and `NullabilityUntracked`), ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementMismatch` (an empty
+`ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `DuplicateFieldNameWrong`, `TimeOfDayFormat`, `RootPrimaryKey`
+and `CheckSkipped` findings print and start, as they built or ran in 0.17), so a new kind forces a decision there. A kind
 that stops a deployment the previous release started is a breaking change: allowed in a minor or major release when it is the correct behaviour, marked breaking, with an entry on that release's upgrade page (`docs/src/operate/upgrade-to-*.md`) saying what stops and how to fix it. `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
-`#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. No opt-out
+`#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. **An index
+that starting flusso does not make work as its schema says is an `Error`, whatever the cause**
+(issue #485): `Nullability` (a null where the schema says never), `UndeclaredArrayColumn` (a list
+where it says one value), `IdsElementLossy` (other ids than the table's) and
+`DuplicateFieldNameWrong` are errors that still start without `--strict`; `IgnoredPrimaryKey`,
+`CheckSkipped`, `DuplicateFieldName` and `NullabilityUntracked` stay warnings. A namesake pair's
+severity is decided in one place, `source::duplicate_is_wrong(same, Reach)` over `duplicate_outcome`:
+`Holds` a value the mapping takes and `Unknown` are the `DuplicateFieldName` warning, every other
+outcome (`Holds` as raw JSON, `Wrapped`, `FirstsChildren`, `Nothing` beside an emitted namesake,
+`Null`, `AsText`, `FailsToBuild`, `Rejected`, `Stored`: a value kept unchecked in `_source` where an
+`indexed: false` join or an `enabled: false` object declares another shape) is
+`DuplicateFieldNameWrong`. The `Reach` says what holds the level: `Indexed`, `Stored` (under an
+unindexed parent: a refusal is worded as stored, never as a refusal), `Scripts` (the pair is, or is
+under, an input-only field and a running script can read it: one at that level or above through
+`this`, one anywhere whose text names `root`, as the scripts crate decides who gets `root`; judged by
+what the script reads, as if every namesake were emitted, a script namesake's own output never) and
+`Absent` (nothing reads it: only `FailsToBuild` is wrong); `validation.rs`'s `Level` decides it. The
+live `duplicate_names` matrix asserts each pair's severity against what it saw, except a pair seen
+holding one namesake's value (raw JSON can't be told apart there), and the designer counts the kind
+among its duplicate kinds (`model/issues.ts`). `required` over a column of a relation that records no nullability is
+`NullabilityUntracked`, not `Nullability`: `Catalog::tracks_nullability` (default `true`, the table
+rule; Postgres: `relkind` not `v`/`m`/`f`), asked only before a nullability finding. **A gap in
+capture `run` won't close is an error too** (`apps/cli/src/gaps.rs`, `publication_gap` /
+`replica_identity_gap`): a table the publication doesn't stream (or misroutes) when the role can't
+fix it or `manage_publication = false`, and a replica identity `gaps` entry (primary key or parent
+link) `run` won't set; a gap `run` closes, a `partial` entry (only the #169 skip) and a kept table are
+not (`print::Status`: `ok`/`run_fixes`/`by_hand`/`problem`, the one judge for both formats). `check`
+prints each as an `[error]` line at the bottom with its section's SQL and counts it; `Backends::source`
+inspects the same, read-only, before staging, after checking the server; one verdict
+(`backends.rs`'s `start_verdict`) then judges schema findings and gaps together, so `--strict` refuses
+once with both, a refused start printing everything; a plain start reports each gap as the schema
+errors' event and gauge, once per index reading its table, and hands the capture the tables it
+reported (`WalChangeCapture::with_reported_gaps`), so `prepare` logs those gaps at `debug`, not as a
+second warning, while a table that falls out of the publication later still warns
+(`ReportedGaps::covers_publication`). Each `Error` the start goes on with is a `tracing::error!` event
+(target `flusso::schema_errors`; `index`, `kind`, `field`, the message) at every start and a value
+of the `flusso.index.schema_errors{index,kind}` gauge (`telemetry/schema_errors.rs`). Under OTLP the
+event is a span event of the `daemon.start` span: the CLI has no OTel log bridge. One copy per
+reader of stderr (`schema_errors::Reader`): at a terminal the start's report prints it and the stderr
+log leaves the event out (a per-layer filter in `telemetry/mod.rs`); into a log the event is the copy
+and the report leaves it out; a refused start prints everything. No opt-out
 flag. The stopping kinds apply only where every document carries the value, mapped as declared:
 the root and plain objects (`validation.rs`'s `carries`: a `Group`, emitted, no `options`); a pair
 elsewhere is the plain `DuplicateFieldName`. `TimeOfDayAsDate` (issue #309): a `time`/`timetz`
 column under a `timestamp`/`date` field there (`Checker.date_mapped`: no namesake, no `options`
-at all); not a `min`/`max` or a field in a join (a parent with no related row indexes). Guards:
-`backends::tests` (one per kind, plus `only_an_opensearch_sink_that_maps_the_value_as_written_refuses_it`),
+at all); not a `min`/`max` or a field in a join (a parent with no related row indexes).
+`TimeOfDayFormat` (an error that starts): a mapped date field whose `format` reads a time of day only
+(`kernel::reads_time_of_day_only`, the append rule's own classifier, which leaves such a format as
+written) over a value that is none: a `timestamp` column, `min`/`max` or `ids` key whose base type
+isn't `time`/`timetz` is decided by the database walk (`Checker::time_of_day_format`, `time_format`
+set per field while nothing above unmaps it), anything the schema alone types (a `date` field, a
+`custom` over date/timestamp types, a constant, a script) by `time_of_day_formats`, which
+`validate_spec` runs too (guards `a_time_of_day_format_over_a_timestamp_column_is_reported`,
+`a_time_of_day_format_where_flusso_writes_a_date_is_reported_with_no_database`). Guards:
+`backends::tests` (one per kind, the `strict_*` cases, plus `only_an_opensearch_sink_that_maps_the_value_as_written_refuses_it`),
+`validation::tests`' `an_index_that_differs_from_its_schema_is_an_error`, `schema_errors::tests`,
+`check::tests` (`both_formats_render_the_same_report`, `a_partial_replica_identity_set_by_hand_is_no_error`),
+`gaps::tests`, `validation::tests`' `required_over_a_views_column_is_a_warning_that_says_why`,
+`config_coverage`'s `required_over_a_views_column_is_a_warning_and_over_a_tables_an_error`,
+`apps/cli/tests/check_report.rs` (the
+report's order, one-line sections and colour, a JSON report with no config, mapping or secret; no
+Docker), `apps/cli/tests/strict_start.rs` (live Postgres: `--strict` refuses from the config and
+from a `--locked` lock, a schema error and a `publication_gap` alike, creating no slot or publication
+and leaving the replica identity; a plain start logs the event and sets the gauge),
 `config_coverage`'s `an_enum_or_domain_column_is_a_type_mismatch_that_still_builds` and
 `a_time_of_day_under_a_date_mapping_is_reported`, `apps/cli/tests/time_columns.rs` (live Postgres
 + OpenSearch: reported only where no document indexes; the workarounds index and leave `check`
@@ -2337,7 +2412,34 @@ and `a_schema_without_via_keeps_its_content_hash` pin it. `Column` and `Join` do
 renders it `{"type": "object", "enabled": false}` and `collect_enum_sorts`/`collect_map_templates`
 stop at it; descendants' mapping-only settings are accepted and ignored, `options` on the
 unindexed field itself is rejected. Guards: `a_schema_that_never_opts_out_keeps_its_content_hash`,
-`opting_out_of_subfields_or_indexing_changes_the_content_hash`. Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
+`opting_out_of_subfields_or_indexing_changes_the_content_hash`. **A date `format` reads what flusso
+writes** (issue #485's timestamp decision; it replaced the `timestamp_format` error): a mapped
+date-typed field (`MappingType::Date` or `date_nanos`) gets `||strict_date_optional_time` appended last
+only when its `options.format` can't read what flusso writes **into that field** (`DateValues`, from
+the schema: a `date` value `2024-01-02`, a `timestamp` the `T` forms; a `custom` only when every `postgres:` type is `date` /
+`timestamp…` by name, else no append (another type, a domain: the user's, as on 0.17); a format of time-of-day patterns only is
+left alone: over a `time` column it is `time_of_day_as_date`'s workaround, over anything else the
+`TimeOfDayFormat` error; the declared type decides, never the column's: a `date` field over a
+timestamp column is a `TypeMismatch` that says when its `format` refuses the timestamp,
+`Checker::date_format_refuses`, guard `a_date_field_over_a_timestamp_column_says_its_format_refuses_the_timestamp`);
+the named formats' table is `config/date_format.rs`'s module
+doc (`iso8601` and the `date_optional_time` family read both kinds, `date`/`year_month_day` dates
+only). `kernel::iso_date_format` decides per field, `IndexSchema::completed_date_formats` walks what the
+index maps (no input-only field, nothing under an `indexed: false` join or `enabled: false` object), and
+the projection (never the schema, so an older lock gets it too; `show mapping` notes each) and the
+content hash (`projection.rs`'s `Revised`: `ISO_DATE_FORMAT_REVISION` once, only when that walk finds
+one; `Field`'s `Hash` is `main`'s) follow it, so the hash moves exactly when the mapping does (a few
+indexes that already indexed move too: an all-letter literal read as a named format, a `timestamp`
+field over a `date` column). A year past 9999 or
+before 0 is still refused, as by the default mapping. Guards: the projection tests'
+`a_date_format_that_cannot_read_what_flusso_writes_gets_the_iso_pattern_last` (each pattern, both
+kinds), `a_date_field_whose_format_reads_what_flusso_writes_there_keeps_it_and_its_hash` (pinned to
+`main`'s hash), `a_custom_date_over_a_date_or_timestamp_column_takes_the_rule`,
+`every_date_mapping_with_a_refusing_format_resolves_with_the_iso_pattern`,
+`a_schema_whose_date_format_gets_the_iso_pattern_moves_off_its_hash`, and `pipeline`'s
+`a_tuned_timestamp_mapping_meets_the_iso_form` (indexed, a range in either form, `key_as_string`,
+`docvalue_fields` and `fields` in the user's form, sort values in epoch milliseconds, a `yyyy-MM-dd`
+date column untouched). Any new optional field on a hashed kernel config type needs the same treatment. A `map:` field (`values:` = the shared leaf type) is a dynamic-key object over a
 `json`/`jsonb` column — `FlussoType::Map { values }` → OS `object` with `dynamic: true`
 injected into options (so runtime keys are accepted); the resolved `Mapping.map_values` is
 the **full `Mapping` every key gets** (what a plain field of `values` resolves to, incl.
@@ -2521,7 +2623,12 @@ takes `element: bool` (Postgres probes the `[]` base type, `text` for `json`/`js
 declared type is still checked against the domain's own name. The designer's `array_default` /
 `json_array_default` value slots refuse what the config conversion refuses, and `api::render_op`
 refuses a schema whose file would not load, so a save never writes one (a `FileOp` carries its
-content only as `schema`, written into `base`; there is no raw-text op). Query side: `check_type`'s
+content only as `schema`, written into `base`; there is no raw-text op). A type that reads an array
+at a single-valued field is refused leading with "a column that holds an array needs the field
+declared `array: true`", then "any other field (an aggregate, a constant) holds one value", since
+the element type alone compiles and fails on every list; the mapping doesn't say which a field is
+(`doc.rs`'s `single_value_message`; a fragment gives it where `check::declares_array`: a leaf other
+than `geo_point`, or `json`; issue #485; `ui/vec_at_a_single_value.rs`). Query side: `check_type`'s
 scalar arm also accepts a custom non-`Vec` type through const asserts (`OpaqueProbe::LEAF_ARRAY` +
 `accepts_kind`), and `#[derive(FlussoValue)]` on a newtype over `Vec<E>` emits only
 `FlussoValueMeta` (`E`'s kinds, `ARRAY`), no `FlussoValue<K>`. So `ARRAY` has **two
@@ -3068,7 +3175,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
 | Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
-| CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
+| CLI subcommands (`build`/`run`/`check`/`show`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs` (the report: one `Report`, rendered human or JSON), `show.rs` (`show config`/`show mapping`), `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport (`telemetry/schema_errors.rs`: the schema errors and capture gaps a start goes on with), `gaps.rs` the capture gaps `run` won't close, `lock.rs` which file a command reads and whether the lock is current, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /indexes/{name}/reindex?sink=`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
 | Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position; `rules/`: read-time fields — `condition.rs` the two-sided tests, `date.rs`, `handles.rs` the rule handles, `list.rs` `Rules`/`Plan`, `field.rs` `RuleField`, `computation.rs`) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `read_time.rs` (what `context`/`rules`/`computed` generate, and which stored fields get a rule handle), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |

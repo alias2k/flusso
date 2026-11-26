@@ -29,7 +29,7 @@ use kernel::{
     Through, Transform, ValueOpFilter, ViaHop,
 };
 use source::document::{Document, DocumentBuilder, DocumentId};
-use source::{Anchor, DiagnosticKind, RowKey, SourceSpec, validate_indexes};
+use source::{Anchor, DiagnosticKind, RowKey, Severity, SourceSpec, validate_indexes};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -1735,6 +1735,66 @@ async fn an_enum_or_domain_column_is_a_type_mismatch_that_still_builds() {
     assert_eq!(str_of(&body, "contact"), "ada@example.com");
 }
 
+/// `required` over a nullable column (issue #485): an error on a table, but a
+/// warning on a view or a materialized view, whose columns Postgres reports
+/// nullable whatever they hold, `NOT NULL` in the table under it included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn required_over_a_views_column_is_a_warning_and_over_a_tables_an_error() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE VIEW users_v AS SELECT id, name, status FROM users",
+        "CREATE MATERIALIZED VIEW users_mv AS SELECT id, name, status FROM users",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let required = |name: &str| {
+        let mut field = col(name, name);
+        if let FieldSource::Column(column) = &mut field.source {
+            column.nullable = false;
+        }
+        field
+    };
+    let mut found = Vec::new();
+    for relation in ["users", "users_v", "users_mv"] {
+        let mut schema = users_schema(vec![required("name"), required("status")], None);
+        schema.table = table(relation);
+        let documents = builder(&url, schema.clone()).await;
+        for d in validate_indexes(&spec(schema), &documents).await.unwrap() {
+            if matches!(
+                d.kind,
+                DiagnosticKind::Nullability | DiagnosticKind::NullabilityUntracked
+            ) {
+                found.push((relation, d.dotted_path(), d.kind, d.severity));
+            }
+        }
+    }
+    let untracked = |relation, path: &str| {
+        (
+            relation,
+            path.to_owned(),
+            DiagnosticKind::NullabilityUntracked,
+            Severity::Warning,
+        )
+    };
+    assert_eq!(
+        found,
+        vec![
+            (
+                "users",
+                "name".to_owned(),
+                DiagnosticKind::Nullability,
+                Severity::Error
+            ),
+            untracked("users_v", "name"),
+            untracked("users_v", "status"),
+            untracked("users_mv", "name"),
+            untracked("users_mv", "status"),
+        ]
+    );
+}
+
 /// A `time` or `timetz` column under a `timestamp` or `date` field (issue
 /// #309): OpenSearch refuses every non-null value under a `date` mapping with
 /// no `format`, so `validate_indexes` reports it where every document carries
@@ -2354,8 +2414,9 @@ async fn a_check_the_role_may_not_run_is_reported_as_skipped() {
 /// An `ids` aggregate's `element_type` against the related table's key type
 /// (issue #299). OpenSearch maps the array as the element type: one that can
 /// hold no value of the key's type rejects every document collecting a key,
-/// so it is an error; one that holds only some, or changes them, is a
-/// warning; one that holds them all is not reported.
+/// so it is an error; one that holds only some, or changes them, is an error
+/// too, since the index then holds other ids than the table (issue #485); one
+/// that holds them all is not reported.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn validation_checks_an_ids_element_type_against_the_related_key() {
@@ -2422,11 +2483,13 @@ async fn validation_checks_an_ids_element_type_against_the_related_key() {
         format!(
             "`element_type` `{element}` holds only some `{key}` keys of `{table}`: OpenSearch \
              rejects a document that collects another, or stores the key altered (a fraction \
-             truncated), so two keys can become equal"
+             truncated), so two keys can become equal{LOSSY_FIX}"
         )
     };
     let changes = |element: &str, key: &str, table: &str, how: &str| {
-        format!("`element_type` `{element}` changes the `{key}` keys of `{table}`: {how}")
+        format!(
+            "`element_type` `{element}` changes the `{key}` keys of `{table}`: {how}{LOSSY_FIX}"
+        )
     };
     assert_eq!(
         found,
@@ -2479,6 +2542,10 @@ async fn validation_checks_an_ids_element_type_against_the_related_key() {
         ]
     );
 }
+
+/// How an `ids_element_lossy` message ends: what is wrong, and the fix.
+const LOSSY_FIX: &str = "; the index holds other ids than the table: declare an `element_type` \
+                         that holds every key (`keyword` takes any key as its text)";
 
 /// A document keyed as a live change carries a value of a type the WAL
 /// decoder leaves as text.

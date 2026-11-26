@@ -13,7 +13,7 @@ flusso.toml ──▶ [source]  Postgres
                 [[index]] orders ──▶ orders.schema.yml
 ```
 
-Because every leaf declares its type, the OpenSearch mapping is a pure function of the schema. `flusso check --offline` prints it with no database, and the query-side derive resolves the same mapping at compile time.
+Because every leaf declares its type, the OpenSearch mapping is a pure function of the schema. `flusso show mapping` prints it with no database, and the query-side derive resolves the same mapping at compile time.
 
 ## Documents are assembled, not copied
 

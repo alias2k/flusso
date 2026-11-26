@@ -1,0 +1,35 @@
+error: field `email` is a single `keyword` in the schema, but `Vec<String>` reads an array — a column that holds an array needs the field declared `array: true` in the schema (the element type alone fails to read every document that holds a list); any other field (an aggregate, a constant) holds one value: use the element type
+  --> tests/ui/vec_at_a_single_value.rs:12:12
+   |
+12 |     email: Vec<String>,
+   |            ^^^
+
+error: field `orderCount` is a single `long` in the schema, but `Vec<i64>` reads an array — a column that holds an array needs the field declared `array: true` in the schema (the element type alone fails to read every document that holds a list); any other field (an aggregate, a constant) holds one value: use the element type
+  --> tests/ui/vec_at_a_single_value.rs:33:18
+   |
+33 |     order_count: Vec<i64>,
+   |                  ^^^
+
+error[E0080]: evaluation panicked: fragment `Leaves`: field `email` is declared `Vec<String>`, but the schema field here is not an array — a column that holds an array needs the field declared `array: true` in the schema (without the `Vec<…>` it fails to read every document that holds a list); any other field (an aggregate, a constant) holds one value: drop the `Vec<…>`
+  --> tests/ui/vec_at_a_single_value.rs:25:11
+   |
+25 |     flat: Leaves,
+   |           ^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Leaves::__flusso_check`
+  --> tests/ui/vec_at_a_single_value.rs:17:12
+   |
+17 |     email: Vec<String>,
+   |            ^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `Counted`: field `orderCount` is declared `Vec<i64>`, but the schema field here is not an array — a column that holds an array needs the field declared `array: true` in the schema (without the `Vec<…>` it fails to read every document that holds a list); any other field (an aggregate, a constant) holds one value: drop the `Vec<…>`
+  --> tests/ui/vec_at_a_single_value.rs:47:11
+   |
+47 |     flat: Counted,
+   |           ^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Counted::__flusso_check`
+  --> tests/ui/vec_at_a_single_value.rs:39:18
+   |
+39 |     order_count: Vec<i64>,
+   |                  ^^^ the failure occurred here

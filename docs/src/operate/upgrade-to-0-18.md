@@ -78,7 +78,7 @@ Without either, no index is rebuilt. A `constant` holding a number, a boolean, o
 | a `format` that also reads ISO, or `ignore_malformed: true` | indexed (`ignore_malformed`: stored, not searchable) | indexed; `_source` changes at each document's next write | `flusso reindex <index>` to make every document uniform. |
 | inside an `indexed: false` join | stored | stored in the new form at each document's next write | `flusso reindex <index>`. |
 
-`flusso check` warns about the second row with [`timestamp_format`](../reference/cli.md#check), with `--offline` too, and so does the start of `run`; neither stops.
+`flusso check` warns about the second row with `timestamp_format`, with `--offline` too, and so does the start of `run`; neither stops. From 0.19 flusso completes such a format itself: see [Upgrade to 0.19](upgrade-to-0-19.md#a-date-format-reads-what-flusso-writes).
 
 1. **A default mapping.** Under `on_error = "stop"` the sink engine stopped on the first such document and resumes from the batch it held. Under `"skip"` each was quarantined: it lands at its row's next write, or run [`flusso reindex <index>`](../reference/cli.md#reindex) to fill them all in now.
 2. **A space-only `format`.** After the upgrade the first write holding a value is rejected: under `"stop"` the sink engine stops; under `"skip"` the document keeps its 0.17 version (an update is lost) and a new row is missing. Before starting 0.18, put `strict_date_optional_time` first in the `format`, keeping the space patterns so a query bound written with a space still parses:

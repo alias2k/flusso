@@ -61,15 +61,15 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 > ⚠️ **Warning** — integer overflow stalls the index. An integer result past its type (`integer * integer` beyond 2³¹) makes Postgres fail the document query. That fails the whole batch: the index goes down and retries it, and WAL stays pinned until the offending row changes. With two or more indexes the others go on ([A failing index](config-toml.md#a-failing-index)); with one, the ingest engine restarts. A backfill over such a row keeps failing its backfill the same way. Rule it out in the schema: lead with a decimal literal (`1.0 * quantity * unit_price`) so every step runs in `numeric`, or widen the column type (`bigint`, `numeric`) in Postgres. A trailing `* 1.0` is too late, since operators group left to right.
 
 - **Every column in the expression rebuilds the parent.** Changing any of them on an aggregated row rebuilds its parent document; an update that changes none of them, nor the aggregate's key or filter columns, rebuilds nothing.
-- **[`flusso check`](cli.md#check) verifies the columns.** Each column the expression names must exist on `table` and be numeric. A plain column keeps its own check: the declared `value_type` must accept its database type.
+- **[`flusso check`](checks.md#what-is-checked) verifies the columns.** Each column the expression names must exist on `table` and be numeric. A plain column keeps its own check: the declared `value_type` must accept its database type.
 
 ## ids
 
 `ids` collects the related table's **primary key** into a flat scalar array. It takes no `column`. OpenSearch has no array type, so the mapping is the element type and the value is multi-valued. Project it as a bare `Vec<_>` on the query side, never `Option<Vec<_>>`.
 
-The keys go into the array as they are, so `element_type` has to hold the key's type. [`flusso check`](cli.md#check) compares the two:
+The keys go into the array as they are, so `element_type` has to hold the key's type. [`flusso check`](checks.md#what-is-checked) compares the two:
 
-| `element_type` | Holds every key of | Holds only some (warning) | Changes them (warning) | Holds none (error) |
+| `element_type` | Holds every key of | Holds only some | Changes them | Holds none |
 | --- | --- | --- | --- | --- |
 | `keyword`, `text`, `identifier`, `enum`, `uuid` | any type | | | |
 | `short` | `smallint` | wider integers, `numeric`, floats, text | | anything else |
@@ -82,8 +82,10 @@ The keys go into the array as they are, so `element_type` has to hold the key's 
 | `binary` | `bytea` | | anything else: indexed as written, not as bytes | |
 | `json` | | | | any type |
 
-- **Holds none** is `ids_element_mismatch`, an error: OpenSearch rejects every document that collects a key. `check` fails on it; [`run` prints it and starts](cli.md#validation-at-start), since a document whose `ids` array is empty still indexes.
-- **Holds only some** and **changes them** are `ids_element_lossy`, a warning. A key that doesn't fit has one of two outcomes. OpenSearch either rejects the document, and the index's [`on_error`](index-and-on-error.md#on_error) decides what happens next, or stores the key altered: a fraction under `short`/`integer`/`long` is truncated (`1.5` → `1`), so two keys can become equal.
+All three but the first column are errors: `check` fails on them, and [`run` reports them and starts](checks.md#errors-a-start-goes-on-with), since a document whose `ids` array is empty, or holds only keys that fit, still indexes.
+
+- **Holds none** is `ids_element_mismatch`: OpenSearch rejects every document that collects a key.
+- **Holds only some** and **changes them** are `ids_element_lossy`: the index holds other ids than the table. A key that doesn't fit has one of two outcomes. OpenSearch either rejects the document, and the index's [`on_error`](index-and-on-error.md#on_error) decides what happens next, or stores the key altered: a fraction under `short`/`integer`/`long` is truncated (`1.5` → `1`), so two keys can become equal.
 - **Precision of the declared types, not reported.** A `numeric` key under `decimal` or `double` is indexed as a double, about 15 to 17 significant digits ([numbers](field-types.md#numbers): a `decimal` keeps every digit in `_source` only), so a search sees keys beyond that rounded and two can collide. A `timestamp` or `timestamptz` key under `date` or `timestamp` is stored to the millisecond ([Dates and times](field-types.md#dates-and-times)), so two keys a microsecond apart become equal. These are the natural declarations for those columns, so `check` stays quiet; `keyword` keeps every key exact.
 - **Special values.** Even a matching pair can't hold a `numeric` or float `NaN` or infinity, or an infinite date; a document collecting one is rejected.
 
@@ -105,7 +107,7 @@ The keys go into the array as they are, so `element_type` has to hold the key's 
 - **Hops go down foreign keys only.** Each hop's table holds the key. A `column` on a hop (the `belongs_to` direction) and a `through` on a hop (a junction in the middle) are rejected at load.
 - **The last hop can still be a junction.** Write it as the aggregate's own `through`, whose `left_key` then points at the last `via` table.
 - **Each row counts once.** A row has one parent along a foreign-key chain, so no path reaches it twice; that's why `distinct` stays rejected without `through`. A final junction can reach a target row once per junction row, so `distinct: true` keeps its meaning there: each target row once.
-- **[`flusso check`](cli.md#check) verifies the hops**: each hop's `table`, `foreign_key`, `on:` pairs and filter columns.
+- **[`flusso check`](checks.md#what-is-checked) verifies the hops**: each hop's `table`, `foreign_key`, `on:` pairs and filter columns.
 - **Every hop rebuilds the parent.** Inserting, deleting, or re-parenting a row on any hop, or changing a column a hop's `filters` read, rebuilds the parent document, the old parent included (each hop's `foreign_key` must be in its table's replica identity; see [Deleted and re-parented rows](source-postgres.md#deleted-and-re-parented-rows)).
 
 ```yaml

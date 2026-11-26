@@ -112,6 +112,38 @@ pub struct WalChangeCapture {
     /// stream reads its `Relation`; set via
     /// [`with_column_types`](Self::with_column_types).
     column_types: Option<ColumnTypes>,
+    /// The gaps the caller already reported, which
+    /// [`prepare`](ChangeCapture::prepare) logs at `debug` instead of
+    /// warning again; set via [`with_reported_gaps`](Self::with_reported_gaps).
+    reported: ReportedGaps,
+}
+
+/// The capture gaps a caller reported before [`prepare`](ChangeCapture::prepare)
+/// (the CLI does at start): `prepare` won't fix them either, so it doesn't
+/// warn about them a second time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReportedGaps {
+    /// The tables whose publication gap was reported: missing from it, or
+    /// streamed under their partitions' names.
+    pub publication: BTreeSet<QualifiedTable>,
+    /// The tables whose replica identity gap was reported.
+    pub replica_identity: BTreeSet<QualifiedTable>,
+}
+
+impl ReportedGaps {
+    /// Whether every table `report` finds not covered was reported.
+    pub fn covers_publication(&self, report: &CoverageReport) -> bool {
+        report
+            .missing
+            .iter()
+            .chain(&report.misrouted)
+            .all(|table| self.publication.contains(table))
+    }
+
+    /// Whether `table`'s replica identity gap was reported.
+    pub fn covers_replica_identity(&self, table: &QualifiedTable) -> bool {
+        self.replica_identity.contains(table)
+    }
 }
 
 impl WalChangeCapture {
@@ -154,7 +186,16 @@ impl WalChangeCapture {
             hold_clock: Arc::default(),
             visibility_pool: Arc::new(OnceCell::new()),
             column_types: None,
+            reported: ReportedGaps::default(),
         }
+    }
+
+    /// Say which gaps the caller already reported (with their SQL): `prepare`
+    /// logs those at `debug`. One it finds and couldn't foresee (a table it
+    /// was allowed to set and couldn't) is still a warning.
+    pub fn with_reported_gaps(mut self, reported: ReportedGaps) -> Self {
+        self.reported = reported;
+        self
     }
 
     /// How many changes a stream reads ahead while it holds a transaction that
@@ -672,16 +713,25 @@ impl CaptureProvisioning for WalChangeCapture {
             } else {
                 report.blockers.join("; ")
             };
-            tracing::warn!(
-                publication = %self.config.publication,
-                missing = %missing,
-                partitioned = %misrouted,
-                reason = %reason,
-                remediation = %report.remediation.join(" "),
-                "publication is missing tables, or streams partitioned tables under their \
-                 partitions' names, and flusso will not fix it automatically; run the printed \
-                 SQL (until then, changes to those tables are dropped)",
-            );
+            if self.reported.covers_publication(&report) {
+                tracing::debug!(
+                    publication = %self.config.publication,
+                    missing = %missing,
+                    partitioned = %misrouted,
+                    "publication gap left as reported at start",
+                );
+            } else {
+                tracing::warn!(
+                    publication = %self.config.publication,
+                    missing = %missing,
+                    partitioned = %misrouted,
+                    reason = %reason,
+                    remediation = %report.remediation.join(" "),
+                    "publication is missing tables, or streams partitioned tables under their \
+                     partitions' names, and flusso will not fix it automatically; run the \
+                     printed SQL (until then, changes to those tables are dropped)",
+                );
+            }
         }
 
         Ok(report)
@@ -732,6 +782,13 @@ impl CaptureProvisioning for WalChangeCapture {
             };
             if gap.missing.is_empty() && gap.missing_key.is_empty() {
                 unset.push((gap, reason));
+                continue;
+            }
+            if self.reported.covers_replica_identity(&gap.table) {
+                tracing::debug!(
+                    table = %gap.table,
+                    "replica identity gap left as reported at start",
+                );
                 continue;
             }
             if !gap.missing_key.is_empty() {
@@ -826,6 +883,43 @@ impl SlotHolder {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn table(name: &str) -> QualifiedTable {
+        QualifiedTable::new(
+            kernel::DatabaseSchema::try_new("public").unwrap(),
+            kernel::TableName::try_new(name).unwrap(),
+        )
+    }
+
+    fn coverage(missing: &[&str], misrouted: &[&str]) -> CoverageReport {
+        CoverageReport {
+            satisfied: false,
+            present: Vec::new(),
+            missing: missing.iter().map(|name| table(name)).collect(),
+            misrouted: misrouted.iter().map(|name| table(name)).collect(),
+            manageable: false,
+            blockers: Vec::new(),
+            remediation: Vec::new(),
+        }
+    }
+
+    /// `prepare` stays quiet only about gaps the start reported (review 3 of
+    /// #486): a table missing from the publication later, after an ingest
+    /// restart, still warns.
+    #[test]
+    fn a_publication_gap_the_start_did_not_report_still_warns() {
+        let reported = ReportedGaps {
+            publication: BTreeSet::from([table("a"), table("parts")]),
+            replica_identity: BTreeSet::from([table("items")]),
+        };
+        assert!(reported.covers_publication(&coverage(&["a"], &["parts"])));
+        assert!(reported.covers_publication(&coverage(&["a"], &[])));
+        assert!(!reported.covers_publication(&coverage(&["a", "b"], &[])));
+        assert!(!reported.covers_publication(&coverage(&[], &["b"])));
+        assert!(!ReportedGaps::default().covers_publication(&coverage(&["a"], &[])));
+        assert!(reported.covers_replica_identity(&table("items")));
+        assert!(!reported.covers_replica_identity(&table("orders")));
+    }
 
     fn config() -> ReplicationConfig {
         ReplicationConfig::new("localhost", "app", "pw", "db", "slot", "pub")

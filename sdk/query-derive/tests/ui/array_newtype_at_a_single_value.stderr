@@ -16,7 +16,7 @@ note: inside `OpaqueObject::__flusso_check`
 31 |     billing_address: Addresses,
    |                      ^^^^^^^^^ the failure occurred here
 
-error[E0080]: evaluation panicked: fragment `Leaves`: field `email` is `Codes`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — it takes one value, so declare a type that reads one
+error[E0080]: evaluation panicked: fragment `Leaves`: field `email` is `Codes`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — a column that holds an array needs the field declared `array: true` in the schema (a type that reads one value fails to read every document that holds a list); any other field (an aggregate, a constant) holds one value: declare a type that reads one
   --> tests/ui/array_newtype_at_a_single_value.rs:52:11
    |
 52 |     flat: Leaves,

@@ -1,5 +1,6 @@
 mod aggregate;
 mod content_hash;
+mod date_format;
 mod expression;
 mod field;
 mod filter;
@@ -14,6 +15,7 @@ mod transform;
 
 pub use aggregate::*;
 pub use content_hash::*;
+pub use date_format::*;
 pub use expression::*;
 pub use field::*;
 pub use filter::*;

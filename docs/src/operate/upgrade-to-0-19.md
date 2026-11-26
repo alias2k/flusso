@@ -5,6 +5,10 @@
 **Check before upgrading**
 
 - **A cut-down OpenSearch role needs `indices:data/read/mget`** on `{prefix}flusso_meta`: staging now reads three meta documents per index in one `_mget`; a sink whose role can't, or whose proxy answers that request `404`, retries its staging and writes nothing: [Staging reads the meta documents with one request](#staging-reads-the-meta-documents-with-one-request).
+- **`flusso check` fails on an index that won't work as its schema says** (breaking for its exit code): a `[]` column without `array: true`, `required` over a nullable column, a lossy `ids` element type, a duplicate field name that leaves a wrong value, a capture gap `run` won't close, and a time-of-day `format` over a date are errors now. A plain `run` still starts on them: [check fails on an index that won't work as written](#check-fails-on-an-index-that-wont-work-as-written).
+- **`flusso check` compares `flusso.lock` with the config** and fails on a stale or unreadable one; `check --fix` rewrites it: [check compares the lock](#check-compares-the-lock).
+- **`check` no longer prints the config or the mapping**, and its JSON lost `config` and `mappings` (breaking for a script reading them): `flusso show config` and `flusso show mapping` print them: [check only checks](#check-only-checks).
+- **An index with a date `format` that can't read what flusso writes is rebuilt once**: flusso appends `||strict_date_optional_time` to such a format, and the `timestamp_format` warning is gone: [A date format reads what flusso writes](#a-date-format-reads-what-flusso-writes).
 
 **Running flusso**
 
@@ -27,9 +31,12 @@
 - **`POST /reindex` is gone** (breaking): reindex with `POST /indexes/<name>/reindex[?sink=<name>]`, which answers JSON; `flusso reindex` already does: [Reindex moved to the index path](#reindex-moved-to-the-index-path).
 - **Each index's state is shown**: `/status`'s `ingest.indexes` (with `state`, `last_error` and `restarts`), `GET /indexes/<name>/status`, the `flusso_index_*` metrics, `flusso_reader_waits_seconds`, and a new alert, `FlussoIndexBacklog`: [Each index's state is shown](#each-indexs-state-is-shown).
 
+- **`run` logs each error it starts with** as an `error` event and counts it on `flusso_index_schema_errors`; `--strict` refuses to start on them instead, opt-in: [Errors a start goes on with are logged and counted](#errors-a-start-goes-on-with-are-logged-and-counted).
+
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`, the per-index ingest state in `Status`, `Observer::on_reader_wait`, per-index restart (`IngestEngine::with_backoff`, `Observer::on_index_failed` and `on_index_restarted`), and `Sink::detachment`**: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`, the per-index ingest state in `Status`, `Observer::on_reader_wait`, per-index restart (`IngestEngine::with_backoff`, `Observer::on_index_failed` and `on_index_restarted`), and `Sink::detachment`**; for checks, new `DiagnosticKind`s, `TimestampFormat` removed, `Catalog::tracks_nullability`, the date-format functions in `kernel`: [For code embedding the crates](#for-code-embedding-the-crates).
+- **A `Vec` at a single-valued field** now fails to compile with the schema fix first: declare the field `array: true` when its column holds an array: [Arrays](../query/document-structs.md#arrays).
 
 ## Staging reads the meta documents with one request
 
@@ -466,6 +473,74 @@ Every other failure with one index restarts the ingest engine, as in 0.18. The w
 - **A long catch-up can page.** With several indexes, an index slower than the others is exempt while it trails, so a catch-up longer than `indexBacklogFor` fires `FlussoIndexBacklog`. Silence it, or raise the period.
 - **Disabled indexes** have no `ingest.indexes` entry and no series; `indexes` in `/status` and `GET /indexes` still list them.
 
+## check fails on an index that won't work as written
+
+**What changed.** `flusso check` reports as an error every finding that leaves an index not working as its schema says: a document holds something other than the schema declares, misses changes, or is refused. Some were warnings in 0.18, and `check` passed on them; some are new. `check` now exits non-zero on each. Every kind, with its severity: [Every finding](../reference/checks.md#every-finding).
+
+| Finding | 0.18 | 0.19 | Fix |
+| --- | --- | --- | --- |
+| A `[]` column read without `array: true` | `undeclared_array_column`, warning | error | Declare `array: true` on the field. The schema's hash moves, so the index is rebuilt once; on the query side the field becomes a `Vec` ([Arrays](../query/document-structs.md#arrays)). |
+| `required: true` over a nullable column of a table | `nullability`, warning | error | `required: false`, `NOT NULL` on the column, or a `default` on the field. |
+| An `ids` `element_type` that holds only some keys, or changes them | `ids_element_lossy`, warning | error | An `element_type` that holds every key: see the table in [ids](../reference/aggregates.md#ids); `keyword` always does. |
+| Two fields of one name whose documents hold something other than the schema says (a list for one value, raw JSON, text, `null`, a cut object, a refused or unchecked value) | `duplicate_field_name`, warning | `duplicate_field_name_wrong`, error | Rename all but one. Pairs that hold a value the index maps stay the warning: [One name per level](../reference/identifiers.md#one-name-per-level). |
+| A table missing from the publication, or a replica identity missing a primary key or parent link, that `run` won't fix (the role can't, or management is off) | a warning at start; `check` passed | `publication_gap`, `replica_identity_gap`, errors | Run the SQL `check` prints, give the role ownership, or turn management on: [Capture gaps](../reference/checks.md#capture-gaps). |
+| A date `format` that reads only a time of day, over a date or a timestamp | `timestamp_format`, warning, on a timestamp; nothing on a date | `time_of_day_format`, error | Drop the `format`, or follow it with `\|\|strict_date_optional_time`. Over a `time` column the format is fine. |
+| `required: true` over a column of a view, a materialized view or a foreign table | `nullability`, warning | `nullability_untracked`, warning | Nothing, as long as the column never holds `null`. |
+
+**Why a view's column stays a warning.** Postgres records no nullability for the columns of a view, a materialized view or a foreign table: every one reads as nullable, whatever it holds. As an error, a correct `required` there would fail `check` every time, so it has its own kind and stays a warning.
+
+**Who is affected.** Anyone running `flusso check` as a gate (CI, a pre-deploy step) on a schema with any of these. Each message says what is wrong and how to fix it.
+
+**What to do.**
+
+1. **Run 0.19's `flusso check`** against the database, before upgrading the deployment.
+2. **Fix each error**, per the table. A fix that changes the schema's hash (`array: true`) rebuilds that index once at the next start.
+
+**What doesn't change.** A plain `flusso run` starts on every one of these, as 0.18 did; only the kinds that already stopped a start still do. Refusing them at start is opt-in, with `run --strict`: [Errors a start goes on with are logged and counted](#errors-a-start-goes-on-with-are-logged-and-counted).
+
+## check compares the lock
+
+**What changed.** `flusso check` compiles the config as `run` does and compares the result with `flusso.lock` (`--lock`, `FLUSSO_LOCK`), offline too. A lock compiled from another config, or one it can't read, is an error; a missing lock, or the same config written in other bytes, is a note. Given no config, `check` checks the lock itself. The states: [Checked by flusso check](../reference/lock.md#checked-by-flusso-check).
+
+**Who is affected.** A repository whose committed `flusso.lock` trails `flusso.toml` or a schema: `check` in CI now fails until the lock is regenerated. A lock checked out with Windows line endings reads as the same config, unless it holds a script, whose text then differs.
+
+**What to do.** Regenerate the lock and commit it: `flusso check --fix`, or `flusso build`, as before. `--fix` writes only the lock, and only after the config validates.
+
+## check only checks
+
+**What changed.** `check` no longer prints the source, the sinks and each index's mapping. Its report is one line per passing section, each problem in full, warnings, then errors, then a summary line, in colour on a terminal ([The report](../reference/checks.md#the-report)). `--offline` ends on `✓ offline checks passed; database checks not run`.
+
+`check --format json` is the same report as data:
+
+- **Removed:** `config` and `mappings`.
+- **Added:** `config_file`, `lock`, `gaps` (`null` offline), `summary`, a `status` on `server`, `coverage` and `pre_image`, and `positions` on each diagnostic.
+- **Kept:** `diagnostics`, `server`, `coverage`, `pre_image`.
+
+The full shape: [JSON output](../reference/checks.md#json-output).
+
+**Who is affected.** A script that reads the config or the mappings from `check`'s output, or parses its human output.
+
+**What to do.** Read them from [`flusso show`](../reference/cli.md#show): `flusso show config --format json` (every literal secret now prints as `***`) and `flusso show mapping --format json` (the list `mappings` held). In both, a value the schema gives (an `options` entry such as `format`, a `default`, a `constant`) is now plain JSON, no longer tagged with its type, so a script reading the old shape must change:
+
+```text
+0.18, check's mappings:     "format": {"String": "yyyy-MM-dd HH:mm:ss"}
+0.19, show mapping's JSON:  "format": "yyyy-MM-dd HH:mm:ss||strict_date_optional_time"
+```
+
+## A date format reads what flusso writes
+
+**What changed.** A date field whose `options.format` has no pattern that reads what flusso writes into it gets `||strict_date_optional_time` appended in the mapping flusso creates. Its documents index; dates still print in the format's first pattern, and queries read either form. In 0.18 every document holding a value was refused, and `check` warned with `timestamp_format`, which is gone. The rule, and which formats it leaves alone: [A format of your own](../reference/field-types.md#a-format-of-your-own).
+
+**Who is affected.** A schema with such a field: a `format` of space patterns only (`yyyy-MM-dd HH:mm:ss`), `epoch_millis` alone, `yyyy/MM/dd` on a `date` field, and the like. Its hash moves, so the index is rebuilt once into a new physical index at the first 0.19 start, a lock compiled by 0.18 included. Every other index keeps its name.
+
+**What to do.** Nothing. To see which indexes move before upgrading, run 0.19's `flusso show mapping`: it notes each field it completes. Plan for their backfill.
+
+## Errors a start goes on with are logged and counted
+
+**What changed.** `run` starts on the same errors as 0.18, and reports each one at every start: an `error` event (target `flusso::schema_errors`, with `index`, `kind`, and `field` or `table`) and the gauge `flusso_index_schema_errors{index,kind}`. On a terminal the start's report prints them instead of the log; under OTLP they are span events of `daemon.start`. Capture gaps are reported once there, no longer again as a warning while the publication and replica identities are prepared. `run --strict` (`FLUSSO_STRICT`) refuses to start on any of them, before anything is staged. Details: [Errors a start goes on with](../reference/checks.md#errors-a-start-goes-on-with).
+
+**What to do.** Alert on `flusso_index_schema_errors > 0`. Add `--strict` where a wrong index must never go live.
+
 ## For code embedding the crates
 
 - **Removed:** `EngineError::DocumentsRejected` (a refusal no longer ends the run).
@@ -491,6 +566,9 @@ Every other failure with one index restarts the ingest engine, as in 0.18. The w
 - **Per-index restart.** `IngestEngine::with_backoff(Backoff)` sets the wait before one index restarts alone or retries its backfill (default 1 s doubling to 60 s; the daemon passes `[backoff]`). `Observer` gains `on_index_failed(index, kind, error, retry_in)` and `on_index_restarted(index, kind)`, `kind` an `engine::Work` (`Live` or `Backfill`), both with no-op defaults; an index's failure is not an `on_engine_error`. New in `daemon`: `IngestState` (`Running`, `Down`), `BackfillState` (`Walking`, `Retrying`, `Waiting`), `IndexFailure` (`message`, `at`), and `IndexErrors` and `IndexRestarts` (`live`, `backfill`); `IndexIngestSnapshot` carries `state`, `down_since`, `last_error` and `restarts`, and `BackfillSnapshot` carries `state`, `retry_at` and `sinks: Option<Vec<String>>`. The channel stream adapter now wakes a `recv` already waiting when a delivery is released (nacked, or dropped unacknowledged), so it is redelivered at once.
 - **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.
 - **Fresh builds.** `stream::Batch` gains `keys: Arc<[RowKey]>` (each envelope's root key, in envelope order; empty when unknown) and `build: Option<u64>` (the build's number on its index). `Request::Rebuild { index, sink, keys, ticket }` is new, with `Request::index()` and `Request::sink()`; code matching on `Request` must handle it. `Stream::substitutes(sink)` returns a `SubstituteLane` of `stream::Substitute` items; its default answers the new `QueueError::Unsupported`, and a parked lane over such a stream writes its own batch again. `RowKey` moved to `kernel`; `source` still re-exports it. `Consumer`'s contract now states the redelivery order, which an adapter must keep: items come in publication order, and a returned delivery (nacked, or dropped unacknowledged) comes back in its order among the returned ones, before any item not yet delivered.
+- **Checks (`source`).** `DiagnosticKind` gains `DuplicateFieldNameWrong`, `NullabilityUntracked` and `TimeOfDayFormat`, and loses `TimestampFormat`: an exhaustive match must handle them. `Nullability`, `UndeclaredArrayColumn` and `IdsElementLossy` are now `Severity::Error`. `source::reads_iso_timestamps` is removed. `Catalog::tracks_nullability(schema, table)` is new, defaulting to `true` (the column is judged as a table's). New: `source::Reach`, `source::duplicate_is_wrong`, and `DuplicateOutcome::Stored`.
+- **Date formats (`kernel`).** New: `IndexSchema::completed_date_formats`, `kernel::ISO_DATE_PATTERN`, `DateValues`, `reads`, `reads_time_of_day_only`, `with_iso`, `iso_date_format`, `date_format`, `date_values` and `maps_children`. `IndexSchema::resolve` applies the completed format, and the content hash follows it.
+- **Capture gaps (`source-postgres`).** New `ReportedGaps` and `WalChangeCapture::with_reported_gaps`: `prepare` doesn't warn again about a gap the caller already reported.
 - **New: `Sink::detachment(&IndexMapping)`**, called at the start of every staging step, before `reindex` and `ensure_index`; its default keeps nothing. It returns a `sink::Detachment` (`record: Option<DetachRecord>`, `stuck: Option<StuckClock>`, `restored`, `unreadable_marker`), all new and `#[non_exhaustive]`. An `Err` fails the step. `SinkEngine::detachment(index)` returns what the last staging of the index read.
 
 ## Related

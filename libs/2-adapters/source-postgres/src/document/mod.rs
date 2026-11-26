@@ -1262,6 +1262,20 @@ impl Catalog for PgDocumentBuilder {
         self.table_exists(schema, table).await
     }
 
+    /// A view's, a materialized view's and a foreign table's columns carry no
+    /// enforced `NOT NULL`: Postgres reports them nullable whatever they hold
+    /// (a foreign table's declared `NOT NULL` is trusted, not enforced, and
+    /// reads as not null, so it never asks).
+    async fn tracks_nullability(&self, schema: &DatabaseSchema, table: &TableName) -> Result<bool> {
+        let kind: Option<String> =
+            sqlx::query_scalar("SELECT relkind::text FROM pg_class WHERE oid = to_regclass($1)")
+                .bind(format!("{schema}.{table}"))
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(query_err)?;
+        Ok(!matches!(kind.as_deref(), Some("v" | "m" | "f")))
+    }
+
     async fn primary_key(
         &self,
         schema: &DatabaseSchema,

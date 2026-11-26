@@ -11,7 +11,7 @@ mod document;
 mod text_value;
 mod tls;
 
-pub use cdc::WalChangeCapture;
+pub use cdc::{ReportedGaps, WalChangeCapture};
 pub use config::{Connection, PostgresConfig, SslMode, Tls};
 pub use connection_url::{ConnectionUrl, ConnectionUrlError, Scheme};
 pub use document::{Built, ColumnTypes, PgDocumentBuilder};

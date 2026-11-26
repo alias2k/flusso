@@ -748,7 +748,22 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
                 "is declared `{rendered}`, but the schema field here is not an array; drop the `Vec<…>`"
             ),
         );
+        let leaf_msg = message(
+            fragment,
+            key,
+            &format!(
+                "is declared `{rendered}`, but the schema field here is not an array — a column \
+                 that holds an array needs the field declared `array: true` in the schema \
+                 (without the `Vec<…>` it fails to read every document that holds a list); any \
+                 other field (an aggregate, a constant) holds one value: drop the `Vec<…>`"
+            ),
+        );
         let mut checks = quote_spanned! {span=>
+            assert!(
+                ::flusso_query::array_shape_ok(level, #key, true)
+                    || !::flusso_query::declares_array(level, #key),
+                #leaf_msg
+            );
             assert!(::flusso_query::array_shape_ok(level, #key, true), #msg);
         };
         if primitive_kinds(element).is_none() || is_foreign_leaf(element) {
@@ -809,6 +824,17 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
              field here is not an array — it takes one value, so declare a type that reads one"
         ),
     );
+    let array_at_a_leaf_msg = message(
+        fragment,
+        key,
+        &format!(
+            "is `{rendered}`, a newtype over a `Vec<…>`, which reads an array, but the schema \
+             field here is not an array — a column that holds an array needs the field declared \
+             `array: true` in the schema (a type that reads one value fails to read every \
+             document that holds a list); any other field (an aggregate, a constant) holds one \
+             value: declare a type that reads one"
+        ),
+    );
     let values_at_nested_msg = message(
         fragment,
         key,
@@ -836,6 +862,12 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
             let shaped = array || ::flusso_query::array_shape_ok(level, #key, false);
             assert!(shaped || !::flusso_query::is_nested(level, #key), #nested_msg);
             assert!(shaped, #msg);
+            assert!(
+                !array
+                    || ::flusso_query::array_shape_ok(level, #key, true)
+                    || !::flusso_query::declares_array(level, #key),
+                #array_at_a_leaf_msg
+            );
             assert!(!array || ::flusso_query::array_shape_ok(level, #key, true), #array_msg);
             assert!(!values || !::flusso_query::is_nested(level, #key), #values_at_nested_msg);
             assert!(

@@ -180,6 +180,22 @@ pub const fn array_shape_ok(level: &[FieldSpec], name: &str, vec: bool) -> bool 
     }
 }
 
+/// Whether `name` is of a kind a schema may declare `array: true`: a leaf
+/// other than a `geo_point`, an opaque `json` field, or a kind this vocabulary
+/// does not model. The kind alone can't tell a column from an aggregate or a
+/// constant of that kind, which take no `array: true`. Absent → `false`.
+#[must_use]
+pub const fn declares_array(level: &[FieldSpec], name: &str) -> bool {
+    match find(level, name) {
+        Some(field) => match field.kind {
+            KindTag::Nested | KindTag::GeoPoint => false,
+            KindTag::Object => field.map_values.is_none() && field.children.is_empty(),
+            _ => true,
+        },
+        None => false,
+    }
+}
+
 /// Whether `name` is a `keyword` or `text` field that is not a `map`. Absent →
 /// `false`.
 #[must_use]

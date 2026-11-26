@@ -90,12 +90,19 @@ export const DUPLICATE_FIELD_NAME = "duplicate_field_name";
 export const DUPLICATE_FAILS_TO_BUILD = "duplicate_field_name_fails_to_build";
 export const DUPLICATE_REFUSED = "duplicate_field_name_refused";
 
+/// The server's kind for namesakes whose documents hold something other than
+/// the index maps: an error that does not stop `flusso run`.
+export const DUPLICATE_WRONG = "duplicate_field_name_wrong";
+
 /// The server's kind for a time-of-day column under a `timestamp` or `date` field.
 export const TIME_OF_DAY_AS_DATE = "time_of_day_as_date";
 
 /// Whether a server diagnostic is about fields that share a name.
 export const isDuplicateKind = (kind: string | undefined): boolean =>
-  kind === DUPLICATE_FIELD_NAME || kind === DUPLICATE_FAILS_TO_BUILD || kind === DUPLICATE_REFUSED;
+  kind === DUPLICATE_FIELD_NAME ||
+  kind === DUPLICATE_FAILS_TO_BUILD ||
+  kind === DUPLICATE_REFUSED ||
+  kind === DUPLICATE_WRONG;
 
 /// What a diagnostic of a kind that stops `flusso run` means for the deployment;
 /// `null` for any other kind.

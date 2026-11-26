@@ -12,3 +12,4 @@ pub(crate) mod print;
 pub(crate) mod run;
 pub(crate) mod schema_cmd;
 pub(crate) mod script;
+pub(crate) mod show;

@@ -69,8 +69,14 @@ pub enum CompileError {
     },
     #[error("failed to encode compiled config: {0}")]
     Encode(#[from] toml::ser::Error),
-    #[error("failed to decode compiled config: {0}")]
-    Decode(#[from] toml::de::Error),
+    /// The lock isn't the TOML it should be. Names the place and the parser's
+    /// reason, never the text there: a literal secret may sit on that line.
+    #[error("failed to decode compiled config at line {line}, column {column}: {message}")]
+    Decode {
+        line: usize,
+        column: usize,
+        message: String,
+    },
     #[error(
         "compiled config format version {got} is not supported by this build \
          (expected {expected}); re-run `flusso build` (or `flusso run` without \
@@ -208,7 +214,60 @@ fn falls_back(error: &std::io::Error, stage: Stage) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{Stage, falls_back, write_bytes, write_bytes_if_changed};
+    use super::{Stage, falls_back, unquoted, write_bytes, write_bytes_if_changed};
+
+    #[test]
+    fn a_decode_message_keeps_what_was_expected_and_never_the_value() {
+        for (message, said) in [
+            (
+                "invalid type: string \"SecretThree\", expected a boolean",
+                "invalid type: string \"…\", expected a boolean",
+            ),
+            (
+                "invalid value: string \"a\\\"b\", expected a port",
+                "invalid value: string \"…\", expected a port",
+            ),
+            (
+                "unknown variant `hunter2`, expected one of `stop`, `skip`",
+                "unknown variant `…`, expected one of `stop`, `skip`",
+            ),
+            (
+                "unknown field `pw`, expected `type`",
+                "unknown field `…`, expected `type`",
+            ),
+            (
+                "invalid type: integer `48151623`, expected a string",
+                "invalid type: integer `…`, expected a string",
+            ),
+            (
+                "invalid type: floating point `3.14`, expected a string",
+                "invalid type: floating point `…`, expected a string",
+            ),
+            (
+                "invalid value: character `x`, expected a digit",
+                "invalid value: character `…`, expected a digit",
+            ),
+            (
+                "invalid type: string \"Sek`ret\", expected a map",
+                "invalid type: string \"…\", expected a map",
+            ),
+            ("expected `=`", "expected `=`"),
+            (
+                "invalid basic string, expected `\"`",
+                "invalid basic string, expected `\"`",
+            ),
+            (
+                "missing escaped value, expected `b`, `e`, `f`, `n`, `r`, `\\`, `\"`, `u`, `U`",
+                "missing escaped value, expected `b`, `e`, `f`, `n`, `r`, `\\`, `\"`, `u`, `U`",
+            ),
+            (
+                "invalid type: sequence, expected a string",
+                "invalid type: sequence, expected a string",
+            ),
+        ] {
+            assert_eq!(unquoted(message), said, "{message}");
+        }
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("flusso-lock-{}-{name}", std::process::id()));
@@ -411,15 +470,78 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Config, CompileError> {
     // The version is checked before the body is decoded, so a lock written in
     // another format reports the version mismatch (and its regenerate hint)
     // rather than whichever field of the old shape fails first.
-    let header: Header = toml::from_str(text)?;
+    let header: Header = toml::from_str(text).map_err(|error| decode_error(text, &error))?;
     if header.format_version != FORMAT_VERSION {
         return Err(CompileError::VersionMismatch {
             got: header.format_version,
             expected: FORMAT_VERSION,
         });
     }
-    let compiled: Compiled = toml::from_str(text)?;
+    let compiled: Compiled = toml::from_str(text).map_err(|error| decode_error(text, &error))?;
     Ok(compiled.config)
+}
+
+/// A TOML error as where it is and why, without the excerpt the parser's own
+/// message quotes.
+fn decode_error(text: &str, error: &toml::de::Error) -> CompileError {
+    let at = error.span().map_or(0, |span| span.start).min(text.len());
+    let before = text.get(..at).unwrap_or_default();
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count())
+        + 1;
+    CompileError::Decode {
+        line,
+        column,
+        message: unquoted(error.message()),
+    }
+}
+
+/// A parser's message without the values it quotes from the lock: the value
+/// serde names after `invalid type: ` or `invalid value: ` (a string, an
+/// integer, a float, a character), an unknown variant or field name. What
+/// was expected stays, and the parser's own syntax messages stay whole.
+fn unquoted(message: &str) -> String {
+    let mut out = message.to_owned();
+    for lead in ["invalid type: ", "invalid value: "] {
+        if let Some(at) = out.find(lead).map(|at| at + lead.len())
+            && let Some((head, rest)) = out.split_at_checked(at)
+            && let Some(scrubbed) = without_value(rest)
+        {
+            out = format!("{head}{scrubbed}");
+        }
+    }
+    for lead in ["unknown variant `", "unknown field `"] {
+        if let Some(rest) = out.strip_prefix(lead)
+            && let Some(end) = rest.find('`')
+        {
+            out = format!("{lead}…{}", rest.get(end..).unwrap_or_default());
+        }
+    }
+    out
+}
+
+/// `rest`, which starts with what serde found, with that value replaced by
+/// `…`; `None` when it names a kind with no value (`sequence`, `map`).
+fn without_value(rest: &str) -> Option<String> {
+    if let Some(quoted) = rest.strip_prefix("string \"") {
+        let mut escaped = false;
+        let end = quoted.char_indices().find_map(|(at, c)| {
+            let closes = c == '"' && !escaped;
+            escaped = c == '\\' && !escaped;
+            closes.then_some(at + 1)
+        })?;
+        return Some(format!("string \"…\"{}", quoted.get(end..)?));
+    }
+    ["integer `", "floating point `", "character `"]
+        .into_iter()
+        .find_map(|kind| {
+            let value = rest.strip_prefix(kind)?;
+            let end = value.find('`')?;
+            Some(format!("{kind}…{}", value.get(end..)?))
+        })
 }
 
 /// Just the version line of a lock, read ahead of the body.

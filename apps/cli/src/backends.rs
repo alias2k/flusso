@@ -32,11 +32,16 @@ use script::{ScriptedBuilder, Scripts};
 
 use crate::adapters::{self, IndexSinkConfig, SinkConfig};
 use crate::commands::print;
+use crate::telemetry::schema_errors::Reader;
 
 /// The one [`Backends`] implementation: the composition root's choice of
 /// concrete adapters, looked up by each port entry's `type`.
 #[derive(Debug, Default)]
-pub(crate) struct FlussoBackends;
+pub(crate) struct FlussoBackends {
+    /// Refuse to start on any error `flusso check` reports, not only on the
+    /// kinds that stop every start (`run --strict`).
+    pub(crate) strict: bool,
+}
 
 #[async_trait]
 impl Backends for FlussoBackends {
@@ -61,7 +66,8 @@ impl Backends for FlussoBackends {
             .context("applying the source TLS settings to the connection URL")?;
 
         let spec = source_spec(&config);
-        let (documents, resolver, column_types) = build_documents(&sql_url, &config).await?;
+        let (documents, resolver, column_types, schema) =
+            build_documents(&sql_url, &config).await?;
         let capture = WalChangeCapture::new(replication, sql_url.clone())
             .with_publication_management(spec.all_tables(), postgres.manage_publication)
             .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity)
@@ -71,7 +77,40 @@ impl Backends for FlussoBackends {
             .check_server()
             .await
             .context("checking the source server")?;
-        let capture: Arc<dyn ChangeCapture> = Arc::new(capture);
+        let coverage = capture
+            .inspect_coverage(&spec.all_tables())
+            .await
+            .context("inspecting publication coverage")?;
+        let pre_image = capture
+            .inspect_pre_image(&spec.pre_images())
+            .await
+            .context("inspecting replica identities")?;
+        let gaps = crate::gaps::of(
+            &spec,
+            &coverage,
+            postgres.manage_publication,
+            &pre_image,
+            postgres.manage_replica_identity,
+        );
+        start_verdict(
+            &mut std::io::stderr().lock(),
+            print::Pen::detect_stderr(),
+            &schema.diagnostics,
+            &|at| schema.refused.get(at).copied().unwrap_or(true),
+            Some(&Capture {
+                gaps: &gaps,
+                coverage: &coverage,
+                manage_publication: postgres.manage_publication,
+                pre_image: &pre_image,
+                manage_replica_identity: postgres.manage_replica_identity,
+            }),
+            self.strict,
+            Reader::of_stderr(),
+        )?;
+        crate::telemetry::schema_errors::report(&schema.diagnostics);
+        crate::telemetry::schema_errors::report_gaps(&gaps);
+        let capture: Arc<dyn ChangeCapture> =
+            Arc::new(capture.with_reported_gaps(crate::gaps::reported(&gaps)));
 
         Ok(SourceParts {
             capture,
@@ -150,7 +189,8 @@ fn resolve_connection_url(postgres: &PostgresConfig) -> anyhow::Result<String> {
 }
 
 /// The document builder, scripts applied, beside its column types, which the
-/// capture drops a table's entries from as the table changes.
+/// capture drops a table's entries from as the table changes, and what
+/// checking the schemas against the database found.
 async fn build_documents(
     connection_url: &str,
     config: &Config,
@@ -158,6 +198,7 @@ async fn build_documents(
     Arc<dyn DocumentBuilder>,
     Arc<dyn DocumentBuilder>,
     ColumnTypes,
+    SchemaFindings,
 )> {
     let scripts = compile_scripts(config)?;
     let spec = Arc::new(source_spec(config));
@@ -172,7 +213,7 @@ async fn build_documents(
     )
     .await
     .context("connecting to Postgres")?;
-    validate_at_start(&spec, &builder, config).await?;
+    let schema = validate_at_start(&spec, &builder, config).await?;
     let column_types = builder.column_types();
     let resolver = builder
         .on_own_pool(connection_url, 1)
@@ -182,19 +223,27 @@ async fn build_documents(
         ScriptedBuilder::wrap(Arc::new(builder), scripts),
         Arc::new(resolver),
         column_types,
+        schema,
     ))
 }
 
+/// The schemas checked against the database at start, before the verdict.
+struct SchemaFindings {
+    diagnostics: Vec<Diagnostic>,
+    /// Per diagnostic, whether a sink refuses what it reports (see
+    /// [`refused_only_by_a_mapping`]).
+    refused: Vec<bool>,
+}
+
 /// Check the schemas against the database once, before anything is staged,
-/// with `flusso check`'s check: print the diagnostics to stderr and refuse to
-/// start on one that cannot work as written (see [`stops_the_start`]). Runs on
-/// the document builder's own connection, so an unreachable database fails
-/// exactly as the connect above does.
+/// with `flusso check`'s check; [`start_verdict`] judges what it finds
+/// beside the capture's gaps. Runs on the document builder's own connection,
+/// so an unreachable database fails exactly as the connect above does.
 async fn validate_at_start(
     spec: &SourceSpec,
     catalog: &dyn Catalog,
     config: &Config,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SchemaFindings> {
     let diagnostics = source::validate_indexes(spec, catalog)
         .await
         .context("validating the schemas against the database")?;
@@ -205,12 +254,10 @@ async fn validate_at_start(
             None => true,
         });
     }
-    start_verdict(
-        &mut std::io::stderr().lock(),
-        print::Pen::detect_stderr(),
-        &diagnostics,
-        &|at| refused.get(at).copied().unwrap_or(true),
-    )
+    Ok(SchemaFindings {
+        diagnostics,
+        refused,
+    })
 }
 
 /// For a kind whose documents only the sink's mapping refuses, whether
@@ -309,38 +356,134 @@ fn plain_opensearch(
     }))
 }
 
-/// Print `diagnostics` (nothing when there are none) and fail when any
-/// [stops the start](stops_the_start). Every other diagnostic, error or
-/// warning, is printed and the start goes on. `refused(i)` says whether a sink
-/// refuses what `diagnostics[i]` describes, for a kind only a sink's mapping
-/// refuses (see [`a_sink_refuses`]).
+/// Judge the start on what checking the schemas and inspecting the capture
+/// found, together, as `check` shows them: refuse on a schema that cannot
+/// work as written (see [`stops_the_start`]) or, `strict`, on any error or
+/// gap, printing everything; otherwise print and go on.
+///
+/// An error or gap the start goes on with is also an `error` event
+/// ([`schema_errors`](crate::telemetry::schema_errors)), so each reader gets
+/// one copy: a person at a terminal reads it here and the event stays off
+/// stderr; a deployment's log reads the event, so it is left out here.
 fn start_verdict(
     out: &mut impl Write,
     pen: print::Pen,
     diagnostics: &[Diagnostic],
     refused: &dyn Fn(usize) -> bool,
+    capture: Option<&Capture<'_>>,
+    strict: bool,
+    reader: Reader,
 ) -> anyhow::Result<()> {
-    if diagnostics.is_empty() {
+    let gaps = capture.map_or(0, |capture| capture.gaps.len());
+    if diagnostics.is_empty() && gaps == 0 {
         return Ok(());
     }
-    print::diagnostics(out, pen, diagnostics)?;
-    writeln!(out)?;
     let blocking = diagnostics
         .iter()
         .enumerate()
         .filter(|(at, d)| stops_the_start(d.kind) && refused(*at))
         .count();
+    let errors = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .count();
+    let starts = blocking == 0 && (!strict || errors + gaps == 0);
+    let quiet = starts && reader == Reader::Log;
+    if quiet {
+        let warnings: Vec<Diagnostic> = diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .cloned()
+            .collect();
+        if !warnings.is_empty() {
+            print::diagnostics(out, pen, &warnings)?;
+            writeln!(out)?;
+        }
+    } else if !diagnostics.is_empty() {
+        print::diagnostics(out, pen, diagnostics)?;
+        writeln!(out)?;
+    }
+    if let Some(capture) = capture.filter(|_| gaps > 0 && !quiet) {
+        print_gaps(out, pen, capture)?;
+    }
     ensure!(
         blocking == 0,
         "the schemas cannot be built against this database ({blocking} problem(s) above); \
          fix them, confirm with `flusso check`, then start again"
     );
-    if diagnostics.iter().any(|d| d.severity == Severity::Error) {
-        writeln!(
-            out,
-            "starting anyway: the errors above do not stop `flusso run` (`flusso check` still fails on them)\n"
-        )?;
+    let counted = [(errors, "error(s)"), (gaps, "gap(s)")]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let what = match (errors > 0, gaps > 0) {
+        (true, true) => "the schemas and the capture do not give a working index",
+        (false, true) => "the source cannot capture every change the indexes need",
+        _ => "the schemas do not give a working index against this database",
+    };
+    ensure!(
+        !strict || errors + gaps == 0,
+        "{what} ({counted} above, refused under --strict); fix them, confirm with `flusso \
+         check`, then start again"
+    );
+    if errors + gaps > 0 {
+        match reader {
+            Reader::Person => {
+                let above = match (errors > 0, gaps > 0) {
+                    (true, true) => "the errors and gaps above",
+                    (false, true) => "the gaps above",
+                    _ => "the errors above",
+                };
+                writeln!(
+                    out,
+                    "starting anyway: {above} do not stop `flusso run` (`flusso check` still \
+                     fails on them; `--strict` refuses them)\n"
+                )?;
+            }
+            Reader::Log => {
+                let logged = [(errors, "schema error(s)"), (gaps, "capture gap(s)")]
+                    .iter()
+                    .filter(|(n, _)| *n > 0)
+                    .map(|(n, what)| format!("{n} {what}"))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                writeln!(
+                    out,
+                    "starting anyway with {logged} `flusso check` fails on, each logged next as \
+                     an `error` line (`--strict` refuses them)\n"
+                )?;
+            }
+        }
     }
+    Ok(())
+}
+
+/// What the source's capture reports say at start: the gaps `flusso run`
+/// won't close, and the reports that hold their SQL.
+struct Capture<'a> {
+    gaps: &'a [crate::gaps::Gap],
+    coverage: &'a source::CoverageReport,
+    manage_publication: bool,
+    pre_image: &'a source::PreImageReport,
+    manage_replica_identity: bool,
+}
+
+/// The gaps in capture `flusso run` won't close, as `check` prints them: each
+/// `[error]` line, then the sections that hold their SQL.
+fn print_gaps(out: &mut impl Write, pen: print::Pen, capture: &Capture<'_>) -> anyhow::Result<()> {
+    print::gaps(out, pen, capture.gaps)?;
+    if print::coverage_status(capture.coverage, capture.manage_publication)
+        == print::Status::Problem
+    {
+        print::coverage(out, pen, capture.coverage, capture.manage_publication)?;
+    }
+    if print::pre_image_status(capture.pre_image, capture.manage_replica_identity)
+        == print::Status::Problem
+    {
+        print::pre_image(out, pen, capture.pre_image, capture.manage_replica_identity)?;
+    }
+    writeln!(out)?;
     Ok(())
 }
 
@@ -361,9 +504,12 @@ fn start_verdict(
 /// A type, numeric or nullability disagreement still builds, as it did before
 /// `run` validated, so it only prints. So does an `ids` `element_type` that
 /// holds no key, or only some: a document whose `ids` array is empty, or
-/// holds only keys that fit, indexes as before. So does a root table without a
-/// single-column primary key: its live changes are still indexed, so refusing
-/// would stop a deployment that runs.
+/// holds only keys that fit, indexes as before. So does a `[]` column without
+/// `array: true`, and a date `format` that reads a time of day only over a
+/// date or a timestamp (0.17 started it; a row whose value is null indexes). So does a root table without a single-column primary key:
+/// its live changes are still indexed, so refusing would stop a deployment
+/// that runs. Each of these is still an error `check` fails on, and one
+/// `run --strict` refuses.
 fn stops_the_start(kind: DiagnosticKind) -> bool {
     match kind {
         DiagnosticKind::UnknownTable
@@ -381,13 +527,15 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         DiagnosticKind::TypeMismatch
         | DiagnosticKind::NotNumeric
         | DiagnosticKind::Nullability
+        | DiagnosticKind::NullabilityUntracked
         | DiagnosticKind::IgnoredPrimaryKey
         | DiagnosticKind::RootPrimaryKey
         | DiagnosticKind::UndeclaredArrayColumn
         | DiagnosticKind::IdsElementMismatch
         | DiagnosticKind::IdsElementLossy
         | DiagnosticKind::DuplicateFieldName
-        | DiagnosticKind::TimestampFormat
+        | DiagnosticKind::DuplicateFieldNameWrong
+        | DiagnosticKind::TimeOfDayFormat
         | DiagnosticKind::CheckSkipped => false,
     }
 }
@@ -519,10 +667,310 @@ mod tests {
 
     fn verdict(diagnostics: &[Diagnostic]) -> (anyhow::Result<()>, String) {
         let mut out = Vec::new();
-        let result = start_verdict(&mut out, print::Pen::detect_stderr(), diagnostics, &|_| {
-            true
-        });
+        let result = start_verdict(
+            &mut out,
+            print::Pen::detect_stderr(),
+            diagnostics,
+            &|_| true,
+            None,
+            false,
+            Reader::Person,
+        );
         (result, String::from_utf8(out).unwrap())
+    }
+
+    fn strict_verdict(diagnostics: &[Diagnostic]) -> (anyhow::Result<()>, String) {
+        let mut out = Vec::new();
+        let result = start_verdict(
+            &mut out,
+            print::Pen::plain(),
+            diagnostics,
+            &|_| true,
+            None,
+            true,
+            Reader::Log,
+        );
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    fn logged_verdict(diagnostics: &[Diagnostic]) -> (anyhow::Result<()>, String) {
+        let mut out = Vec::new();
+        let result = start_verdict(
+            &mut out,
+            print::Pen::plain(),
+            diagnostics,
+            &|_| true,
+            None,
+            false,
+            Reader::Log,
+        );
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    /// Into a log (stderr not a terminal), an error the start goes on with is
+    /// left to its `error` event: the report prints the warnings and says how
+    /// many errors follow as log lines, so no finding is read twice.
+    #[test]
+    fn into_a_log_an_error_the_start_goes_on_with_is_left_to_its_event() {
+        let (result, printed) = logged_verdict(&[
+            diagnostic(DiagnosticKind::UndeclaredArrayColumn),
+            diagnostic(DiagnosticKind::IgnoredPrimaryKey),
+        ]);
+        assert!(result.is_ok(), "{printed}");
+        assert!(printed.contains("a IgnoredPrimaryKey finding"), "{printed}");
+        assert!(
+            !printed.contains("a UndeclaredArrayColumn finding"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains(
+                "starting anyway with 1 schema error(s) `flusso check` fails on, each logged next \
+                 as an `error` line"
+            ),
+            "{printed}"
+        );
+    }
+
+    /// A refused start emits no event, so its report prints everything, into a
+    /// log too.
+    #[test]
+    fn into_a_log_a_refused_start_prints_every_finding() {
+        let (result, printed) = logged_verdict(&[
+            diagnostic(DiagnosticKind::UndeclaredArrayColumn),
+            diagnostic(DiagnosticKind::UnknownColumn),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            printed.contains("a UndeclaredArrayColumn finding"),
+            "{printed}"
+        );
+        assert!(printed.contains("a UnknownColumn finding"), "{printed}");
+    }
+
+    /// Into a log with nothing but errors the start goes on with, the report is
+    /// the one line saying they follow.
+    #[test]
+    fn into_a_log_errors_alone_print_one_line() {
+        let (result, printed) = logged_verdict(&[diagnostic(DiagnosticKind::Nullability)]);
+        assert!(result.is_ok());
+        assert_eq!(
+            printed.lines().filter(|l| !l.is_empty()).count(),
+            1,
+            "{printed}"
+        );
+    }
+
+    fn a_gap(manageable: bool) -> (source::CoverageReport, Vec<crate::gaps::Gap>) {
+        let orders = source::QualifiedTable::new(
+            kernel::DatabaseSchema::try_new("public").unwrap(),
+            kernel::TableName::try_new("orders").unwrap(),
+        );
+        let coverage = source::CoverageReport {
+            satisfied: false,
+            present: Vec::new(),
+            missing: vec![orders.clone()],
+            misrouted: Vec::new(),
+            manageable,
+            blockers: vec!["role does not own table public.orders".to_owned()],
+            remediation: vec!["ALTER PUBLICATION flusso ADD TABLE public.orders;".to_owned()],
+        };
+        let spec = SourceSpec::new(std::collections::BTreeMap::from([(
+            IndexName::try_new("orders").unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "version": 1, "table": "orders", "db_schema": "public", "fields": []
+            }))
+            .unwrap(),
+        )]));
+        let gaps = crate::gaps::of(
+            &spec,
+            &coverage,
+            true,
+            &source::PreImageReport::default(),
+            true,
+        );
+        (coverage, gaps)
+    }
+
+    fn gaps_verdict(
+        coverage: &source::CoverageReport,
+        gaps: &[crate::gaps::Gap],
+        strict: bool,
+        reader: Reader,
+    ) -> (anyhow::Result<()>, String) {
+        both_verdict(&[], coverage, gaps, strict, reader)
+    }
+
+    fn both_verdict(
+        diagnostics: &[Diagnostic],
+        coverage: &source::CoverageReport,
+        gaps: &[crate::gaps::Gap],
+        strict: bool,
+        reader: Reader,
+    ) -> (anyhow::Result<()>, String) {
+        let pre_image = source::PreImageReport::default();
+        let mut out = Vec::new();
+        let result = start_verdict(
+            &mut out,
+            print::Pen::plain(),
+            diagnostics,
+            &|_| true,
+            Some(&Capture {
+                gaps,
+                coverage,
+                manage_publication: true,
+                pre_image: &pre_image,
+                manage_replica_identity: true,
+            }),
+            strict,
+            reader,
+        );
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    /// Schema errors and capture gaps are judged together, after both are
+    /// inspected: `--strict` refuses once, printing every one, as `check`
+    /// shows them, so fixing one never reveals the other a restart later.
+    #[test]
+    fn strict_prints_schema_errors_and_gaps_together() {
+        let (coverage, gaps) = a_gap(false);
+        let (result, printed) = both_verdict(
+            &[diagnostic(DiagnosticKind::Nullability)],
+            &coverage,
+            &gaps,
+            true,
+            Reader::Log,
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("1 error(s) and 1 gap(s) above, refused under --strict"),
+            "{error}"
+        );
+        assert!(printed.contains("a Nullability finding"), "{printed}");
+        assert!(printed.contains("[error] public.orders"), "{printed}");
+        assert!(
+            printed.contains("ALTER PUBLICATION flusso ADD TABLE public.orders;"),
+            "{printed}"
+        );
+
+        let (result, printed) = both_verdict(
+            &[diagnostic(DiagnosticKind::Nullability)],
+            &coverage,
+            &gaps,
+            false,
+            Reader::Log,
+        );
+        assert!(result.is_ok());
+        assert!(
+            printed.contains(
+                "starting anyway with 1 schema error(s) and 1 capture gap(s) `flusso check` \
+                 fails on, each logged next as an `error` line"
+            ),
+            "{printed}"
+        );
+    }
+
+    /// A stop on a schema that can't be built prints the gaps too: a refused
+    /// start prints everything.
+    #[test]
+    fn a_refused_start_prints_its_gaps_too() {
+        let (coverage, gaps) = a_gap(false);
+        let (result, printed) = both_verdict(
+            &[diagnostic(DiagnosticKind::UnknownColumn)],
+            &coverage,
+            &gaps,
+            false,
+            Reader::Log,
+        );
+        assert!(result.is_err());
+        assert!(printed.contains("a UnknownColumn finding"), "{printed}");
+        assert!(printed.contains("[error] public.orders"), "{printed}");
+    }
+
+    /// A gap `run` won't close (issue #485): `--strict` refuses it with the
+    /// gap and its SQL; without it the start goes on, printing it for a
+    /// person and leaving it to its event in a log.
+    #[test]
+    fn strict_refuses_a_gap_run_wont_close() {
+        let (coverage, gaps) = a_gap(false);
+        assert_eq!(gaps.len(), 1);
+        let (result, printed) = gaps_verdict(&coverage, &gaps, true, Reader::Log);
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("1 gap(s) above, refused under --strict"),
+            "{error}"
+        );
+        assert!(printed.contains("[error] public.orders"), "{printed}");
+        assert!(
+            printed.contains("ALTER PUBLICATION flusso ADD TABLE public.orders;"),
+            "{printed}"
+        );
+
+        let (result, printed) = gaps_verdict(&coverage, &gaps, false, Reader::Person);
+        assert!(result.is_ok());
+        assert!(printed.contains("[error] public.orders"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
+
+        let (result, printed) = gaps_verdict(&coverage, &gaps, false, Reader::Log);
+        assert!(result.is_ok());
+        assert!(!printed.contains("public.orders"), "{printed}");
+        assert!(
+            printed.contains("starting anyway with 1 capture gap(s)"),
+            "{printed}"
+        );
+    }
+
+    #[test]
+    fn a_gap_run_closes_itself_is_none_under_strict() {
+        let (coverage, gaps) = a_gap(true);
+        assert!(gaps.is_empty());
+        let (result, printed) = gaps_verdict(&coverage, &gaps, true, Reader::Person);
+        assert!(result.is_ok());
+        assert_eq!(printed, "");
+    }
+
+    /// `--strict` (issue #485) refuses every error `flusso check` fails on,
+    /// each printed as `check` prints it, warnings above errors.
+    #[test]
+    fn strict_refuses_every_error_and_prints_them() {
+        for kind in [
+            DiagnosticKind::UndeclaredArrayColumn,
+            DiagnosticKind::Nullability,
+            DiagnosticKind::IdsElementLossy,
+            DiagnosticKind::TypeMismatch,
+            DiagnosticKind::RootPrimaryKey,
+        ] {
+            let (result, printed) = strict_verdict(&[
+                diagnostic(DiagnosticKind::IgnoredPrimaryKey),
+                diagnostic(kind),
+            ]);
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("1 error(s)"), "{kind:?}: {error}");
+            assert!(error.contains("--strict"), "{kind:?}: {error}");
+            assert!(
+                printed.find("[warning]").unwrap() < printed.find("[error]").unwrap(),
+                "{printed}"
+            );
+            assert!(!printed.contains("starting anyway"), "{printed}");
+        }
+    }
+
+    #[test]
+    fn strict_starts_on_warnings_alone() {
+        let (result, printed) = strict_verdict(&[
+            diagnostic(DiagnosticKind::IgnoredPrimaryKey),
+            diagnostic(DiagnosticKind::CheckSkipped),
+            diagnostic(DiagnosticKind::DuplicateFieldName),
+        ]);
+        assert!(result.is_ok(), "{printed}");
+        assert!(printed.contains("[warning]"), "{printed}");
+    }
+
+    /// A kind that stops every start keeps its own words under `--strict`.
+    #[test]
+    fn strict_keeps_the_message_of_a_kind_that_stops_every_start() {
+        let (result, _) = strict_verdict(&[diagnostic(DiagnosticKind::UnknownColumn)]);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("cannot be built"), "{error}");
     }
 
     #[test]
@@ -605,17 +1053,17 @@ mod tests {
     }
 
     #[test]
-    fn an_ids_element_type_that_holds_only_some_keys_warns_and_starts() {
+    fn an_ids_element_type_that_holds_only_some_keys_is_an_error_and_starts() {
         let printed = starts(DiagnosticKind::IdsElementLossy);
-        assert!(printed.contains("[warning]"), "{printed}");
-        assert!(!printed.contains("starting anyway"), "{printed}");
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
-    fn an_undeclared_array_column_warns_and_starts() {
+    fn an_undeclared_array_column_is_an_error_and_starts() {
         let printed = starts(DiagnosticKind::UndeclaredArrayColumn);
-        assert!(printed.contains("[warning]"), "{printed}");
-        assert!(!printed.contains("starting anyway"), "{printed}");
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
@@ -640,8 +1088,15 @@ mod tests {
     }
 
     #[test]
-    fn a_nullability_warning_prints_and_starts() {
+    fn a_nullability_error_prints_and_starts() {
         let printed = starts(DiagnosticKind::Nullability);
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn required_over_a_views_column_warns_and_starts() {
+        let printed = starts(DiagnosticKind::NullabilityUntracked);
         assert!(printed.contains("[warning]"), "{printed}");
         assert!(!printed.contains("starting anyway"), "{printed}");
     }
@@ -660,10 +1115,17 @@ mod tests {
     }
 
     #[test]
-    fn a_timestamp_format_prints_and_starts() {
-        let printed = starts(DiagnosticKind::TimestampFormat);
-        assert!(printed.contains("[warning]"), "{printed}");
-        assert!(!printed.contains("starting anyway"), "{printed}");
+    fn a_duplicate_whose_documents_differ_from_the_mapping_is_an_error_and_starts() {
+        let printed = starts(DiagnosticKind::DuplicateFieldNameWrong);
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn a_time_of_day_format_over_a_timestamp_is_an_error_and_starts() {
+        let printed = starts(DiagnosticKind::TimeOfDayFormat);
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
@@ -692,9 +1154,15 @@ mod tests {
     fn a_finding_no_sink_refuses_prints_and_starts() {
         let diagnostics = [diagnostic(DiagnosticKind::TimeOfDayAsDate)];
         let mut out = Vec::new();
-        let result = start_verdict(&mut out, print::Pen::detect_stderr(), &diagnostics, &|_| {
-            false
-        });
+        let result = start_verdict(
+            &mut out,
+            print::Pen::detect_stderr(),
+            &diagnostics,
+            &|_| false,
+            None,
+            false,
+            Reader::Person,
+        );
         assert!(result.is_ok());
         let printed = String::from_utf8(out).unwrap();
         assert!(printed.contains("starting anyway"), "{printed}");
@@ -828,7 +1296,7 @@ mod tests {
     #[test]
     fn one_refusing_kind_among_others_refuses_and_prints_them_all() {
         let (result, printed) = verdict(&[
-            diagnostic(DiagnosticKind::Nullability),
+            diagnostic(DiagnosticKind::IgnoredPrimaryKey),
             diagnostic(DiagnosticKind::TypeMismatch),
             diagnostic(DiagnosticKind::UnknownColumn),
         ]);
@@ -953,7 +1421,7 @@ mod tests {
         for config in [from_file, from_flag] {
             adapters::validate(&config).unwrap();
             assert_eq!(adapters::stream_config(&config).unwrap().capacity, Some(1));
-            let stream = FlussoBackends
+            let stream = FlussoBackends::default()
                 .stream(&config, std::slice::from_ref(&key))
                 .unwrap();
             let lane = stream.lane(&key).unwrap();

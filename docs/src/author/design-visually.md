@@ -24,7 +24,7 @@ You'd rather pick tables and columns than type the grammar, or you want a sample
 
 5. **Fold a related table in.** On a node, **+ join** lists the foreign keys pointing to and from its table. Pick one and the verb is inferred from the key's direction (`belongs_to`, `has_one`, `has_many`, or `many_to_many` through a detected junction); a child node appears, connected by an edge. Aggregates, `geo`, `map`, `custom`, and `constant` come from **+ field** and land on the node as leaf fields.
 
-6. **Preview.** The **Preview** panel has three tabs. **YAML** is the file that would be written. **Mapping** is the derived OpenSearch mapping, the same `flusso check --offline` prints. **Sample** builds a document from one live row, exactly what the sink would write, or synthesizes example data when the table is empty.
+6. **Preview.** The **Preview** panel has three tabs. **YAML** is the file that would be written. **Mapping** is the derived OpenSearch mapping, the same `flusso show mapping` prints. **Sample** builds a document from one live row, exactly what the sink would write, or synthesizes example data when the table is empty.
 
 7. **Validate.** **Validate** checks every field's column, type, and nullability, and every table and column a relation names, against the database and highlights offending fields on the canvas with the message on hover.
 

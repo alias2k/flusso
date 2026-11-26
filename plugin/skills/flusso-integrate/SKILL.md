@@ -74,13 +74,15 @@ root `table`, a `primary_key`, and `fields`.
 ### 3. Validate
 
 ```sh
-flusso check --config flusso.toml            # validates + prints the typed mapping
+flusso check --config flusso.toml            # validates; errors last, one summary line
 flusso check --config flusso.toml --offline  # format and rules only, skip the DB
+flusso show mapping --config flusso.toml     # prints the typed mapping (no DB)
 ```
 
 Against a live DB this also checks the real catalog and prints the publication coverage and
 replica identity reports (see **flusso-postgres**); what it verifies is owned by the
-[CLI reference](https://alias2k.github.io/flusso/main/reference/cli.html#check). Fix every error here before running.
+[CLI reference](https://alias2k.github.io/flusso/main/reference/cli.html#check). Fix every error here before running:
+an error means the index won't hold what its schema says, and `flusso run --strict` refuses it.
 
 ### 4. Run
 

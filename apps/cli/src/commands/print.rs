@@ -1,9 +1,10 @@
-//! Human-readable rendering for `flusso check`.
+//! Human-readable rendering for `flusso check` and `flusso show`.
 //!
-//! The report is built for a person reading a terminal: a short summary of the
-//! deployment (source, sinks, indexes), then a field tree per index — the
-//! declared shape when offline, or the fully-resolved types and nullability
-//! when checked against the database.
+//! `check` is built for a person who wants to know what is wrong: a section
+//! that passes is one line, a section with a problem prints in full, with its
+//! SQL, then the schema findings, warnings above errors, and a summary line.
+//! `show config` prints the deployment (source, stream, sinks, indexes, secrets
+//! redacted) and `show mapping` a field tree per index with the typed mapping.
 //!
 //! Color is emitted only when stdout is a terminal and `NO_COLOR` is unset, so
 //! piping the output to a file or `grep` stays clean. Alignment is computed on
@@ -18,6 +19,17 @@ use kernel::{OptionValue, Port, PortEntry};
 use crate::adapters;
 use source::{CoverageReport, Diagnostic, PreImageGap, PreImageReport, Severity};
 
+/// When a report is coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ColorChoice {
+    /// When the output is a terminal and `NO_COLOR` is unset.
+    Auto,
+    /// Always, even into a pipe or a file.
+    Always,
+    /// Never.
+    Never,
+}
+
 /// A palette that paints ANSI color only when enabled. Cheap to copy, so it is
 /// threaded by value through the render functions.
 #[derive(Clone, Copy)]
@@ -30,6 +42,21 @@ impl Pen {
     #[cfg(test)]
     pub(crate) fn plain() -> Self {
         Self { color: false }
+    }
+
+    /// Color always, for a test that reads the escapes.
+    #[cfg(test)]
+    pub(crate) fn coloured() -> Self {
+        Self { color: true }
+    }
+
+    /// Color as `choice` says, `auto` deciding on stdout.
+    pub(crate) fn for_stdout(choice: ColorChoice) -> Self {
+        match choice {
+            ColorChoice::Auto => Self::detect(),
+            ColorChoice::Always => Self { color: true },
+            ColorChoice::Never => Self { color: false },
+        }
     }
 
     /// Color when stdout is a terminal and `NO_COLOR` is not set.
@@ -89,9 +116,9 @@ pub(crate) fn success(out: &mut impl Write, pen: Pen, message: &str) -> Result<(
     Ok(())
 }
 
-/// A yellow, bracketed note — e.g. the `[offline]` mode banner.
-pub(crate) fn warning(out: &mut impl Write, pen: Pen, scope: &str, message: &str) -> Result<()> {
-    writeln!(out, "\n{} {}", pen.yellow(&format!("[{scope}]")), message)?;
+/// A yellow `!` followed by a note the reader should see first.
+pub(crate) fn note(out: &mut impl Write, pen: Pen, message: &str) -> Result<()> {
+    writeln!(out, "{} {message}", pen.paint("1;33", "!"))?;
     Ok(())
 }
 
@@ -102,20 +129,129 @@ fn section(out: &mut impl Write, pen: Pen, title: &str) -> Result<()> {
     Ok(())
 }
 
+/// A passing check on one line: a green check mark and what passed.
+fn passed(out: &mut impl Write, pen: Pen, what: &str) -> Result<()> {
+    writeln!(out, "{} {what}", pen.green("✓"))?;
+    Ok(())
+}
+
+/// `n` with `one`, pluralised with an `s`: `1 index`, `2 sinks`.
+fn count(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("{n} {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// The config `check` read, on one line: its path and what it declares.
+pub(crate) fn config_line(
+    out: &mut impl Write,
+    pen: Pen,
+    path: &std::path::Path,
+    config: &Config,
+) -> Result<()> {
+    let disabled = config.indexes.values().filter(|i| !i.enabled).count();
+    let mut indexes = count(config.indexes.len(), "index", "indexes");
+    if disabled > 0 {
+        indexes.push_str(&format!(" ({disabled} disabled)"));
+    }
+    let sinks = if config.sinks.is_empty() {
+        "no sink (stdout by default)".to_owned()
+    } else {
+        count(config.sinks.len(), "sink", "sinks")
+    };
+    passed(
+        out,
+        pen,
+        &format!("config valid: {}: {indexes}, {sinks}", path.display()),
+    )
+}
+
+/// That the database was not checked, on one line (`check --offline`).
+pub(crate) fn offline(out: &mut impl Write, pen: Pen) -> Result<()> {
+    writeln!(
+        out,
+        "{} offline: the database was not checked (types, nullability, the source server, \
+         publication and replica identity)",
+        pen.paint("1;33", "!"),
+    )?;
+    Ok(())
+}
+
 /// Report whether the source server is one `flusso run` accepts: the primary,
 /// and not a server that would make flusso a synchronous standby. `problem` is
-/// the refusal `run` would stop with.
+/// the refusal `run` would stop with. One line when it passes.
 pub(crate) fn server(out: &mut impl Write, pen: Pen, problem: Option<&str>) -> Result<()> {
-    section(out, pen, "Source server")?;
     match problem {
-        None => writeln!(
+        None => passed(
             out,
-            "  {} the primary, and flusso is not a synchronous standby of it",
-            pen.green("✓"),
-        )?,
-        Some(problem) => writeln!(out, "  {} {problem}", pen.paint("31", "✗"))?,
+            pen,
+            "source server: the primary, and flusso is not a synchronous standby of it",
+        ),
+        Some(problem) => {
+            section(out, pen, "Source server")?;
+            writeln!(out, "  {} {problem}", pen.paint("1;31", "✗"))?;
+            Ok(())
+        }
     }
-    Ok(())
+}
+
+/// How a section of `flusso check` came out: one line, or in full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Status {
+    /// Nothing to do.
+    Ok,
+    /// The next `flusso run` closes the gap itself, or flusso keeps it on
+    /// purpose: nothing to do by hand.
+    RunFixes,
+    /// Something to do by hand that only makes flusso slower (an update that
+    /// changes no column a document reads still rebuilds): the section prints
+    /// in full, with its SQL, and is no error.
+    ByHand,
+    /// A gap `flusso run` won't close, which leaves an index short of changes
+    /// or with stale documents: an error, printed in full with its SQL.
+    Problem,
+}
+
+impl Status {
+    /// The status as a stable `snake_case` token.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::RunFixes => "run_fixes",
+            Self::ByHand => "by_hand",
+            Self::Problem => "problem",
+        }
+    }
+}
+
+/// How the publication section comes out under `manage`.
+pub(crate) fn coverage_status(report: &CoverageReport, manage: bool) -> Status {
+    if report.satisfied {
+        Status::Ok
+    } else if report.manageable && manage {
+        Status::RunFixes
+    } else {
+        Status::Problem
+    }
+}
+
+/// How the replica identity section comes out under `manage`.
+pub(crate) fn pre_image_status(report: &PreImageReport, manage: bool) -> Status {
+    let by_hand = |gap: &&PreImageGap| gap.kept.is_none() && !gap.will_manage(manage);
+    let every = || report.gaps.iter().chain(&report.partial);
+    if report.complete() {
+        Status::Ok
+    } else if report.gaps.iter().any(|gap| by_hand(&gap)) {
+        Status::Problem
+    } else if report.partial.iter().any(|gap| by_hand(&gap)) {
+        Status::ByHand
+    } else if every().any(|gap| gap.kept.is_none()) {
+        Status::RunFixes
+    } else {
+        Status::Ok
+    }
 }
 
 /// Report whether the source streams every table the indexes read, and — when it
@@ -123,24 +259,40 @@ pub(crate) fn server(out: &mut impl Write, pen: Pen, problem: Option<&str>) -> R
 ///
 /// `manage` is the effective publication-management setting `run` would use, so
 /// the phrasing matches what running would actually do; the remediation SQL is
-/// always printed when there's a gap, copy-pasteable for the manual path.
+/// always printed when there's a gap the operator must close. One line when
+/// nothing is missing, or when `flusso run` closes the gap itself.
 pub(crate) fn coverage(
     out: &mut impl Write,
     pen: Pen,
     report: &CoverageReport,
     manage: bool,
 ) -> Result<()> {
-    section(out, pen, "Publication coverage")?;
-
-    if report.satisfied {
-        writeln!(
-            out,
-            "  {} source streams all {} required table(s)",
-            pen.green("✓"),
-            report.present.len(),
-        )?;
-        return Ok(());
+    match coverage_status(report, manage) {
+        Status::Ok => {
+            let covered = match report.present.len() {
+                0 => "publication: the indexes read no table".to_owned(),
+                1 => "publication covers the one table the indexes read".to_owned(),
+                n => format!("publication covers all {n} tables the indexes read"),
+            };
+            return passed(out, pen, &covered);
+        }
+        Status::RunFixes => {
+            return passed(
+                out,
+                pen,
+                &format!(
+                    "publication: the next `flusso run` covers the {} it misses",
+                    count(
+                        report.missing.len() + report.misrouted.len(),
+                        "table",
+                        "tables"
+                    )
+                ),
+            );
+        }
+        Status::ByHand | Status::Problem => {}
     }
+    section(out, pen, "Publication coverage")?;
 
     if !report.missing.is_empty() {
         writeln!(
@@ -165,13 +317,7 @@ pub(crate) fn coverage(
         }
     }
 
-    if report.manageable && manage {
-        writeln!(
-            out,
-            "  {}",
-            pen.green("→ will be fixed automatically on the next `flusso run`"),
-        )?;
-    } else if report.manageable {
+    if report.manageable {
         writeln!(
             out,
             "  {}",
@@ -207,23 +353,45 @@ pub(crate) fn coverage(
 /// delete can leave its document) and the ones that only
 /// lose the unread-column skip. Each says whether `flusso run` will set it (`manage` is
 /// the effective `manage_replica_identity`) or keeps it on purpose; the SQL is
-/// printed for the ones it won't set and doesn't keep.
+/// printed for the ones it won't set and doesn't keep. One line when there is
+/// nothing to set by hand: every table logs its whole old row, or the next
+/// `flusso run` sets it, or flusso keeps it on purpose.
 pub(crate) fn pre_image(
     out: &mut impl Write,
     pen: Pen,
     report: &PreImageReport,
     manage: bool,
 ) -> Result<()> {
-    section(out, pen, "Replica identity")?;
-
     if report.complete() {
-        writeln!(
+        return passed(
             out,
-            "  {} every table an index reads logs its whole old row",
-            pen.green("✓"),
-        )?;
-        return Ok(());
+            pen,
+            "replica identity: every table an index reads logs its whole old row",
+        );
     }
+    let every = || report.gaps.iter().chain(&report.partial);
+    if matches!(
+        pre_image_status(report, manage),
+        Status::Ok | Status::RunFixes
+    ) {
+        let set = every().filter(|gap| gap.kept.is_none()).count();
+        let kept = every().filter(|gap| gap.kept.is_some()).count();
+        let mut parts = Vec::new();
+        if set > 0 {
+            parts.push(format!(
+                "the next `flusso run` sets REPLICA IDENTITY FULL on {}",
+                count(set, "table", "tables")
+            ));
+        }
+        if kept > 0 {
+            parts.push(format!(
+                "{} kept as is (updates there always rebuild)",
+                count(kept, "table", "tables")
+            ));
+        }
+        return passed(out, pen, &format!("replica identity: {}", parts.join("; ")));
+    }
+    section(out, pen, "Replica identity")?;
 
     let verdict = |gap: &PreImageGap| {
         if let Some(reason) = &gap.kept {
@@ -453,23 +621,23 @@ pub(crate) fn resolved(out: &mut impl Write, pen: Pen, mappings: &[IndexMapping]
     Ok(())
 }
 
-/// The disagreements found checking the declared schema against the database.
-/// Errors are red, warnings yellow; an empty list prints a reassuring line.
+/// The disagreements found checking the declared schema against the database,
+/// warnings first and errors last, so what fails is at the bottom. Errors are
+/// red, warnings yellow. Prints nothing when there are none.
 pub(crate) fn diagnostics(
     out: &mut impl Write,
     pen: Pen,
     diagnostics: &[Diagnostic],
 ) -> Result<()> {
-    section(out, pen, "Database validation")?;
     if diagnostics.is_empty() {
-        writeln!(out, "  {}", pen.dim("(schema matches the database)"))?;
         return Ok(());
     }
+    section(out, pen, "Database validation")?;
     diagnostic_lines(out, pen, diagnostics)
 }
 
-/// The disagreements found with no database (`check --offline`). Prints
-/// nothing when there are none.
+/// The disagreements found with no database (`check --offline`), warnings
+/// first and errors last. Prints nothing when there are none.
 pub(crate) fn offline_diagnostics(
     out: &mut impl Write,
     pen: Pen,
@@ -483,19 +651,175 @@ pub(crate) fn offline_diagnostics(
 }
 
 fn diagnostic_lines(out: &mut impl Write, pen: Pen, diagnostics: &[Diagnostic]) -> Result<()> {
-    for d in diagnostics {
+    let warnings = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Warning);
+    let errors = diagnostics.iter().filter(|d| d.severity == Severity::Error);
+    for d in warnings.chain(errors) {
         let (label, code) = match d.severity {
-            Severity::Error => ("error", "31"),
-            Severity::Warning => ("warning", "33"),
+            Severity::Error => ("error", "1;31"),
+            Severity::Warning => ("warning", "1;33"),
         };
         writeln!(
             out,
             "  {} {}  {}",
             pen.paint(code, &format!("[{label}]")),
             pen.bold(&format!("{}.{}", d.index, d.dotted_path())),
-            pen.dim(&d.message),
+            d.message,
         )?;
     }
+    Ok(())
+}
+
+/// The gaps in capture `flusso run` won't close, one `[error]` line each,
+/// under a heading; the sections that hold their SQL follow them.
+pub(crate) fn gaps(out: &mut impl Write, pen: Pen, gaps: &[crate::gaps::Gap]) -> Result<()> {
+    if gaps.is_empty() {
+        return Ok(());
+    }
+    section(out, pen, "Capture gaps")?;
+    for gap in gaps {
+        writeln!(
+            out,
+            "  {} {}  {}",
+            pen.paint("1;31", "[error]"),
+            pen.bold(&gap.table.to_string()),
+            gap.message,
+        )?;
+    }
+    Ok(())
+}
+
+/// Where the lock stands, when that is no problem: one line, `✓` when it is
+/// current, a note when there is none or nothing to compare it with.
+pub(crate) fn lock(
+    out: &mut impl Write,
+    pen: Pen,
+    at: &crate::lock::LockAt<'_>,
+    state: &crate::lock::LockState,
+) -> Result<()> {
+    match state {
+        crate::lock::LockState::Current | crate::lock::LockState::Rewritten { .. } => {
+            passed(out, pen, &state.message(at))
+        }
+        state if state.is_error() => Ok(()),
+        state => note(out, pen, &state.message(at)),
+    }
+}
+
+/// A lock `check` fails on, as an `[error]` line of its own section.
+pub(crate) fn lock_error(
+    out: &mut impl Write,
+    pen: Pen,
+    at: &crate::lock::LockAt<'_>,
+    state: &crate::lock::LockState,
+) -> Result<()> {
+    if !state.is_error() {
+        return Ok(());
+    }
+    section(out, pen, "Lock")?;
+    writeln!(
+        out,
+        "  {} {}  {}",
+        pen.paint("1;31", "[error]"),
+        pen.bold(&at.lock.display().to_string()),
+        state.message(at),
+    )?;
+    Ok(())
+}
+
+/// What `flusso check` concluded: the counts, and whether it passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Summary {
+    pub(crate) errors: usize,
+    pub(crate) warnings: usize,
+    /// Run with `--offline`: the database checks were not run.
+    pub(crate) offline: bool,
+    /// The source server refusal `flusso run` would stop with, which fails
+    /// the check too.
+    pub(crate) server_refused: bool,
+}
+
+impl Summary {
+    /// The summary of `diagnostics` and `others` (gaps and a lock `check`
+    /// fails on, each an error), `offline` or not, with the server refused or
+    /// not.
+    pub(crate) fn of(
+        diagnostics: &[Diagnostic],
+        others: usize,
+        offline: bool,
+        server_refused: bool,
+    ) -> Self {
+        let count = |severity: Severity| {
+            diagnostics
+                .iter()
+                .filter(|d| d.severity == severity)
+                .count()
+        };
+        Self {
+            errors: count(Severity::Error) + others,
+            warnings: count(Severity::Warning),
+            offline,
+            server_refused,
+        }
+    }
+
+    /// Whether the check passed: no error, and the server accepted.
+    pub(crate) fn passed(&self) -> bool {
+        self.errors == 0 && !self.server_refused
+    }
+
+    /// The last line of the report, with its `✓` or `✗`.
+    pub(crate) fn line(&self) -> String {
+        let plural = |n: usize, one: &str| {
+            if n == 1 {
+                format!("{n} {one}")
+            } else {
+                format!("{n} {one}s")
+            }
+        };
+        let counts = format!(
+            "{}, {}",
+            plural(self.errors, "error"),
+            plural(self.warnings, "warning")
+        );
+        if self.server_refused {
+            return format!("✗ check failed: flusso run would refuse the source server; {counts}");
+        }
+        if self.errors > 0 {
+            return format!("✗ check failed: {counts}");
+        }
+        let passed = if self.offline {
+            "offline checks passed"
+        } else {
+            "check passed"
+        };
+        let warned = if self.warnings > 0 {
+            format!(" with {}", plural(self.warnings, "warning"))
+        } else {
+            String::new()
+        };
+        let not_run = if self.offline {
+            "; database checks not run"
+        } else {
+            ""
+        };
+        format!("✓ {passed}{warned}{not_run}")
+    }
+}
+
+/// The last line of a report, `summary`'s line painted: a failure bold red, a
+/// pass with warnings yellow.
+pub(crate) fn summary(out: &mut impl Write, pen: Pen, summary: &Summary) -> Result<()> {
+    let line = summary.line();
+    let painted = match line.strip_prefix("✓ ") {
+        None => pen.paint("1;31", &line),
+        Some(rest) if summary.warnings > 0 => {
+            format!("{} {}", pen.green("✓"), pen.paint("1;33", rest))
+        }
+        Some(rest) => format!("{} {}", pen.green("✓"), pen.bold(rest)),
+    };
+    writeln!(out, "{painted}")?;
     Ok(())
 }
 
@@ -579,8 +903,8 @@ fn print_rows(out: &mut impl Write, pen: Pen, rows: &[Row]) -> Result<()> {
 
 /// One port entry's options on a line, `key=value` pairs in key order, without
 /// interpreting them: the adapter's description says which fields are secrets,
-/// and those are shown as their variable name (`${VAR}`), as a URL with the
-/// password masked, or as `***`.
+/// and those are shown as their variable name (`${VAR}`), or, given
+/// literally, as `***` whole: a URL can carry a credential in any part.
 fn describe_entry(port: Port, entry: &PortEntry) -> String {
     let secrets: Vec<String> = adapters::description(port, &entry.kind)
         .map(|d| d.secrets.clone())
@@ -590,6 +914,45 @@ fn describe_entry(port: Port, entry: &PortEntry) -> String {
         parts.push(format!("{key}={}", describe_value(value, key, &secrets)));
     }
     parts.join(" ")
+}
+
+/// `config` as JSON, with every literal secret masked whole as `***`, as the
+/// human listing masks it. A secret read from the environment
+/// (`{ env = "VAR" }`) names its variable.
+pub(crate) fn redacted_config(config: &Config) -> Result<serde_json::Value> {
+    let mut document = crate::plain_json::to_value(config)?;
+    if let Some(source) = document.get_mut("source") {
+        mask_secrets(source, Port::Source, &config.source.kind);
+    }
+    if let Some(stream) = document.get_mut("stream") {
+        mask_secrets(stream, Port::Stream, &config.stream.kind);
+    }
+    for (name, entry) in &config.sinks {
+        if let Some(sink) = document
+            .get_mut("sinks")
+            .and_then(|sinks| sinks.get_mut(name.as_ref()))
+        {
+            mask_secrets(sink, Port::Sink, &entry.kind);
+        }
+    }
+    Ok(document)
+}
+
+fn mask_secrets(entry: &mut serde_json::Value, port: Port, kind: &str) {
+    let secrets: Vec<String> = adapters::description(port, kind)
+        .map(|d| d.secrets.clone())
+        .unwrap_or_default();
+    for path in secrets {
+        let mut at = Some(&mut *entry);
+        for key in path.split('.') {
+            at = at.and_then(|value| value.get_mut(key));
+        }
+        if let Some(value) = at
+            && let serde_json::Value::String(text) = value
+        {
+            *text = "***".to_owned();
+        }
+    }
 }
 
 fn describe_value(value: &OptionValue, path: &str, secrets: &[String]) -> String {
@@ -605,13 +968,7 @@ fn describe_value(value: &OptionValue, path: &str, secrets: &[String]) -> String
                 .collect();
             format!("{{{}}}", inner.join(" "))
         }
-        OptionValue::String(text) if secret => {
-            if text.contains("://") {
-                redact_url(text)
-            } else {
-                "***".to_owned()
-            }
-        }
+        OptionValue::String(_) if secret => "***".to_owned(),
         OptionValue::String(text) => text.clone(),
         OptionValue::Array(items) => format!(
             "[{}]",
@@ -635,21 +992,6 @@ fn describe_soft_delete(sd: &SoftDelete) -> String {
     }
 }
 
-/// Mask the password in `scheme://user:password@host…` — the report shows the
-/// URL, never the secret.
-fn redact_url(url: &str) -> String {
-    let Some(after) = url.find("://").map(|i| i + 3) else {
-        return url.to_owned();
-    };
-    let Some(at) = url[after..].find('@').map(|i| after + i) else {
-        return url.to_owned();
-    };
-    match url[after..at].find(':') {
-        Some(colon) => format!("{}:***{}", &url[..after + colon], &url[at..]),
-        None => url.to_owned(),
-    }
-}
-
 /// ANSI escapes have zero display width, so a `{:<width}` pad over a *colored*
 /// string under-pads. This returns the extra width the escapes occupy, to add
 /// back into the format width when the painted string is padded.
@@ -661,7 +1003,7 @@ fn pen_pad(pen: Pen, text: &str) -> usize {
 mod tests {
     use config::{FlussoType, Mapping};
 
-    use super::{Pen, pre_image, type_label};
+    use super::{Pen, coverage, pre_image, type_label};
 
     fn gap(table: &str, kept: Option<&str>) -> source::PreImageGap {
         source::PreImageGap {
@@ -719,6 +1061,65 @@ mod tests {
         );
         assert!(!out.contains("re-parenting"), "{out}");
         assert!(out.contains("ALTER TABLE logs"), "{out}");
+    }
+
+    #[test]
+    fn a_publication_line_reads_well_for_one_table_and_for_none() {
+        let line = |present: usize| {
+            let table = source::QualifiedTable::new(
+                config::DatabaseSchema::try_new("public").unwrap(),
+                config::TableName::try_new("users").unwrap(),
+            );
+            let report = source::CoverageReport {
+                satisfied: true,
+                present: vec![table; present],
+                missing: Vec::new(),
+                misrouted: Vec::new(),
+                manageable: true,
+                blockers: Vec::new(),
+                remediation: Vec::new(),
+            };
+            let mut out = Vec::new();
+            coverage(&mut out, Pen { color: false }, &report, true).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(
+            line(1),
+            "✓ publication covers the one table the indexes read\n"
+        );
+        assert_eq!(
+            line(3),
+            "✓ publication covers all 3 tables the indexes read\n"
+        );
+        assert_eq!(line(0), "✓ publication: the indexes read no table\n");
+    }
+
+    /// A gap the role could close is printed in full only while management is
+    /// off; with it on, the section is one line (`check::tests`).
+    #[test]
+    fn a_gap_the_role_could_close_with_management_off_prints_its_sql() {
+        let users = source::QualifiedTable::new(
+            config::DatabaseSchema::try_new("public").unwrap(),
+            config::TableName::try_new("users").unwrap(),
+        );
+        let report = source::CoverageReport {
+            satisfied: false,
+            present: Vec::new(),
+            missing: vec![users],
+            misrouted: Vec::new(),
+            manageable: true,
+            blockers: Vec::new(),
+            remediation: vec!["ALTER PUBLICATION flusso ADD TABLE public.users;".to_owned()],
+        };
+        let mut out = Vec::new();
+        coverage(&mut out, Pen { color: false }, &report, false).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("automatic management is disabled"), "{out}");
+        assert!(
+            out.contains("ALTER PUBLICATION flusso ADD TABLE public.users;"),
+            "{out}"
+        );
+        assert!(!out.contains("will be fixed automatically"), "{out}");
     }
 
     #[test]

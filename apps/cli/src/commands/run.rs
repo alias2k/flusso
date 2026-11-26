@@ -32,6 +32,7 @@ use crate::DEFAULT_LOCK;
 use crate::adapters;
 use crate::backends::FlussoBackends;
 use crate::http::{self, BasicAuth, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USER};
+use crate::lock::{ConfigPlan, plan_config};
 use crate::shutdown::{self, Cause, Drained, Progress, Signals};
 use crate::telemetry::observer::OtelObserver;
 use crate::telemetry::script_log::ScriptFailureLog;
@@ -88,6 +89,13 @@ pub(crate) struct RunArgs {
     /// issuing the `ALTER` (it then only warns about the gap).
     #[arg(long, env = "FLUSSO_MANAGE_REPLICA_IDENTITY")]
     manage_replica_identity: Option<bool>,
+
+    /// Refuse to start on any error `flusso check` reports, printed as
+    /// `check` prints it. Without it, only an error no document builds past
+    /// stops the start; the others are logged at `error` and counted on
+    /// `flusso.index.schema_errors`, and the start goes on.
+    #[arg(long, env = "FLUSSO_STRICT")]
+    strict: bool,
 
     /// Skip the initial backfill and resume live capture only. Use after the
     /// index has already been seeded, to avoid re-reading every existing row.
@@ -350,7 +358,9 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         lag_poll_interval: Duration::from_secs(args.lag_poll_secs),
     };
 
-    let backends: Arc<dyn daemon::Backends> = Arc::new(FlussoBackends);
+    let backends: Arc<dyn daemon::Backends> = Arc::new(FlussoBackends {
+        strict: args.strict,
+    });
     let otel_observer: Arc<dyn daemon::Observer> = Arc::new(OtelObserver::new(started));
     let running = Daemon::new(config, Arc::clone(&backends))
         .with_options(options)
@@ -547,41 +557,6 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     }
 }
 
-/// What `run` does to obtain its [`Config`], decided purely from the flags plus
-/// whether the candidate config file exists. Split out from the IO in
-/// [`resolve_config`] so the branching is unit-testable without a filesystem.
-#[derive(Debug, PartialEq, Eq)]
-enum ConfigPlan {
-    /// `--locked`: load the existing lock as-is, no compile, no write.
-    UseLock,
-    /// Compile this config path, (re)write the lock, then run the result.
-    Compile(PathBuf),
-    /// No config to compile: fall back to loading the existing lock.
-    Fallback,
-    /// An explicit `--config` was given but does not exist — fatal.
-    Missing(PathBuf),
-}
-
-/// Decide the [`ConfigPlan`] cargo-style: `--locked` wins; otherwise an explicit
-/// `--config` is compiled when it exists and is an error when it doesn't, while a
-/// missing default `flusso.toml` is allowed and falls back to the lock.
-fn plan_config(
-    locked: bool,
-    config: Option<&Path>,
-    default_config: &Path,
-    exists: impl Fn(&Path) -> bool,
-) -> ConfigPlan {
-    if locked {
-        return ConfigPlan::UseLock;
-    }
-    match config {
-        Some(path) if exists(path) => ConfigPlan::Compile(path.to_path_buf()),
-        Some(path) => ConfigPlan::Missing(path.to_path_buf()),
-        None if exists(default_config) => ConfigPlan::Compile(default_config.to_path_buf()),
-        None => ConfigPlan::Fallback,
-    }
-}
-
 /// Resolve the configuration a `run` should use, cargo-style: compile the config
 /// and **(re)write the lock** when one is present (skipping the write when the
 /// bytes are already identical, so a no-change run leaves a committed lock
@@ -612,9 +587,8 @@ fn resolve_config(args: &RunArgs) -> anyhow::Result<Config> {
         }
         ConfigPlan::Fallback => load_lock(&args.lock).with_context(|| {
             format!(
-                "no {} to compile and no compiled lock at {}; create a config or build a lock first",
-                crate::DEFAULT_CONFIG,
-                args.lock.display()
+                "{}; create a config or build a lock first",
+                crate::lock::no_config_headline(&args.lock, " to compile")
             )
         }),
         ConfigPlan::Missing(config_path) => {

@@ -18,7 +18,15 @@ You have a validated config and want to run it, locally or in a deployment. The 
 
 2. **Commit the lock.** The rewritten `flusso.lock` is deterministic TOML. Commit it; a config change shows as a readable diff.
 
-3. **Ship the lock, run it locked.** In a deployment, copy or mount only the lock and pin it:
+3. **Gate it in CI.** `flusso check` fails when the committed lock isn't what the config compiles to, and on any schema that won't work as written. Offline it needs no database; against a staging database it also checks types, nullability and capture:
+
+   ```sh
+   flusso check --config flusso.toml --offline
+   ```
+
+   A stale lock is fixed with `flusso check --fix` (or `flusso build`), then committed. What it reports: [Checks and findings](../reference/checks.md).
+
+4. **Ship the lock, run it locked.** In a deployment, copy or mount only the lock and pin it:
 
    ```sh
    flusso run --locked --lock /app/flusso.lock
@@ -30,12 +38,13 @@ You have a validated config and want to run it, locally or in a deployment. The 
    flusso build --config flusso.toml --out flusso.lock
    ```
 
-4. **Restart without a backfill.** Once seeded, a restart skips the backfill on its own because the sink remembers. `--skip-backfill` forces that even when the sink disagrees; it exists for recovery, not routine use.
+5. **Restart without a backfill.** Once seeded, a restart skips the backfill on its own because the sink remembers. `--skip-backfill` forces that even when the sink disagrees; it exists for recovery, not routine use.
 
-5. **Stop.** `SIGTERM`, `SIGINT` or `SIGHUP` drains: nothing new is read, what was already read is built, lands on every sink and is confirmed to Postgres, then flusso exits `0`, within 30 seconds by default. The same sender twice within half a second (Ctrl-C pressed twice), or three signals within a second, exit at once; whatever wasn't confirmed is read again on the next start. The sequence, deadline and exit codes are in [Stopping](../reference/cli.md#stopping).
+6. **Stop.** `SIGTERM`, `SIGINT` or `SIGHUP` drains: nothing new is read, what was already read is built, lands on every sink and is confirmed to Postgres, then flusso exits `0`, within 30 seconds by default. The same sender twice within half a second (Ctrl-C pressed twice), or three signals within a second, exit at once; whatever wasn't confirmed is read again on the next start. The sequence, deadline and exit codes are in [Stopping](../reference/cli.md#stopping).
 
 ## Options and variations
 
+- **Refuse a wrong index at start.** A plain `run` starts on most errors `check` reports (a `[]` column without `array: true`, a capture gap it can't close), logging each and counting it on `flusso_index_schema_errors`. `--strict` (`FLUSSO_STRICT=true`) refuses to start on them instead. See [Validation at start](../reference/checks.md#validation-at-start).
 - **Configure from the environment.** Every flag has a `FLUSSO_*` twin: `FLUSSO_CONFIG`, `FLUSSO_PUBLIC_ADDRESS`, `FLUSSO_INDEX_PREFIX`. See [Environment variables](../reference/environment.md#cli-flags).
 - **Where it listens.** Both surfaces default to localhost. A container needs the public one on `0.0.0.0`; the private one should stay on localhost. Defaults and ports are in [HTTP endpoints](../reference/http.md).
 - **Change the admin password** before exposing anything: `--admin-password` / `FLUSSO_ADMIN_PASSWORD`. flusso warns on every start while it's the default.

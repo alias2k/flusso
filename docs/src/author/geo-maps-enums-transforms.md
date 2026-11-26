@@ -58,7 +58,7 @@ You're adding a location, a translations column, a status or severity with a mea
 
    What happens to nulls, lone values and transforms, and what `check` says about a `[]` column without the flag, is in [array](../reference/field-types.md#array).
 
-6. **Validate.** `flusso check --offline` shows the derived mapping: `geo_point` for the geo, `map<text>` for the map (`--format json` shows the mapping every key gets as its `values`), a `.sort` subfield under the enum.
+6. **Validate.** `flusso check --offline` validates the files; `flusso show mapping` shows the derived mapping: `geo_point` for the geo, `map<text>` for the map (`--format json` shows the mapping every key gets as its `values`), a `.sort` subfield under the enum.
 
 ## Options and variations
 

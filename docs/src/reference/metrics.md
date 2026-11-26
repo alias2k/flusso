@@ -27,6 +27,7 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 | `flusso.documents.built` | counter | | `index` | Documents assembled by the ingest engine, once for every sink. The unlabeled total is the sum. |
 | `flusso.documents.quarantined` | counter | | `sink`, `index` | Documents that sink rejected and its engine skipped under `on_error = "skip"`. Non-zero means data is being dropped. Alert on it. |
 | `flusso.script.failures` | counter | | `index`, `field`, `policy` | Documents that failed to build: a [script failed](scripts.md#failures), or an [`array: true`](field-types.md#array) column held an object. `field` is the path with array positions folded (`variants[].gross`); `policy` is `skip` (the document kept its indexed version) or `stop` (its index went [down](config-toml.md#a-failing-index), or with one index the ingest engine stopped; each retry counts). Non-zero means documents are going stale. Alert on it. See [Script fields](scripts.md#failures). |
+| `flusso.index.schema_errors` | gauge | | `index`, `kind` | How many errors of that [`kind`](checks.md#every-finding) the last start found for the index and went on with: the index doesn't hold what its schema says, or misses changes (a [capture gap](checks.md#capture-gaps)). Set once per start; a start after the fix has no series for it. Alert on `> 0`. `run --strict` refuses to start on them instead. See [Errors a start goes on with](checks.md#errors-a-start-goes-on-with). |
 | `flusso.batches` | counter | | `sink` | Batches that sink wrote. |
 | `flusso.flush.duration` | histogram | s | `sink` | Time per write (one batch) at that sink. Several run at once, so the sum can exceed wall time. Buckets from 1 ms to 10 s. |
 | `flusso.flush.documents` | histogram | | `sink`, `work` | Documents per write at that sink, every lane item merged into the write counted (about one batch in a burst). A write of nothing (a live batch that resolved to no document) isn't counted. Buckets from 1 to 10,000. |
@@ -76,6 +77,7 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.memory.wait` | `flusso_memory_wait_seconds_bucket{work,wake}`, `_sum`, `_count` |
 | `flusso.documents.quarantined` | `flusso_documents_quarantined_total{sink,index}` |
 | `flusso.script.failures` | `flusso_script_failures_total{index,field,policy}` |
+| `flusso.index.schema_errors` | `flusso_index_schema_errors{index,kind}` |
 | `flusso.batches` | `flusso_batches_total{sink}` |
 | `flusso.flush.duration` | `flusso_flush_duration_seconds_bucket{sink}`, `_sum`, `_count` |
 | `flusso.flush.documents` | `flusso_flush_documents_bucket{sink,work}`, `_sum`, `_count` |

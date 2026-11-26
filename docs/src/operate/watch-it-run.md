@@ -41,7 +41,7 @@ flusso is running and you want to know whether it's keeping up, what it's done, 
    | falling behind | `flusso:slot_lag_bytes_rate5m > 0 for 15m` | the backlog is growing, not draining |
    | held by a commit | `flusso_replication_visibility_wait_seconds > 30 for 1m` | a commit isn't visible yet, so nothing after it is indexed; usually a synchronous standby not answering (see [Behind a synchronous standby](../reference/source-postgres.md#behind-a-synchronous-standby)) |
 
-   Add `flusso_errors_total` increasing, and `up == 0` on the scrape target.
+   Add `flusso_errors_total` increasing, `flusso_index_schema_errors > 0` (a start went on with an index that [won't work as written](../reference/checks.md#errors-a-start-goes-on-with)), and `up == 0` on the scrape target.
 
 ## Options and variations
 

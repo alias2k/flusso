@@ -147,7 +147,7 @@ A search document needs more than its root row: a user with their orders, a prod
    flusso check --config flusso.toml
    ```
 
-   The coverage section lists any table not yet streamed. When the source role owns the tables and holds `CREATE` on the database, `flusso run` extends the publication itself. Otherwise `check` prints the exact `ALTER PUBLICATION … ADD TABLE` to run with a privileged role. Details in [Source: Postgres](../reference/source-postgres.md#capture).
+   The coverage section lists any table not yet streamed. When the source role owns the tables and holds `CREATE` on the database, `flusso run` extends the publication itself. Otherwise `check` fails on it as a [capture gap](../reference/checks.md#capture-gaps) and prints the exact `ALTER PUBLICATION … ADD TABLE` to run with a privileged role. Details in [Source: Postgres](../reference/source-postgres.md#capture).
 
 ## Options and variations
 
