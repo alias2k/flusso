@@ -482,6 +482,14 @@ impl crate::SourcePositions for Seqs {
     fn parses(&self, text: &str) -> bool {
         text == "nothing" || text.parse::<u64>().is_ok()
     }
+
+    fn compare(&self, a: &str, b: &str) -> Option<std::cmp::Ordering> {
+        let seq = |text: &str| match text {
+            "nothing" => Some(0),
+            text => text.parse::<u64>().ok(),
+        };
+        Some(seq(a)?.cmp(&seq(b)?))
+    }
 }
 
 /// Two lanes, `orders` and `users`, of one sink `primary`.
@@ -2766,5 +2774,32 @@ async fn a_record_delete_that_landed_although_its_call_failed_goes_on() {
     *rig.sink.forget_lands_then_fails.lock().unwrap() = true;
     assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
     let _attach = next_request(&rig).await;
+    task.abort();
+}
+
+/// Review of the second fix round, S-a': another writer settles the
+/// reattach's open gap at a stale place (it believed it held the slot)
+/// before the attach. The attach takes its gap by its start, open or not,
+/// and moves the end to where it attached: an end only ever moves later.
+#[tokio::test(start_paused = true)]
+async fn a_gap_settled_by_another_writer_before_the_attach_keeps_the_attach_end() {
+    let rig = Rig::new(64);
+    let (_engine, task, control) = detached_live_only(&rig).await;
+    assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
+    let stream::Request::Attach { attempt, .. } = next_request(&rig).await else {
+        panic!("an attach");
+    };
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), vec![gap(Some("1"), Some("2"))]);
+    rig.progress.routed(Position::new(3));
+    rig.progress.attach(&lane(users()), attempt);
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    eventually("the attach end is kept", || {
+        rig.sink.marker_gaps.lock().unwrap().get("users") == Some(&vec![gap(Some("1"), Some("3"))])
+    })
+    .await;
     task.abort();
 }

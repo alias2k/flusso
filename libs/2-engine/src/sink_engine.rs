@@ -527,11 +527,14 @@ impl SinkEngine {
     }
 
     /// The reattached `lane`'s gap `attached` (its `to` set at the attach)
-    /// kept with its index: the open gap it completes, if no one settled it
-    /// first (the write is conditional). A failure fails the run: the fence
-    /// heard it already, and the next read while the slot is held settles
-    /// the open end where the lane stands, which is where it was attached
-    /// (nothing of it landed).
+    /// kept with its index, by a conditional write. The gap is taken by its
+    /// start, open or not (review of the second fix round, S-a'): another
+    /// process that believed it held the slot may have settled it at a stale
+    /// place first. Its end moves to the attach's when that is later or the
+    /// kept end can't be compared; it never moves earlier. A failure fails
+    /// the run: the fence heard the gap already, and the next read while the
+    /// slot is held settles an open end where the lane stands, which is
+    /// where it was attached (nothing of it landed).
     pub(super) async fn record_reattached(
         &self,
         lane: &LaneKey,
@@ -540,15 +543,30 @@ impl SinkEngine {
         let Some(mapping) = self.mappings.iter().find(|m| m.index == lane.index) else {
             return Ok(());
         };
+        let later = |kept: &Option<String>| match (kept.as_deref(), attached.to.as_deref()) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(kept), Some(to)) => self
+                .positions
+                .as_ref()
+                .and_then(|positions| positions.compare(to, kept))
+                .is_none_or(|order| order.is_gt()),
+        };
         let gaps = self
             .sink
             .record_gaps(mapping, &|kept| {
                 let mut gaps = kept.to_vec();
-                let open = gaps
+                let ours = gaps
                     .iter_mut()
                     .rev()
-                    .find(|gap| gap.to.is_none() && gap.from == attached.from)?;
-                open.to = attached.to.clone();
+                    .find(|gap| gap.from == attached.from)?;
+                if !later(&ours.to) {
+                    return None;
+                }
+                if ours.to.is_some() {
+                    tracing::warn!(%lane, kept = ?ours.to, to = ?attached.to, "the gap was settled elsewhere at a place before the attach: its end moves to the attach");
+                }
+                ours.to = attached.to.clone();
                 Some(gaps)
             })
             .await

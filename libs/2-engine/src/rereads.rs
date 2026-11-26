@@ -230,6 +230,10 @@ pub trait SourcePositions: Debug + Send + Sync {
 
     /// Whether `text` is a position this source reads.
     fn parses(&self, text: &str) -> bool;
+
+    /// How two positions in the source's text compare; `None` when either
+    /// doesn't parse.
+    fn compare(&self, a: &str, b: &str) -> Option<std::cmp::Ordering>;
 }
 
 /// [`SourcePositions`] over a change capture.
@@ -245,5 +249,11 @@ impl SourcePositions for CapturePositions {
 
     fn parses(&self, text: &str) -> bool {
         self.0.parse_position(text).is_ok()
+    }
+
+    fn compare(&self, a: &str, b: &str) -> Option<std::cmp::Ordering> {
+        let a = self.0.parse_position(a).ok()?;
+        let b = self.0.parse_position(b).ok()?;
+        Some(a.cmp(&b))
     }
 }
