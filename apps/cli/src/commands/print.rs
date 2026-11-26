@@ -116,6 +116,12 @@ pub(crate) fn success(out: &mut impl Write, pen: Pen, message: &str) -> Result<(
     Ok(())
 }
 
+/// A yellow `!` followed by a note the reader should see first.
+pub(crate) fn note(out: &mut impl Write, pen: Pen, message: &str) -> Result<()> {
+    writeln!(out, "{} {message}", pen.paint("1;33", "!"))?;
+    Ok(())
+}
+
 /// A bold section title with a dim underline the width of the title.
 fn section(out: &mut impl Write, pen: Pen, title: &str) -> Result<()> {
     writeln!(out, "\n{}", pen.bold(title))?;

@@ -1,6 +1,7 @@
 //! `flusso show` — what a config declares, with no database: `show config`
 //! prints the deployment (source, stream, sinks, indexes; secrets redacted)
-//! and `show mapping [index]` every index's typed mapping, or one.
+//! and `show mapping [index]` every enabled index's typed mapping, or the one
+//! named, a disabled one included (said so first).
 //!
 //! `flusso check` only checks; this is where the detail it used to print
 //! lives. The config is read as `check --offline` reads it: `--config` (or
@@ -147,9 +148,26 @@ fn mapping_to(
     config: &Config,
     index: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mappings = chosen(config.resolve_mappings(), index)?;
+    let mappings = chosen(config, index)?;
     match format {
-        Format::Human => print::resolved(out, pen, &mappings),
+        Format::Human => {
+            if let Some(name) = index
+                && config
+                    .indexes
+                    .iter()
+                    .any(|(of, entry)| of.as_ref() == name && !entry.enabled)
+            {
+                print::note(
+                    out,
+                    pen,
+                    &format!(
+                        "index `{name}` is disabled: `flusso run` builds no index for it until it \
+                         is enabled"
+                    ),
+                )?;
+            }
+            print::resolved(out, pen, &mappings)
+        }
         Format::Json => {
             writeln!(out, "{}", serde_json::to_string_pretty(&mappings)?)?;
             Ok(())
@@ -157,26 +175,34 @@ fn mapping_to(
     }
 }
 
-/// Every mapping, or the one of `index`; an unknown name lists the known.
-fn chosen(mappings: Vec<IndexMapping>, index: Option<&str>) -> anyhow::Result<Vec<IndexMapping>> {
+/// Every enabled index's mapping, or the one of `index`, disabled or not; an
+/// unknown name lists the indexes the config declares.
+fn chosen(config: &Config, index: Option<&str>) -> anyhow::Result<Vec<IndexMapping>> {
     let Some(name) = index else {
-        return Ok(mappings);
+        return Ok(config.resolve_mappings());
     };
-    let known: Vec<String> = mappings.iter().map(|m| m.index.to_string()).collect();
-    let one: Vec<IndexMapping> = mappings
-        .into_iter()
-        .filter(|m| m.index.as_ref() == name)
+    if let Some((of, entry)) = config.indexes.iter().find(|(of, _)| of.as_ref() == name) {
+        return Ok(vec![entry.schema.resolve(of.clone())]);
+    }
+    let known: Vec<String> = config
+        .indexes
+        .iter()
+        .map(|(of, entry)| {
+            if entry.enabled {
+                of.to_string()
+            } else {
+                format!("{of} (disabled)")
+            }
+        })
         .collect();
-    anyhow::ensure!(
-        !one.is_empty(),
+    anyhow::bail!(
         "no index `{name}` in the config; the indexes are: {}",
         if known.is_empty() {
             "(none)".to_owned()
         } else {
             known.join(", ")
         }
-    );
-    Ok(one)
+    )
 }
 
 #[cfg(test)]
@@ -188,7 +214,8 @@ mod tests {
 
     use super::*;
 
-    /// `products` and `users`, read by a Postgres source whose URL holds a
+    /// `products` and `users`, and `archive` disabled, read by a Postgres
+    /// source whose URL holds a
     /// password, written to an OpenSearch sink whose password is literal and
     /// whose URL names a variable.
     fn config() -> Config {
@@ -213,6 +240,11 @@ mod tests {
             name = "users"
             schema = "users.schema.yml"
             enabled = true
+
+            [[index]]
+            name = "archive"
+            schema = "archive.schema.yml"
+            enabled = false
             "#,
         )
         .unwrap();
@@ -357,7 +389,45 @@ mod tests {
         .to_string();
         assert_eq!(
             error,
-            "no index `orders` in the config; the indexes are: products, users"
+            "no index `orders` in the config; the indexes are: archive (disabled), products, users"
         );
+    }
+
+    /// A disabled index is named as disabled, and its mapping still shows.
+    #[test]
+    fn show_mapping_of_a_disabled_index_says_it_is_disabled() {
+        let config = config();
+        let all = printed(|out| mapping_to(out, print::Pen::plain(), Format::Human, &config, None));
+        assert!(
+            !all.contains("archive"),
+            "every index means every enabled one:\n{all}"
+        );
+        let human = printed(|out| {
+            mapping_to(
+                out,
+                print::Pen::plain(),
+                Format::Human,
+                &config,
+                Some("archive"),
+            )
+        });
+        assert!(
+            human.contains(
+                "index `archive` is disabled: `flusso run` builds no index for it until it is enabled"
+            ),
+            "{human}"
+        );
+        assert!(human.contains("Index  archive"), "{human}");
+        let json = printed(|out| {
+            mapping_to(
+                out,
+                print::Pen::plain(),
+                Format::Json,
+                &config,
+                Some("archive"),
+            )
+        });
+        let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(document[0]["index"], "archive", "{json}");
     }
 }
