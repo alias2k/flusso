@@ -109,6 +109,8 @@ struct Gate {
     rereads: std::sync::OnceLock<Arc<crate::Rereads>>,
     /// Each document written on a lane not read under the current stream.
     unread_writes: Mutex<Vec<String>>,
+    /// Each index's walk checkpoint, as a real sink keeps it with the marker.
+    walked: Mutex<BTreeMap<String, String>>,
     /// Reads of the records that fail once `forget_detachment` landed then
     /// failed.
     reads_fail_after_forget: Mutex<usize>,
@@ -378,7 +380,32 @@ impl Sink for Gate {
         Ok(attempts)
     }
 
+    async fn record_walked(&self, index: &IndexName, mark: &str) -> sink::Result<()> {
+        self.walked
+            .lock()
+            .unwrap()
+            .insert(index.to_string(), mark.to_owned());
+        Ok(())
+    }
+
+    async fn forget_walked(&self, index: &IndexName) -> sink::Result<()> {
+        self.walked.lock().unwrap().remove(index.as_ref());
+        Ok(())
+    }
+
+    async fn seeding(&self, index: &IndexName) -> sink::Result<sink::Seeding> {
+        Ok(if self.unseeded.lock().unwrap().contains(index.as_ref()) {
+            sink::Seeding::Unseeded {
+                walked: self.walked.lock().unwrap().get(index.as_ref()).cloned(),
+            }
+        } else {
+            sink::Seeding::Seeded
+        })
+    }
+
     async fn demote(&self, mapping: &IndexMapping, live_only: bool) -> sink::Result<()> {
+        // A demotion forgets the walk, as the real sink's does.
+        self.walked.lock().unwrap().remove(mapping.index.as_ref());
         if let Some(record) = self.kept.lock().unwrap().get_mut(mapping.index.as_ref()) {
             record.record = Some(DetachRecord::Detached { live_only });
             // R14: live only, the marker is back on the generation reads see.
@@ -3307,4 +3334,59 @@ async fn a_rebuild_across_an_opening_never_writes_a_lane_another_process_demoted
     assert!(rig.sink.unread_writes.lock().unwrap().is_empty());
     assert!(engine.lane_health(&lane(orders())).is_detached());
     task.abort();
+}
+
+/// The fourth re-check, B-2: read again once the slot is held, a rebuild
+/// another process began (its record `rebuilding`, a walk checkpoint kept)
+/// is put back to detached before the lane drops anything: a later start
+/// finds it detached, never resumes the rebuild from its checkpoint over the
+/// changes this run dropped.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_another_process_began_is_demoted_before_its_lane_drops_anything() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let mut record = Detachment::recorded(
+        DetachRecord::Rebuilding { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    );
+    record.attempts = Some(1);
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), record);
+    rig.sink
+        .walked
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), "k".to_owned());
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    rig.live(&users(), 1, 1).await;
+    eventually("the lane is taken as detached", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    assert_eq!(
+        *rig.sink.demoted.lock().unwrap(),
+        [("users".to_owned(), false)],
+        "demoted before the lane dropped anything"
+    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(written(&rig).is_empty(), "the change at 1 was dropped");
+    task.abort();
+    let _ = task.await;
+    assert!(
+        rig.sink.walked.lock().unwrap().get("users").is_none(),
+        "the walk checkpoint is gone"
+    );
+    let next = rig.engine();
+    next.stage(Continuity::Resumed).await.unwrap();
+    assert!(
+        next.lane_health(&lane(users())).is_detached(),
+        "the next start finds it detached, not a rebuild to resume"
+    );
 }

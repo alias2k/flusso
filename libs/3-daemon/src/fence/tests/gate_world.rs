@@ -194,6 +194,13 @@ impl Sink for Store {
         Ok(attempts)
     }
 
+    async fn demote(&self, mapping: &IndexMapping, live_only: bool) -> sink::Result<()> {
+        if let Some(record) = self.kept.lock().unwrap().get_mut(mapping.index.as_ref()) {
+            record.record = Some(DetachRecord::Detached { live_only });
+        }
+        Ok(())
+    }
+
     async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
         // The seed writes the marker whole: the record and the gaps go. A
         // seed this process made holds every change its walk read after the
