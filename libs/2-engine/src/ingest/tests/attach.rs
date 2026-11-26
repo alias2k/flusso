@@ -576,3 +576,72 @@ async fn an_attach_beside_another_builder_under_a_budget_pauses_only_its_index()
     }
     assert!(!progress.is_detached(&lane()));
 }
+
+/// O27: a rebuild's backfill asked while another sink's walk of the index
+/// runs waits for that walk (the inbox is read only with no walk running),
+/// then gets its own: its first page comes after the other walk completed.
+#[tokio::test(start_paused = true)]
+async fn a_rebuilds_backfill_waits_behind_another_sinks_walk_of_the_index() {
+    let db = Database::new(200, Vec::new());
+    let (stream, kinds_log, _progress, ingest, _builder) = two_sinks(&db);
+    let requests = stream.requests().unwrap();
+    requests
+        .producer
+        .publish(backfill_of(secondary()))
+        .await
+        .unwrap();
+    let other = LaneKey::new(users(), secondary());
+    let late = async {
+        for _ in 0..600 {
+            if kinds_log
+                .lock()
+                .unwrap()
+                .get(&other)
+                .is_some_and(|sent| !sent.is_empty())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        requests
+            .producer
+            .publish(backfill_of(sink_name()))
+            .await
+            .unwrap();
+        for _ in 0..6000 {
+            if kinds_log
+                .lock()
+                .unwrap()
+                .get(&lane())
+                .is_some_and(|sent| !sent.is_empty())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let other_sent = kinds_log
+            .lock()
+            .unwrap()
+            .get(&other)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            other_sent.last().map(String::as_str),
+            Some("complete"),
+            "the first page of the waiting backfill comes after the other walk's end"
+        );
+    };
+    let (ran, ()) = tokio::join!(tokio::time::timeout(LIMIT, ingest.run()), late);
+    ran.expect("the run ends").expect("the run succeeds");
+    let first = kinds_log
+        .lock()
+        .unwrap()
+        .get(&lane())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        first.last().map(String::as_str),
+        Some("complete"),
+        "{first:?}"
+    );
+}
