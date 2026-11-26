@@ -63,6 +63,10 @@ type Write = (Instant, Vec<(String, Vec<String>)>);
 /// index is ensured again), or landed. `fail` fails every write as a whole.
 #[derive(Debug, Default)]
 struct Gate {
+    /// When set, each upsert written while its lane isn't read under the
+    /// current stream is logged in `unread_writes`.
+    rereads: std::sync::OnceLock<Arc<crate::Rereads>>,
+    unread_writes: Mutex<Vec<String>>,
     answers: Mutex<BTreeMap<String, Answer>>,
     fail: std::sync::atomic::AtomicBool,
     ordered: bool,
@@ -171,6 +175,17 @@ impl Sink for Gate {
                 return Err(SinkError::Write("refresh: connection reset".to_owned()));
             }
             return Ok(WriteReport::clean());
+        }
+        if let Some(rereads) = self.rereads.get() {
+            for envelope in parts.iter().flat_map(|part| part.iter()) {
+                let lane = LaneKey::new(envelope.index.clone(), sink_name("primary"));
+                if !rereads.current(&lane) {
+                    self.unread_writes
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}/{}", envelope.index, envelope.id));
+                }
+            }
         }
         let started = Instant::now();
         let slow = self.slow_id.lock().unwrap().clone();
@@ -3942,4 +3957,86 @@ async fn a_reindex_staged_before_the_parked_item_is_redelivered_still_holds_it()
     assert_eq!(rig.applied(&orders()), through(0));
     drop((control, control2));
     task.abort();
+}
+
+/// The fifth re-check (N1 of the first report): a substitute is written as
+/// its lane's probe, past `grant`, so it reads the records again first when
+/// a read is due. The slot opens again just as the substitute arrives; the
+/// run's `select!` takes either first, so the case runs 16 times: never is
+/// the substitute written before its lane is read under the new stream.
+#[tokio::test(start_paused = true)]
+async fn a_substitute_arriving_with_an_opening_is_written_only_once_read() {
+    for _ in 0..16 {
+        let rig = Rig::new(Gate::default());
+        let rereads = Arc::new(crate::Rereads::default());
+        let _ = rig.sink.rereads.set(Arc::clone(&rereads));
+        rig.sink.refused_ids.lock().unwrap().insert("1".to_owned());
+        rig.progress.published(
+            &lane(orders()),
+            stream::ItemKey::new(0),
+            Position::new(0),
+            Position::new(0),
+        );
+        rig.stream
+            .lane(&lane(orders()))
+            .unwrap()
+            .producer
+            .publish(keyed(&orders(), &[1], Some(0), 1))
+            .await
+            .unwrap();
+        let builder = Arc::new(Builder::default());
+        builder
+            .silent
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let answers = answering(&rig, Arc::clone(&builder), 10);
+        rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+        let engine = Arc::new(
+            rig.engine(FailurePolicy::Stop)
+                .with_rereads(Arc::clone(&rereads)),
+        );
+        let task = spawn(Arc::clone(&engine));
+        eventually("a fresh build is asked", || builder.asked().len() == 1).await;
+        rig.sink.refused_ids.lock().unwrap().clear();
+        let ticket = builder.asked()[0].1;
+        let substitutes = rig
+            .stream
+            .substitutes(&sink_name("primary"))
+            .unwrap()
+            .producer;
+        rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+        substitutes
+            .publish(stream::Substitute {
+                lane: lane(orders()),
+                ticket,
+                batch: Batch {
+                    envelopes: vec![Envelope::upsert(
+                        orders(),
+                        "1",
+                        GenericValue::Map(BTreeMap::new()),
+                        None,
+                        chrono::Utc::now(),
+                    )]
+                    .into(),
+                    build: Some(10),
+                    ids: Some(Arc::new(vec![kernel::DocumentId {
+                        index: orders(),
+                        key: key(1),
+                    }])),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        eventually("the substitute lands", || {
+            rig.applied(&orders()) == through(0)
+        })
+        .await;
+        assert!(
+            rig.sink.unread_writes.lock().unwrap().is_empty(),
+            "written before its lane was read under the new stream: {:?}",
+            rig.sink.unread_writes.lock().unwrap()
+        );
+        task.abort();
+        answers.abort();
+    }
 }
