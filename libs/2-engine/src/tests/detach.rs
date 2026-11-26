@@ -3515,3 +3515,100 @@ async fn a_staging_drops_a_rebuild_the_records_no_longer_show() {
     assert!(!written(&rig).contains(&"users/99".to_owned()));
     task.abort();
 }
+
+/// The fifth re-check, B-1: the stream ended (this process no longer holds
+/// the slot) and no opening has begun. Another process detaches `users`.
+/// What the lane holds is written as on `main`, but the seed it reaches
+/// erases no record: with no slot held the index stays unseeded.
+#[tokio::test(start_paused = true)]
+async fn a_stream_that_ended_seeds_nothing_over_a_detach_written_since() {
+    let rig = Rig::new(64);
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    let stream::Request::Backfill { index, ticket, .. } = next_request(&rig).await else {
+        panic!("a backfill is asked at staging");
+    };
+    assert_eq!(index, users());
+    eventually("read under the stream", || read_all(&rig)).await;
+    rig.live(&users(), 1, 1).await;
+    eventually("written while held", || {
+        written(&rig).contains(&"users/1".to_owned())
+    })
+    .await;
+    rig.rereads.closed();
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), detached_record());
+    rig.live(&users(), 2, 2).await;
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    eventually("the lane's backlog is written, as on main", || {
+        written(&rig).contains(&"users/2".to_owned())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let kept = rig.sink.kept.lock().unwrap().get("users").cloned();
+    let seeded = rig.sink.seeded.lock().unwrap().clone();
+    task.abort();
+    assert!(
+        kept.is_some() && seeded.is_empty(),
+        "with no slot held the seed erased the record: record after {kept:?}, seeded {seeded:?}"
+    );
+}
+
+/// The fifth re-check, S-1: one process, nothing detached. The stream ends
+/// and the restart's opening fails (the old walsender still holds the slot).
+/// A stop arrives: the sinks still land what their lanes hold, as on `main`,
+/// so the drain ends instead of sitting out its deadline.
+#[tokio::test(start_paused = true)]
+async fn a_stop_while_an_opening_failed_still_drains_the_lanes() {
+    let rig = Rig::new(64);
+    let stop = crate::Stop::new();
+    let engine = Arc::new(
+        rig.built("primary", Arc::clone(&rig.sink))
+            .with_stop(stop.clone()),
+    );
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    eventually("read under the stream", || read_all(&rig)).await;
+    rig.live(&users(), 1, 1).await;
+    eventually("written", || written(&rig).contains(&"users/1".to_owned())).await;
+    rig.sink
+        .slow
+        .lock()
+        .unwrap()
+        .replace(("2".to_owned(), Duration::from_secs(2)));
+    for at in 2..10 {
+        rig.live(&users(), i64::try_from(at).unwrap(), at).await;
+    }
+    rig.rereads.closed();
+    assert!(rig.rereads.open(async { Err::<(), ()>(()) }).await.is_err());
+    stop.request();
+    let started = Instant::now();
+    let mut drained = false;
+    while Instant::now() < started + Duration::from_secs(30) {
+        if rig.stream.is_idle() {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let written = written(&rig);
+    task.abort();
+    assert!(
+        drained,
+        "the lanes never drained within 30 s of the stop: written {written:?}"
+    );
+}
