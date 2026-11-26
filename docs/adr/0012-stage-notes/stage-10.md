@@ -1099,6 +1099,77 @@ The re-check (`target/review-482-fix-round-2/REPORT.md`) found the same place a 
 
 **Not proven.** As before. Nothing in this round runs against a live Postgres or OpenSearch.
 
+### After the third re-check
+
+The re-check (`target/review-482-fix-round-3/REPORT.md`) found a fourth hole in what an unread lane may vouch for, in the sink engine's half this time. The coordinator simplified the rule instead of patching it again (a decision under the owner's correctness-over-speed rule, reported to him). The branch was first rebased onto `main` at `7ddff7e5` (#486).
+
+**The rule, one line.** A lane answers `starting` from the moment a new stream may answer until its own records were read under that stream. `gap`, `detached`, `rebuilding` and `backfilling` still take precedence as themselves.
+
+**Why the frozen answer went (item 2, `5b5cc99a`).**
+- **The problem.** Three of the four holes were in the convenience that let an unread lane vouch for what it applied under the previous stream (`at_open`):
+  - B1': the window at the opening;
+  - B1'': a second opening re-freezing;
+  - S-c: a detach adopted while unread.
+
+  Its own statement was not literally true either (S-1: the freeze took the max of every answer, unread ones included).
+- **What went.** `at_open`, `ReadBefore`, the opening's freeze, and their tests.
+- **What stays.** `Rereads::open` as the one opening, marking every lane unread before the stream can answer.
+- **The cost, for the docs:**
+  - after each opening, a `/wait` on an already-applied position holds until that lane's first read: one `_mget`, normally well under a second. `flusso-query` retries `503` within its deadline;
+  - while a destination is down across an opening, its lanes answer `starting`.
+- **The read is prompt.** An opening wakes every sink engine's run (`Rereads::openings`, a watch), so a quiet stream doesn't leave its lanes unread until the next write or idle tick (`an_opening_on_a_quiet_stream_is_read_at_once`).
+
+**The four holes, for the record.**
+
+| Hole | Where | What it let through |
+| --- | --- | --- |
+| B1' | the opening | an answer from the new stream taken before the lanes counted as unread |
+| B1'' | a second opening before the read | the first stream's start re-frozen |
+| S-c | a detach adopted while unread | a freeze at the new stream's start |
+| B1''' | the read count | a staging that couldn't read one index counted as a read of the whole sink, so that index's lane vouched up to the new stream's start, over another process's drop |
+
+The world property then found a fifth of the same shape: a rebuild begun while unread froze `Rebuilding` at whatever answer was held. Fixed with it, in `256fea15`.
+
+**B1''' (item 1, `4453a87f`): reads count per lane, never per sink.**
+- **The count.** `Rereads::read(&LaneKey, at)` and `current(&LaneKey)`. `SinkEngine::step` counts its lane only when its step got through: staging, a restage or a reindex alike.
+- **The run's read.** `Run::reread` counts each lane it read. A detached lane counts without a read, since its state answers. A restaging lane is left to its restage path, so a bad index never fails the sink's run (#471).
+- **An index whose read failed** stays unread, answers `starting` and writes nothing new, while its siblings go on.
+- **Tests:**
+  - `a_staging_that_left_an_index_unread_counts_no_read_of_it`, during a stop too;
+  - `a_read_again_that_missed_a_lane_counts_no_read_of_it`;
+  - `an_unread_lane_never_holds_back_its_read_sibling`.
+
+**The world property (item 3, `256fea15`): `fence::tests::gate_world`.**
+- **The setup.** It runs the real sink engines over a stand-in sink:
+  - two sinks: `audit` with `backfill = false`, which reattaches; `primary`, which rebuilds;
+  - two indexes, so four lanes.
+- **The events:**
+  - openings that succeed or fail, one of them past another process's drop of one lane (its detach record left in the sink, every other lane applied by that process);
+  - sink-run restarts whose staging can't read some indexes, which stay unreadable for the run's own read until made readable;
+  - changes applied and made searchable per lane;
+  - a reindex (a rebuild to its seed when detached) and a reattach, through the engines' controls, the test playing the index's builder (`Attached`, the backfill);
+  - `/status` reads;
+  - waits at both levels, on one lane or a whole sink.
+- **The oracle owes nothing to the engine's count.** The stand-in logs every read of a lane's records that got through, with the opening it began under; a seed counts as one. It also holds the records and gaps. A wait for `p` on a lane passes only if the lane covered `p` while it held all of these:
+  - its records were read under the current stream, with no detach record in them;
+  - it was neither detached nor rebuilding;
+  - no gap the sink keeps holds `p`.
+- **Liveness.** Once a healthy lane is read, a change applied on it is vouched for on that lane alone, beside an unread sibling.
+- **Size.** 512 cases of 1 to 40 events, about 2 s. The `gate_property` test over the fence alone stays.
+- **What it rediscovers when the fix is reverted, each time:**
+  - B1''' (a lane counted though its step failed);
+  - `Fence::started` turning a detached lane back into a writing one;
+  - the rebuild freeze;
+  - S-c;
+  - B1' (the old order);
+  - the unread-writes gate turned off.
+
+**Minors (item 4).**
+- **m-1 (`99f35b57`).** A token only `Rereads::open` can make can't be true by construction. The source port (layer 1) would have to name a type only the engine (layer 2) constructs, and Rust has no such visibility: any constructor the port exposes is open to every caller, at the cost of every capture's `live` signature. So the tripwire stays. It now also catches `ChangeCapture::live`, and skips comment lines. Its doc lists what it misses and what trips it falsely.
+- **m-2 (`2955cfb5`).** The log of a reattach finishing with no gap open says it refuses the lane's whole past, and that only a seed (a reindex on a sink that can rebuild) clears it.
+
+**Not proven.** As before: no live run of overlapping processes, a rebuild, a reattach, or the conditional gap write.
+
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
 **O29: can a process that staged before another one's detach keep the lane attached? (S3)**
