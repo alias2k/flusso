@@ -1229,7 +1229,12 @@ impl SinkEngine {
                 return Ok(self.staged_detached(&mapping.index, why, through));
             }
             AtStaging::Rebuilding(attempts) => {
-                if !self.options.backfill || self.skip_backfill {
+                let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
+                // O26 demotes at a process's start only: a rebuild this
+                // process runs survives its sink's re-staging (review of
+                // step 4, S1).
+                let running_here = self.lane_state(&lane).rebuilding.is_some();
+                if !running_here && (!self.options.backfill || self.skip_backfill) {
                     // O26 / R14: no backfill to finish it in this process.
                     self.sink.demote(mapping, !self.options.backfill).await?;
                     tracing::warn!(index = %mapping.index, sink = %self.name, skip_backfill = self.skip_backfill, "a rebuild under way is put back to detached: this start backfills nothing");
@@ -1240,7 +1245,6 @@ impl SinkEngine {
                         through,
                     ));
                 }
-                let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
                 let mut state = self.lane_state(&lane);
                 if state.rebuilding.is_none() {
                     state.rebuilding = Some(attempts);

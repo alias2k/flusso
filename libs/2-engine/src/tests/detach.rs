@@ -2160,3 +2160,49 @@ async fn a_second_reattach_keeps_the_first_gaps_start() {
     );
     task.abort();
 }
+
+/// Review of step 4, S1: a rebuild an operator forced under
+/// `--skip-backfill` survives its sink's re-staging inside the process (a
+/// run restart after a transient failure): O26 demotes only at a process's
+/// start, where no backfill would finish it.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_forced_under_skip_backfill_survives_a_sink_run_restart() {
+    let rig = Rig::new(64);
+    rig.sink.block(&users(), true);
+    let engine = Arc::new(
+        rig.built("primary", Arc::clone(&rig.sink))
+            .skip_backfill(true),
+    );
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 1, 1).await;
+    eventually("the lane detaches", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    rig.sink.block(&users(), false);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    let stream::Request::Attach { attempt, .. } = next_request(&rig).await else {
+        panic!("the forced rebuild asks for its attach");
+    };
+    rig.progress.attach(&lane(users()), attempt);
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let _backfill = next_request(&rig).await;
+    task.abort();
+    let _ = task.await;
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert!(
+        rig.sink.demoted.lock().unwrap().is_empty(),
+        "no demotion inside the process"
+    );
+    assert!(engine.lane_health(&lane(users())).is_open());
+    assert_eq!(engine.lane_state(&lane(users())).rebuilding, Some(1));
+}
