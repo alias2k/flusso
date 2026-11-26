@@ -210,11 +210,11 @@ pub fn duplicate_outcome(same: &[&Field]) -> DuplicateOutcome {
 struct Voice {
     /// Who declares the shape: "the index maps the last one".
     lead: String,
-    /// "a document holds", or "a script reads".
+    /// "a document holds", or "a script can read".
     holds: &'static str,
-    /// "every document holds", or "a script reads".
+    /// "every document holds", or "a script can read".
     every: &'static str,
-    /// "a document keeps", or "a script reads".
+    /// "a document keeps", or "a script can read".
     keeps: &'static str,
     /// "the index maps", or "the schema declares".
     maps: &'static str,
@@ -225,12 +225,13 @@ impl Voice {
         match reach {
             Reach::Scripts => Self {
                 lead: "no document holds them, since they are, or are under, an input-only \
-                       (`emit: false`) field, but a script reads this level (through `this` or `root`) \
-                       before it is stripped, and the schema declares the last one"
+                       (`emit: false`) field, but a script can read this level (through `this`, \
+                       or through `root` where a script names it) before it is stripped, and the \
+                       schema declares the last one"
                     .to_owned(),
-                holds: "a script reads",
-                every: "a script reads",
-                keeps: "a script reads",
+                holds: "a script can read",
+                every: "a script can read",
+                keeps: "a script can read",
                 maps: "the schema declares",
             },
             Reach::Indexed | Reach::Stored | Reach::Absent => Self {
@@ -437,7 +438,7 @@ fn unchecked_message(
     if reach == Reach::Scripts {
         let Voice { lead, .. } = Voice::of(reach);
         return format!(
-            "{lead}, {last}, but a script reads {what}, not what #{} declares",
+            "{lead}, {last}, but a script can read {what}, not what #{} declares",
             position(fields.len() - 1)
         );
     }

@@ -3556,7 +3556,7 @@ mod tests {
             assert_eq!(kind, expected, "{fields}");
             assert!(message.contains("no document holds"), "{message}");
             if expected == wrong {
-                assert!(message.contains("a script reads"), "{message}");
+                assert!(message.contains("a script can read"), "{message}");
             } else {
                 assert!(message.contains("no script reads"), "{message}");
             }
@@ -4054,7 +4054,7 @@ mod tests {
             (
                 json!([int_field("id"), reader.clone(), a, b]),
                 warning,
-                "a script reads the last one's value, read as the first one declares it",
+                "a script can read the last one's value, read as the first one declares it",
             ),
             (
                 json!([int_field("id"), five.clone(), object.clone()]),
@@ -4064,7 +4064,7 @@ mod tests {
             (
                 json!([int_field("id"), reader, five, object]),
                 wrong,
-                "a script reads the first one's constant (#3)",
+                "a script can read the first one's constant (#3)",
             ),
         ] {
             let (kind, message) = stated(fields.clone());
