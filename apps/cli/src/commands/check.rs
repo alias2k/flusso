@@ -143,15 +143,17 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
 
     let has_errors = diagnostics.iter().any(|d| d.severity == Severity::Error);
     let online = match (&coverage, &pre_image) {
-        (Some(coverage), Some(pre_image)) => Some(Online {
-            server: refused,
+        (Some(coverage), Some(pre_image)) => Some(Online::new(
+            &source_spec(&config),
+            refused,
             coverage,
             pre_image,
-            manage_publication: manage,
-            manage_replica_identity: postgres.manage_replica_identity,
-        }),
+            manage,
+            postgres.manage_replica_identity,
+        )),
         _ => None,
     };
+    let gaps = online.as_ref().map_or(0, |o| o.gaps.len());
     let report = Report {
         path: &args.config,
         config: &config,
@@ -178,6 +180,10 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
             "schema validation failed against the database"
         }
     );
+    ensure!(
+        gaps == 0,
+        "{gaps} capture gap(s) `flusso run` won't close: the indexes miss changes"
+    );
     Ok(())
 }
 
@@ -189,6 +195,34 @@ struct Online<'a> {
     pre_image: &'a PreImageReport,
     manage_publication: bool,
     manage_replica_identity: bool,
+    /// The gaps in capture `flusso run` won't close: errors.
+    gaps: Vec<crate::gaps::Gap>,
+}
+
+impl<'a> Online<'a> {
+    fn new(
+        spec: &source::SourceSpec,
+        server: Option<&'a str>,
+        coverage: &'a CoverageReport,
+        pre_image: &'a PreImageReport,
+        manage_publication: bool,
+        manage_replica_identity: bool,
+    ) -> Self {
+        Self {
+            gaps: crate::gaps::of(
+                spec,
+                coverage,
+                manage_publication,
+                pre_image,
+                manage_replica_identity,
+            ),
+            server,
+            coverage,
+            pre_image,
+            manage_publication,
+            manage_replica_identity,
+        }
+    }
 }
 
 /// Everything `check` found, rendered as the human report or as JSON: one
@@ -206,6 +240,7 @@ impl Report<'_> {
     fn summary(&self) -> print::Summary {
         print::Summary::of(
             self.diagnostics,
+            self.online.as_ref().map_or(0, |o| o.gaps.len()),
             self.online.is_none(),
             self.online.as_ref().is_some_and(|o| o.server.is_some()),
         )
@@ -223,10 +258,27 @@ impl Report<'_> {
                 print::offline_diagnostics(out, pen, self.diagnostics)?;
             }
             Some(online) => {
+                let coverage_fails =
+                    print::coverage_status(online.coverage, online.manage_publication)
+                        == print::Status::Problem;
+                let pre_image_fails =
+                    print::pre_image_status(online.pre_image, online.manage_replica_identity)
+                        == print::Status::Problem;
                 print::server(out, pen, online.server)?;
-                print::coverage(out, pen, online.coverage, online.manage_publication)?;
-                print::pre_image(out, pen, online.pre_image, online.manage_replica_identity)?;
+                if !coverage_fails {
+                    print::coverage(out, pen, online.coverage, online.manage_publication)?;
+                }
+                if !pre_image_fails {
+                    print::pre_image(out, pen, online.pre_image, online.manage_replica_identity)?;
+                }
                 print::diagnostics(out, pen, self.diagnostics)?;
+                print::gaps(out, pen, &online.gaps)?;
+                if coverage_fails {
+                    print::coverage(out, pen, online.coverage, online.manage_publication)?;
+                }
+                if pre_image_fails {
+                    print::pre_image(out, pen, online.pre_image, online.manage_replica_identity)?;
+                }
             }
         }
         writeln!(out)?;
@@ -291,6 +343,12 @@ impl Report<'_> {
                     "partial": gaps(&p.partial),
                 })
             }),
+            "gaps": online.map(|o| o.gaps.iter().map(|gap| serde_json::json!({
+                "kind": gap.kind.as_str(),
+                "table": gap.table.to_string(),
+                "indexes": gap.indexes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "message": gap.message,
+            })).collect::<Vec<_>>()).unwrap_or_default(),
             "diagnostics": self.diagnostics
                 .iter()
                 .map(|d| serde_json::json!({
@@ -397,12 +455,15 @@ mod tests {
             path: Path::new("flusso.toml"),
             config,
             diagnostics,
-            online: online.map(|o| Online {
-                server: o.server,
-                coverage: o.coverage,
-                pre_image: o.pre_image,
-                manage_publication: o.manage_publication,
-                manage_replica_identity: o.manage_replica_identity,
+            online: online.map(|o| {
+                Online::new(
+                    &source_spec(config),
+                    o.server,
+                    o.coverage,
+                    o.pre_image,
+                    o.manage_publication,
+                    o.manage_replica_identity,
+                )
             }),
         }
     }
@@ -412,13 +473,14 @@ mod tests {
         pre_image: &'a PreImageReport,
         server: Option<&'a str>,
     ) -> Online<'a> {
-        Online {
+        Online::new(
+            &source_spec(&config()),
             server,
             coverage,
             pre_image,
-            manage_publication: true,
-            manage_replica_identity: true,
-        }
+            true,
+            true,
+        )
     }
 
     fn table(name: &str) -> source::QualifiedTable {
@@ -491,6 +553,56 @@ mod tests {
             assert!(printed.contains(line), "{line:?} missing from:\n{printed}");
         }
         assert!(!printed.contains("Indexes"), "no config dump:\n{printed}");
+        // A gap `run` won't close is an error (issue #485): printed last, after
+        // every one-line section, with its SQL, and counted.
+        let error = printed
+            .find("[error] public.users  `public.users` is not in the publication")
+            .unwrap_or_else(|| panic!("no gap line in:\n{printed}"));
+        assert!(
+            printed.find("✓ replica identity").unwrap() < error,
+            "{printed}"
+        );
+        assert!(
+            error < printed.find("\nPublication coverage\n").unwrap(),
+            "{printed}"
+        );
+        assert_eq!(
+            printed.trim_end().lines().last(),
+            Some("✗ check failed: 1 error, 0 warnings"),
+            "{printed}"
+        );
+    }
+
+    /// A table that only loses the update skip, with management off, prints in
+    /// full with its SQL in place, and is no error.
+    #[test]
+    fn a_partial_replica_identity_set_by_hand_is_no_error() {
+        let coverage = satisfied();
+        let pre_image = PreImageReport {
+            gaps: Vec::new(),
+            partial: vec![source::PreImageGap {
+                table: table("products"),
+                missing: Vec::new(),
+                missing_key: Vec::new(),
+                manageable: false,
+                blockers: vec!["role does not own table public.products".to_owned()],
+                remediation: "ALTER TABLE public.products REPLICA IDENTITY FULL;".to_owned(),
+                kept: None,
+            }],
+        };
+        let printed = report(
+            &[],
+            Some(&online(&coverage, &pre_image, None)),
+            print::Pen::plain(),
+        );
+        assert!(printed.contains("\nReplica identity\n"), "{printed}");
+        assert!(printed.contains("ALTER TABLE public.products"), "{printed}");
+        assert!(!printed.contains("[error]"), "{printed}");
+        assert_eq!(
+            printed.trim_end().lines().last(),
+            Some("✓ check passed"),
+            "{printed}"
+        );
     }
 
     /// What `flusso run` fixes on its own, or keeps on purpose, is one line:
@@ -708,7 +820,15 @@ mod tests {
             assert_eq!(json["summary"]["errors"], errors, "{case}");
             assert_eq!(json["summary"]["warnings"], warnings, "{case}");
             let listed = json["diagnostics"].as_array().unwrap();
-            assert_eq!(listed.len(), errors + warnings, "{case}");
+            let gaps = json["gaps"].as_array().unwrap();
+            assert_eq!(listed.len() + gaps.len(), errors + warnings, "{case}");
+            for gap in gaps {
+                let line = format!("[error] {}  ", gap["table"].as_str().unwrap());
+                assert!(
+                    human.contains(&line),
+                    "{case}: {line} missing from\n{human}"
+                );
+            }
             for d in listed {
                 let line = format!(
                     "[{}] {}.{}",

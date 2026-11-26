@@ -205,7 +205,12 @@ pub(crate) enum Status {
     /// The next `flusso run` closes the gap itself, or flusso keeps it on
     /// purpose: nothing to do by hand.
     RunFixes,
-    /// Something to do by hand: the section prints in full, with its SQL.
+    /// Something to do by hand that only makes flusso slower (an update that
+    /// changes no column a document reads still rebuilds): the section prints
+    /// in full, with its SQL, and is no error.
+    ByHand,
+    /// A gap `flusso run` won't close, which leaves an index short of changes
+    /// or with stale documents: an error, printed in full with its SQL.
     Problem,
 }
 
@@ -215,6 +220,7 @@ impl Status {
         match self {
             Self::Ok => "ok",
             Self::RunFixes => "run_fixes",
+            Self::ByHand => "by_hand",
             Self::Problem => "problem",
         }
     }
@@ -233,11 +239,14 @@ pub(crate) fn coverage_status(report: &CoverageReport, manage: bool) -> Status {
 
 /// How the replica identity section comes out under `manage`.
 pub(crate) fn pre_image_status(report: &PreImageReport, manage: bool) -> Status {
+    let by_hand = |gap: &&PreImageGap| gap.kept.is_none() && !gap.will_manage(manage);
     let every = || report.gaps.iter().chain(&report.partial);
     if report.complete() {
         Status::Ok
-    } else if every().any(|gap| gap.kept.is_none() && !gap.will_manage(manage)) {
+    } else if report.gaps.iter().any(|gap| by_hand(&gap)) {
         Status::Problem
+    } else if report.partial.iter().any(|gap| by_hand(&gap)) {
+        Status::ByHand
     } else if every().any(|gap| gap.kept.is_none()) {
         Status::RunFixes
     } else {
@@ -281,7 +290,7 @@ pub(crate) fn coverage(
                 ),
             );
         }
-        Status::Problem => {}
+        Status::ByHand | Status::Problem => {}
     }
     section(out, pen, "Publication coverage")?;
 
@@ -361,7 +370,10 @@ pub(crate) fn pre_image(
         );
     }
     let every = || report.gaps.iter().chain(&report.partial);
-    if pre_image_status(report, manage) != Status::Problem {
+    if matches!(
+        pre_image_status(report, manage),
+        Status::Ok | Status::RunFixes
+    ) {
         let set = every().filter(|gap| gap.kept.is_none()).count();
         let kept = every().filter(|gap| gap.kept.is_some()).count();
         let mut parts = Vec::new();
@@ -659,6 +671,25 @@ fn diagnostic_lines(out: &mut impl Write, pen: Pen, diagnostics: &[Diagnostic]) 
     Ok(())
 }
 
+/// The gaps in capture `flusso run` won't close, one `[error]` line each,
+/// under a heading; the sections that hold their SQL follow them.
+pub(crate) fn gaps(out: &mut impl Write, pen: Pen, gaps: &[crate::gaps::Gap]) -> Result<()> {
+    if gaps.is_empty() {
+        return Ok(());
+    }
+    section(out, pen, "Capture gaps")?;
+    for gap in gaps {
+        writeln!(
+            out,
+            "  {} {}  {}",
+            pen.paint("1;31", "[error]"),
+            pen.bold(&gap.table.to_string()),
+            gap.message,
+        )?;
+    }
+    Ok(())
+}
+
 /// What `flusso check` concluded: the counts, and whether it passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Summary {
@@ -672,9 +703,14 @@ pub(crate) struct Summary {
 }
 
 impl Summary {
-    /// The summary of `diagnostics`, `offline` or not, with the server refused
-    /// or not.
-    pub(crate) fn of(diagnostics: &[Diagnostic], offline: bool, server_refused: bool) -> Self {
+    /// The summary of `diagnostics` and `gaps` (each an error), `offline` or
+    /// not, with the server refused or not.
+    pub(crate) fn of(
+        diagnostics: &[Diagnostic],
+        gaps: usize,
+        offline: bool,
+        server_refused: bool,
+    ) -> Self {
         let count = |severity: Severity| {
             diagnostics
                 .iter()
@@ -682,7 +718,7 @@ impl Summary {
                 .count()
         };
         Self {
-            errors: count(Severity::Error),
+            errors: count(Severity::Error) + gaps,
             warnings: count(Severity::Warning),
             offline,
             server_refused,

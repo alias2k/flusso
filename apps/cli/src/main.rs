@@ -37,6 +37,7 @@ use {flusso_query as _, sqlx as _, test_postgres as _, testcontainers_modules as
 mod adapters;
 mod backends;
 mod commands;
+mod gaps;
 mod http;
 mod memory;
 mod shutdown;

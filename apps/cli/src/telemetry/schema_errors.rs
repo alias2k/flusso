@@ -7,6 +7,9 @@
 //! event. Each (index, kind) pair is also set on `flusso.index.schema_errors`,
 //! a gauge of how many such errors the last start found: an alert on `> 0`
 //! fires while one is there, and a start after the fix has no series for it.
+//! A gap in capture `flusso run` won't close (`publication_gap`,
+//! `replica_identity_gap`, see [`crate::gaps`]) is reported the same way,
+//! once per index that reads its table.
 //! A gauge, not a counter: the value is a state of the deployment, not
 //! something that happens, and a counter would read 1 for the life of a
 //! process whatever its rate window.
@@ -81,6 +84,36 @@ pub(crate) fn record(meter: &Meter, diagnostics: &[Diagnostic]) {
             .entry((d.index.to_string(), d.kind.as_str()))
             .or_default() += 1;
     }
+    set(meter, counts);
+}
+
+/// Log every gap in capture the start goes on with, once per index that
+/// reads its table, and set the gauge on the global meter.
+pub(crate) fn report_gaps(gaps: &[crate::gaps::Gap]) {
+    record_gaps(&global::meter("flusso"), gaps);
+}
+
+pub(crate) fn record_gaps(meter: &Meter, gaps: &[crate::gaps::Gap]) {
+    let mut counts: BTreeMap<(String, &'static str), u64> = BTreeMap::new();
+    for gap in gaps {
+        for index in &gap.indexes {
+            tracing::error!(
+                target: TARGET,
+                index = %index,
+                kind = gap.kind.as_str(),
+                table = %gap.table,
+                "{}",
+                gap.message
+            );
+            *counts
+                .entry((index.to_string(), gap.kind.as_str()))
+                .or_default() += 1;
+        }
+    }
+    set(meter, counts);
+}
+
+fn set(meter: &Meter, counts: BTreeMap<(String, &'static str), u64>) {
     if counts.is_empty() {
         return;
     }
@@ -88,7 +121,8 @@ pub(crate) fn record(meter: &Meter, diagnostics: &[Diagnostic]) {
         .u64_gauge("flusso.index.schema_errors")
         .with_description(
             "Errors `flusso check` reports that the last start went on with, by index and kind: \
-             the index does not hold what its schema says. `flusso run --strict` refuses them",
+             the index does not hold what its schema says, or misses changes (a gap in capture \
+             `flusso run` won't close). `flusso run --strict` refuses them",
         )
         .build();
     for ((index, kind), count) in counts {
@@ -191,6 +225,41 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((*event.metadata().level(), fields.0));
+        }
+    }
+
+    /// A gap in capture is counted on each index that reads its table, under
+    /// its own kind.
+    #[test]
+    fn each_gap_is_counted_on_every_index_that_reads_its_table() {
+        let registry = Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .scope_info_enabled(false)
+            .build()
+            .unwrap();
+        let provider = provider_builder().with_reader(exporter).build();
+        let gap = crate::gaps::Gap {
+            kind: crate::gaps::GapKind::Publication,
+            table: source::QualifiedTable::new(
+                config::DatabaseSchema::try_new("public").unwrap(),
+                config::TableName::try_new("orders").unwrap(),
+            ),
+            indexes: vec![
+                kernel::IndexName::try_new("orders").unwrap(),
+                kernel::IndexName::try_new("users").unwrap(),
+            ],
+            message: "not in the publication".to_owned(),
+        };
+        record_gaps(&provider.meter("flusso"), &[gap]);
+        let text = TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for line in [
+            r#"flusso_index_schema_errors{index="orders",kind="publication_gap"} 1"#,
+            r#"flusso_index_schema_errors{index="users",kind="publication_gap"} 1"#,
+        ] {
+            assert!(text.contains(line), "{line} missing from:\n{text}");
         }
     }
 

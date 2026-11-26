@@ -77,6 +77,35 @@ impl Backends for FlussoBackends {
             .check_server()
             .await
             .context("checking the source server")?;
+        let coverage = capture
+            .inspect_coverage(&spec.all_tables())
+            .await
+            .context("inspecting publication coverage")?;
+        let pre_image = capture
+            .inspect_pre_image(&spec.pre_images())
+            .await
+            .context("inspecting replica identities")?;
+        let gaps = crate::gaps::of(
+            &spec,
+            &coverage,
+            postgres.manage_publication,
+            &pre_image,
+            postgres.manage_replica_identity,
+        );
+        gap_verdict(
+            &mut std::io::stderr().lock(),
+            print::Pen::detect_stderr(),
+            &Capture {
+                gaps: &gaps,
+                coverage: &coverage,
+                manage_publication: postgres.manage_publication,
+                pre_image: &pre_image,
+                manage_replica_identity: postgres.manage_replica_identity,
+            },
+            self.strict,
+            Reader::of_stderr(),
+        )?;
+        crate::telemetry::schema_errors::report_gaps(&gaps);
         let capture: Arc<dyn ChangeCapture> = Arc::new(capture);
 
         Ok(SourceParts {
@@ -395,6 +424,56 @@ fn start_verdict(
     Ok(())
 }
 
+/// What the source's capture reports say at start: the gaps `flusso run`
+/// won't close, and the reports that hold their SQL.
+struct Capture<'a> {
+    gaps: &'a [crate::gaps::Gap],
+    coverage: &'a source::CoverageReport,
+    manage_publication: bool,
+    pre_image: &'a source::PreImageReport,
+    manage_replica_identity: bool,
+}
+
+/// Print the gaps in capture `flusso run` won't close, as `check` prints them,
+/// and fail under `strict`. Without it the start goes on: `prepare` still
+/// warns with the SQL, and each gap is an `error` event, so into a log
+/// (`Reader::Log`) the report leaves them to it.
+fn gap_verdict(
+    out: &mut impl Write,
+    pen: print::Pen,
+    capture: &Capture<'_>,
+    strict: bool,
+    reader: Reader,
+) -> anyhow::Result<()> {
+    let gaps = capture.gaps.len();
+    if gaps == 0 || (!strict && reader == Reader::Log) {
+        return Ok(());
+    }
+    print::gaps(out, pen, capture.gaps)?;
+    if print::coverage_status(capture.coverage, capture.manage_publication)
+        == print::Status::Problem
+    {
+        print::coverage(out, pen, capture.coverage, capture.manage_publication)?;
+    }
+    if print::pre_image_status(capture.pre_image, capture.manage_replica_identity)
+        == print::Status::Problem
+    {
+        print::pre_image(out, pen, capture.pre_image, capture.manage_replica_identity)?;
+    }
+    writeln!(out)?;
+    ensure!(
+        !strict,
+        "the source cannot capture every change the indexes need ({gaps} gap(s) above, refused \
+         under --strict); fix them, confirm with `flusso check`, then start again"
+    );
+    writeln!(
+        out,
+        "starting anyway: the gaps above do not stop `flusso run` (`flusso check` still fails on \
+         them; `--strict` refuses them)\n"
+    )?;
+    Ok(())
+}
+
 /// Whether a diagnostic of `kind` means the documents cannot be built as
 /// written, so no deployment in that state works: a table or column that does
 /// not exist, a `soft_delete` marker that reads no column (it would be dropped,
@@ -662,6 +741,99 @@ mod tests {
             1,
             "{printed}"
         );
+    }
+
+    fn a_gap(manageable: bool) -> (source::CoverageReport, Vec<crate::gaps::Gap>) {
+        let orders = source::QualifiedTable::new(
+            kernel::DatabaseSchema::try_new("public").unwrap(),
+            kernel::TableName::try_new("orders").unwrap(),
+        );
+        let coverage = source::CoverageReport {
+            satisfied: false,
+            present: Vec::new(),
+            missing: vec![orders.clone()],
+            misrouted: Vec::new(),
+            manageable,
+            blockers: vec!["role does not own table public.orders".to_owned()],
+            remediation: vec!["ALTER PUBLICATION flusso ADD TABLE public.orders;".to_owned()],
+        };
+        let spec = SourceSpec::new(std::collections::BTreeMap::from([(
+            IndexName::try_new("orders").unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "version": 1, "table": "orders", "db_schema": "public", "fields": []
+            }))
+            .unwrap(),
+        )]));
+        let gaps = crate::gaps::of(
+            &spec,
+            &coverage,
+            true,
+            &source::PreImageReport::default(),
+            true,
+        );
+        (coverage, gaps)
+    }
+
+    fn gaps_verdict(
+        coverage: &source::CoverageReport,
+        gaps: &[crate::gaps::Gap],
+        strict: bool,
+        reader: Reader,
+    ) -> (anyhow::Result<()>, String) {
+        let pre_image = source::PreImageReport::default();
+        let mut out = Vec::new();
+        let result = gap_verdict(
+            &mut out,
+            print::Pen::plain(),
+            &Capture {
+                gaps,
+                coverage,
+                manage_publication: true,
+                pre_image: &pre_image,
+                manage_replica_identity: true,
+            },
+            strict,
+            reader,
+        );
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    /// A gap `run` won't close (issue #485): `--strict` refuses it with the
+    /// gap and its SQL; without it the start goes on, printing it for a
+    /// person and leaving it to its event in a log.
+    #[test]
+    fn strict_refuses_a_gap_run_wont_close() {
+        let (coverage, gaps) = a_gap(false);
+        assert_eq!(gaps.len(), 1);
+        let (result, printed) = gaps_verdict(&coverage, &gaps, true, Reader::Log);
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("1 gap(s) above, refused under --strict"),
+            "{error}"
+        );
+        assert!(printed.contains("[error] public.orders"), "{printed}");
+        assert!(
+            printed.contains("ALTER PUBLICATION flusso ADD TABLE public.orders;"),
+            "{printed}"
+        );
+
+        let (result, printed) = gaps_verdict(&coverage, &gaps, false, Reader::Person);
+        assert!(result.is_ok());
+        assert!(printed.contains("[error] public.orders"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
+
+        let (result, printed) = gaps_verdict(&coverage, &gaps, false, Reader::Log);
+        assert!(result.is_ok());
+        assert_eq!(printed, "");
+    }
+
+    #[test]
+    fn a_gap_run_closes_itself_is_none_under_strict() {
+        let (coverage, gaps) = a_gap(true);
+        assert!(gaps.is_empty());
+        let (result, printed) = gaps_verdict(&coverage, &gaps, true, Reader::Person);
+        assert!(result.is_ok());
+        assert_eq!(printed, "");
     }
 
     /// `--strict` (issue #485) refuses every error `flusso check` fails on,
