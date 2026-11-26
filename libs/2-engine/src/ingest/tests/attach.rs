@@ -500,3 +500,79 @@ async fn a_backfill_asked_for_a_detached_lane_starts_no_walk() {
     assert!(kinds_log.lock().unwrap().is_empty());
     assert!(requests.consumer.is_empty());
 }
+
+/// The quiesce beside another builder, under a budget tight enough to hold
+/// batches back (review of step 3, not proven): an attach on `users` waits
+/// for its held build while `orders` keeps building and publishing (the
+/// builds' permits are several: one is the engine's whole parallelism),
+/// nothing deadlocks, and `users` resumes after the attach.
+#[tokio::test(start_paused = true)]
+async fn an_attach_beside_another_builder_under_a_budget_pauses_only_its_index() {
+    // Even ids are `users`, odd ones `orders`.
+    let mut log = vec![Change::upsert(2), Change::upsert(3)];
+    log.extend((0..20).flat_map(|n| [Change::upsert(5 + 2 * n), Change::upsert(4 + 2 * n)]));
+    let db = Database::new(60, log);
+    let behaviour = Behaviour {
+        padding: 20 * KIB,
+        ..Behaviour::default()
+    };
+    behaviour.held.lock().unwrap().extend([2, 3]);
+    let builder = Builder::two(&db, behaviour);
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_millis(200)),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| ingest.with_batch(batch(1)).with_builds(4))
+    .with_budget(64 * KIB, usize::MAX);
+    let progress = deployment.ingest.progress();
+    progress.detach(&lane());
+    let orders = LaneKey::new(IndexName::try_new("orders").unwrap(), sink_name());
+    let requests = deployment.stream.requests().unwrap();
+    let kinds_log = Arc::clone(&deployment.kinds);
+    let watch = async {
+        for _ in 0..600 {
+            if builder.grants.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        requests.producer.publish(attach(1)).await.unwrap();
+        builder.release(3);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let orders_sent = kinds_log.lock().unwrap().get(&orders).map_or(0, Vec::len);
+        assert!(
+            orders_sent > 1,
+            "orders builds and publishes beside the attach: {orders_sent}"
+        );
+        assert!(
+            progress.is_detached(&lane()),
+            "users' build still holds the attach"
+        );
+        builder.release(2);
+    };
+    let (ran, ()) = tokio::join!(tokio::time::timeout(LIMIT, deployment.run_to_end(0)), watch);
+    ran.expect("the run ends: no deadlock");
+    let sent = kinds(&deployment);
+    assert_eq!(
+        sent.first().map(String::as_str),
+        Some("attached 1"),
+        "{sent:?}"
+    );
+    assert!(
+        sent.iter().filter(|kind| *kind == "item").count() >= 1,
+        "users resumed: {sent:?}"
+    );
+    let state = deployment.recorder.state();
+    assert_eq!(state.get(&2), None, "built while detached");
+    let expected = db.expected();
+    for change in db.log.iter().filter(|change| change.id % 2 == 1) {
+        assert_eq!(
+            state.get(&change.id),
+            expected.get(&change.id),
+            "orders {}",
+            change.id
+        );
+    }
+    assert!(!progress.is_detached(&lane()));
+}

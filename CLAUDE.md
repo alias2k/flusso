@@ -1892,7 +1892,7 @@ is the one concrete piece.
   then acknowledges. The sink engine holds the `Attached` it waits for at the lane's front
   (`take_attached`, after `drain_detached` acknowledged every discard) and opens the lane; any other
   `Attached` is acknowledged and dropped. The daemon fence goes from `Detached` to `Writes` on the open.
-  R7, with `Progress::any_detached` (one atomic) gating every look-up: `publish_live` registers a skip on
+  R7, with `Progress::any_detached` (an atomic load) gating each look-up of a lane: `publish_live` registers a skip on
   a detached lane, `publish_backfill` and `finish_snapshot` send it nothing, `start_snapshot`
   acknowledges its `Backfill` unserved, and `cut_detached_walk` cuts a walk only detached lanes asked
   for. `IngestEngine::confirm` measures advances afresh when the answer leaves `Free` (m6). Guards:

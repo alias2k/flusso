@@ -712,14 +712,14 @@ impl<'a> Run<'a> {
         if !self.discards.is_empty() {
             self.drain_detached().await?;
         }
+        if !self.unacknowledged_held.is_empty() {
+            self.acknowledge_held().await?;
+        }
         if !self.attached.is_empty() {
             self.take_attached().await?;
         }
         if !self.to_attach.is_empty() {
             self.send_attaches()?;
-        }
-        if !self.unacknowledged_held.is_empty() {
-            self.acknowledge_held().await?;
         }
         if self.engine.stop.is_requested() {
             self.skip_backfill().await?;
@@ -2928,23 +2928,28 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
-    /// Each `Attached` held at its lane's front takes effect once nothing of
-    /// the lane is unacknowledged (R6, H3): the lane opens, and the
-    /// `Attached` is acknowledged, here in the run loop.
+    /// Each `Attached` held at its lane's front takes effect (R6, H3): the
+    /// lane opens, and the `Attached` is acknowledged, here in the run loop.
+    ///
+    /// R6 wants nothing of the lane unacknowledged first. That holds by
+    /// construction, and is asserted: `advance` acknowledged every discard
+    /// and every settled held item just before; a detached lane's items never
+    /// enter the window or the held items, and its settling entries went at
+    /// the detach; nothing of it is in flight once detached.
     async fn take_attached(&mut self) -> Result<()> {
-        let mut at = 0;
-        while at < self.attached.len() {
-            let Some(&(lane, _, _)) = self.attached.get(at) else {
-                break;
-            };
-            let blocked = self.discards.iter().any(|(_, of, _)| *of == lane)
-                || self.window.iter().any(|queued| queued.lane == lane)
-                || self.lane_in_flight(lane);
-            if blocked {
-                at += 1;
-                continue;
-            }
-            let (lane, seq, handle) = self.attached.swap_remove(at);
+        for (lane, seq, handle) in std::mem::take(&mut self.attached) {
+            debug_assert!(
+                !self.discards.iter().any(|(_, of, _)| *of == lane)
+                    && !self.window.iter().any(|queued| queued.lane == lane)
+                    && self.lanes.get(lane).is_none_or(|run| run.held.is_empty())
+                    && !self
+                        .unacknowledged_held
+                        .iter()
+                        .any(|(_, of, _, _)| *of == lane)
+                    && !self.settling.keys().any(|(of, _)| *of == lane)
+                    && !self.lane_in_flight(lane),
+                "R6: an Attached takes effect with nothing of its lane unacknowledged"
+            );
             if let Some(run) = self.lanes.get_mut(lane)
                 && let Some(down) = run.health.attached(Instant::now())
             {

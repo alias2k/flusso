@@ -691,7 +691,7 @@ None of these can be taken out without the feature. Measured locally (base `efc4
   - A detached lane is attached for an attempt above the one it last attached for. Its `newest` becomes `routed_ever`, the newest position routed in this process, which `forget_all` keeps (H7).
   - A lane already attached for the request's attempt answers `Again`: `Attached` is published again.
   - Anything else is stale and acknowledged with nothing published: an older attempt, or the attempt the lane was attached for and then detached again.
-- **R7.** With a lane detached (`Progress::any_detached`, one atomic load, so nothing is looked up otherwise):
+- **R7.** With a lane detached (`Progress::any_detached`, an atomic load that gates each look-up; see the review of step 3 for what else the paths pay):
   - `publish_live` registers a skip on it and puts no item there;
   - `publish_backfill` and the snapshot's end publish nothing to it;
   - a `Backfill` request for it is acknowledged unserved when its snapshot starts;
@@ -747,6 +747,23 @@ Built as designed above, with these corrections from the code:
 - An attach request lane that stays full.
 - Any of it against a live Postgres or OpenSearch.
 - That a lone builder keeps its batching after an attach (W2), beyond the quiesce test's three changes.
+
+### After the review of step 3
+
+The independent review (`target/review-482-step3/REPORT.md`) found nothing blocking. What it asked, and what was done:
+
+- **S1, `Attached` was not the exact boundary after a run death.** The next run's builder could publish to the lane before the request that the dying run left came back. **Chosen: the builder publishes first.** `Progress` keeps `unannounced` beside the attempt; `attach` sets it, and the builder clears it once `Attached` is out. Every run's builder publishes `Attached` for each unannounced lane of its index before its first grant (`announce`).
+  - **Rejected:** treating an unannounced lane like a detached one until the request returns. Its changes would be skipped while the lane counts in the minimum, which a `reattach` (no backfill) would lose.
+  - **The guard,** `a_run_dying_between_attach_and_attached_publishes_nothing_before_it`, asserts the lane's whole sequence and that nothing stays registered unwritten on it. The H2 test now asserts `Attached` is first.
+- **m1:** R7 inside a walk another sink shares, and a backfill for a detached lane alone starting no snapshot. The three surviving mutations now fail a test each.
+- **m2:** the test spy marks an `Attached` forwarded while the progress still skips its lane, so R8's order reversed fails every attach test.
+- **m3:** `fence::tests::a_lane_attached_again_serves_its_writes` (step 4 narrows it).
+- **m4:** a live-only `rebuilding` record beside a marker on serving is detached again (O30).
+- **m6:** `take_attached`'s check is a `debug_assert!` over R6's whole list: discards, window, held, settled-unacknowledged, settling, in flight. `advance` now acknowledges settled held items before it.
+- **m7:** the per-item cost, said exactly. The publish paths add one `any_detached()` load each; `choose`, a bool; the sink's `queue`, an enum match per item; `advance`, a few emptiness checks. The builder's `select!` gains an `attaches.recv()` arm built and polled every turn. While any lane anywhere is detached, the publish paths and `cut_detached_walk` take the registry lock per requested lane per turn, in every builder. CI's in-process gate passed on the step 3 head.
+- **The quiesce beside another builder** (not proven before): `an_attach_beside_another_builder_under_a_budget_pauses_only_its_index`. It has two indexes, four build permits, a 64 KiB budget with 20 KiB documents, and builds held on both. The other index keeps publishing while the attach waits, nothing deadlocks, and the attached index resumes after `Attached`.
+  - With one build permit, the held build holds the engine's only permit, so the other index waits too. That is the permit, not the quiesce.
+  - That the budget refused a batch during the attach is not asserted.
 
 ### Decided by the owner on 2026-11-26, from the review of step 2
 

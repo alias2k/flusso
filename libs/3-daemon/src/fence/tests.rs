@@ -1083,3 +1083,28 @@ async fn a_backfill_asked_for_a_detached_lane_keeps_it_detached() {
         Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Detached)]
     ));
 }
+
+/// A lane that opens again after a detach (its attach, review of step 3,
+/// m3) serves its writes from there: a position it reaches after the attach
+/// is vouched for. Step 4 narrows this for a rebuild and a reattach.
+#[tokio::test(start_paused = true)]
+async fn a_lane_attached_again_serves_its_writes() {
+    let rig = fence(&["primary"]);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    assert_eq!(
+        rig.progress.attach(&lane("primary"), 1),
+        engine::Attach::Attached
+    );
+    rig.observer
+        .on_lane_health(&lane("primary"), &engine::LaneHealth::Open);
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
+    assert_eq!(
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
+        reached("20")
+    );
+}
