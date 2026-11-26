@@ -324,3 +324,179 @@ async fn an_advance_after_every_lane_was_free_is_counted() {
         "the landing after the attach is progress"
     );
 }
+
+/// R8's order (review of step 3, m2): `Attached` goes out only once the
+/// progress counts the lane. The spy marks one forwarded while the lane is
+/// still detached as `early`, which no attach test then reads as the
+/// boundary.
+#[tokio::test(start_paused = true)]
+async fn attached_is_published_only_once_the_progress_counts_the_lane() {
+    let db = Database::new(10, vec![Change::upsert(1)]);
+    let mut deployment = Deployment::new(Feed::new(&db), instant(&db), Recorder::seeded(true));
+    deployment.ingest.progress().detach(&lane());
+    deployment
+        .stream
+        .requests()
+        .unwrap()
+        .producer
+        .publish(attach(1))
+        .await
+        .unwrap();
+    tokio::time::timeout(LIMIT, deployment.run_to_end(0))
+        .await
+        .expect("the run ends");
+    let sent = kinds(&deployment);
+    assert!(sent.contains(&"attached 1".to_owned()), "{sent:?}");
+    assert!(!sent.iter().any(|kind| kind.ends_with("early")), "{sent:?}");
+}
+
+fn secondary() -> SinkName {
+    SinkName::try_new("secondary").unwrap()
+}
+
+/// An ingest engine over `users` on two sinks, each lane logged by kind, its
+/// builds taking a second each: no sink engine reads the lanes.
+fn two_sinks(
+    db: &Arc<Database>,
+) -> (
+    Arc<ChannelStream>,
+    Kinds,
+    Arc<crate::Progress>,
+    IngestEngine,
+    Arc<Builder>,
+) {
+    let sinks = [sink_name(), secondary()];
+    let stream = Arc::new(ChannelStream::over(100_000, [users()], sinks.clone()));
+    let progress = Arc::new(crate::Progress::of([users()], sinks.clone()));
+    let kinds: Kinds = Arc::default();
+    let spy = Arc::new(Spy {
+        inner: Arc::clone(&stream),
+        kinds: Arc::clone(&kinds),
+        progress: Some(Arc::clone(&progress)),
+        published: Arc::default(),
+        failing: Arc::default(),
+        items: Arc::default(),
+        substituted: Arc::default(),
+    });
+    let builder = Builder::new(
+        db,
+        Behaviour {
+            delay: Some(Duration::from_secs(1)),
+            ..Behaviour::default()
+        },
+    );
+    let ingest = IngestEngine::new(
+        Arc::new(Feed::new(db)) as Arc<dyn ChangeCapture>,
+        Arc::clone(&builder) as Arc<dyn DocumentBuilder>,
+        spy as Arc<dyn Stream>,
+        sinks.to_vec(),
+        Arc::clone(&progress),
+    )
+    .with_batch(batch(10));
+    (stream, kinds, progress, ingest, builder)
+}
+
+fn backfill_of(sink: SinkName) -> Request {
+    Request::Backfill {
+        index: users(),
+        sink,
+        after: None,
+        ticket: Ticket::new(1),
+    }
+}
+
+/// R7 inside a walk another sink shares (review of step 3, m1): detached
+/// mid-walk, a lane gets no further page and no completion; the other sink's
+/// walk goes on to its completion, and both requests are acknowledged.
+#[tokio::test(start_paused = true)]
+async fn a_walk_another_sink_shares_sends_a_detached_lane_no_page_and_no_completion() {
+    let db = Database::new(200, Vec::new());
+    let (stream, kinds_log, progress, ingest, _builder) = two_sinks(&db);
+    let requests = stream.requests().unwrap();
+    requests
+        .producer
+        .publish(backfill_of(sink_name()))
+        .await
+        .unwrap();
+    requests
+        .producer
+        .publish(backfill_of(secondary()))
+        .await
+        .unwrap();
+    let primary = lane();
+    let detach = async {
+        for _ in 0..600 {
+            if kinds_log
+                .lock()
+                .unwrap()
+                .get(&primary)
+                .is_some_and(|sent| !sent.is_empty())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        progress.detach(&primary);
+        kinds_log.lock().unwrap().get(&primary).map_or(0, Vec::len)
+    };
+    let (ran, sent_before) = tokio::join!(tokio::time::timeout(LIMIT, ingest.run()), detach);
+    ran.expect("the run ends").expect("the run succeeds");
+    let kinds = kinds_log.lock().unwrap().clone();
+    let first = kinds.get(&primary).cloned().unwrap_or_default();
+    assert!(sent_before > 0);
+    assert_eq!(
+        first.len(),
+        sent_before,
+        "nothing after the detach: {first:?}"
+    );
+    assert!(!first.contains(&"complete".to_owned()));
+    let other = kinds
+        .get(&LaneKey::new(users(), secondary()))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        other.last().map(String::as_str),
+        Some("complete"),
+        "{other:?}"
+    );
+    assert!(
+        other.iter().filter(|kind| *kind == "item").count() > first.len(),
+        "the other sink's walk went on"
+    );
+    assert!(requests.consumer.is_empty(), "both requests acknowledged");
+}
+
+/// Counts the snapshots started.
+#[derive(Debug, Default)]
+struct Snapshots(AtomicUsize);
+
+impl crate::Observer for Snapshots {
+    fn on_snapshot_started(&self, _: &[IndexName]) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// R7 (review of step 3, m1): a backfill asked for a detached lane alone is
+/// acknowledged with no walk started: no snapshot, no page built.
+#[tokio::test(start_paused = true)]
+async fn a_backfill_asked_for_a_detached_lane_starts_no_walk() {
+    let db = Database::new(200, Vec::new());
+    let (stream, kinds_log, progress, ingest, builder) = two_sinks(&db);
+    let snapshots = Arc::new(Snapshots::default());
+    let ingest = ingest.with_observer(Arc::clone(&snapshots) as Arc<dyn crate::Observer>);
+    progress.detach(&lane());
+    let requests = stream.requests().unwrap();
+    requests
+        .producer
+        .publish(backfill_of(sink_name()))
+        .await
+        .unwrap();
+    tokio::time::timeout(LIMIT, ingest.run())
+        .await
+        .expect("the run ends")
+        .expect("the run succeeds");
+    assert_eq!(snapshots.0.load(Ordering::SeqCst), 0, "no snapshot started");
+    assert!(builder.grants.lock().unwrap().is_empty(), "no page built");
+    assert!(kinds_log.lock().unwrap().is_empty());
+    assert!(requests.consumer.is_empty());
+}

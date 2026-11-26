@@ -977,6 +977,8 @@ impl Sink for Recorder {
 struct Spy {
     inner: Arc<ChannelStream>,
     kinds: Kinds,
+    /// The engine's progress, read as each `Attached` is forwarded.
+    progress: Option<Arc<crate::Progress>>,
     published: Published,
     failing: FailingLanes,
     items: ItemLog,
@@ -1021,6 +1023,7 @@ type Kinds = Arc<Mutex<BTreeMap<stream::LaneKey, Vec<String>>>>;
 struct SpyProducer {
     inner: Box<dyn stream::Producer<stream::LaneItem>>,
     kinds: Kinds,
+    progress: Option<Arc<crate::Progress>>,
     lane: stream::LaneKey,
     published: Published,
     failing: FailingLanes,
@@ -1036,7 +1039,19 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
         let kind = match &item {
             stream::LaneItem::Batch(_) => "item".to_owned(),
             stream::LaneItem::SnapshotComplete { .. } => "complete".to_owned(),
-            stream::LaneItem::Attached { attempt } => format!("attached {attempt}"),
+            // An `Attached` sent while the progress still skips the lane is
+            // R8's order reversed: marked, so no test reads it as the boundary.
+            stream::LaneItem::Attached { attempt } => {
+                if self
+                    .progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.is_detached(&self.lane))
+                {
+                    format!("attached {attempt} early")
+                } else {
+                    format!("attached {attempt}")
+                }
+            }
         };
         if let stream::LaneItem::Batch(batch) = &item {
             self.items.lock().unwrap().push((
@@ -1085,6 +1100,7 @@ impl Stream for Spy {
             producer: Box::new(SpyProducer {
                 inner: lane.producer,
                 kinds: Arc::clone(&self.kinds),
+                progress: self.progress.clone(),
                 lane: key.clone(),
                 published: Arc::clone(&self.published),
                 failing: Arc::clone(&self.failing),
@@ -1168,9 +1184,11 @@ impl Deployment {
         let items: ItemLog = Arc::default();
         let substituted: Arc<AtomicUsize> = Arc::default();
         let kinds: Kinds = Arc::default();
+        let progress = Arc::new(crate::Progress::of(indexes.clone(), [sink_name()]));
         let spy = Arc::new(Spy {
             inner: Arc::clone(&stream),
             kinds: Arc::clone(&kinds),
+            progress: Some(Arc::clone(&progress)),
             published: Arc::clone(&published),
             failing: Arc::clone(&failing),
             items: Arc::clone(&items),
@@ -1181,7 +1199,7 @@ impl Deployment {
             Arc::clone(&builder) as Arc<dyn DocumentBuilder>,
             spy as Arc<dyn Stream>,
             vec![sink_name()],
-            Arc::new(crate::Progress::of(indexes.clone(), [sink_name()])),
+            progress,
         );
         let sink = SinkEngine::new(
             sink_name(),
