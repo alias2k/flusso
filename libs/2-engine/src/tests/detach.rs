@@ -214,6 +214,11 @@ impl Sink for Gate {
 #[derive(Debug, Default)]
 struct Heard {
     health: Mutex<Vec<(LaneKey, LaneHealth)>>,
+    /// The deployment's progress, read as each detach is heard.
+    progress: std::sync::OnceLock<Arc<Progress>>,
+    /// For each detach heard, whether its lane had already left the
+    /// minimum: never, or the fence would freeze where `Free` reaches (R5).
+    left_first: Mutex<Vec<bool>>,
 }
 
 impl Heard {
@@ -230,6 +235,14 @@ impl Heard {
 
 impl Observer for Heard {
     fn on_lane_health(&self, lane: &LaneKey, health: &LaneHealth) {
+        if health.is_detached()
+            && let Some(progress) = self.progress.get()
+        {
+            self.left_first
+                .lock()
+                .unwrap()
+                .push(progress.is_detached(lane));
+        }
         self.health
             .lock()
             .unwrap()
@@ -270,15 +283,18 @@ impl Rig {
     fn over(capacity: usize, sinks: &[&str]) -> Self {
         let indexes = [orders(), users()];
         let sinks: Vec<_> = sinks.iter().map(|name| sink_name(name)).collect();
+        let progress = Arc::new(Progress::of(indexes.clone(), sinks.clone()));
+        let heard = Arc::new(Heard::default());
+        let _ = heard.progress.set(Arc::clone(&progress));
         Self {
             stream: Arc::new(ChannelStream::over(
                 capacity,
                 indexes.clone(),
                 sinks.clone(),
             )),
-            progress: Arc::new(Progress::of(indexes, sinks)),
+            progress,
             sink: Arc::new(Gate::default()),
-            heard: Arc::new(Heard::default()),
+            heard,
         }
     }
 
@@ -930,4 +946,29 @@ async fn a_lane_staged_detached_writes_nothing() {
     assert!(rig.sink.writes_of(&users()).is_empty());
     assert_eq!(rig.progress.landed(), Landed::Through(Position::new(2)));
     task.abort();
+}
+
+/// The fence hears a detach before the lane leaves the minimum, in a run and
+/// at staging alike: heard after, it would freeze at what `Free` reaches,
+/// the source's horizon, and vouch for changes the index never got (R5,
+/// review S4).
+#[tokio::test(start_paused = true)]
+async fn the_fence_hears_a_detach_before_the_lane_leaves_the_minimum() {
+    let rig = Rig::new(64);
+    let (_engine, task) = detached_on_a_block(&rig).await;
+    task.abort();
+    assert_eq!(*rig.heard.left_first.lock().unwrap(), [false], "in a run");
+
+    let rig = Rig::new(64);
+    rig.sink.kept.lock().unwrap().insert(
+        "users".to_owned(),
+        Detachment::recorded(
+            DetachRecord::Detached { live_only: false },
+            Some(MarkerAt::Newer { seeded: false }),
+            version(),
+        ),
+    );
+    rig.engine().stage(Continuity::Resumed).await.unwrap();
+    assert!(rig.progress.is_detached(&lane(users())));
+    assert_eq!(*rig.heard.left_first.lock().unwrap(), [false], "at staging");
 }
