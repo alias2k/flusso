@@ -81,6 +81,8 @@ pub struct Rereads {
     held: AtomicU64,
     /// The stream of the last opening is open.
     holding: AtomicBool,
+    /// The last opening's run ended cleanly ([`finished`](Rereads::finished)).
+    finished: AtomicBool,
     read: Mutex<BTreeMap<LaneKey, u64>>,
     listeners: Mutex<Vec<RereadListener>>,
     /// The last opening that returned Ok, for sink engines to wake on: an
@@ -94,6 +96,7 @@ impl Default for Rereads {
             opened: AtomicU64::new(0),
             held: AtomicU64::new(0),
             holding: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
             read: Mutex::new(BTreeMap::new()),
             listeners: Mutex::new(Vec::new()),
             openings: tokio::sync::watch::Sender::new(0),
@@ -133,6 +136,7 @@ impl Rereads {
     pub async fn open<T, E>(&self, opening: impl Future<Output = Result<T, E>>) -> Result<T, E> {
         let epoch = self.opened.fetch_add(1, Ordering::AcqRel) + 1;
         self.holding.store(false, Ordering::Release);
+        self.finished.store(false, Ordering::Release);
         self.tell(Reread::Opening);
         let opened = opening.await;
         if opened.is_ok() {
@@ -155,10 +159,28 @@ impl Rereads {
         self.holding.store(false, Ordering::Release);
     }
 
+    /// The run of the last opening ended cleanly: the source finished its
+    /// own stream, or a stop drained and confirmed. The deployment ends
+    /// after the lanes drain, with no restart another process could precede,
+    /// so what the lanes still hold may seed ([`may_erase_records`](Self::may_erase_records)).
+    /// The slot still counts as not held for a gap end.
+    pub fn finished(&self) {
+        self.finished.store(true, Ordering::Release);
+    }
+
     /// Whether the stream of the last opening is open: this process holds
     /// the slot.
     pub fn holding(&self) -> bool {
         self.holding.load(Ordering::Acquire)
+    }
+
+    /// Whether this process may erase or rewrite a record another process
+    /// may rely on (O29, the fifth re-check): only while it holds the slot.
+    /// Before any opening was counted nothing here opens a stream (a test,
+    /// a sink engine with no ingest engine beside it), and no snapshot is
+    /// served before the first opening, so no seed can come: as on `main`.
+    pub fn may_erase_records(&self) -> bool {
+        self.holding() || self.opened() == 0 || self.finished.load(Ordering::Acquire)
     }
 
     /// Hear every opening and every read, for a fence to note and wake on.
@@ -185,14 +207,6 @@ impl Rereads {
     /// was opened past [`open`](Self::open).
     pub fn opened(&self) -> u64 {
         self.opened.load(Ordering::Acquire)
-    }
-
-    /// Whether an opening began and has not returned `Ok` yet: one in
-    /// flight, or one that failed and no later one got through. No stream is
-    /// current then, so no lane is written until an opening returns and its
-    /// records are read again. Two atomic loads.
-    pub fn opening_outstanding(&self) -> bool {
-        self.opened.load(Ordering::Acquire) != self.read_begins()
     }
 
     /// What a read of the records beginning now counts for: the last

@@ -1086,9 +1086,30 @@ impl SinkEngine {
 
     /// Whether the slot opened since the last full read of the records.
     pub(super) fn reread_due(&self) -> bool {
-        self.rereads.is_due(self.read_at.load(Ordering::Acquire))
-            || self.opened_unread.load(Ordering::Acquire)
+        (self.rereads.may_erase_records()
+            && (self.rereads.is_due(self.read_at.load(Ordering::Acquire))
+                || self.opened_unread.load(Ordering::Acquire)))
             || (self.gaps_unsettled.load(Ordering::Acquire) && self.rereads.holding())
+    }
+
+    /// `index`'s seed was met while this process holds no stream: the
+    /// backfill is cut, so nothing of it seeds the index, and the next read
+    /// while the slot is held asks for it again (O29, the fifth re-check).
+    pub(super) fn cut_unheld_seed(&self, index: &IndexName) {
+        if let Some(asked) = self.lock_outstanding().get_mut(index) {
+            asked.cut = true;
+        }
+        tracing::warn!(%index, sink = %self.name, "its backfill completed while this process holds no stream: it seeds nothing (a seed may erase a record another process wrote since); asked for again once the slot is held");
+    }
+
+    /// The cut backfills of `lanes`' indexes, with the target each was asked
+    /// for: what a read while the slot is held asks for again.
+    pub(super) fn cut_asks(&self, indexes: &[IndexName]) -> Vec<(IndexName, Option<TargetId>)> {
+        self.lock_outstanding()
+            .iter()
+            .filter(|(index, asked)| asked.cut && indexes.contains(index))
+            .map(|(index, asked)| (index.clone(), asked.target.clone()))
+            .collect()
     }
 
     /// `gaps` were just kept with an end still unknown or unreadable (a

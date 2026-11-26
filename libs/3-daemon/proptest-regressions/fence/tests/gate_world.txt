@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc fa5148ae18f1d7bc29aa02b20052ae0a1b87915897ca03f99c8c5280e709cdef # shrinks to events = [HoldReads { sink: 0 }, Open { ok: true, jump: 10, drop: Some(2), rebuild: true }, Apply { index: 0 }, Open { ok: false, jump: 0, drop: None, rebuild: false }, Release { sink: 0 }]

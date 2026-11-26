@@ -436,7 +436,10 @@ impl IngestEngine {
         // answer (`Rereads::open` alone orders it), and the slot counts as
         // held until this run's stream ends.
         let live: LiveStream = self.rereads.open(self.source.live()).await?;
-        let _held = Held(&self.rereads);
+        let mut held = Held {
+            rereads: &self.rereads,
+            clean: false,
+        };
         self.observer
             .on_startup_step(StartupStep::OpenLive, None, started.elapsed());
         tracing::info!("following live changes");
@@ -473,6 +476,8 @@ impl IngestEngine {
             for builds in &mut builds {
                 builds.abandon().await;
             }
+        } else {
+            held.clean = true;
         }
         ended
     }
@@ -771,11 +776,20 @@ impl From<SourceError> for EngineError {
 }
 
 /// While alive, this run's live stream holds the slot; dropped, by any end
-/// of the run, it says so ([`Rereads::closed`](crate::Rereads::closed)).
-struct Held<'a>(&'a crate::Rereads);
+/// of the run, it says so ([`Rereads::closed`](crate::Rereads::closed)). A
+/// clean end also says the run finished
+/// ([`Rereads::finished`](crate::Rereads::finished)): the deployment ends
+/// after the lanes drain, with no restart another process could precede.
+struct Held<'a> {
+    rereads: &'a crate::Rereads,
+    clean: bool,
+}
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
-        self.0.closed();
+        self.rereads.closed();
+        if self.clean {
+            self.rereads.finished();
+        }
     }
 }

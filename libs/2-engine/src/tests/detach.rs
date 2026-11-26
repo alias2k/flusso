@@ -3426,35 +3426,53 @@ async fn a_step_whose_read_spans_an_opening_counts_no_read_for_it() {
     }
 }
 
-/// The fourth re-check's world property: after a failed opening no stream is
-/// current (another process may hold the slot), so nothing is written, a
-/// seed included, until an opening gets through and the records are read
-/// again.
+/// The fifth re-check: after a failed opening (another process may hold the
+/// slot) what the lanes hold is written as on `main`, but no seed is made:
+/// the backfill is cut, and asked for again once an opening gets through.
 #[tokio::test(start_paused = true)]
-async fn a_failed_opening_writes_nothing_until_one_gets_through() {
+async fn a_failed_opening_seeds_nothing_and_asks_the_backfill_again_once_held() {
     let rig = Rig::new(64);
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
     let engine = rig.engine();
     engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let (task, _control) = spawn(&engine);
-    rig.live(&users(), 1, 1).await;
-    eventually("written while the stream is current", || {
-        written(&rig).contains(&"users/1".to_owned())
-    })
-    .await;
+    let stream::Request::Backfill { ticket, .. } = next_request(&rig).await else {
+        panic!("a backfill is asked at staging");
+    };
+    eventually("read under the stream", || read_all(&rig)).await;
+    rig.rereads.closed();
     assert!(rig.rereads.open(async { Err::<(), ()>(()) }).await.is_err());
     rig.live(&users(), 2, 2).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    assert_eq!(
-        written(&rig),
-        ["users/1"],
-        "nothing written with no stream current"
-    );
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    eventually("written once an opening got through", || {
+    eventually("written as on main", || {
         written(&rig).contains(&"users/2".to_owned())
     })
     .await;
-    assert!(rig.sink.unread_writes.lock().unwrap().is_empty());
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        rig.sink.seeded.lock().unwrap().is_empty(),
+        "seeded with no slot held"
+    );
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let stream::Request::Backfill {
+        index,
+        ticket: again,
+        after,
+        ..
+    } = next_request(&rig).await
+    else {
+        panic!("the backfill is asked again");
+    };
+    assert_eq!((index, after), (users(), None));
+    assert!(again > ticket);
     task.abort();
 }
 

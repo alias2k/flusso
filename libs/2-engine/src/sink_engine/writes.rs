@@ -1459,13 +1459,6 @@ impl<'a> Run<'a> {
     /// run a lane's `SnapshotComplete` once it is the oldest thing unfinished
     /// on its lane.
     async fn grant(&mut self) -> Result<()> {
-        // O29: with no stream current (an opening in flight, or one that
-        // failed: another process may hold the slot), nothing is written or
-        // seeded. The opening that gets through wakes the run, which reads
-        // the records again first.
-        if self.engine.rereads.opening_outstanding() {
-            return Ok(());
-        }
         let slots = self.slots();
         // A write handled at its first poll may have failed the run: from
         // then on nothing new starts.
@@ -1490,6 +1483,15 @@ impl<'a> Run<'a> {
                         run.walked.ended(seq, Instant::now());
                     }
                     if self.engine.cut_short(&index) || self.engine.superseded(&index, ticket) {
+                        self.acknowledge(handle, lane, seq, None, true, None)
+                            .await?;
+                        continue;
+                    }
+                    // O29: a seed writes the marker whole, erasing whatever
+                    // record another process wrote since; with no stream held
+                    // it waits for the next read while the slot is held.
+                    if !self.engine.rereads.may_erase_records() {
+                        self.engine.cut_unheld_seed(&index);
                         self.acknowledge(handle, lane, seq, None, true, None)
                             .await?;
                         continue;
@@ -2535,7 +2537,6 @@ impl<'a> Run<'a> {
         // No probe starts once the run failed (review of #458, m2).
         self.unhealthy > 0
             && self.failure.is_none()
-            && !self.engine.rereads.opening_outstanding()
             && self.substitutes.is_some()
             && self.lanes.iter().any(|run| run.health.rebuild.is_some())
     }
@@ -3041,6 +3042,11 @@ impl<'a> Run<'a> {
     /// restart stages, which reads), except on a detached lane, which stays
     /// detached and unread.
     async fn reread(&mut self) -> Result<()> {
+        // It may demote or detach (record writes): only while the slot is
+        // held. Until then plain writes go on, as on `main`.
+        if !self.engine.rereads.may_erase_records() {
+            return Ok(());
+        }
         let read_at = self.engine.rereads.read_begins();
         self.engine.settling_gaps();
         for lane in 0..self.lanes.len() {
@@ -3148,6 +3154,18 @@ impl<'a> Run<'a> {
             self.engine.rereads.read(&key, read_at);
         }
         self.engine.records_read(read_at);
+        // A backfill whose seed was met while no stream was held is asked for
+        // again now (`cut_unheld_seed`).
+        let open: Vec<IndexName> = self
+            .lanes
+            .iter()
+            .filter(|run| run.health.is_open())
+            .map(|run| run.key.index.clone())
+            .collect();
+        let again = self.engine.cut_asks(&open);
+        if !again.is_empty() {
+            self.engine.ask_again(again).await?;
+        }
         Ok(())
     }
 
