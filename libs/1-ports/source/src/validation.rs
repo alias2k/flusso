@@ -72,7 +72,12 @@
 //!
 //! The same rule decides where a duplicate pair that never indexes gets its
 //! own kind: under a join, an input-only or unindexed ancestor, or an object
-//! with `options`, it is the plain warning.
+//! with `options`, it does not stop the start. Its severity is then decided
+//! by what holds the pair: a document's `_source` under an unindexed parent
+//! (stored unchecked), a script under an input-only one (one at that field's
+//! level or above reads it through `this`, one anywhere that names `root`
+//! through `root`), or nothing at all, the only place a wrong pair is the
+//! warning.
 //!
 //! The one store-specific piece is the [`Catalog`] trait: how a store reports a
 //! table and a column, and, when it can, a table's primary key, whether a
@@ -358,8 +363,9 @@ pub enum DiagnosticKind {
     /// something other than the index maps (see
     /// [`duplicate_is_wrong`](crate::duplicate_is_wrong)): a list where it
     /// maps one value, an object cut to other child fields, raw JSON, text,
-    /// `null`, no value at all, or a document that fails to build or is
-    /// refused. Where that holds for every document whatever the data, it is
+    /// `null`, no value at all, a value stored unchecked where another shape
+    /// is declared, or a document that fails to build or is refused. Under an
+    /// input-only field, what a script reading it gets. Where that holds for every document whatever the data, it is
     /// [`DuplicateFieldNameFailsToBuild`](Self::DuplicateFieldNameFailsToBuild)
     /// or [`DuplicateFieldNameRefused`](Self::DuplicateFieldNameRefused)
     /// instead.
@@ -593,7 +599,7 @@ async fn validate_index(
     duplicate_names(
         name,
         &schema.fields,
-        (true, crate::Reach::Indexed),
+        Level::root(&schema.fields),
         &mut Vec::new(),
         &mut diagnostics,
     );
@@ -625,7 +631,7 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
         duplicate_names(
             name,
             &schema.fields,
-            (true, crate::Reach::Indexed),
+            Level::root(&schema.fields),
             &mut Vec::new(),
             &mut diagnostics,
         );
@@ -634,16 +640,86 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// Where a level of fields sits, for [`duplicate_names`].
+#[derive(Clone, Copy)]
+struct Level {
+    /// Every document carries the level (see [`carries`]).
+    carried: bool,
+    /// How far it reaches: indexed, stored, or under an input-only field.
+    reach: crate::Reach,
+    /// A running script reads it through `this`: one at its level or above,
+    /// none of them under an input-only field (that subtree runs no script).
+    read_by_this: bool,
+    /// A running script of the index names `root`, which holds every level.
+    read_by_root: bool,
+}
+
+impl Level {
+    fn root(fields: &[Field]) -> Self {
+        Self {
+            carried: true,
+            reach: crate::Reach::Indexed,
+            read_by_this: has_script(fields),
+            read_by_root: names_root(fields),
+        }
+    }
+
+    /// The level of `field`'s children.
+    fn under(self, field: &Field) -> Self {
+        let reach = self.reach.max(reach_of(field));
+        Self {
+            carried: self.carried && carries(field),
+            reach,
+            read_by_this: self.read_by_this
+                || (reach != crate::Reach::Absent && has_script(field.children())),
+            read_by_root: self.read_by_root,
+        }
+    }
+
+    /// The reach the namesakes `same` at this level are judged at: when
+    /// they are, or are under, an input-only field, whether a script reads
+    /// them.
+    fn judged(self, same: &[&Field]) -> crate::Reach {
+        let read = self.read_by_this || self.read_by_root;
+        let input_only = same.iter().all(|field| !field.emit);
+        match self.reach {
+            crate::Reach::Absent if read => crate::Reach::Scripts,
+            crate::Reach::Indexed | crate::Reach::Stored if input_only && read => {
+                crate::Reach::Scripts
+            }
+            reach => reach,
+        }
+    }
+}
+
+/// A script that runs among `fields`: an emitted one (an input-only script
+/// is stripped unrun).
+fn has_script(fields: &[Field]) -> bool {
+    fields
+        .iter()
+        .any(|field| field.emit && matches!(field.source, FieldSource::Script(_)))
+}
+
+/// Whether a script that runs, anywhere in `fields`, names `root`: the
+/// scripts crate builds `root` for such a script. Nothing under an input-only
+/// field runs.
+fn names_root(fields: &[Field]) -> bool {
+    fields.iter().filter(|field| field.emit).any(|field| {
+        matches!(&field.source, FieldSource::Script(script) if script.source.contains("root"))
+            || names_root(field.children())
+    })
+}
+
 /// One [`DiagnosticKind::DuplicateFieldName`] per name declared more than
 /// once at a level of `fields`, at any depth, anchored at that name. A pair
 /// that never gives an indexed document gets its own kind, but only where
-/// every document carries the level (`carried`: see [`carries`]); one whose
-/// documents hold something other than the index maps at the level's
-/// [`Reach`](crate::Reach) is [`DiagnosticKind::DuplicateFieldNameWrong`].
+/// every document carries the level; one whose documents (or, under an
+/// input-only field, the scripts reading it) hold something other than the
+/// schema declares is [`DiagnosticKind::DuplicateFieldNameWrong`].
 fn duplicate_names(
     index: &IndexName,
     fields: &[Field],
-    (carried, reach): (bool, crate::Reach),
+    level: Level,
     path: &mut Vec<(FieldName, Option<usize>)>,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -664,7 +740,11 @@ fn duplicate_names(
         reported.push(name);
         path.push((name.clone(), None));
         let fields: Vec<&Field> = same.iter().map(|(_, field)| *field).collect();
-        let never = carried.then(|| crate::never_indexed(&fields)).flatten();
+        let reach = level.judged(&fields);
+        let never = level
+            .carried
+            .then(|| crate::never_indexed(&fields))
+            .flatten();
         let kind = match never {
             Some(crate::NeverIndexed::FailsToBuild) => {
                 DiagnosticKind::DuplicateFieldNameFailsToBuild
@@ -683,19 +763,13 @@ fn duplicate_names(
             anchor: Anchor::Field,
             kind,
             severity: kind.severity(),
-            message: crate::duplicates::duplicate_message(name, &same),
+            message: crate::duplicates::duplicate_message(name, &same, reach),
         });
         path.pop();
     }
     for (at, field) in fields.iter().enumerate() {
         path.push((field.field.clone(), position(fields, at)));
-        duplicate_names(
-            index,
-            field.children(),
-            (carried && carries(field), reach.max(reach_of(field))),
-            path,
-            out,
-        );
+        duplicate_names(index, field.children(), level.under(field), path, out);
         path.pop();
     }
 }
@@ -781,11 +855,9 @@ fn carries(field: &Field) -> bool {
 /// input-only field, stored only under an unindexed join or an object with
 /// `enabled: false`.
 fn reach_of(field: &Field) -> crate::Reach {
-    let unindexed = matches!(&field.source, FieldSource::Relation(Relation::Join(join)) if !join.indexed)
-        || field.options.get("enabled") == Some(&kernel::GenericValue::Bool(false));
     if !field.emit {
         crate::Reach::Absent
-    } else if unindexed {
+    } else if crate::duplicates::unindexed(field) {
         crate::Reach::Stored
     } else {
         crate::Reach::Indexed
@@ -3348,8 +3420,10 @@ mod tests {
     /// A stopping pair stops only where every document carries it: at the
     /// root, or in plain objects all the way up. Under a join (a parent with
     /// no related row indexes), an input-only or unindexed ancestor (the pair
-    /// is never mapped), or an object with `options`, it is the warning. A
-    /// `dynamic` the user sets counts as an option of their own.
+    /// is never mapped), or an object with `options`, it does not stop: it is
+    /// the error where a document stores it (unindexed included) and the
+    /// warning where no document holds it and no script reads it. A `dynamic`
+    /// the user sets counts as an option of their own.
     #[test]
     fn a_stopping_pair_stops_only_where_every_document_carries_it() {
         let kind = |fields: serde_json::Value| {
@@ -3382,13 +3456,13 @@ mod tests {
             ])),
             DiagnosticKind::DuplicateFieldNameRefused
         );
-        // Under an input-only ancestor no document holds the pair, and where
-        // nothing is indexed OpenSearch refuses nothing: the warning. Anywhere
-        // else a document holds what the index doesn't map: the error.
+        // Under an input-only ancestor no document holds the pair and no
+        // script here reads it: the warning. Anywhere else a document holds,
+        // or stores unindexed, what the schema doesn't declare: the error.
         let warning = DiagnosticKind::DuplicateFieldName;
         let wrong = DiagnosticKind::DuplicateFieldNameWrong;
         for (fields, expected) in [
-            (json!([int_field("id"), unindexed]), warning),
+            (json!([int_field("id"), unindexed]), wrong),
             (
                 json!([
                     int_field("id"),
@@ -3431,7 +3505,7 @@ mod tests {
                         json!({ "enabled": { "Bool": false } })
                     )
                 ]),
-                warning,
+                wrong,
             ),
             (
                 json!([
@@ -3456,6 +3530,161 @@ mod tests {
         ] {
             assert_eq!(kind(fields.clone()), expected, "{fields}");
         }
+    }
+
+    fn script_field(name: &str, source: &str) -> serde_json::Value {
+        json!({ "field": name, "source": { "script": {
+            "source": source, "ty": "keyword", "nullable": true,
+        } } })
+    }
+
+    fn stated(fields: serde_json::Value) -> (DiagnosticKind, String) {
+        let found = duplicates(fields);
+        assert_eq!(found.len(), 1, "{found:?}");
+        (found[0].1, found[0].2.clone())
+    }
+
+    fn says_nothing_is_refused(message: &str) {
+        for claim in [
+            "rejects",
+            "refuse",
+            "sink stops",
+            "replication slot",
+            "quarantined",
+        ] {
+            assert!(!message.contains(claim), "says {claim:?}: {message}");
+        }
+    }
+
+    /// Under an `indexed: false` join or an object with `enabled: false`,
+    /// OpenSearch indexes nothing and checks nothing: a value the last
+    /// namesake would refuse is stored as it is, in `_source`, where the
+    /// schema declares another shape. That is the error, and it says the
+    /// value is stored, not refused.
+    #[test]
+    fn a_rejected_pair_under_an_unindexed_parent_is_an_error_that_says_it_is_stored() {
+        let five = json!({ "field": "v", "source": { "constant": { "BigInt": 5 } } });
+        let object = group("v", json!([column_field("k", "k")]));
+        let pair = json!([five, object.clone()]);
+        let unindexed = |fields: serde_json::Value| {
+            let mut join = orders_join("rel", fields);
+            join["source"]["relation"]["join"]["indexed"] = json!(false);
+            join
+        };
+        let mut disabled = group("o", pair.clone());
+        disabled["options"] = json!({ "enabled": { "Bool": false } });
+        let script_then_object = json!([script_field("v", "\"s\""), object]);
+        for fields in [
+            json!([int_field("id"), unindexed(pair)]),
+            json!([int_field("id"), disabled]),
+            json!([int_field("id"), unindexed(script_then_object)]),
+        ] {
+            let (kind, message) = stated(fields.clone());
+            assert_eq!(kind, DiagnosticKind::DuplicateFieldNameWrong, "{fields}");
+            assert!(message.contains("stores"), "{message}");
+            assert!(message.contains("`_source`"), "{message}");
+            says_nothing_is_refused(&message);
+        }
+    }
+
+    /// A last namesake that is itself unindexed (an object with `enabled:
+    /// false`, an `indexed: false` join) takes any value unchecked: the first
+    /// one's constant is stored where the schema declares an object or rows.
+    #[test]
+    fn a_constant_beside_an_unindexed_object_or_join_is_stored_as_an_error() {
+        let five = json!({ "field": "v", "source": { "constant": { "BigInt": 5 } } });
+        let mut disabled = group("v", json!([column_field("k", "k")]));
+        disabled["options"] = json!({ "enabled": { "Bool": false } });
+        let mut rows = orders_join("v", json!([column_field("k", "k")]));
+        rows["source"]["relation"]["join"]["indexed"] = json!(false);
+        for last in [disabled, rows] {
+            let fields = json!([int_field("id"), five.clone(), last]);
+            let (kind, message) = stated(fields.clone());
+            assert_eq!(kind, DiagnosticKind::DuplicateFieldNameWrong, "{fields}");
+            assert!(
+                message.contains("a document stores the first one's constant (#2)"),
+                "{message}"
+            );
+            says_nothing_is_refused(&message);
+        }
+    }
+
+    /// Under an input-only (`emit: false`) parent no document holds the pair,
+    /// but a script reads the level through `this` (a script at the parent's
+    /// level or above) or `root` (a script anywhere that names it), before the
+    /// parent is stripped: then it is the error, saying what the scripts read.
+    /// A script inside the input-only subtree never runs, and one beside it
+    /// that names no `root` can't reach it: then it is the warning, saying no
+    /// document holds it.
+    #[test]
+    fn a_pair_under_an_input_only_parent_is_an_error_only_where_a_script_reads_it() {
+        let five = json!({ "field": "v", "source": { "constant": { "BigInt": 5 } } });
+        let object = group("v", json!([column_field("k", "k")]));
+        let hidden = |mut fields: Vec<serde_json::Value>| {
+            fields.extend([five.clone(), object.clone()]);
+            let mut parent = group("o", serde_json::Value::Array(fields));
+            parent["emit"] = json!(false);
+            parent
+        };
+        let this_reader = script_field("s", "this.o.v");
+        let root_reader = script_field("s", "root.o.v");
+        let elsewhere = |script: serde_json::Value| orders_join("rel", json!([script]));
+        let warning = DiagnosticKind::DuplicateFieldName;
+        let wrong = DiagnosticKind::DuplicateFieldNameWrong;
+        for (fields, expected) in [
+            (json!([int_field("id"), hidden(vec![])]), warning),
+            (
+                json!([int_field("id"), this_reader.clone(), hidden(vec![])]),
+                wrong,
+            ),
+            (
+                json!([
+                    int_field("id"),
+                    elsewhere(root_reader.clone()),
+                    hidden(vec![])
+                ]),
+                wrong,
+            ),
+            (
+                json!([
+                    int_field("id"),
+                    elsewhere(this_reader.clone()),
+                    hidden(vec![])
+                ]),
+                warning,
+            ),
+            (json!([int_field("id"), hidden(vec![root_reader])]), warning),
+            (
+                json!([
+                    int_field("id"),
+                    group("p", json!([this_reader.clone(), hidden(vec![])]))
+                ]),
+                wrong,
+            ),
+        ] {
+            let (kind, message) = stated(fields.clone());
+            assert_eq!(kind, expected, "{fields}");
+            assert!(message.contains("no document holds"), "{message}");
+            if expected == wrong {
+                assert!(message.contains("a script reads"), "{message}");
+            } else {
+                assert!(message.contains("no script reads"), "{message}");
+            }
+            says_nothing_is_refused(&message);
+        }
+        let mut quiet = hidden(vec![]);
+        quiet["source"]["group"] = json!([
+            { "field": "v", "source": { "column": {
+                "column": "tags", "ty": "keyword", "nullable": true, "array": true,
+            } } },
+            object,
+        ]);
+        let (kind, message) = stated(json!([int_field("id"), quiet]));
+        assert_eq!(
+            kind, wrong,
+            "a document that fails to build fails under any parent"
+        );
+        assert!(message.contains("fails to build"), "{message}");
     }
 
     fn group(name: &str, fields: serde_json::Value) -> serde_json::Value {
@@ -3875,10 +4104,58 @@ mod tests {
             messages(json!([hidden.clone(), hidden])),
             [
                 "`name` is declared 2 times at this level: #1 (column `full_name`, `emit: false`), \
-              #2 (column `full_name`, `emit: false`); none reaches the document. Rename all \
-              but one"
+              #2 (column `full_name`, `emit: false`); none reaches the document, and no \
+              script reads this level. Rename all but one"
             ],
         );
+    }
+
+    /// Namesakes that are all input-only are meant to reach no document: the
+    /// warning (the live matrix's `keyword emit: false` pair). A script that
+    /// reads their level reads one value under the name: what it reads decides,
+    /// as a document's value does elsewhere.
+    #[test]
+    fn input_only_namesakes_are_a_warning_unless_a_script_reads_another_shape() {
+        let quiet = |mut field: serde_json::Value| {
+            field["emit"] = json!(false);
+            field
+        };
+        let five = quiet(json!({ "field": "v", "source": { "constant": { "BigInt": 5 } } }));
+        let object = quiet(group("v", json!([column_field("k", "k")])));
+        let (a, b) = (
+            quiet(column_field("v", "full_name")),
+            quiet(column_field("v", "name")),
+        );
+        let reader = script_field("s", "this.v");
+        let warning = DiagnosticKind::DuplicateFieldName;
+        let wrong = DiagnosticKind::DuplicateFieldNameWrong;
+        for (fields, expected, says) in [
+            (
+                json!([int_field("id"), a.clone(), b.clone()]),
+                warning,
+                "none reaches the document, and no script reads this level",
+            ),
+            (
+                json!([int_field("id"), reader.clone(), a, b]),
+                warning,
+                "a script reads the last one's value, read as the first one declares it",
+            ),
+            (
+                json!([int_field("id"), five.clone(), object.clone()]),
+                warning,
+                "none reaches the document, and no script reads this level",
+            ),
+            (
+                json!([int_field("id"), reader, five, object]),
+                wrong,
+                "a script reads the first one's constant (#3)",
+            ),
+        ] {
+            let (kind, message) = stated(fields.clone());
+            assert_eq!(kind, expected, "{fields}");
+            assert!(message.contains(says), "{message}");
+            says_nothing_is_refused(&message);
+        }
     }
 
     #[test]

@@ -19,8 +19,10 @@
 //! text is built from. Where the classifier says it cannot tell
 //! ([`DuplicateOutcome::Unknown`]), anything goes: its wording says so. Each
 //! pair's severity must follow what was seen ([`source::duplicate_is_wrong`]):
-//! the warning for a value the mapping takes or an unknown pair, the error for
-//! everything else.
+//! the warning for an unknown pair or namesakes that are all input-only, the
+//! error for everything else. A pair seen holding one namesake's value is not
+//! asserted: raw JSON can't be told from a converted value here, so
+//! `duplicate_is_wrong`'s unit tests pin those.
 //!
 //! Row 1 has related rows and a set `belongs_to` link; row 2 has none, so a
 //! pair whose outcome depends on related rows is seen both ways. The outcome
@@ -50,7 +52,7 @@ use serde_json::{Value, json};
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
 use source::document::{Document, DocumentId};
-use source::{DuplicateOutcome, NeverIndexed, RowKey, SourceSpec};
+use source::{DuplicateOutcome, NeverIndexed, Rejection, RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -323,6 +325,13 @@ async fn the_duplicate_warning_says_what_a_live_pipeline_does() {
                 ..
             } => seen == Seen::Rejected || seen == Seen::Holds(*at),
             DuplicateOutcome::Rejected { .. } => seen == Seen::Rejected,
+            // Stored unchecked: the document holds that namesake's value.
+            DuplicateOutcome::Stored {
+                reason: Rejection::FirstConstant,
+            } => seen == Seen::Holds(0),
+            DuplicateOutcome::Stored {
+                reason: Rejection::ScriptOutput { at, .. },
+            } => seen == Seen::Holds(*at),
             _ => false,
         };
         if !agrees {
@@ -334,11 +343,14 @@ async fn the_duplicate_warning_says_what_a_live_pipeline_does() {
         // The severity (issue #485): a document that holds what the index maps,
         // or a pair nothing is known about, is the warning; any other the error.
         // A value one namesake builds on its own may still reach the document as
-        // raw JSON, which this run can't tell from a converted one.
+        // raw JSON, which this run can't tell from a converted one. Namesakes
+        // that are all input-only are meant to reach no document: no script
+        // here reads them, so that is the warning.
         let wrong = source::duplicate_is_wrong(&named, source::Reach::Indexed);
         let expected_wrong = match (&predicted, &seen) {
             (DuplicateOutcome::Unknown, _) => Some(false),
             (_, Seen::Holds(_)) => None,
+            (_, Seen::Nothing) if named.iter().all(|field| !field.emit) => Some(false),
             _ => Some(true),
         };
         if expected_wrong.is_some_and(|expected| expected != wrong) {
@@ -409,6 +421,13 @@ async fn a_pair_some_document_survives_starts_and_indexes() {
         (
             "unindexed_join",
             nested("\n  indexed: false", pair),
+            "",
+            "",
+            2,
+        ),
+        (
+            "disabled_object",
+            "- constant: v\n  value: 5\n- object: v\n  options:\n    enabled: false\n  fields:\n    - keyword: k\n      required: false".to_owned(),
             "",
             "",
             2,
@@ -641,6 +660,7 @@ fn short(outcome: &DuplicateOutcome) -> String {
         DuplicateOutcome::AsText { .. } => "as text".to_owned(),
         DuplicateOutcome::FailsToBuild { .. } => "fails to build".to_owned(),
         DuplicateOutcome::Rejected { .. } => "rejected".to_owned(),
+        DuplicateOutcome::Stored { .. } => "stored unchecked".to_owned(),
         _ => "general wording".to_owned(),
     }
 }

@@ -2072,12 +2072,17 @@ where it says one value), `IdsElementLossy` (other ids than the table's), `Times
 `CheckSkipped`, `DuplicateFieldName` and `NullabilityUntracked` stay warnings. A namesake pair's
 severity is decided in one place, `source::duplicate_is_wrong(same, Reach)` over `duplicate_outcome`:
 `Holds` a value the mapping takes and `Unknown` are the `DuplicateFieldName` warning, every other
-outcome (`Holds` as raw JSON, `Wrapped`, `FirstsChildren`, `Nothing`, `Null`, `AsText`,
-`FailsToBuild`, `Rejected`) is `DuplicateFieldNameWrong`, except under an input-only ancestor
-(`Reach::Absent`: no document holds it) and a refusal where nothing is indexed (`Reach::Stored`: an
-unindexed join, an object with `enabled: false`); the live `duplicate_names` matrix asserts each pair's
-severity against what it saw, and the designer counts the kind among its duplicate kinds
-(`model/issues.ts`). `required` over a column of a relation that records no nullability is
+outcome (`Holds` as raw JSON, `Wrapped`, `FirstsChildren`, `Nothing` beside an emitted namesake,
+`Null`, `AsText`, `FailsToBuild`, `Rejected`, `Stored`: a value kept unchecked in `_source` where an
+`indexed: false` join or an `enabled: false` object declares another shape) is
+`DuplicateFieldNameWrong`. The `Reach` says what holds the level: `Indexed`, `Stored` (under an
+unindexed parent: a refusal is worded as stored, never as a refusal), `Scripts` (the pair is, or is
+under, an input-only field and a running script reads it: one at that level or above through `this`,
+one anywhere naming `root`; judged by what the script reads, as if every namesake were emitted) and
+`Absent` (nothing reads it: only `FailsToBuild` is wrong); `validation.rs`'s `Level` decides it. The
+live `duplicate_names` matrix asserts each pair's severity against what it saw, except a pair seen
+holding one namesake's value (raw JSON can't be told apart there), and the designer counts the kind
+among its duplicate kinds (`model/issues.ts`). `required` over a column of a relation that records no nullability is
 `NullabilityUntracked`, not `Nullability`: `Catalog::tracks_nullability` (default `true`, the table
 rule; Postgres: `relkind` not `v`/`m`/`f`), asked only before a nullability finding. **A gap in
 capture `run` won't close is an error too** (`apps/cli/src/gaps.rs`, `publication_gap` /

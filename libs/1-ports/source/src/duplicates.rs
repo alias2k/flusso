@@ -18,10 +18,12 @@
 //! 2. Script fields write their output over it.
 //! 3. An input-only (`emit: false`) namesake strips the name.
 //! 4. The sink indexes what is left under the last emitted one's mapping, and
-//!    may reject it.
+//!    may reject it; under an `indexed: false` join or an object with
+//!    `enabled: false` it keeps the value unchecked in `_source`.
 //!
 //! [`duplicate_outcome`] classifies a set of namesakes, [`duplicate_is_wrong`]
-//! says whether a document then holds something other than the index maps,
+//! says, at a level's [`Reach`], whether a document (or a script reading an
+//! input-only level) then holds something other than the schema declares,
 //! which makes the diagnostic an error (issue #485), and [`never_indexed`]
 //! whether they never give an indexed document, which makes it an error that
 //! stops `flusso run`. The `duplicate_names`
@@ -94,6 +96,14 @@ pub enum DuplicateOutcome {
         /// document then holds; `None` when no document is indexed.
         unless_it_fits: Option<usize>,
     },
+    /// A document stores, unchecked, a value of another shape than the last
+    /// namesake declares: its mapping (an `indexed: false` join, an object
+    /// with `enabled: false`) indexes nothing, so OpenSearch keeps it in
+    /// `_source` as it is. `reason` says which value.
+    Stored {
+        /// What the document holds that the last one does not declare.
+        reason: Rejection,
+    },
     /// It depends on both declarations and on the data: either value, an
     /// empty one, a failed build or a rejection.
     Unknown,
@@ -113,7 +123,8 @@ pub enum Text {
     Binary,
 }
 
-/// What a document holds that the last namesake's mapping refuses.
+/// What a document holds that the last namesake's mapping refuses, or, when
+/// nothing checks it, does not declare.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Rejection {
@@ -157,6 +168,11 @@ pub fn duplicate_outcome(same: &[&Field]) -> DuplicateOutcome {
     if let FieldSource::Constant(value) = &first.source {
         return match constant_fits(value, last) {
             Some(true) => DuplicateOutcome::Holds(0),
+            Some(false) if matches!(mapped_as(last), Mapped::Disabled) => {
+                DuplicateOutcome::Stored {
+                    reason: Rejection::FirstConstant,
+                }
+            }
             Some(false) => DuplicateOutcome::Rejected {
                 reason: Rejection::FirstConstant,
                 unless_it_fits: None,
@@ -189,9 +205,52 @@ pub fn duplicate_outcome(same: &[&Field]) -> DuplicateOutcome {
     document_outcome(same.len() - 1, first, last)
 }
 
+/// How a message speaks of the level, by its [`Reach`]: what holds the value
+/// and what declares the shape.
+struct Voice {
+    /// Who declares the shape: "the index maps the last one".
+    lead: String,
+    /// "a document holds", or "a script reads".
+    holds: &'static str,
+    /// "every document holds", or "a script reads".
+    every: &'static str,
+    /// "a document keeps", or "a script reads".
+    keeps: &'static str,
+    /// "the index maps", or "the schema declares".
+    maps: &'static str,
+}
+
+impl Voice {
+    fn of(reach: Reach) -> Self {
+        match reach {
+            Reach::Scripts => Self {
+                lead: "no document holds them, since they are, or are under, an input-only \
+                       (`emit: false`) field, but a script reads this level (through `this` or `root`) \
+                       before it is stripped, and the schema declares the last one"
+                    .to_owned(),
+                holds: "a script reads",
+                every: "a script reads",
+                keeps: "a script reads",
+                maps: "the schema declares",
+            },
+            Reach::Indexed | Reach::Stored | Reach::Absent => Self {
+                lead: "the index maps the last one".to_owned(),
+                holds: "a document holds",
+                every: "every document holds",
+                keeps: "a document keeps",
+                maps: "the index maps",
+            },
+        }
+    }
+}
+
 /// Names every field of `name` by position at its level and says what a
-/// deployment does with them.
-pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> String {
+/// deployment does with them at `reach`.
+pub(crate) fn duplicate_message(
+    name: &FieldName,
+    same: &[(usize, &Field)],
+    reach: Reach,
+) -> String {
     let listed = same
         .iter()
         .map(|(at, field)| format!("#{} ({})", at + 1, described(field)))
@@ -199,8 +258,46 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
         .join(", ");
     let fields: Vec<&Field> = same.iter().map(|(_, field)| *field).collect();
     let position = |i: usize| same.get(i).map_or(0, |(at, _)| at + 1);
-    let kept = match duplicate_outcome(&fields) {
-        DuplicateOutcome::Holds(i) => holds_message(i, &fields, position(i)),
+    let kept = kept_message(outcome_at(&fields, reach), &fields, position, reach);
+    format!(
+        "`{name}` is declared {} times at this level: {listed}; {kept}. Rename all but one",
+        same.len()
+    )
+}
+
+/// What a document (or a script) gets from namesakes whose outcome is
+/// `outcome`, at `reach`. A failed build fails whatever reads the level.
+fn kept_message(
+    outcome: DuplicateOutcome,
+    fields: &[&Field],
+    position: impl Fn(usize) -> usize,
+    reach: Reach,
+) -> String {
+    let voice = Voice::of(reach);
+    let Voice {
+        lead,
+        holds,
+        every,
+        keeps,
+        maps,
+    } = &voice;
+    match outcome {
+        DuplicateOutcome::FailsToBuild { .. } => {}
+        _ if reach == Reach::Absent => {
+            return "no document holds them, since they are under an input-only (`emit: \
+                    false`) field, and no script reads this level"
+                .to_owned();
+        }
+        DuplicateOutcome::Stored { reason } => {
+            return unchecked_message(&reason, fields, position, reach);
+        }
+        DuplicateOutcome::Rejected { reason, .. } if reach != Reach::Indexed => {
+            return unchecked_message(&reason, fields, position, reach);
+        }
+        _ => {}
+    }
+    match outcome {
+        DuplicateOutcome::Holds(i) => holds_message(i, fields, position(i), &voice),
         DuplicateOutcome::FirstsChildren { kept } => {
             let (first, last) = (position(0), position(fields.len() - 1));
             if kept.is_empty() {
@@ -210,9 +307,8 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
                     "the object is empty"
                 };
                 format!(
-                    "the index maps the last one, but a document keeps none of its child \
-                     fields: #{first} and #{last} declare none in common, so {empty}, not the \
-                     object the index maps"
+                    "{lead}, but {keeps} none of its child fields: #{first} and #{last} declare \
+                     none in common, so {empty}, not the object {maps}"
                 )
             } else {
                 let kept = kept
@@ -221,19 +317,19 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "the index maps the last one, but a document holds its value cut to the \
-                     child fields #{first} declares that #{last} has too ({kept}), read as \
-                     #{first} declares them, not the object the index maps"
+                    "{lead}, but {holds} its value cut to the child fields #{first} declares \
+                     that #{last} has too ({kept}), read as #{first} declares them, not the \
+                     object {maps}"
                 )
             }
         }
         DuplicateOutcome::Nothing if fields.iter().all(|field| !field.emit) => {
-            "none reaches the document".to_owned()
+            "none reaches the document, and no script reads this level".to_owned()
         }
         DuplicateOutcome::Null => format!(
-            "the index maps the last one, but every document holds `null`, not the constant the \
-             schema declares: #{} is a constant holding a list or an object, which the document \
-             query reads as `null`, and #{} reads that",
+            "{lead}, but {every} `null`, not the constant the schema declares: #{} is a constant \
+             holding a list or an object, which the document query reads as `null`, and #{} \
+             reads that",
             position(fields.len() - 1),
             position(0)
         ),
@@ -271,31 +367,74 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
                 String::new()
             };
             format!(
-                "the index maps the last one, but a document holds the last one's value as \
-                 text{array}, not the value the schema declares: {what}"
+                "{lead}, but {holds} the last one's value as text{array}, not the value the \
+                 schema declares: {what}"
             )
         }
-        DuplicateOutcome::Wrapped => "the index maps the last one, but a document holds the last \
-                                      one's value wrapped in a one-element array (the first one \
-                                      is an `array: true` column): a list where the index maps \
-                                      one value"
-            .to_owned(),
-        DuplicateOutcome::Rejected { reason, .. } => format!(
-            "the index maps the last one, {}, but {}. With `on_error = stop` (the \
-             default) the sink stops and restarts on it, which halts every index it writes \
-             and pins the replication slot; with `skip` such a document is quarantined",
-            fields.last().map_or_else(String::new, |f| described(f)),
-            rejection_message(&reason, position)
+        DuplicateOutcome::Wrapped => format!(
+            "{lead}, but {holds} the last one's value wrapped in a one-element array (the first \
+             one is an `array: true` column): a list where {maps} one value"
         ),
-        DuplicateOutcome::Unknown => "the index maps the last one; what a document holds \
-                                      depends on both declarations: it may hold either value, \
-                                      be empty, fail to build or be refused by the sink (run \
-                                      `flusso script run` on a row to see)"
-            .to_owned(),
+        DuplicateOutcome::Rejected { reason, .. } | DuplicateOutcome::Stored { reason } => {
+            format!(
+                "the index maps the last one, {}, but {}. With `on_error = stop` (the \
+                 default) the sink stops and restarts on it, which halts every index it writes \
+                 and pins the replication slot; with `skip` such a document is quarantined",
+                fields.last().map_or_else(String::new, |f| described(f)),
+                rejection_message(&reason, position)
+            )
+        }
+        DuplicateOutcome::Unknown => format!(
+            "{lead}; what {holds} depends on both declarations: it may be either value, be \
+             empty, fail to build or be refused by the sink (run `flusso script run` on a row \
+             to see)"
+        ),
+    }
+}
+
+/// A value the last namesake does not declare, where nothing checks it: under
+/// an unindexed parent, or beside a last one that indexes nothing, a document
+/// stores it in `_source`; under an input-only parent, a script reads it.
+fn unchecked_message(
+    reason: &Rejection,
+    fields: &[&Field],
+    position: impl Fn(usize) -> usize,
+    reach: Reach,
+) -> String {
+    let last = fields.last().map_or_else(String::new, |f| described(f));
+    let what = match reason {
+        Rejection::FirstConstant => format!(
+            "the first one's constant (#{}), which a constant builds whatever the last one reads",
+            position(0)
+        ),
+        Rejection::ScriptOutput { at, .. } if reach == Reach::Scripts => format!(
+            "the value built before any script ran, not #{}'s output: a script never reads \
+             another script's output",
+            position(*at)
+        ),
+        Rejection::ScriptOutput { at, produced, .. } => format!(
+            "the last script's output (#{}, {})",
+            position(*at),
+            typed(produced, false)
+        ),
+        Rejection::PointWithoutLatLon => format!(
+            "its point cut to the child fields #{} declares, with no `lat` and `lon`",
+            position(0)
+        ),
     };
+    if reach == Reach::Scripts {
+        let Voice { lead, .. } = Voice::of(reach);
+        return format!(
+            "{lead}, {last}, but a script reads {what}, not what #{} declares",
+            position(fields.len() - 1)
+        );
+    }
     format!(
-        "`{name}` is declared {} times at this level: {listed}; {kept}. Rename all but one",
-        same.len()
+        "the schema declares the last one, {last}, but a document stores {what} where #{} \
+         declares another shape: OpenSearch indexes nothing under `indexed: false` or `enabled: \
+         false`, so it keeps the value unchecked in `_source`, and whoever reads `_source` gets \
+         another shape than the schema says",
+        position(fields.len() - 1)
     )
 }
 
@@ -349,14 +488,14 @@ fn typed(ty: &MappingType, array: bool) -> String {
     format!("{article} `{name}`")
 }
 
-fn holds_message(i: usize, fields: &[&Field], position: usize) -> String {
+fn holds_message(i: usize, fields: &[&Field], position: usize, voice: &Voice) -> String {
+    let Voice { lead, holds, .. } = voice;
     let (Some(first), Some(field)) = (fields.first(), fields.get(i)) else {
         return String::new();
     };
     if let FieldSource::Script(script) = &field.source {
         return format!(
-            "the index maps the last one, and a document holds the last script's output \
-             (#{position}, {})",
+            "{lead}, and {holds} the last script's output (#{position}, {})",
             typed(&script.ty.opensearch(), script.array)
         );
     }
@@ -364,8 +503,8 @@ fn holds_message(i: usize, fields: &[&Field], position: usize) -> String {
         && let FieldSource::Constant(_) = &first.source
     {
         return format!(
-            "the index maps the last one, and a document holds the first one's constant \
-             (#{position}), which a constant builds whatever the last one reads"
+            "{lead}, and {holds} the first one's constant (#{position}), which a constant \
+             builds whatever the last one reads"
         );
     }
     let how = if holds_raw(i, fields) {
@@ -378,7 +517,7 @@ fn holds_message(i: usize, fields: &[&Field], position: usize) -> String {
     } else {
         ", its child fields read as the first one declares them"
     };
-    format!("the index maps the last one, and a document holds the last one's value{how}")
+    format!("{lead}, and {holds} the last one's value{how}")
 }
 
 /// Whether the value [`DuplicateOutcome::Holds`] names at `i` reaches the
@@ -409,27 +548,51 @@ pub enum Reach {
     /// Indexed: the mapping reads every value.
     Indexed,
     /// Stored but not indexed (under an `indexed: false` join, or an object
-    /// with `enabled: false`): OpenSearch refuses nothing there.
+    /// with `enabled: false`): OpenSearch keeps every value unchecked in
+    /// `_source`.
     Stored,
-    /// Under an input-only (`emit: false`) field: no document holds it.
+    /// Under an input-only (`emit: false`) field that a script reads: no
+    /// document holds it, but a script at the input-only field's level or
+    /// above reads it through `this`, or one that names `root` through
+    /// `root`, before it is stripped.
+    Scripts,
+    /// Under an input-only (`emit: false`) field no script reads: nothing
+    /// holds it.
     Absent,
 }
 
-/// Whether the namesakes `same`, at `reach`, leave a document holding
-/// something other than the index maps: every outcome but a value the mapped
-/// field takes ([`DuplicateOutcome::Holds`], not as raw JSON) and one nothing
-/// is known about ([`DuplicateOutcome::Unknown`]); never under an input-only
-/// ancestor, and a refusal never where nothing is indexed. The one place the
-/// severity of a pair is decided (issue #485).
+/// Whether the namesakes `same`, at `reach`, leave a document (or, under an
+/// input-only field, a script) holding something other than the schema
+/// declares: every outcome but a value the last one takes
+/// ([`DuplicateOutcome::Holds`], not as raw JSON) and one nothing is known
+/// about ([`DuplicateOutcome::Unknown`]). Where nothing reads the level
+/// ([`Reach::Absent`]) only a failed build is. The one place the severity of
+/// a pair is decided (issue #485).
 pub fn duplicate_is_wrong(same: &[&Field], reach: Reach) -> bool {
-    match (reach, duplicate_outcome(same)) {
-        (Reach::Absent, _)
-        | (_, DuplicateOutcome::Unknown)
-        | (Reach::Stored, DuplicateOutcome::Rejected { .. }) => false,
+    match (reach, outcome_at(same, reach)) {
+        (_, DuplicateOutcome::FailsToBuild { .. }) => true,
+        (Reach::Absent, _) | (_, DuplicateOutcome::Unknown) => false,
         (_, DuplicateOutcome::Holds(i)) => holds_raw(i, same),
         (_, DuplicateOutcome::Nothing) => same.iter().any(|field| field.emit),
         _ => true,
     }
+}
+
+/// The outcome at `reach`: under an input-only field a script reads the level
+/// before anything is stripped, so as if every namesake were emitted.
+fn outcome_at(same: &[&Field], reach: Reach) -> DuplicateOutcome {
+    if reach != Reach::Scripts {
+        return duplicate_outcome(same);
+    }
+    let emitted: Vec<Field> = same
+        .iter()
+        .map(|field| {
+            let mut field = (*field).clone();
+            field.emit = true;
+            field
+        })
+        .collect();
+    duplicate_outcome(&emitted.iter().collect::<Vec<_>>())
 }
 
 /// Whether the document query reads a constant as `null`: it emits only a
@@ -479,8 +642,10 @@ fn constant_fits(value: &GenericValue, last: &Field) -> Option<bool> {
     let object = scalar_leaves(value, &mut leaves);
     match mapped_as(last) {
         Mapped::Unindexed | Mapped::Itself => Some(true),
-        Mapped::Structured if object => strict_refuses(value, last).then_some(false),
-        Mapped::Structured => Some(leaves.is_empty()),
+        Mapped::Structured | Mapped::Disabled if object => {
+            strict_refuses(value, last).then_some(false)
+        }
+        Mapped::Structured | Mapped::Disabled => Some(leaves.is_empty()),
         _ if object => Some(false),
         Mapped::Anything => Some(true),
         Mapped::Scalar(MappingType::Other(name)) if name == "geo_point" => geo_fits(value),
@@ -652,6 +817,13 @@ fn script_outcome(at: usize, same: &[&Field], last: &Field) -> DuplicateOutcome 
     let produced = script.ty.opensearch();
     match mapped_as(last) {
         Mapped::Itself | Mapped::Anything | Mapped::Unindexed => DuplicateOutcome::Holds(at),
+        Mapped::Disabled => DuplicateOutcome::Stored {
+            reason: Rejection::ScriptOutput {
+                at,
+                produced,
+                wanted: None,
+            },
+        },
         Mapped::Structured => DuplicateOutcome::Rejected {
             reason: Rejection::ScriptOutput {
                 at,
@@ -678,8 +850,12 @@ enum Mapped {
     Itself,
     /// Any scalar: a text-family field.
     Anything,
-    /// Any value: a field that is not indexed.
+    /// Any value: a field that is not indexed and declares no shape (a
+    /// `json` column, a constant).
     Unindexed,
+    /// Any value, unchecked, where an object or rows are declared: an
+    /// `indexed: false` join, an object with `enabled: false`.
+    Disabled,
     /// An object or nested array: a join, an object, a `json` or `map` column.
     Structured,
     /// A scalar of this type.
@@ -694,6 +870,9 @@ fn mapped_as(field: &Field) -> Mapped {
     };
     match &field.source {
         FieldSource::Script(_) => Mapped::Itself,
+        FieldSource::Group(_) | FieldSource::Relation(Relation::Join(_)) if unindexed(field) => {
+            Mapped::Disabled
+        }
         FieldSource::Constant(value) if constant_is_stored_unindexed(value) => Mapped::Unindexed,
         FieldSource::Constant(value) => match constant_mapping_type(value) {
             MappingType::Keyword | MappingType::Text => Mapped::Anything,
@@ -702,7 +881,6 @@ fn mapped_as(field: &Field) -> Mapped {
         },
         FieldSource::Column(column) if !column.indexed => Mapped::Unindexed,
         FieldSource::Column(column) => of(&column.ty),
-        FieldSource::Relation(Relation::Join(join)) if !join.indexed => Mapped::Unindexed,
         FieldSource::Relation(Relation::Join(_)) | FieldSource::Group(_) => Mapped::Structured,
         FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
             AggregateOp::Count => Mapped::Scalar(MappingType::Long),
@@ -716,6 +894,13 @@ fn mapped_as(field: &Field) -> Mapped {
         },
         FieldSource::Geo(_) => of(&FlussoType::GeoPoint),
     }
+}
+
+/// Whether OpenSearch indexes nothing under `field`: an `indexed: false` join,
+/// or a field with `enabled: false`.
+pub(crate) fn unindexed(field: &Field) -> bool {
+    matches!(&field.source, FieldSource::Relation(Relation::Join(join)) if !join.indexed)
+        || field.options.get("enabled") == Some(&GenericValue::Bool(false))
 }
 
 /// The shape a field's value has in a document.
