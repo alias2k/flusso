@@ -141,3 +141,57 @@ fn an_unknown_lane_is_not_detached() {
     assert!(!progress.is_detached(&lane("users", "b")));
     assert!(progress.detach(&lane("users", "a")));
 }
+
+/// An attach (ADR 0012 stage 10, R8): a detached lane is attached for an
+/// attempt above the one it last attached for; the same attempt on a lane
+/// attached for it answers `Again` (its `Attached` is published again); an
+/// older attempt, or the attempt a lane was attached for and then detached
+/// again, is stale.
+#[test]
+fn a_detached_lane_is_attached_for_a_newer_attempt_only() {
+    let (lane_a, lane_b) = (lane("users", "a"), lane("users", "b"));
+    let progress = Progress::new([lane_a.clone(), lane_b.clone()]);
+    assert!(!progress.any_detached());
+    assert_eq!(progress.attach(&lane_a, 1), Attach::Stale, "never detached");
+
+    progress.detach(&lane_a);
+    assert!(progress.any_detached());
+    assert_eq!(progress.attach(&lane_a, 1), Attach::Attached);
+    assert!(!progress.is_detached(&lane_a));
+    assert!(!progress.any_detached());
+    assert_eq!(progress.attach(&lane_a, 1), Attach::Again);
+    assert_eq!(progress.attach(&lane_a, 0), Attach::Stale);
+
+    progress.detach(&lane_a);
+    assert_eq!(
+        progress.attach(&lane_a, 1),
+        Attach::Stale,
+        "attached for it, then detached again"
+    );
+    assert!(progress.is_detached(&lane_a));
+    assert_eq!(progress.attach(&lane_a, 2), Attach::Attached);
+}
+
+/// An attached lane answers through the newest position routed in this
+/// process, which `forget_all` keeps: a lane that registered nothing since
+/// is not `Idle`, so a quiet database keeps confirming (H7). Registrations
+/// count on it again.
+#[test]
+fn an_attached_lane_answers_through_what_was_routed_even_after_forget_all() {
+    let (attached, other) = (lane("users", "a"), lane("users", "b"));
+    let progress = Progress::new([attached.clone(), other.clone()]);
+    progress.routed(p(5));
+    progress.forget_all();
+    progress.detach(&attached);
+    progress.detach(&other);
+    assert_eq!(progress.landed(), Landed::Free);
+    assert_eq!(progress.attach(&attached, 1), Attach::Attached);
+    assert_eq!(progress.landed(), Landed::Through(p(5)));
+    let key = progress.next_key(&attached.index).unwrap();
+    progress.published(&attached, key, p(6), p(6));
+    assert_eq!(
+        progress.landed(),
+        Landed::Before(p(6)),
+        "registrations count again"
+    );
+}

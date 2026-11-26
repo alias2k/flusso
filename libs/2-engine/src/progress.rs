@@ -137,6 +137,19 @@ use stream::{ItemKey, LaneKey};
 use pending::Pending;
 pub use pending::{Taken, Token};
 
+/// What [`Progress::attach`] did (ADR 0012 stage 10, R8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attach {
+    /// The lane was detached and is attached now, for this attempt.
+    Attached,
+    /// The lane is attached for this attempt already: its `Attached` is
+    /// published again (a run that died between the two).
+    Again,
+    /// An attempt the lane is past, or a lane it doesn't apply to: nothing
+    /// is published.
+    Stale,
+}
+
 /// What holds the source's resume point back the most
 /// ([`Progress::pinned_by`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +211,8 @@ pub struct Progress {
     /// confirm (ADR 0012 stage 8a, §3.9 §2): the listener's one slot is the
     /// fence's.
     registrations: Registrations,
+    /// How many lanes are detached.
+    detached: AtomicUsize,
 }
 
 /// A flag raised after every registration, and the waker of whoever waits on
@@ -237,6 +252,10 @@ struct Registry {
     /// The newest position the reader routed in this engine run: a lane with
     /// nothing outstanding answers through it (§3.9 D1).
     routed: Option<Position>,
+    /// The newest position routed in this process, over every engine run:
+    /// `forget_all` keeps it. What an attached lane starts answering through
+    /// (ADR 0012 stage 10, H7).
+    routed_ever: Option<Position>,
 }
 
 /// One lane's routed items not yet covered, as `(key, oldest, step)` in
@@ -265,6 +284,9 @@ struct Registered {
     /// Detached from the minimum (ADR 0012 stage 10, R5): nothing registered
     /// on it counts, and no answer over several lanes reads it.
     detached: bool,
+    /// The attempt it was last attached for (R8): an attach for it again
+    /// publishes `Attached` again; an older one is stale.
+    attempt: Option<u64>,
 }
 
 /// How far one lane's sink engine has written, in lane order: the key's
@@ -302,6 +324,7 @@ impl Progress {
                     .collect(),
                 next_step: 0,
                 routed: None,
+                routed_ever: None,
             }),
             marks,
             keys,
@@ -312,6 +335,7 @@ impl Progress {
             unmarked: AtomicU64::new(u64::MAX),
             listener: OnceLock::new(),
             registrations: Registrations::default(),
+            detached: AtomicUsize::new(0),
         }
     }
 
@@ -346,13 +370,56 @@ impl Progress {
         let Some(registered) = registry.lanes.get_mut(lane) else {
             return false;
         };
+        if !registered.detached {
+            self.detached.fetch_add(1, Ordering::AcqRel);
+        }
         *registered = Registered {
             detached: true,
+            attempt: registered.attempt,
             ..Registered::default()
         };
         drop(registry);
         self.registered();
         true
+    }
+
+    /// Attach `lane` again for `attempt` (ADR 0012 stage 10, R8), under the
+    /// registry lock: a detached lane, for an attempt above the one it last
+    /// attached for, counts in the minimum from here on, answering through
+    /// the newest position routed in this process (H7) until something is
+    /// registered on it. Called with nothing of its index granted and
+    /// unpublished (the builder's quiesce).
+    pub fn attach(&self, lane: &LaneKey, attempt: u64) -> Attach {
+        let mut registry = lock(&self.registry);
+        let routed_ever = registry.routed_ever;
+        let Some(registered) = registry.lanes.get_mut(lane) else {
+            return Attach::Stale;
+        };
+        let newer = registered.attempt.is_none_or(|last| attempt > last);
+        let answer = match (registered.detached, newer) {
+            (true, true) => {
+                *registered = Registered {
+                    attempt: Some(attempt),
+                    newest: routed_ever,
+                    ..Registered::default()
+                };
+                self.detached.fetch_sub(1, Ordering::AcqRel);
+                Attach::Attached
+            }
+            (false, _) if registered.attempt == Some(attempt) => Attach::Again,
+            _ => Attach::Stale,
+        };
+        drop(registry);
+        if answer == Attach::Attached {
+            self.registered();
+        }
+        answer
+    }
+
+    /// Whether some lane is detached: one atomic load, so the paths every
+    /// batch takes look up nothing while none is.
+    pub fn any_detached(&self) -> bool {
+        self.detached.load(Ordering::Acquire) > 0
     }
 
     /// Whether `lane` is detached from the minimum.
@@ -737,6 +804,12 @@ impl Progress {
                 .is_none_or(|routed| routed.seq < position.seq)
             {
                 registry.routed = Some(position);
+            }
+            if registry
+                .routed_ever
+                .is_none_or(|routed| routed.seq < position.seq)
+            {
+                registry.routed_ever = Some(position);
             }
         }
         self.registered();
