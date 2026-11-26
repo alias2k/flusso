@@ -3630,3 +3630,80 @@ async fn a_stop_while_an_opening_failed_still_drains_the_lanes() {
         "the lanes never drained within 30 s of the stop: written {written:?}"
     );
 }
+
+/// `users`' detach writes its record but the call fails (the lane parks,
+/// unsure), then this process stops holding the slot as `lose` does, and
+/// another process writes its own detach record of `users`.
+async fn a_failed_detach_then_another_process_detaches(
+    rig: &Rig,
+    lose: impl std::future::Future<Output = ()>,
+) -> tokio::task::JoinHandle<crate::Result<()>> {
+    rig.sink
+        .records
+        .lock()
+        .unwrap()
+        .push_back(Record::FailAfterWriting);
+    rig.sink.block(&users(), true);
+    let engine = rig.engine();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 1, 1).await;
+    eventually("the record was written and the call failed", || {
+        rig.sink.detaches().len() == 1
+    })
+    .await;
+    lose.await;
+    rig.sink.kept.lock().unwrap().insert(
+        "users".to_owned(),
+        Detachment::recorded(
+            DetachRecord::Detached { live_only: false },
+            Some(MarkerAt::Newer { seeded: false }),
+            Some(RecordVersion::new("9:9")),
+        ),
+    );
+    task
+}
+
+/// The fifth re-check (second report), B-2: a parked lane's clear deletes a
+/// `Detached` record it reads. After a failed opening another process may
+/// hold the slot and rely on that record: the clear waits until this process
+/// holds the slot again.
+#[tokio::test(start_paused = true)]
+async fn a_clear_waits_while_no_stream_is_held() {
+    let rig = Rig::new(64);
+    let task = a_failed_detach_then_another_process_detaches(&rig, async {
+        rig.rereads.closed();
+        assert!(rig.rereads.open(async { Err::<(), ()>(()) }).await.is_err());
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let forgotten = rig.sink.forgotten.lock().unwrap().clone();
+    let kept = rig.sink.kept.lock().unwrap().get("users").cloned();
+    task.abort();
+    assert!(
+        kept.is_some() && !forgotten.contains(&"users@9:9".to_owned()),
+        "no stream held, yet: forgotten {forgotten:?}, record after {kept:?}"
+    );
+}
+
+/// ... and the same once the stream ended, with no opening begun.
+#[tokio::test(start_paused = true)]
+async fn a_clear_waits_after_the_stream_ended() {
+    let rig = Rig::new(64);
+    let task = a_failed_detach_then_another_process_detaches(&rig, async {
+        rig.rereads.closed();
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let forgotten = rig.sink.forgotten.lock().unwrap().clone();
+    let kept = rig.sink.kept.lock().unwrap().get("users").cloned();
+    task.abort();
+    assert!(
+        kept.is_some() && !forgotten.contains(&"users@9:9".to_owned()),
+        "no stream held, yet: forgotten {forgotten:?}, record after {kept:?}"
+    );
+}
