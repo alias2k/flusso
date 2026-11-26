@@ -77,7 +77,7 @@ A leaf can also be computed from the built document instead of read from a colum
 - **[`transforms`](#transforms)** apply to each string element. They're checked against the element type: the `[]` column's base type, or `text` for `json`/`jsonb`. A `json` array takes none.
 - **`default`** is a list, written whole when the column is null: `default: [general]`. Its elements are non-null scalars (any non-null JSON on a `json` field). A scalar `default` with `array: true` is rejected at load.
 - **`required`** is about the array: `true` maps `Vec<T>`, `false` `Option<Vec<T>>`. See [Document structs](../query/document-structs.md#arrays).
-- **Checked against the database.** `array: true` over a column that's neither a `[]` type nor `json`/`jsonb` is an error that stops `run`; a `[]` column without it is a warning. A domain counts as the type it's declared over. See [check](cli.md#check).
+- **Checked against the database.** `array: true` over a column that's neither a `[]` type nor `json`/`jsonb` is an error that stops `run`. A `[]` column read without it is an error too (`undeclared_array_column`): the index holds a list where the schema says one value, so a consumer reading by the schema fails on every such document; `run` still starts on it. A domain counts as the type it's declared over. See [Every finding](checks.md#every-finding).
 - **Not on** `geo`, `map`, `object`, `constant`, joins, or aggregates: the key is rejected at load.
 - **Changing it** moves the schema to a new content hash, so the index is rebuilt once. A schema without it keeps its hash.
 
@@ -116,8 +116,8 @@ A `date` or `timestamp` field is mapped as an OpenSearch `date` with its default
 The same form is written wherever the value goes: a `min`/`max` with `value_type: timestamp`, an `ids` of `timestamp`, a script declared `timestamp`, a field inside an [`indexed: false`](joins.md#indexed) join (stored, not mapped), and the `stdout` sink.
 
 - **Precision.** A `date` field stores milliseconds, so `range` and sort see `.123456` as `.123`. `_source` keeps every digit.
-- **A `format` of your own.** `options.format` replaces the default, so it must keep a pattern that reads the forms above: put `strict_date_optional_time` first (`strict_date_optional_time||yyyy-MM-dd HH:mm:ss`). A format with none refuses every document holding a value. `flusso check` (`--offline` too) and `run` warn with [`timestamp_format`](cli.md#check) when every pattern is known to refuse the form.
-- **A time of day has no date.** A `time` or `timetz` column is accepted under `timestamp`, but the `date` mapping refuses `03:04:05`, so every document with a non-null value is an [item-level rejection](index-and-on-error.md#on_error). With the database, `check` reports it as [`time_of_day_as_date`](cli.md#check), and `run` stops at start, for a `timestamp` or `date` field with no `options` at the root or in a plain object (see [Validation at start](cli.md#validation-at-start)). A field inside a join, or a `min`/`max` over such a column, is refused only for a parent with a related row, so it isn't reported. Two ways out, checked against OpenSearch 2, each leaving `check` with nothing to report. Declare it as a `custom` keyword; `HH:MM:SS` sorts correctly as text:
+- **A `format` of your own.** `options.format` replaces the default. When none of its patterns reads what flusso writes into the field, flusso appends `||strict_date_optional_time` to the mapping, so documents still index: see [A format of your own](#a-format-of-your-own).
+- **A time of day has no date.** A `time` or `timetz` column is accepted under `timestamp`, but the `date` mapping refuses `03:04:05`, so every document with a non-null value is an [item-level rejection](index-and-on-error.md#on_error). With the database, `check` reports it as [`time_of_day_as_date`](checks.md#every-finding), and `run` stops at start, for a `timestamp` or `date` field with no `options` at the root or in a plain object (see [Validation at start](checks.md#validation-at-start)). A field inside a join, or a `min`/`max` over such a column, is refused only for a parent with a related row, so it isn't reported. Two ways out, checked against OpenSearch 2, each leaving `check` with nothing to report. Declare it as a `custom` keyword; `HH:MM:SS` sorts correctly as text:
 
   ```yaml
   - custom: opensAt
@@ -139,6 +139,41 @@ The same form is written wherever the value goes: a `min`/`max` with `value_type
   ```
 
 - **Values outside the format.** A BC date, `infinity` and `-infinity`, and a year past 9999 reach the document as Postgres renders them (`0044-03-15 BC`, `infinity`), which the `date` mapping refuses, so that one document is rejected and `on_error` decides.
+
+### A format of your own
+
+A field mapped as a date takes `options.format` in place of the default. If no pattern of it reads what flusso writes into that field, the mapping flusso creates gets `||strict_date_optional_time` appended:
+
+```yaml
+- timestamp: placedAt
+  options:
+    format: "yyyy-MM-dd HH:mm:ss"   # mapped as "yyyy-MM-dd HH:mm:ss||strict_date_optional_time"
+```
+
+- **Your patterns stay first.** OpenSearch prints dates in the first pattern (`key_as_string`, `docvalue_fields`, the `fields` API) and reads a query value in any of them. `_source` holds what flusso wrote; sort values are epoch milliseconds, whatever the format.
+- **The declared type decides**, never the column: a `date` field holds `2024-01-02`, a `timestamp` field the `T` forms in the table above. A `date` field over a timestamp column holds the timestamp, which a date-only format refuses; `check` reports that column as a `type_mismatch` and says so.
+- **Left as written:** a format that already reads the field's values; a format of time-of-day patterns only (below); a field the index doesn't map (`emit: false`, or under an [`indexed: false`](joins.md#indexed) join or an `enabled: false` object); a `custom` field unless every `postgres:` type is `date` or `timestamp…` by name, so a list naming any other type, or a domain over a date, keeps its format.
+- **[`flusso show mapping`](cli.md#show)** notes each field it completes: `! users.updatedAt: flusso appends strict_date_optional_time to its format, …`.
+- **The index moves once.** A schema with such a field gets a new [hash](sink-opensearch.md#index-naming), so its index is rebuilt under a new name once. Every other schema keeps its hash.
+
+What reads, per pattern (named formats also with `strict_` and in camelCase):
+
+| Pattern | On a `date` field | On a `timestamp` field |
+| --- | --- | --- |
+| `date_optional_time`, `date_optional_time_nanos`, `iso8601` | reads | reads |
+| `date`, `year_month_day`, `yyyy-MM-dd`, `uuuu-MM-dd` | reads | appended |
+| `hour`, `hour_minute`, `hour_minute_second` (`_fraction`, `_millis`), `time`, `time_no_millis`, `t_time`, `t_time_no_millis`, `basic_time`, `basic_time_no_millis`, `basic_t_time`, `basic_t_time_no_millis`, and a pattern of your own with an hour and no date letter (`HH:mm:ss`) | time of day: left as written | time of day: left as written |
+| any other: `epoch_millis`, `epoch_second`, `basic_date`, `date_hour_minute_second`, `date_time`, `ordinal_date`, `week_date`, `year`, `year_month`, a pattern of your own (`yyyy-MM-dd HH:mm:ss`, `dd/MM/yyyy`) | appended | appended |
+
+One pattern that reads is enough: `strict_date_optional_time||epoch_millis` is left alone. The rule leans towards appending, so a few formats that already read get the pattern too, and their index moves: an all-letter pattern such as `yyyyMMdd` reads as an unknown named format, and a `timestamp` field over a `date` column is taken to hold timestamps.
+
+**A time-of-day format over a date is an error.** A format whose every pattern reads a time of day only is kept as written, since over a `time` column it is how a time of day is indexed (above). Over anything else OpenSearch refuses every document holding a value, so [`check`](checks.md#every-finding) reports it as `time_of_day_format`: with no database for a `date` field, a `custom` date, a constant or a script, and once the database names the type for a `timestamp` column, `min`/`max` or `ids`. `run` starts on it.
+
+```text
+[error] users.account.createdAt  the `format` `HH:mm:ss` reads a time of day only, but flusso writes a timestamp (`2024-01-02T03:04:05`) here, from the column's `timestamp with time zone`, so OpenSearch refuses every document whose value is not null. Drop the `format`, or use one that reads it: `strict_date_optional_time`, or yours followed by `||strict_date_optional_time`
+```
+
+`strict_date_optional_time` doesn't read a year past 9999 or before year 0 (`+10000-01-01`, `-0001-01-01`), so such a value is still refused, as under the default mapping.
 
 ## numbers
 
@@ -219,7 +254,7 @@ The kinds are string, number and boolean; a `null` element counts as none, and a
 
 ## transforms
 
-Applied in order to a column value before it lands in the document. Each runs in Postgres (`lower`, `trim`), so the column's type must take it: a text type (`text`, `varchar`, `char`, `name`, `citext`) or a domain over one. Anything else, an `integer`, `jsonb` or an enum, fails every document build; `flusso check` reports it, and [Validation at start](cli.md#validation-at-start) says what `run` does. On an [`array`](#array) field they apply to each element instead, so a `text[]` or `jsonb` column takes them. A `[]` column read without `array: true` gets them on the whole array, which `lower` and `trim` don't take, so every build fails.
+Applied in order to a column value before it lands in the document. Each runs in Postgres (`lower`, `trim`), so the column's type must take it: a text type (`text`, `varchar`, `char`, `name`, `citext`) or a domain over one. Anything else, an `integer`, `jsonb` or an enum, fails every document build; `flusso check` reports it, and [Validation at start](checks.md#validation-at-start) says what `run` does. On an [`array`](#array) field they apply to each element instead, so a `text[]` or `jsonb` column takes them. A `[]` column read without `array: true` gets them on the whole array, which `lower` and `trim` don't take, so every build fails.
 
 | Transform | Effect |
 | --- | --- |
@@ -234,4 +269,9 @@ Applied in order to a column value before it lands in the document. Each runs in
 
 ## Nullability
 
-`required: true` maps a scalar, `geo`, or `map` leaf non-null; the default is nullable. The root `primary_key` field and a join's `primary_key` field are forced non-null. `flusso check` against a database confirms each declaration against the column's `NOT NULL`. On the query side a nullable field must be an `Option<T>`; see [Document structs](../query/document-structs.md#nullability).
+`required: true` maps a scalar, `geo`, or `map` leaf non-null; the default is nullable. The root `primary_key` field and a join's `primary_key` field are forced non-null. [`flusso check`](checks.md#every-finding) against a database confirms each `required: true` against the column's `NOT NULL`, unless the field is a key or has a `default`, which never leaves it null:
+
+- **`required: true` over a nullable column of a table** is an error, `nullability`: a document can hold `null` where the schema says it never does. Declare `required: false`, make the column `NOT NULL`, or give the field a `default`. `run` still starts on it.
+- **Over a column of a view, a materialized view or a foreign table** it's a warning, `nullability_untracked`: Postgres records no nullability there, so every such column reads as nullable and flusso can't tell. The column must really never hold `null`.
+
+On the query side a nullable field must be an `Option<T>`; see [Document structs](../query/document-structs.md#nullability).

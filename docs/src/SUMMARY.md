@@ -74,6 +74,7 @@
 - [Index entries and on_error](reference/index-and-on-error.md)
 - [Environment variables](reference/environment.md)
 - [CLI](reference/cli.md)
+- [Checks and findings](reference/checks.md)
 - [flusso.lock](reference/lock.md)
 - [Helm chart values](reference/helm-values.md)
 - [Schema top-level keys](reference/schema-top-level.md)

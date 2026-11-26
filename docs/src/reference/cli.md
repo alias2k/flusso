@@ -1,12 +1,13 @@
 # CLI
 
-The `flusso` binary has eight subcommands. Six work locally; `indexes` and `reindex` are HTTP clients for a running server's private surface. Every flag also reads a `FLUSSO_*` variable, listed in [Environment variables](environment.md#cli-flags); the flag wins.
+The `flusso` binary has nine subcommands. Seven work locally; `indexes` and `reindex` are HTTP clients for a running server's private surface. Every flag but `check --fix` also reads a `FLUSSO_*` variable, listed in [Environment variables](environment.md#cli-flags); the flag wins.
 
 | Command | Does | Needs a database? |
 | --- | --- | --- |
 | [`build`](#build) | Compile `flusso.toml` + schemas into one `flusso.lock`. | no |
 | [`run`](#run) | Compile if a config is present, then backfill and follow. | yes |
-| [`check`](#check) | Validate and print the typed mapping; confirm against live columns. | optional |
+| [`check`](#check) | Check the config, the schemas, the lock and the capture; report what won't work. | optional |
+| [`show`](#show) | Print the deployment, or each index's typed mapping. | no |
 | [`design`](#design) | Open the visual designer. | optional |
 | [`schema`](#schema) | Print an editor-assist JSON Schema, or the adapters' Reference option tables. | no |
 | [`script run`](#script) | Run an index's script fields over one document. | optional |
@@ -24,7 +25,7 @@ Runs the full load and validation, then writes the whole configuration, every sc
 
 ## run
 
-Like `cargo run`, it compiles first. With a `flusso.toml` present (the default path or `--config`) it recompiles, **rewrites `flusso.lock`** when the bytes changed, and runs that. With no config it loads the existing lock. Connection and credentials resolve here, in the running environment. Then: [validate against the database](#validation-at-start), continuity check, ensure indexes, backfill unseeded ones, follow live changes, serve the two HTTP surfaces until a signal or an error.
+Like `cargo run`, it compiles first. With a `flusso.toml` present (the default path or `--config`) it recompiles, **rewrites `flusso.lock`** when the bytes changed, and runs that. With no config it loads the existing lock. Connection and credentials resolve here, in the running environment. Then: [validate against the database](checks.md#validation-at-start), continuity check, ensure indexes, backfill unseeded ones, follow live changes, serve the two HTTP surfaces until a signal or an error.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -35,6 +36,7 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--publication <name>` | `[source] publication`, else `flusso` | Publication to subscribe to. Created or extended when allowed. |
 | `--manage-publication <bool>` | `[source] manage_publication`, else `true` | Whether flusso may issue publication DDL. |
 | `--manage-replica-identity <bool>` | `[source] manage_replica_identity`, else `true` | Whether flusso may set `REPLICA IDENTITY FULL` on every table an index reads (a `USING INDEX` identity carrying the primary key and every parent link is kept). |
+| `--strict` | off | Refuse to start on any error `check` reports from the schemas and the capture, not only on those no document builds past. See [--strict](checks.md#strict). |
 | `--skip-backfill` | off | Resume live capture only. A fresh slot then only warns instead of rebuilding. |
 | `--pretty` | off | Pretty-print every stdout sink's output (the default sink included). |
 | `--queue-capacity <n>` | `[stream] capacity` | Deprecated and ignored, with a warning: `--max-built-mib` bounds what the lanes hold. |
@@ -62,29 +64,7 @@ The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--manage-
 
 ### Validation at start
 
-Once connected, and before any index is touched, `run` runs the same check as [`check`](#what-the-database-check-verifies), on every start, `--locked` and lock-only runs included. The diagnostics go to stderr in `check`'s format. The verdict differs: `run` stops only on what can't work as written.
-
-- **These stop the start:**
-  - a table that doesn't exist, in any position;
-  - a column the document query reads that doesn't exist: a field's column, a key (`column`, `foreign_key`, `left_key`, `right_key`, a hop's `foreign_key`), either side of an `on:` pair, a value or null-check filter column (relation, junction, hop, root `filters`, `soft_delete` `when`), an `order_by` column, a geo coordinate, an aggregate's input column or expression operand, and the `soft_delete` column;
-  - a `soft_delete` `field` that reads no column;
-  - a root `primary_key` that names no column, when the root table has a single-column primary key or the index has any relation (a relation keys on the root, or traces a change back to it, by that column);
-  - a root `primary_key` that names a column other than the root table's single-column primary key: changes and the backfill carry the table's key, the build matches it on the declared column, so a document is built from another row or written as a tombstone, and a change on a related table writes a document under the declared column's value that the next root change deletes;
-  - a root `primary_key` of a type flusso can't read back as a document id (`inet`, an enum, …; see [Key types](source-postgres.md#key-types)): every key reads as none, so no document is ever written;
-  - a relation table without a single-column primary key (none, or a composite one): a join's, an aggregate's or a `via` hop's table, at any depth (a junction needs none);
-  - [`transforms`](field-types.md#transforms) the column's type doesn't take, such as `lowercase` over an `integer` or an enum column. When Postgres won't run the check (the role has no `USAGE` on the type's schema), it's reported as [`check_skipped`](#check) instead, and the start goes on;
-  - a link column of a type Postgres can't compare with the key it names, such as a `text` `foreign_key` against a `uuid` key (see [A link of another type](source-postgres.md#a-link-of-another-type)): the document query can't be planned, so every build of the index fails;
-  - [`array: true`](field-types.md#array) over a column that holds no array (neither a `[]` type nor `json`/`jsonb`);
-  - two fields of one name, at the root or in plain objects, that can never give an indexed document (see [Pairs that stop the start](identifiers.md#pairs-that-stop-the-start)): an `array: true` column of scalars before an `object` fails every build; a constant before a field whose mapping refuses it even with `ignore_malformed` is refused in every document;
-  - a `time` or `timetz` column under a `timestamp` or `date` field with no `options`, at the root or in plain objects (see [dates and times](field-types.md#dates-and-times)): every document whose value isn't null is refused.
-
-  A **plain object** is an `object` field with no `emit: false` and no `options`, under plain objects up to the root. Under a join, a parent without the related row still indexes, and under `emit: false` or `indexed: false` the value is never mapped, so neither case stops.
-
-  The relation, transform, link and failing-pair cases fail document builds of the index, so 0.17 started and then wrote nothing, or failed on the first build. `array: true` is a key new in 0.18, so no running deployment has it. The refused pair and the time of day stop only while every sink of the deployment is a **plain OpenSearch sink**: one with no `pipeline` option and no index settings (sink-wide or for the index) but the shard counts, `max_result_window`, the `mapping.*.limit` settings, and, for the refused pair only, `mapping.ignore_malformed`. Any other setting (an `index.default_pipeline` or `index.final_pipeline`, `mapping.coerce`, …) may let the value in or keep OpenSearch from seeing it, so flusso doesn't stop; nor does it when any other sink (stdout, or an OpenSearch sink that isn't plain) also writes the index, since that sink indexes the document. Both are still printed, and `check` still fails on them. An OpenSearch index template on the cluster is outside what flusso reads: if one makes these documents index (a `default_pipeline`, `mapping.ignore_malformed`), say so in the sink's `index_settings` (the same `default_pipeline`, for example) and the start goes on. `run` exits non-zero with `the schemas cannot be built against this database (N problem(s) above)`. Under Kubernetes or compose that's a restart loop with the same message each time, until the config is fixed. Nothing is staged, no slot is created, no index is touched.
-- **Everything else is printed and the start goes on**, errors included: a declared type or aggregate `value_type` that doesn't accept the column's type (e.g. `keyword` over a Postgres enum or domain, which the database reports by its own type name), an expression or geo column that isn't numeric, `required` over a nullable column, a join `primary_key` that names no column, a `[]` column without `array: true` (it indexes as before; the query side can't read it as an array), an [`ids`](aggregates.md#ids) `element_type` that holds no key of the related table's type, or only some, or changes them (a document whose `ids` array is empty, or holds only keys that fit, indexes as before), two fields of one name at one level, a transform or link check Postgres wouldn't run (`check_skipped`: the role has no `USAGE` on a type's schema; the message names what wasn't checked and Postgres's reason), and a root table without a single-column primary key (none, or a composite one: the backfill skips it, its live changes are still indexed; see [Tables without a primary key](source-postgres.md#tables-without-a-primary-key)). On such a root, with no relation in the index, a `primary_key` that names no column is printed too: a root change built by its whole key never reads it (one whose key is a single column does, and fails, as do `flusso script run --id` and the designer's sample). The documents build as they did in 0.16; `check` still exits non-zero on the errors.
-- **An unreachable database** fails as it always has, as `connecting to Postgres`, before validation runs.
-
-There's no flag to skip it. Run `flusso check` before deploying a changed config to see the same list without stopping anything.
+Once connected, and before any index is touched, `run` checks the schemas and the capture as `check` does, on every start. An error no document builds past stops it; every other error is logged at `error`, counted on `flusso.index.schema_errors`, and the start goes on, unless `--strict` is set. Which is which: [Validation at start](checks.md#validation-at-start). There's no flag to skip it.
 
 ### Stopping
 
@@ -137,7 +117,7 @@ A change let go was never confirmed to the slot, so the next start reads it agai
 - **A reindex being staged when the stop came.** The drain waits for the destination to answer that one staging.
 - **A sink that fails during the stop.** It is restarted after its [`[backoff]`](config-toml.md#backoff) wait, then only makes sure its indexes exist: no backfill is asked for and no lane reopens. An index it can't ensure is left `restaging`, its reason `could not be ensured during the stop: <error>` (or `not ensured during the stop: not tried` for one it didn't get to), and let go like any `restaging` lane. That wait doubles each time the sink fails again without progress, up to `max_ms` (60 s by default), past the default 30 s deadline, so such a stop can end at the deadline with exit `1`.
 
-Until the pipeline is started (through [validation at start](#validation-at-start)), a signal ends the process the default way, at once; a parent that exits meanwhile is noticed as soon as it is.
+Until the pipeline is started (through [validation at start](checks.md#validation-at-start)), a signal ends the process the default way, at once; a parent that exits meanwhile is noticed as soon as it is.
 
 Whatever stops flusso must wait longer than the deadline before killing it: Kubernetes' `terminationGracePeriodSeconds` (the Helm chart sets 45), compose's `stop_grace_period` (Docker's default is 10 s: set `35s`), systemd's `TimeoutStopSec` (90 s by default), moon's `killProcessThreshold` (2 s by default). Each pairing is in [Run under a task runner or supervisor](../deploy/compile-and-run.md#run-under-a-task-runner-or-supervisor).
 
@@ -145,70 +125,71 @@ Without `--exit-with-parent`, a flusso whose parent dies keeps running, like any
 
 ## check
 
-Loads and validates the config and every schema, validates every port table against its adapter, then prints the source, the stream, the sinks, and each index's fully typed mapping. Without `--offline` it also checks the schemas against the live database, then prints the publication coverage report and the tables whose replica identity isn't `FULL` (see [Replica identity](source-postgres.md#replica-identity)), in two groups: the child tables that miss their parent link, and the tables that only miss the rest of the row. Each says whether `run` will fix it or gives the exact SQL. `check` never mutates the database.
-
-### What the database check verifies
-
-Every problem of one run is listed together, each naming the index, the field path (`users.orders.items`), and the missing table or column, with the schema key that names it (`` `foreign_key` references unknown column `public.orders.userid` ``).
-
-- **Fields.** Each column a field reads exists, and its database type is one the declared type accepts. Its [`transforms`](field-types.md#transforms) take that type: Postgres plans them over no rows, so a domain over `text` passes and an enum fails. A field declared `required` over a nullable column is a warning. An [`array`](field-types.md#array) field's column holds an array (a `[]` type, or `json`/`jsonb`, whose elements aren't type-checked), and its transforms are checked against the element type; a `[]` column without `array: true` is a warning.
-- **Geo points.** Both coordinate columns exist and are numeric.
-- **Aggregate input.** A `sum`/`min`/`max` column's type is one `value_type` accepts; each column of an [expression](aggregates.md#arithmetic-input) exists and is numeric.
-- **Relations, at any depth.** For every join and aggregate:
-  - the related `table`;
-  - the key: a `belongs_to` `column` on the table that holds the field, a `has_one`/`has_many`/aggregate `foreign_key` on the related table;
-  - a junction's `table`, `left_key`, and `right_key`;
-  - each `via` hop's `table` and `foreign_key`;
-  - both sides of every `on:` pair: `local` on the table before the hop, `related` on the hop's table;
-  - the columns of the value and null-check `filters` on the relation, its junction, and each hop (a `raw` filter is passed to the database unread, so it isn't checked);
-  - every `order_by` column, and a join's `primary_key` (a warning: relations are keyed by the table's own primary key, so a name that misses is ignored);
-  - that the related table, and each hop's, has a single-column primary key;
-  - that each link compares with the key it names: a `belongs_to` `column` with the target's key, a `foreign_key` with the parent's (or the last hop's), a junction's `left_key` and `right_key` with both sides' keys, a hop's `foreign_key` with the level before, and the two sides of each `on:` pair (see [A link of another type](source-postgres.md#a-link-of-another-type));
-  - that an [`ids`](aggregates.md#ids) `element_type` holds the related table's key type (an error when it holds none, a warning when it holds only some or changes them).
-
-  A missing table is reported once, and nothing on it is looked up.
-- **Root keys, on the root table.** That the table has a single-column primary key, reported under `table`; that the declared `primary_key` column exists, is that key, and is of a [key type](source-postgres.md#key-types) flusso reads, reported under `primary_key`, whether or not a field reads it; the columns of the top-level value and null-check [`filters`](filters-and-soft-delete.md#root-filters), reported under `filters`, and the [`soft_delete`](filters-and-soft-delete.md#soft_delete) marker, reported under `soft_delete`: its `column`, its `when` columns, and its `field` (see [How the marker is verified](filters-and-soft-delete.md#how-the-marker-is-verified)).
-
-- **The source server.** That it is the primary and doesn't name flusso a synchronous standby: the same check that stops [`run`](#run) at start, with the same message (see [Behind a synchronous standby](source-postgres.md#behind-a-synchronous-standby)). Printed under *Source server*, and under `server` (`ok`, `problem`) with `--format json`.
-
-Everything above is an error except the four warnings: `required` over a nullable column, a join `primary_key` that names no column, a `[]` column without `array: true`, and an `ids` `element_type` that holds only some keys or changes them. The transform and link checks ask Postgres to try the operation; when it won't (the role has no `USAGE` on a type's schema, which reading the column doesn't need), the check is reported as skipped, a warning that names what wasn't checked and Postgres's reason, instead of either verdict. Grant the role `USAGE` on that schema to run it. Which errors also stop `run` is in [Validation at start](#validation-at-start). `--offline` still reports the two problems that need no database: a `soft_delete` `field` that reads no column (an error), and two fields sharing a name at one level, at any depth (a warning, or an error for a pair that never gives an indexed document; with the database too; see [One name per level](identifiers.md#one-name-per-level)).
+Loads and validates the config and every schema, validates every port table against its adapter, compiles every script, and compares `flusso.lock` with what the config compiles to. Without `--offline` it also checks the schemas against the live database, the source server, and the publication and replica identities. It prints one line per section that passes, each problem in full, and a summary line, and exits non-zero on any error. Every check, finding and the report's shape: [Checks and findings](checks.md). `check` never changes the database, the schemas or the config.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `-c`, `--config <path>` | `flusso.toml` | Config to check. |
-| `--offline` | off | Files only; skip the database and the coverage report. |
+| `-c`, `--config <path>` | `flusso.toml` if present | Config to check. With none, the `--lock` is checked instead. |
+| `--lock <path>` | `flusso.lock` | The lock to compare with what the config compiles to, as `run` resolves it; or to check when there's no config. See [Checked by flusso check](lock.md#checked-by-flusso-check). |
+| `--offline` | off | Connect to nothing: skip the database validation, the source server, and the publication and replica-identity reports. |
+| `--fix` | off | Rewrite the `--lock` when it isn't what the config compiles to, as `flusso build` writes it. Fixes the lock only. No environment variable sets it. |
 | `--publication <name>` | `[source] publication`, else `flusso` | Publication whose coverage to report. |
-| `--manage-publication <bool>` | config, else `true` | Affects the report's phrasing only. |
-| `--manage-replica-identity <bool>` | config, else `true` | Affects the replica-identity report's phrasing only. |
-| `--format <human\|json>` | `human` | `json` prints one machine-readable document. |
+| `--manage-publication <bool>` | config, else `true` | Whether `run` would change the publication: decides whether a missing table is a [gap](checks.md#capture-gaps). |
+| `--manage-replica-identity <bool>` | config, else `true` | Whether `run` would set replica identities: decides whether a missing link is a [gap](checks.md#capture-gaps). |
+| `--format <human\|json>` | `human` | `json` prints the same report as one document: see [JSON output](checks.md#json-output). |
+| `--color <auto\|always\|never>` | `auto` | Colour the human report. `auto` colours it when stdout is a terminal and `NO_COLOR` is unset. |
 
-Exit status is non-zero when validation fails, any diagnostic is an error, or `run` would refuse the source server. `--format json` lists the diagnostics under `diagnostics`, also with `--offline`: each has `index`, `field`, `path`, `anchor`, `severity` (`error`/`warning`), `kind`, and `message`. `anchor` says what `path` names: `field`, a field's path from the document root (a segment that another field at its level shares carries its position, `orders#2.total`; see [One name per level](identifiers.md#one-name-per-level)), or `index_key`, one of the index-level keys `table`, `primary_key`, `filters`, `soft_delete` (a root field may have the same name). `kind` is one of:
+Exit status is `0` when the summary line says `check passed` (warnings allowed), else non-zero.
 
-| `kind` | Found | Severity | Stops `run` |
-| --- | --- | --- | --- |
-| `unknown_table` | A table that doesn't exist. | error | yes |
-| `unknown_column` | A column the document query reads that doesn't exist. | error | yes |
-| `unread_soft_delete_marker` | A `soft_delete` `field` that reads no column. | error | yes |
-| `relation_primary_key` | A relation table without a single-column primary key. | error | yes |
-| `transform_not_applicable` | `transforms` the column's type doesn't take. | error | yes |
-| `root_primary_key_mismatch` | A root `primary_key` other than the table's own single-column key. | error | yes |
-| `unsupported_key_type` | A root `primary_key` of a type flusso can't read back as a document id (see [Key types](source-postgres.md#key-types)). | error | yes |
-| `not_an_array_column` | `array: true` over a column that's neither a `[]` type nor `json`/`jsonb`, nor a domain over one. | error | yes |
-| `link_type_mismatch` | A link column of a type Postgres can't compare with the key it names (see [A link of another type](source-postgres.md#a-link-of-another-type)). | error | yes |
-| `duplicate_field_name_fails_to_build` | Two fields of one name, at the root or in plain objects, whose every document fails to build: an `array: true` column of scalars, then an `object`. Needs no database. | error | yes |
-| `duplicate_field_name_refused` | Two fields of one name, at the root or in plain objects, whose every document OpenSearch refuses: a constant the last one's mapping refuses even with `ignore_malformed`. Needs no database. | error | while every sink is a [plain OpenSearch sink](#validation-at-start) |
-| `time_of_day_as_date` | A `time` or `timetz` column under a `timestamp` or `date` field with no `options`, at the root or in plain objects. | error | while every sink is a [plain OpenSearch sink](#validation-at-start) without `mapping.ignore_malformed` |
-| `root_primary_key` | A root table with no primary key or a composite one (the message says which); on one, with no relation, a `primary_key` that names no column. | error | no |
-| `ids_element_mismatch` | An `ids` `element_type` that holds no key of the related table's type (see [ids](aggregates.md#ids)). | error | no |
-| `type_mismatch` | A declared type that doesn't accept the column's type. | error | no |
-| `not_numeric` | An expression or geo column that isn't numeric. | error | no |
-| `nullability` | `required` over a nullable column. | warning | no |
-| `ignored_primary_key` | A join `primary_key` that names no column. | warning | no |
-| `undeclared_array_column` | A `[]` column (or a domain over one) read by a field without `array: true`. | warning | no |
-| `ids_element_lossy` | An `ids` `element_type` that holds only some keys of the related table's type, or changes them. | warning | no |
-| `duplicate_field_name` | Two fields of one name at one level, any pair but the two above; the message names each by position and says what the index keeps. | warning | no |
-| `timestamp_format` | A `timestamp` field, aggregate result or script output whose `options.format` has no pattern that reads the ISO 8601 form timestamps are written in (see [dates and times](field-types.md#dates-and-times)). Reported only when every pattern is known to refuse it. | warning | no |
-| `check_skipped` | A transform or link check Postgres wouldn't run, such as under a role without `USAGE` on a type's schema; the message names what wasn't checked and Postgres's reason. Nothing is known either way. | warning | no |
+## show
+
+Prints what the config declares, with no database: the deployment, or the typed mapping each index gets. It reads `--config` (or `flusso.toml` when present), else the `--lock`, and validates every port table against its adapter first.
+
+| Subcommand | Prints |
+| --- | --- |
+| `show config` | The source, the stream, the sinks and the indexes. Every value an adapter treats as a secret prints as `***` when written literally; an `{ env = "VAR" }` reference prints by name (`${VAR}`, or `{"env": "VAR"}` in JSON). A disabled index is listed as `disabled`. |
+| `show mapping [index]` | Each enabled index's fields with their mapped type and whether they're required, or only the index named. A disabled index named is shown, after a note that it's disabled; a name the config doesn't have fails, listing the indexes it has. A date field whose `format` flusso [completes](field-types.md#dates-and-times) gets a note first. |
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-c`, `--config <path>` | `flusso.toml` if present | Config to read. |
+| `--lock <path>` | `flusso.lock` | The lock to read when there's no config. |
+| `--format <human\|json>` | `human` | `json` prints one document: the config as it loads, or a list of `{index, hash, fields}` with each field's full mapping. |
+| `--color <auto\|always\|never>` | `auto` | As for `check`. |
+
+```text
+$ flusso show config
+Source
+──────
+  postgres  connection_url=${PG_URL} slot=search
+
+Stream
+──────
+  channel
+
+Sinks
+─────
+  primary  opensearch  password=*** url=*** username=***
+
+Indexes
+───────
+  labels  disabled  public.tags   pk id
+  tags    enabled  public.tags   pk id
+
+$ flusso show mapping users
+! users.updatedAt: flusso appends `strict_date_optional_time` to its `format`, so the dates it writes index; dates still print in the `format`'s first pattern
+
+Index  users
+────────────
+  id .............. integer  required
+  email ........... keyword  required
+  fullName ........ text     required
+  nicknames ....... keyword  optional
+  updatedAt ....... date     required
+  account ......... object   required
+    tier .......... keyword  required
+…
+```
 
 ## design
 

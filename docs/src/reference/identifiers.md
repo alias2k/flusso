@@ -15,7 +15,7 @@ There is no quoting: a table or column whose name only reads with quotes (`"User
 
 ## One name per level
 
-Two fields at one level of the document (the root, or one join's or object's fields) should not share a name, as the field name rule reads it: ` email` and `email` are one name, `Email` and `email` are two. Such a schema still loads, as it always has, but at most one of them reaches the index, and the document may not match it.
+Two fields at one level of the document (the root, or one join's or object's fields) should not share a name, as the field name rule reads it: ` email` and `email` are one name, `Email` and `email` are two. Such a schema still loads, as it always has, but at most one of them reaches the index, and the document may not match it. Rename all but one.
 
 What happens is decided in this order:
 
@@ -24,32 +24,32 @@ What happens is decided in this order:
 3. An `emit: false` namesake strips the name.
 4. OpenSearch indexes what is left under the last emitted one's mapping, and may refuse it.
 
-The outcomes below come from a live test (`apps/cli/tests/duplicate_names.rs`). It builds every ordered pair of 38 field kinds through the real builder and OpenSearch sink: each leaf type, `array: true`, `json` with and without `indexed`, `map`, `geo`, `custom`, each join kind with and without related rows, `object`, the aggregates (one with `value_type: decimal`), `decimal`, constants (a whole and a fractional number, `true`, a string, a list, a mixed list, an object), scripts and `emit: false`. Each outcome is checked against the classification the warning's wording is built from; the table below is written from that test's results.
+The outcomes below come from a live test (`apps/cli/tests/duplicate_names.rs`). It builds every ordered pair of 38 field kinds through the real builder and OpenSearch sink: each leaf type, `array: true`, `json` with and without `indexed`, `map`, `geo`, `custom`, each join kind with and without related rows, `object`, the aggregates (one with `value_type: decimal`), `decimal`, constants (a whole and a fractional number, `true`, a string, a list, a mixed list, an object), scripts and `emit: false`. Each outcome is checked against the classification the finding's wording is built from, and so is its severity; the table below is written from that test's results. **Error** means a document holds something other than the schema declares; **warning** means it holds a value the index maps.
 
-| First | Last | A document holds |
-| --- | --- | --- |
-| any | any, when one of them is `emit: false` | nothing under the name (the mapping still lists the last emitted one) |
-| a constant | anything | the first one's constant, under the last one's mapping: **OpenSearch rejects** every document when that mapping can't take it (a number or boolean under a `geo` point or a join, a string that isn't a number under a numeric field, an object under a scalar field) |
-| anything but a constant | a constant holding a list or an object | `null` |
-| anything but a constant or a `decimal` field | a number constant | the last one's value as text (`"5"`); in a one-element array when the first one is an `array: true` column |
-| a `decimal` column, or `sum`/`min`/`max` with `value_type: decimal` | a number constant | the number (a `decimal` field reads text as a number); in a one-element array when the first one is an `array: true` column |
-| anything but a constant | a boolean constant | `"true"` or `"false"`, as text |
-| anything but a constant or a `binary` column | a `binary` column | its bytes as Postgres hex text (`"\x0102"`), not base64 |
-| a value (column, aggregate, geo) | anything else | the last one's value: read as the first one's type when both are values, as raw JSON otherwise |
-| a join or object | a join or object whose child fields it declares too | the last one's value, its child fields read as the first one declares them |
-| a join or object | a join or object with child fields it doesn't declare | only the child fields both declare; with none, every element (or the object) is empty: `has_many: orders` twice, first with `status`, then with `total` and `note`, gives `"orders": [{}, {}]` |
-| an object | a to-many join | the last one's rows, as raw JSON |
-| a join or object | a `map`, or a `json` with `indexed: false` | the last one's object cut to the keys named like the first one's child fields |
-| a join or object | a scalar column or aggregate | the last one's value, as raw JSON |
-| an `array: true` column | a scalar column, an aggregate other than `ids`, a string constant | the last one's value in a one-element array |
-| an `array: true` `json` column | an object, a to-one join, a `geo` point, a `map` column | the last one's value in a one-element array |
-| an `array: true` column | an array, a to-many join, `ids` | the last one's value, its elements read as the first one's type |
-| an `array: true` column of scalars | a join with a related row, an object, a set `geo` point, a `json` or `map` column holding an object | nothing: **the document fails to build** (`the column holds an object at [0], but an array: true field of keyword takes scalar elements`) |
-| a join or object | a `geo` point | its point cut to the first one's child fields, which **OpenSearch rejects** |
-| a script, anywhere | a field of another type | the script's output under the last one's mapping: **OpenSearch rejects** every document where the script returns a value under a join, an object, a `json` or `map` column or a constant holding one, and every document whose output doesn't read as the last one's type under any other non-text field |
-| a script, anywhere | a text-family field, an unindexed one, or a field of the script's own type | the script's output |
+| First | Last | A document holds | `check` reports |
+| --- | --- | --- | --- |
+| any | any, when one of them is `emit: false` | nothing under the name (the mapping still lists the last emitted one) | error; the warning when every one is `emit: false` |
+| a constant | anything | the first one's constant, under the last one's mapping: **OpenSearch rejects** every document when that mapping can't take it (a number or boolean under a `geo` point or a join, a string that isn't a number under a numeric field, an object under a scalar field) | the warning; an error where OpenSearch rejects it |
+| anything but a constant | a constant holding a list or an object | `null` | error |
+| anything but a constant or a `decimal` field | a number constant | the last one's value as text (`"5"`); in a one-element array when the first one is an `array: true` column | error |
+| a `decimal` column, or `sum`/`min`/`max` with `value_type: decimal` | a number constant | the number (a `decimal` field reads text as a number); in a one-element array when the first one is an `array: true` column | the warning; an error when the first is an `array: true` column |
+| anything but a constant | a boolean constant | `"true"` or `"false"`, as text | error |
+| anything but a constant or a `binary` column | a `binary` column | its bytes as Postgres hex text (`"\x0102"`), not base64 | error |
+| a value (column, aggregate, geo) | anything else | the last one's value: read as the first one's type when both are values, as raw JSON otherwise | the warning when both are values; an error for raw JSON |
+| a join or object | a join or object whose child fields it declares too | the last one's value, its child fields read as the first one declares them | the warning |
+| a join or object | a join or object with child fields it doesn't declare | only the child fields both declare; with none, every element (or the object) is empty: `has_many: orders` twice, first with `status`, then with `total` and `note`, gives `"orders": [{}, {}]` | error |
+| an object | a to-many join | the last one's rows, as raw JSON | error |
+| a join or object | a `map`, or a `json` with `indexed: false` | the last one's object cut to the keys named like the first one's child fields | error |
+| a join or object | a scalar column or aggregate | the last one's value, as raw JSON | error |
+| an `array: true` column | a scalar column, an aggregate other than `ids`, a string constant | the last one's value in a one-element array | error |
+| an `array: true` `json` column | an object, a to-one join, a `geo` point, a `map` column | the last one's value in a one-element array | error |
+| an `array: true` column | an array, a to-many join, `ids` | the last one's value, its elements read as the first one's type | the warning |
+| an `array: true` column of scalars | a join with a related row, an object, a set `geo` point, a `json` or `map` column holding an object | nothing: **the document fails to build** (`the column holds an object at [0], but an array: true field of keyword takes scalar elements`) | error |
+| a join or object | a `geo` point | its point cut to the first one's child fields, which **OpenSearch rejects** | error |
+| a script, anywhere | a field of another type | the script's output under the last one's mapping: **OpenSearch rejects** every document where the script returns a value under a join, an object, a `json` or `map` column or a constant holding one, and every document whose output doesn't read as the last one's type under any other non-text field | error |
+| a script, anywhere | a text-family field, an unindexed one, or a field of the script's own type | the script's output | the warning |
 
-The warning names each field by its position (`#3`) and says which row applies. Where the outcome depends on the data or on a declaration it can't see, it says so instead of guessing: "the index maps the last one; what a document holds depends on both declarations: it may hold either value, be empty, fail to build or be refused by the sink (run `flusso script run` on a row to see)". That covers:
+The finding names each field by its position (`#3`) and says which row applies. Where the outcome depends on the data or on a declaration it can't see, it says so instead of guessing, and stays the warning: "the index maps the last one; what a document holds depends on both declarations: it may be either value, be empty, fail to build or be refused by the sink (run `flusso script run` on a row to see)". That covers:
 
 - a constant first whose value the last one's mapping may or may not take: an object under a `map`, or under a join, an object or a `json` column whose child fields name every key; a string under a date, `binary` or `geo` field;
 - an `array: true` column with a `default` before a constant holding a list or an object (the column's `default` replaces the `null`);
@@ -70,11 +70,20 @@ Elsewhere:
 - **Content hash:** both, in order, as for any field. Swapping them moves the index to a new name.
 - **`flusso-query` derive:** a compile error on the two handles, unless one is `emit: false` or `indexed: false`.
 
-`flusso check`, `--offline` included, and `run` warn with [`duplicate_field_name`](cli.md#check). A finding on one of the namesakes carries the position in its path: `orders#2.total`. Rename all but one.
+[`flusso check`](checks.md#every-finding), `--offline` included, reports an error as `duplicate_field_name_wrong` and fails, and a warning as `duplicate_field_name`. `run` starts on both (`--strict` refuses the error), except for the pairs below that never index. A finding on one of the namesakes carries the position in its path: `orders#2.total`.
+
+### Under an unindexed or input-only field
+
+Where the pair sits changes who reads it:
+
+- **Under an `indexed: false` join or an `enabled: false` object**, OpenSearch keeps the value in `_source` without checking it. A value the last one's mapping would refuse is stored as it is, another shape than the schema says: an error, worded as stored, not refused. So is a constant or a script's output beside a last namesake that is itself such a join or object.
+- **Under an `emit: false` field**, no document holds the pair, but a script may read it before the field is stripped: one at that field's level or above, through `this`, or one anywhere that names `root`. Where a script reads it, the pair is judged by what that script gets, as if every namesake were emitted. Where none does, it is the warning, saying nothing holds it.
+- **Namesakes that are all `emit: false`** are the warning, unless a script reads them.
+- **A pair that fails to build** is an error at every level: the build fails whoever reads it.
 
 ### Pairs that stop the start
 
-Two classes of pair never give an indexed document, whatever the rows hold, where every document carries them: at the root, or in a plain object (no `emit: false`, no `options`) under plain objects up to the root. There, `check` reports them as errors, `--offline` included, and `run` stops at start (see [Validation at start](cli.md#validation-at-start)):
+Two classes of pair never give an indexed document, whatever the rows hold, where every document carries them: at the root, or in a plain object (no `emit: false`, no `options`) under plain objects up to the root. There, `check` reports them with their own kinds, `--offline` included, and `run` stops at start (see [Validation at start](checks.md#what-stops-a-plain-start)):
 
 | First | Last | Why never | `kind` |
 | --- | --- | --- | --- |
@@ -82,11 +91,11 @@ Two classes of pair never give an indexed document, whatever the rows hold, wher
 | a constant holding a scalar or a list | an indexed join, an `object`, an indexed `json` (or `json` array), a `map` | OpenSearch refuses a value that isn't an object under an object mapping, `ignore_malformed` or not | `duplicate_field_name_refused` |
 | a constant holding an object | an indexed join, an `object` or an indexed `json` with no child field for one of its keys, or a `binary` column | the strict mapping refuses the key; `binary` takes no `ignore_malformed` | `duplicate_field_name_refused` |
 
-Each holds only when every namesake is emitted and the last one sets no mapping `options` of its own: an object with `enabled: false` takes anything, and one with a `dynamic` of your own takes unknown keys. A `map`'s own `dynamic: true` isn't counted. The refused class stops `run` only while every sink is a [plain OpenSearch sink](cli.md#validation-at-start): a stdout sink, an ingest pipeline or a setting flusso doesn't model may let the document in.
+Each holds only when every namesake is emitted and the last one sets no mapping `options` of its own: an object with `enabled: false` takes anything, and one with a `dynamic` of your own takes unknown keys. A `map`'s own `dynamic: true` isn't counted. The refused class stops `run` only while every sink is a [plain OpenSearch sink](checks.md#plain-opensearch-sinks): a stdout sink, an ingest pipeline or a setting flusso doesn't model may let the document in.
 
-Anywhere else the same pair stays the `duplicate_field_name` warning. Inside a join, a parent with no related row indexes. Under `emit: false` or `indexed: false`, the pair is never mapped.
+Anywhere else the same pair is `duplicate_field_name_wrong`, an error `run` starts on: inside a join, a parent with no related row indexes; under `indexed: false` the value is stored unchecked; under `emit: false` it is never mapped, and judged [as above](#under-an-unindexed-or-input-only-field).
 
-Every other failing pair can index some document, so it stays the warning: a related row, a point or an object value may be absent, a script may return nothing, and a scalar mapping drops what it can't read under `index.mapping.ignore_malformed`. The live test pins this too: a third row holds only nulls and has no related rows, its scripts return nothing, and a pair no row indexes is written again with `index.mapping.ignore_malformed`. Over the 1,444 pairs at the root, 57 never index (1 fails to build, 56 refused), and the rule above names exactly those. A second live test starts the real `flusso run` on the cases that index some document (a pair inside a join, under `emit: false` or `indexed: false`, with `on_error = "skip"`, a `dynamic` of your own, a pipeline set as an index setting) and checks each starts and indexes what it did before.
+Every other failing pair can index some document, so it doesn't stop the start: a related row, a point or an object value may be absent, a script may return nothing, and a scalar mapping drops what it can't read under `index.mapping.ignore_malformed`. The live test pins this too: a third row holds only nulls and has no related rows, its scripts return nothing, and a pair no row indexes is written again with `index.mapping.ignore_malformed`. Over the 1,444 pairs at the root, 57 never index (1 fails to build, 56 refused), and the rule above names exactly those. A second live test starts the real `flusso run` on the cases that index some document (a pair inside a join, under `emit: false` or `indexed: false`, with `on_error = "skip"`, a `dynamic` of your own, a pipeline set as an index setting) and checks each starts and indexes what it did before.
 
 ## What loading enforces
 
@@ -106,8 +115,8 @@ Loading a `flusso.toml` and its schemas fails with a specific error when any of 
 - In `flusso.toml`: `[source]` is present, each `[[index]]` has `name`, `schema`, and `enabled`, and every `schema` path ends in `.yml`/`.yaml`.
 - Unknown keys anywhere.
 
-## What check adds with a database
+## What check adds
 
-Two fields sharing a name at one level still load: `check` warns, see [One name per level](#one-name-per-level).
+Two fields sharing a name at one level still load: `check` reports them, see [One name per level](#one-name-per-level).
 
-`flusso check` without `--offline` also confirms, per declared field, that the column exists, that its SQL type is accepted by the declared type key, and that its `NOT NULL` agrees with `required`, and that every table and column a relation names exists. It then reports publication coverage and the replica identity of every table an index reads. A disagreement fails the check with the field named; the full list is in [`check`](cli.md#check).
+`flusso check` without `--offline` also confirms, per declared field, that the column exists, that its SQL type is accepted by the declared type key, and that its `NOT NULL` agrees with `required`, and that every table and column a relation names exists. It then reports publication coverage and the replica identity of every table an index reads. The full list is in [Checks and findings](checks.md#what-is-checked).

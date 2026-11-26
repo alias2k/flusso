@@ -77,7 +77,7 @@ The marker column is read from the current row when the document is rebuilt, so 
 
 ### How the marker is verified
 
-`field` resolves to the first field of that name, depth-first in declaration order, joins included; the column behind it is read on the **root** row, even when the field sits inside a join. The marker and its `when` are checked by [`flusso check`](cli.md#what-the-database-check-verifies) and at every [`flusso run` start](cli.md#validation-at-start), each reported under `soft_delete`:
+`field` resolves to the first field of that name, depth-first in declaration order, joins included; the column behind it is read on the **root** row, even when the field sits inside a join. The marker and its `when` are checked by [`flusso check`](checks.md#what-is-checked) and at every [`flusso run` start](checks.md#validation-at-start), each reported under `soft_delete`:
 
 | Problem | Message | Needs the database |
 | --- | --- | --- |

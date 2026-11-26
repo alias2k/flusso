@@ -206,7 +206,13 @@ pub struct Order {
 Order::tags().any_of([Tag::Urgent]);
 ```
 
-A [`FlussoValue` newtype over a `Vec`](enums-and-values.md#arrays) goes where that `Vec` would: `tags: Option<Tags>` with `struct Tags(Vec<Tag>)`, the shape an ORM decoding a `jsonb` column usually wants. A plain type (`Tag`, `String`) at an array field is a compile error, and so is a `Vec` or an array newtype at a field that isn't one. Sorting an array uses OpenSearch's default: the smallest element ascending, the largest descending.
+A [`FlussoValue` newtype over a `Vec`](enums-and-values.md#arrays) goes where that `Vec` would: `tags: Option<Tags>` with `struct Tags(Vec<Tag>)`, the shape an ORM decoding a `jsonb` column usually wants. A plain type (`Tag`, `String`) at an array field is a compile error, and so is a `Vec` or an array newtype at a field that isn't one. That error leads with the schema fix, since the element type alone would compile and then fail on every document holding a list:
+
+```text
+error: field `email` is a single `keyword` in the schema, but `Vec<String>` reads an array — a column that holds an array needs the field declared `array: true` in the schema (the element type alone fails to read every document that holds a list); any other field (an aggregate, a constant) holds one value: use the element type
+```
+
+`flusso check` reports the same column from the database side, as `undeclared_array_column` ([Every finding](../reference/checks.md#every-finding)). Sorting an array uses OpenSearch's default: the smallest element ascending, the largest descending.
 
 A `json` array takes `serde_json::Value`, a `Vec` of any value (`String`, a number, an enum, `serde_json::Value`, a map, an array newtype), or an array newtype of values. A `Vec` of a fragment and a bare struct are compile errors: a `json` field declares no fields to check a struct against. A root and a fragment agree on all of it, with `#[flusso(opaque)]` too, which there turns off the walk into a struct element.
 

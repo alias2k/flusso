@@ -34,18 +34,19 @@ Every secret-valued option also has an **override variable**, so one file runs u
 
 ## CLI flags
 
-Every flag reads a `FLUSSO_*` variable. **The flag wins** when both are set. `flusso <cmd> --help` shows each flag's variable.
+Every flag but `check --fix` reads a `FLUSSO_*` variable. **The flag wins** when both are set. `flusso <cmd> --help` shows each flag's variable.
 
 | Variable | Flag | Commands |
 | --- | --- | --- |
-| `FLUSSO_CONFIG` | `--config` | `build`, `check`, `run`, `design`, `script run` (and the query derive at compile time, see below) |
+| `FLUSSO_CONFIG` | `--config` | `build`, `check`, `show`, `run`, `design`, `script run` (and the query derive at compile time, see below) |
 | `FLUSSO_OUT` | `--out` | `build` |
-| `FLUSSO_LOCK` | `--lock` | `run` |
+| `FLUSSO_LOCK` | `--lock` | `run`, `check`, `show` |
 | `FLUSSO_LOCKED` | `--locked` | `run` |
 | `FLUSSO_SLOT` | `--slot` | `run` |
 | `FLUSSO_PUBLICATION` | `--publication` | `run`, `check` |
 | `FLUSSO_MANAGE_PUBLICATION` | `--manage-publication` | `run`, `check` |
 | `FLUSSO_MANAGE_REPLICA_IDENTITY` | `--manage-replica-identity` | `run`, `check` |
+| `FLUSSO_STRICT` | `--strict` | `run` |
 | `FLUSSO_SKIP_BACKFILL` | `--skip-backfill` | `run` |
 | `FLUSSO_PRETTY` | `--pretty` | `run` |
 | `FLUSSO_QUEUE_CAPACITY` | `--queue-capacity` (deprecated, ignored) | `run` |
@@ -71,7 +72,8 @@ Every flag reads a `FLUSSO_*` variable. **The flag wins** when both are set. `fl
 | `FLUSSO_SERVER` | `--server` | `indexes`, `reindex` |
 | `FLUSSO_CA_FILE` | `--ca-file` | `indexes`, `reindex` |
 | `FLUSSO_OFFLINE` | `--offline` | `check` |
-| `FLUSSO_FORMAT` | `--format` | `check` |
+| `FLUSSO_FORMAT` | `--format` | `check`, `show` |
+| `FLUSSO_COLOR` | `--color` | `check`, `show` |
 | `FLUSSO_DESIGN_ADDRESS` | `--address` | `design` |
 | `FLUSSO_DESIGN_NO_OPEN` | `--no-open` | `design` |
 | `FLUSSO_SCHEMA` | the positional schema kind | `schema` |
@@ -91,7 +93,7 @@ Defaults and semantics are on the [CLI](cli.md) page.
 | --- | --- | --- |
 | `RUST_LOG` | `info` | Log filter, [`tracing` env-filter syntax](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html), e.g. `flusso=debug,info`. Logs go to stderr. |
 | `FLUSSO_LOG_FORMAT` | text | `json` for one JSON object per line. |
-| `NO_COLOR` | unset | Any value disables colored `check` output. Color is also off when stdout isn't a terminal. |
+| `NO_COLOR` | unset | Any value turns colour off where it is `auto`: `check` and `show` (`--color auto`, the default), and the report `run` prints at start. Colour is also off when the output isn't a terminal. `--color always` colours anyway. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Base OTLP endpoint. Its presence turns on trace **and** metric export. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Traces-only endpoint; enables trace export alone. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | Metrics-only endpoint; enables metric export alone. |

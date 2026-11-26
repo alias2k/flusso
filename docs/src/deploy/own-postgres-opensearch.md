@@ -59,7 +59,7 @@ You've run the [Quickstart](../start/quickstart.md) against the dev stack and no
    SOURCE_POSTGRES_CONNECTION_URL=… PRIMARY_OPENSEARCH_URL=… flusso check --config flusso.toml
    ```
 
-   A passing check means the files load, every declared type matches a live column, and the publication covers every table.
+   A passing check means the files load, every declared type matches a live column, and the publication and replica identities cover every table, or the next `run` closes what's missing itself. Anything else is an error with the SQL to run: see [Capture gaps](../reference/checks.md#capture-gaps).
 
 ## Options and variations
 

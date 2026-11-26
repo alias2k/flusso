@@ -31,7 +31,9 @@ Compose starts Postgres (with `wal_level = logical`, the publication, and seed d
 just check
 ```
 
-This runs `flusso check` against `dev/flusso.toml`. It prints the source, the sinks, and the fully typed mapping for each index, confirms every declared type against the live columns, and reports publication coverage. The last line is `check passed`.
+This runs `flusso check` against `dev/flusso.toml`. It loads every schema, confirms every declared type against the live columns, and checks the source server, the publication and the replica identities, one line each. The last line is `✓ check passed`.
+
+To see the mapping flusso derived, run `cargo run -- show mapping --config dev/flusso.toml`: each index's fields with their OpenSearch types, from the schema files alone.
 
 ## Step 3: run it
 
@@ -62,7 +64,7 @@ The first shows a `users` document with its nested `orders` and rollups. The sec
 
 ## What just happened
 
-- **The schema drove the mapping.** `check` printed a typed mapping with no guessing, from the `*.schema.yml` files alone. See [How flusso works](how-it-works.md).
+- **The schema drove the mapping.** `show mapping` printed a typed mapping with no guessing, from the `*.schema.yml` files alone, and `check` confirmed it against the database. See [How flusso works](how-it-works.md).
 - **Backfill, then follow.** Unseeded indexes were snapshotted; then the WAL took over. Restart `just run` and the backfill is skipped because the sink remembers.
 - **Related rows rebuild the parent.** The line-item edit rebuilt a `users` document three levels up. That is reverse resolution through the joins.
 - **The soft-delete became a tombstone.** `users.deleted = true` emitted a `delete`, not an upsert, because the schema declares `soft_delete`.

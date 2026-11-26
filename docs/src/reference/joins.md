@@ -12,7 +12,7 @@ A join folds rows from a related table into the document. The relationship verb 
 | Sibling | Type | Applies to | Meaning |
 | --- | --- | --- | --- |
 | `table` | [Postgres identifier](identifiers.md) | all | The related table. Required. |
-| `primary_key` | Postgres identifier | all | The related table's primary key. Required. The projected field reading it is forced non-null. The join itself is keyed by the table's primary key as the database defines it, so a name that misses is ignored ([a warning](cli.md#what-the-database-check-verifies)). A related table without a primary key fails every build; only a junction may lack one ([details](source-postgres.md#tables-without-a-primary-key)). |
+| `primary_key` | Postgres identifier | all | The related table's primary key. Required. The projected field reading it is forced non-null. The join itself is keyed by the table's primary key as the database defines it, so a name that misses is ignored ([a warning](checks.md#what-is-checked)). A related table without a primary key fails every build; only a junction may lack one ([details](source-postgres.md#tables-without-a-primary-key)). |
 | `column` | Postgres identifier | `belongs_to` | This table's column pointing at the related row. Defaults to the document key. |
 | `foreign_key` | Postgres identifier | `has_one`, `has_many` | The related table's column pointing back at the parent. Required. |
 | `through` | table | `many_to_many` | The junction. Required. See [through](#through). |
@@ -52,7 +52,7 @@ A join folds rows from a related table into the document. The relationship verb 
 - **`required` still means "always matches".** A `required: true` `belongs_to`/`has_one` whose pairs match no row builds a null object in a field mapped non-null, the same as one whose `filters` exclude the row. Mark it required only when the pairs always hold.
 - **The key keeps its meaning.** `column` or `foreign_key` still points at a primary key; `on` only narrows the match. A relation keyed purely on a composite key, with no primary-key column in it, isn't supported.
 - **Where it's allowed:** `belongs_to`, `has_one`, `has_many`, and on aggregates (a `foreign_key` aggregate and each `via` hop; see [Aggregates](aggregates.md#on)). Rejected at load, naming the field: on `many_to_many`, on an aggregate over `through`, a pair missing `local` or `related`, the same pair listed twice. `on: []` is the same as no `on`.
-- **[`flusso check`](cli.md#check) verifies both sides**: `local` on the table before the hop, `related` on the field's `table`.
+- **[`flusso check`](checks.md#what-is-checked) verifies both sides**: `local` on the table before the hop, `related` on the field's `table`.
 - **Changing it** moves the schema to a new content hash, so the index is rebuilt once. A schema without `on` keeps its index.
 
 **What rebuilds.** Both sides of a pair are columns the document reads. A change to a `related` column rebuilds every parent the row's key links, whether the row matched before, matches after, or both, so a row leaving the match drops out of the document it left. A change to a `local` column rebuilds that parent's document, like any column it reads. An update that touches neither side, nor anything else the join reads, still rebuilds nothing; see [What a related change rebuilds](#what-a-related-change-rebuilds).
