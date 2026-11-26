@@ -148,6 +148,34 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         Some(compiled) if args.fix => lock.fixed(compiled, &args.lock)?,
         _ => lock,
     };
+    let rewritten = matches!(lock, LockState::Rewritten { .. });
+    let lock_path = args.lock.clone();
+    after_the_fix(
+        inspect(args, config, lock, path).await,
+        rewritten,
+        &lock_path,
+    )
+}
+
+/// What `check` says when the inspection after `--fix` fails: the lock the
+/// fix rewrote stays rewritten, and the error says so, since the report that
+/// would have is never printed.
+fn after_the_fix(result: anyhow::Result<()>, rewritten: bool, lock: &Path) -> anyhow::Result<()> {
+    if rewritten {
+        result.with_context(|| format!("`check --fix` rewrote {}, then failed", lock.display()))
+    } else {
+        result
+    }
+}
+
+/// Everything `check` inspects once the config is loaded, validated and its
+/// lock judged (and, with `--fix`, rewritten), then the report.
+async fn inspect(
+    args: CheckArgs,
+    config: Config,
+    lock: LockState,
+    path: std::path::PathBuf,
+) -> anyhow::Result<()> {
     let config = Arc::new(config);
 
     let postgres = adapters::source_config(&config)?;
@@ -1015,6 +1043,23 @@ mod tests {
         assert_eq!(fix.get_env(), None);
         let help = fix.get_help().map(ToString::to_string).unwrap_or_default();
         assert!(help.contains("lock only"), "{help}");
+    }
+
+    /// A failure after `--fix` rewrote the lock (an unreachable database,
+    /// say) still says the lock was rewritten: the report that would have
+    /// said so is never printed.
+    #[test]
+    fn a_failure_after_the_fix_says_the_lock_was_rewritten() {
+        let lock = Path::new("deploy/flusso.lock");
+        let failed = || Err(anyhow::anyhow!("connecting to the database"));
+        let said = format!("{:#}", after_the_fix(failed(), true, lock).unwrap_err());
+        assert_eq!(
+            said,
+            "`check --fix` rewrote deploy/flusso.lock, then failed: connecting to the database"
+        );
+        let said = format!("{:#}", after_the_fix(failed(), false, lock).unwrap_err());
+        assert_eq!(said, "connecting to the database");
+        assert!(after_the_fix(Ok(()), true, lock).is_ok());
     }
 
     /// `check` fails exactly when its summary says it failed, and the
