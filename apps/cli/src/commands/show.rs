@@ -182,6 +182,7 @@ fn mapping_to(
             print::resolved(out, pen, &mappings)
         }
         Format::Json => {
+            let mappings = crate::plain_json::to_value(&mappings)?;
             writeln!(out, "{}", serde_json::to_string_pretty(&mappings)?)?;
             Ok(())
         }

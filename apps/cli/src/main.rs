@@ -41,6 +41,7 @@ mod gaps;
 mod http;
 mod lock;
 mod memory;
+mod plain_json;
 mod shutdown;
 mod telemetry;
 

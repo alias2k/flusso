@@ -497,3 +497,79 @@ fn an_unreadable_lock_is_never_headlined_as_missing() {
         shown(&ran)
     );
 }
+
+/// `show --format json` writes every value a schema holds as plain JSON:
+/// a mapping option, a field's options, a constant and a default read as
+/// the string, number, boolean, list or object they are, never as the
+/// tagged shape of flusso's own value type.
+#[test]
+fn show_writes_every_option_and_value_as_plain_json() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("check_report")
+        .join("show_plain_json");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("t.schema.yml"),
+        "version: 1\ntable: t\nprimary_key: id\nfields:\n  - integer: id\n    required: true\n\
+         \x20 - timestamp: seen\n    required: false\n    options:\n      format: yyyy-MM-dd HH:mm:ss\n\
+         \x20     ignore_malformed: true\n      boost: 2\n\
+         \x20 - keyword: kind\n    required: false\n    default: plain\n\
+         \x20 - constant: answer\n    value: 42\n\
+         \x20 - constant: tags\n    value: [a, b]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("flusso.toml"),
+        "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://nobody@127.0.0.1:1/none\"\n\n\
+         [sinks.out]\ntype = \"stdout\"\n\n[[index]]\nname = \"t\"\nschema = \"t.schema.yml\"\n\
+         enabled = true\n",
+    )
+    .unwrap();
+    let ran = flusso(&dir, &["show", "mapping", "t", "--format", "json"]);
+    assert!(ran.status.success(), "{}", shown(&ran));
+    let mappings: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+    let seen = mappings
+        .pointer("/0/fields")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|fields| fields.iter().find(|field| field["name"] == "seen"))
+        .unwrap_or_else(|| panic!("no `seen` field: {}", shown(&ran)));
+    let extra = &seen["mapping"];
+    assert_eq!(
+        extra["format"], "yyyy-MM-dd HH:mm:ss||strict_date_optional_time",
+        "{extra}"
+    );
+    assert_eq!(extra["ignore_malformed"], true, "{extra}");
+    assert_eq!(extra["boost"], 2, "{extra}");
+
+    let ran = flusso(&dir, &["show", "config", "--format", "json"]);
+    assert!(ran.status.success(), "{}", shown(&ran));
+    let text = String::from_utf8_lossy(&ran.stdout);
+    for tag in [
+        "\"String\"",
+        "\"BigInt\"",
+        "\"Bool\"",
+        "\"Array\"",
+        "\"Map\"",
+    ] {
+        assert!(!text.contains(tag), "{tag} in {text}");
+    }
+    let config: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+    let fields = config
+        .pointer("/indexes/t/schema/fields")
+        .unwrap_or_else(|| panic!("{text}"));
+    let field = |name: &str| {
+        fields
+            .as_array()
+            .and_then(|fields| fields.iter().find(|field| field["field"] == name))
+            .unwrap_or_else(|| panic!("no `{name}`: {text}"))
+    };
+    assert_eq!(
+        field("seen")["options"]["format"],
+        "yyyy-MM-dd HH:mm:ss",
+        "{text}"
+    );
+    let text_of = |name: &str| field(name).to_string();
+    assert!(text_of("kind").contains("\"plain\""), "{text}");
+    assert!(text_of("answer").contains("42"), "{text}");
+    assert!(text_of("tags").contains("[\"a\",\"b\"]"), "{text}");
+}

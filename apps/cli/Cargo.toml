@@ -41,6 +41,7 @@ sink.workspace = true
 sink-stdout.workspace = true
 sink-opensearch.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 async-trait.workspace = true
 clap.workspace = true
 # `float_roundtrip`: `flusso script run --input` reads a number as the value

@@ -920,7 +920,7 @@ fn describe_entry(port: Port, entry: &PortEntry) -> String {
 /// human listing masks it. A secret read from the environment
 /// (`{ env = "VAR" }`) names its variable.
 pub(crate) fn redacted_config(config: &Config) -> Result<serde_json::Value> {
-    let mut document = serde_json::to_value(config)?;
+    let mut document = crate::plain_json::to_value(config)?;
     if let Some(source) = document.get_mut("source") {
         mask_secrets(source, Port::Source, &config.source.kind);
     }
