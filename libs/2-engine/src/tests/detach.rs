@@ -1052,7 +1052,94 @@ async fn a_detach_again_the_sink_keeps_no_record_of_fails_the_staging_step() {
             .unwrap()
             .contains(&"users".to_owned())
     );
+    assert!(!rig.progress.is_detached(&lane(users())));
+}
+
+/// The detach records an earlier process left, for `users`.
+fn detached_record() -> Detachment {
+    Detachment::recorded(
+        DetachRecord::Detached { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    )
+}
+
+/// Items of `users` published past a lane of two, within a second: what
+/// only a run that takes the lane as detached lets through.
+async fn drains_within_a_second(rig: &Rig) -> bool {
+    let producer = rig.stream.lane(&lane(users())).unwrap().producer;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        for position in 100..140 {
+            producer
+                .publish(item(&users(), i64::try_from(position).unwrap(), position))
+                .await
+                .unwrap();
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// A lane restaged during a run whose staging finds the index detached is
+/// taken as detached by the run: drained, never reopened (`adopt_detached`).
+#[tokio::test(start_paused = true)]
+async fn a_restage_during_a_run_that_finds_the_index_detached_detaches_the_lane() {
+    let rig = Rig::new(2);
+    rig.sink.missing.lock().unwrap().insert("users".to_owned());
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), detached_record());
+    let engine = rig.engine();
+    let (task, _control) = spawn(&engine);
+    rig.live(&users(), 1, 1).await;
+    eventually("the restage finds it detached", || {
+        rig.progress.is_detached(&lane(users()))
+    })
+    .await;
     assert!(
-        !engine.lane_health(&lane(users())).is_open() || !rig.progress.is_detached(&lane(users()))
+        drains_within_a_second(&rig).await,
+        "the run drains the lane"
     );
+    assert_eq!(
+        rig.sink.writes_of(&users()).len(),
+        1,
+        "only the first write"
+    );
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    task.abort();
+}
+
+/// A reindex whose staging finds the index detached detaches the lane in
+/// the run: nothing ensured, nothing written (`adopt_detached`).
+#[tokio::test(start_paused = true)]
+async fn a_reindex_whose_staging_finds_the_index_detached_detaches_the_lane() {
+    let rig = Rig::new(2);
+    let engine = rig.engine();
+    let (task, control) = spawn(&engine);
+    rig.live(&users(), 1, 1).await;
+    eventually("users lands", || rig.applied(&users()) == through(1)).await;
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), detached_record());
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    eventually("the reindex finds it detached", || {
+        rig.progress.is_detached(&lane(users()))
+    })
+    .await;
+    assert!(
+        drains_within_a_second(&rig).await,
+        "the run drains the lane"
+    );
+    assert_eq!(rig.sink.writes_of(&users()).len(), 1);
+    assert!(rig.sink.ensured.lock().unwrap().is_empty());
+    task.abort();
 }

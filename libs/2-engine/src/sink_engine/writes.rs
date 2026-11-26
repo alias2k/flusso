@@ -336,7 +336,8 @@ enum Outcome {
     /// A quiet lane's empty caught-up write.
     Refresh(sink::Result<WriteReport>),
     /// A lane's index staged again after its target went missing.
-    Restage(Result<()>),
+    /// `true`: staging found the index detached.
+    Restage(Result<bool>),
     /// The retry of a reindex a lane is owed (X15).
     Reindex(Reindexed),
     /// A lane's detach, recorded by the sink (ADR 0012 stage 10, R4).
@@ -930,7 +931,18 @@ impl<'a> Run<'a> {
     /// the staged indexes are owed too and no lane opens; what they staged is
     /// the next start's (X19, X20).
     async fn settle_reindex(&mut self, reindexed: Reindexed) -> Result<()> {
-        let Reindexed { staged, mut failed } = reindexed;
+        let Reindexed {
+            staged,
+            mut failed,
+            detached,
+        } = reindexed;
+        let lanes: Vec<usize> = detached
+            .iter()
+            .filter_map(|index| self.lanes.iter().position(|run| run.key.index == *index))
+            .collect();
+        for lane in lanes {
+            self.adopt_detached(lane).await?;
+        }
         if self.engine.stop.is_requested() {
             failed.extend(
                 staged
@@ -941,11 +953,7 @@ impl<'a> Run<'a> {
             return Ok(());
         }
         self.reindex_failed(failed);
-        self.reindexed(&staged).await?;
-        for lane in 0..self.lanes.len() {
-            self.adopt_detached(lane).await?;
-        }
-        Ok(())
+        self.reindexed(&staged).await
     }
 
     /// Each of `failed` could not stage its reindex (X15): its lane is owed
@@ -973,16 +981,18 @@ impl<'a> Run<'a> {
     /// written again; failed, it is tried again after its backoff. Either
     /// way, how far the lane's walk got in a missing target means nothing in
     /// the new one; a lane a staging left out keeps its walk (#471).
-    fn restage_returned(&mut self, flight: u64, result: Result<()>) -> Option<usize> {
+    fn restage_returned(&mut self, flight: u64, result: Result<bool>) -> Option<usize> {
         let at = self.restaging.iter().position(|(id, _)| *id == flight)?;
         let (_, lane) = self.restaging.swap_remove(at);
         let now = Instant::now();
         let run = self.lanes.get_mut(lane)?;
         // The staging found the index detached: the lane is taken as such,
-        // never reopened.
-        if result.is_ok() && self.engine.lane_health(&run.key).is_detached() {
+        // never reopened. Its own answer decides, not the shared state, which
+        // the run may have stored over meanwhile (review m4).
+        if matches!(result, Ok(true)) {
             return Some(lane);
         }
+        let result = result.map(|_| ());
         if !run.health.unensured {
             run.walked.reset();
         }
@@ -3068,19 +3078,16 @@ impl<'a> Run<'a> {
         self.engine.store_lane(&run.key, &run.health, false);
     }
 
-    /// Take `lane` as detached when a staging found it so (the engine's state
-    /// says detached, the run's not yet).
+    /// Take `lane` as detached: a staging during the run found it so.
     async fn adopt_detached(&mut self, lane: usize) -> Result<()> {
         let Some(run) = self.lanes.get(lane) else {
             return Ok(());
         };
-        if run.health.health.is_detached() {
-            return Ok(());
-        }
-        if let LaneHealth::Detached { reason, .. } = self.engine.lane_health(&run.key) {
-            return self.detached(lane, reason).await;
-        }
-        Ok(())
+        let reason = match self.engine.lane_health(&run.key) {
+            LaneHealth::Detached { reason, .. } => reason,
+            _ => "a staging found the index detached".to_owned(),
+        };
+        self.detached(lane, reason).await
     }
 
     /// Acknowledge, unwritten, the items of detached lanes taken so far, in

@@ -446,41 +446,48 @@ impl SinkEngine {
     /// then, when it is unseeded, a backfill. One already outstanding is cut
     /// (what it wrote went with the missing target), so a fresh one is asked
     /// for. Runs beside writes of the other indexes, never beside one of
-    /// `index`.
-    pub(super) async fn restage(&self, index: &IndexName) -> Result<()> {
+    /// `index`. `true`: staging found the index detached.
+    pub(super) async fn restage(&self, index: &IndexName) -> Result<bool> {
         let Some(mapping) = self.mappings.iter().find(|m| &m.index == index) else {
-            return Ok(());
+            return Ok(false);
         };
         let staged = self
             .step(Step::Restage, mapping)
             .await
             .map_err(|error| staging_failed(index, error))?;
+        if staged == Staged::Detached {
+            return Ok(true);
+        }
         let Staged::Unseeded { walked, target } = staged else {
-            return Ok(());
+            return Ok(false);
         };
         if !self.options.backfill || self.skip_backfill {
             tracing::warn!(%index, sink = %self.name, "staged again with no backfill (backfill off for this sink, or skip_backfill): it holds only what is written from now on");
-            return Ok(());
+            return Ok(false);
         }
         if self.stop.is_requested() {
             tracing::info!(%index, sink = %self.name, "stopping: staged again, its backfill is asked for at the next start");
-            return Ok(());
+            return Ok(false);
         }
         if self.outstanding().contains(index) {
-            return self.ask_again(vec![(index.clone(), target)]).await;
+            return self
+                .ask_again(vec![(index.clone(), target)])
+                .await
+                .map(|()| false);
         }
         self.request_backfill(vec![(index.clone(), walked, target)])
             .await
+            .map(|()| false)
     }
 
     /// Stage again `index`, which a staging left out (#471): with ensure's
     /// rules, as [`stage`](Self::stage) treats one index. An intact target
     /// keeps its outstanding backfill and its walk; a target that changed
     /// meanwhile has its backfill cut and asked again; an unseeded index not
-    /// asked for yet is asked for.
-    pub(super) async fn ensure_again(&self, index: &IndexName) -> Result<()> {
+    /// asked for yet is asked for. `true`: staging found the index detached.
+    pub(super) async fn ensure_again(&self, index: &IndexName) -> Result<bool> {
         let Some(mapping) = self.mappings.iter().find(|m| &m.index == index) else {
-            return Ok(());
+            return Ok(false);
         };
         let backfill = self.options.backfill;
         let staged = self
@@ -492,17 +499,23 @@ impl SinkEngine {
             )
             .await
             .map_err(|error| staging_failed(index, error))?;
+        if staged == Staged::Detached {
+            return Ok(true);
+        }
         let Staged::Unseeded { walked, target } = staged else {
-            return Ok(());
+            return Ok(false);
         };
         if !backfill || self.skip_backfill || self.stop.is_requested() {
-            return Ok(());
+            return Ok(false);
         }
         if self.outstanding().contains(index) {
             if self.is_cut(index) {
-                return self.ask_again(vec![(index.clone(), target)]).await;
+                return self
+                    .ask_again(vec![(index.clone(), target)])
+                    .await
+                    .map(|()| false);
             }
-            return Ok(());
+            return Ok(false);
         }
         if self
             .sink
@@ -514,6 +527,7 @@ impl SinkEngine {
         }
         self.request_backfill(vec![(index.clone(), walked, target)])
             .await
+            .map(|()| false)
     }
 
     /// `indexes` were cut: staged into a target their outstanding backfill
@@ -1329,6 +1343,7 @@ impl SinkEngine {
             .await;
         let mut reindexed = Reindexed {
             staged: Vec::new(),
+            detached: Vec::new(),
             failed: tried
                 .failed
                 .into_iter()
@@ -1359,7 +1374,10 @@ impl SinkEngine {
                 Staged::Seeded => None,
                 // Detached by what staging found: the run takes the lane as
                 // detached, nothing is rebuilt.
-                Staged::Detached => continue,
+                Staged::Detached => {
+                    reindexed.detached.push(index);
+                    continue;
+                }
             };
             let asked = if outstanding.contains(&index) {
                 tracing::warn!(%index, sink = %self.name, "reindex during a backfill: the backfill is cut and asked for again");
@@ -1411,6 +1429,8 @@ struct Tried<'a> {
 pub(super) struct Reindexed {
     pub(super) staged: Vec<IndexName>,
     pub(super) failed: Vec<(IndexName, String)>,
+    /// Staging found these detached: nothing rebuilt, the lane detached.
+    pub(super) detached: Vec<IndexName>,
 }
 
 /// What staging learned of an index.
