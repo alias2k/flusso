@@ -29,7 +29,7 @@
 
 use kernel::IndexMapping;
 use serde_json::{Value, json};
-use sink::{DetachRecord, Detachment, Result, SinkError, StuckClock};
+use sink::{DetachRecord, Detachment, MarkerAt, RecordVersion, Result, SinkError, StuckClock};
 
 use crate::OpensearchSink;
 use crate::transport::request_error;
@@ -41,57 +41,41 @@ struct Found {
     primary_term: Option<u64>,
 }
 
+/// The three documents of one index's `_mget`, each when found.
+struct Kept {
+    marker: Option<Found>,
+    record: Option<Found>,
+    stuck: Option<Found>,
+}
+
+impl Found {
+    /// The `(seq_no, primary_term)` a write conditional on this read names.
+    fn version(&self) -> Option<(u64, u64)> {
+        self.seq_no.zip(self.primary_term)
+    }
+}
+
 impl OpensearchSink {
     /// What the meta index keeps about detaching `mapping`'s index, with a
     /// half-moved seed marker put back first.
     pub(crate) async fn read_detachment(&self, mapping: &IndexMapping) -> Result<Detachment> {
         let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
-        let ids = [
-            hash_alias.clone(),
-            format!("detach:{hash_alias}"),
-            format!("stuck:{hash_alias}"),
-        ];
-        let url = format!("{}/{}/_mget", self.base_url, self.meta_index());
-        let context = "reading the detach records failed";
-        let response = self
-            .maybe_auth(self.client.post(&url).json(&json!({ "ids": ids })))
-            .send()
-            .await
-            .map_err(|e| request_error(context, e))?;
-        let status = response.status();
-        let text = response
-            .text()
-            .await
-            .map_err(|e| request_error(context, e))?;
-        if status == reqwest::StatusCode::NOT_FOUND && is_index_not_found(&text) {
-            return Ok(Detachment::default());
-        }
-        if !status.is_success() {
-            return Err(SinkError::Write(format!(
-                "{context}: HTTP {status}: {text}"
-            )));
-        }
-        let body: Value = serde_json::from_str(&text)
-            .map_err(|e| SinkError::Write(format!("{context}: {e}: {text}")))?;
-        let docs = body
-            .get("docs")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let [marker_id, record_id, stuck_id] = &ids;
-        let [marker, record, stuck] = docs else {
-            return Err(SinkError::Write(format!(
-                "{context}: expected 3 documents, got {}: {text}",
-                docs.len()
-            )));
-        };
-        let (marker, record, stuck) = (
-            found(marker, marker_id, context)?,
-            found(record, record_id, context)?,
-            found(stuck, stuck_id, context)?,
-        );
+        let Kept {
+            marker,
+            record,
+            stuck,
+        } = self.read_kept(&hash_alias).await?;
 
         let mut kept = Detachment::default();
+        if let Some(record) = &record {
+            let serving = record.source.get("serving").and_then(Value::as_u64);
+            kept.marker = marker
+                .as_ref()
+                .and_then(|marker| marker_at(&marker.source, serving));
+            kept.version = record
+                .version()
+                .map(|(seq_no, term)| RecordVersion::new(format!("{seq_no}:{term}")));
+        }
         kept.record = record.map(|record| read_record(&record.source));
         kept.stuck = stuck.map(|stuck| {
             let text = |key: &str| {
@@ -118,6 +102,59 @@ impl OpensearchSink {
             }
         }
         Ok(kept)
+    }
+
+    /// The seed marker, the detach record and the stuck clock of
+    /// `hash_alias`, in one `_mget`, each with its version.
+    async fn read_kept(&self, hash_alias: &str) -> Result<Kept> {
+        let ids = [
+            hash_alias.to_owned(),
+            format!("detach:{hash_alias}"),
+            format!("stuck:{hash_alias}"),
+        ];
+        let url = format!("{}/{}/_mget", self.base_url, self.meta_index());
+        let context = "reading the detach records failed";
+        let response = self
+            .maybe_auth(self.client.post(&url).json(&json!({ "ids": ids })))
+            .send()
+            .await
+            .map_err(|e| request_error(context, e))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| request_error(context, e))?;
+        if status == reqwest::StatusCode::NOT_FOUND && is_index_not_found(&text) {
+            return Ok(Kept {
+                marker: None,
+                record: None,
+                stuck: None,
+            });
+        }
+        if !status.is_success() {
+            return Err(SinkError::Write(format!(
+                "{context}: HTTP {status}: {text}"
+            )));
+        }
+        let body: Value = serde_json::from_str(&text)
+            .map_err(|e| SinkError::Write(format!("{context}: {e}: {text}")))?;
+        let docs = body
+            .get("docs")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let [marker_id, record_id, stuck_id] = &ids;
+        let [marker, record, stuck] = docs else {
+            return Err(SinkError::Write(format!(
+                "{context}: expected 3 documents, got {}: {text}",
+                docs.len()
+            )));
+        };
+        Ok(Kept {
+            marker: found(marker, marker_id, context)?,
+            record: found(record, record_id, context)?,
+            stuck: found(stuck, stuck_id, context)?,
+        })
     }
 
     /// Put the seed marker back on `generation`, as `from` says it was,
@@ -174,6 +211,21 @@ fn generation_of(from: &Value) -> std::result::Result<u64, String> {
     from.get("generation")
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("the seed marker's detaching_from names no generation: {from}"))
+}
+
+/// Where `marker` stands against a record naming `serving`: `None` for a
+/// marker naming no generation.
+fn marker_at(marker: &Value, serving: Option<u64>) -> Option<MarkerAt> {
+    let generation = marker.get("active_generation").and_then(Value::as_u64)?;
+    let seeded = marker
+        .get("seeded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Some(if serving == Some(generation) {
+        MarkerAt::Serving { seeded }
+    } else {
+        MarkerAt::Elsewhere { seeded }
+    })
 }
 
 /// Whether `text` is OpenSearch's answer for a missing index.
@@ -243,6 +295,8 @@ fn read_record(source: &Value) -> DetachRecord {
         None => unreadable(format!("it names no state: {source}")),
     }
 }
+
+mod record;
 
 #[cfg(test)]
 mod tests;

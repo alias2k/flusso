@@ -7,6 +7,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::{OpensearchConfig, OpensearchSink, TextAnalysis};
 
+mod record;
+
 /// The hash alias of [`mapping`]'s index, and its two record ids.
 const ALIAS: &str = "users_00000001";
 const DETACH: &str = "detach:users_00000001";

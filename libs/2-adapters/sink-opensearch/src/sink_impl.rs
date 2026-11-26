@@ -486,6 +486,22 @@ impl Sink for OpensearchSink {
         self.read_detachment(mapping).await
     }
 
+    async fn detach(
+        &self,
+        mapping: &IndexMapping,
+        detach: &sink::Detach,
+    ) -> Result<sink::Recorded> {
+        self.write_detach(mapping, detach).await
+    }
+
+    async fn forget_detachment(
+        &self,
+        mapping: &IndexMapping,
+        version: &sink::RecordVersion,
+    ) -> Result<()> {
+        self.delete_detach(mapping, version).await
+    }
+
     async fn seeding(&self, index: &IndexName) -> Result<Seeding> {
         let Some(target) = self.target(index.as_ref()) else {
             return Ok(Seeding::Unseeded { walked: None });

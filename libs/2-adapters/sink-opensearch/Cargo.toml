@@ -30,6 +30,8 @@ schemars.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+# The detach record's `since`, in UTC.
+chrono = { workspace = true, features = ["clock"] }
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 webpki-root-certs.workspace = true

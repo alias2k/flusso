@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use kernel::{Envelope, IndexMapping, IndexName};
+use kernel::{Envelope, IndexMapping, IndexName, RowKey};
 
 use crate::Result;
 
@@ -329,6 +329,12 @@ pub struct Detachment {
     /// The seed marker carries a `detaching_from` this version can't read
     /// (why): nothing was put back, and the index is staged as before.
     pub unreadable_marker: Option<String>,
+    /// Where the seed marker stands against the record's serving copy, read
+    /// beside a record: `None` with no record, or no marker.
+    pub marker: Option<MarkerAt>,
+    /// The record's version as read, for a write conditional on it
+    /// ([`Sink::forget_detachment`]): `None` with no record.
+    pub version: Option<RecordVersion>,
 }
 
 impl Detachment {
@@ -339,6 +345,97 @@ impl Detachment {
             && self.restored.is_none()
             && self.unreadable_marker.is_none()
     }
+
+    /// `record` kept, with the marker standing at `marker` and the record
+    /// read at `version`.
+    pub fn recorded(
+        record: DetachRecord,
+        marker: Option<MarkerAt>,
+        version: Option<RecordVersion>,
+    ) -> Self {
+        Self {
+            record: Some(record),
+            marker,
+            version,
+            ..Self::default()
+        }
+    }
+}
+
+/// Where an index's seed marker stands against its detach record: on the
+/// copy the record says serves reads, or on another (the one a detach moved
+/// it to, or one a rebuild seeded since).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MarkerAt {
+    /// On the serving copy.
+    Serving { seeded: bool },
+    /// On another copy.
+    Elsewhere { seeded: bool },
+}
+
+/// A detach record's version as a sink read it: opaque text, handed back to
+/// make a write conditional on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordVersion(String);
+
+impl RecordVersion {
+    /// A version written as `text`.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+
+    /// The version as the sink wrote it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// What [`Sink::detach`] records about the lane it detaches (ADR 0012 stage
+/// 10, R4).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Detach {
+    /// Why: the refusal the lane met.
+    pub why: String,
+    /// The row keys of the item the lane parked on, so a later probe can
+    /// build it again; empty when not known.
+    pub refused_keys: Vec<RowKey>,
+    /// The sink can't rebuild the index (`backfill = false`): the seed marker
+    /// stays where it is, and the gap is for an operator to accept.
+    pub live_only: bool,
+}
+
+impl Detach {
+    /// A detach for `why`, with no keys, on a sink that can rebuild.
+    pub fn new(why: impl Into<String>) -> Self {
+        Self {
+            why: why.into(),
+            ..Self::default()
+        }
+    }
+
+    /// The refused item's row keys.
+    pub fn refused_keys(mut self, keys: Vec<RowKey>) -> Self {
+        self.refused_keys = keys;
+        self
+    }
+
+    /// Whether the sink can't rebuild the index.
+    pub fn live_only(mut self, live_only: bool) -> Self {
+        self.live_only = live_only;
+        self
+    }
+}
+
+/// Whether [`Sink::detach`] recorded the detach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Recorded {
+    /// Durably recorded: the lane may leave the slot's minimum.
+    Kept,
+    /// The sink keeps no records: the lane never detaches.
+    NotKept,
 }
 
 /// An index's detach record, as staging read it.
@@ -398,6 +495,9 @@ impl StuckClock {
 /// indexes; never beside a write, a `mark_seeded` or staging of the same
 /// index, and never beside staging. State a sink shares between indexes, such
 /// as one metadata store, must take concurrent calls for different indexes.
+///
+/// **A detach** ([`detach`](Self::detach)) runs beside writes, seeds and
+/// staging of other indexes, never beside any call holding the same index.
 #[async_trait]
 pub trait Sink: std::fmt::Debug + Send + Sync {
     /// Ensure the destination index exists, creating it from `mapping` if it is
@@ -557,6 +657,27 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// nothing.
     async fn detachment(&self, _: &IndexMapping) -> Result<Detachment> {
         Ok(Detachment::default())
+    }
+
+    /// Record that `mapping`'s index is detached from the slot's minimum
+    /// (ADR 0012 stage 10, R4), in this order: the seed marker moves to a
+    /// copy that doesn't exist yet, keeping where it was (skipped when
+    /// `live_only`); then the detach record is written; then unserved copies
+    /// are deleted, best effort. Each write is conditional on what was read
+    /// first, and a conflict reads again and decides again. A marker a detach
+    /// already moved stays where it is. Called once nothing of the index is
+    /// in flight. `Kept` only once the marker and the record are durable;
+    /// the default keeps nothing, so a sink without records never detaches.
+    async fn detach(&self, _: &IndexMapping, _: &Detach) -> Result<Recorded> {
+        Ok(Recorded::NotKept)
+    }
+
+    /// Delete `mapping`'s detach record, if it is still the one read at
+    /// `version`: a later write wins, and the call fails so the caller reads
+    /// again. A record already gone is not an error. The default has nothing
+    /// to delete.
+    async fn forget_detachment(&self, _: &IndexMapping, _: &RecordVersion) -> Result<()> {
+        Ok(())
     }
 
     /// What staging needs of `index`: seeded, or, when not, where its last
