@@ -3264,6 +3264,11 @@ impl<'a> Run<'a> {
             }
             let key = run.key.clone();
             let detached = run.health.health.is_detached();
+            // A detach of this lane failed: a detach record found now is that
+            // detach's own (`known` admits it), which the clear decides
+            // before the lane writes anything; taking the lane as detached
+            // under it would leave it detached once the clear deletes it.
+            let clearing = run.health.detach_unsure && !detached;
             let index = run.key.index.clone();
             let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
                 continue;
@@ -3302,6 +3307,9 @@ impl<'a> Run<'a> {
                             .await
                             .map_err(failed)?;
                     }
+                }
+                super::Acted::Detached { .. } if clearing => {
+                    tracing::info!(%index, sink = %self.engine.name, "read again once the slot is held, the records say detached: the lane's own failed detach, left to its clear");
                 }
                 super::Acted::Detached { why, through } => {
                     tracing::warn!(%index, sink = %self.engine.name, %why, "read again once the slot is held, the records say the index is detached: taken as detached before anything of it is written (O29)");

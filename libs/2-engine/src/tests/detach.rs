@@ -3804,6 +3804,47 @@ async fn a_failed_detach_then_another_process_detaches(
     task
 }
 
+/// Found by the world at 50,000 cases: a lane whose detach landed but
+/// failed, read again at the next opening before its clear ran. The record
+/// is its own failed detach's, which the clear deletes: the read again
+/// leaves it to the clear instead of taking the lane as detached (which,
+/// with the record then deleted, kept it detached for good). The lane opens
+/// once its block lifts, and the record is gone.
+#[tokio::test(start_paused = true)]
+async fn a_failed_detach_read_again_before_its_clear_is_left_to_the_clear() {
+    let rig = Rig::new(64);
+    rig.sink
+        .records
+        .lock()
+        .unwrap()
+        .push_back(Record::FailAfterWriting);
+    rig.sink.block(&users(), true);
+    let engine = rig.engine();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 1, 1).await;
+    eventually("the record was written and the call failed", || {
+        rig.sink.detaches().len() == 1
+    })
+    .await;
+    rig.rereads.closed();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.sink.block(&users(), false);
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    let health = engine.lane_health(&lane(users()));
+    let kept = rig.sink.kept.lock().unwrap().get("users").cloned();
+    assert!(!task.is_finished(), "{:?}", task.await);
+    task.abort();
+    assert!(
+        health.is_open() && kept.is_none(),
+        "health {health:?}, record {kept:?}"
+    );
+}
+
 /// The fifth re-check (second report), B-2: a parked lane's clear deletes a
 /// `Detached` record it reads. After a failed opening another process may
 /// hold the slot and rely on that record: the clear waits until this process
