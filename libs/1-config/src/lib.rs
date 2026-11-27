@@ -5,6 +5,7 @@
 
 mod compiled;
 mod deployment;
+mod line_endings;
 mod loader;
 pub mod toml;
 pub mod yaml;

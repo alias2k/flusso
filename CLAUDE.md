@@ -330,10 +330,11 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   `flusso_version` field — byte-stable across flusso upgrades; each port entry is written as its
   `type` plus its options with sorted keys). Format 2 (kernel-typed adapter settings, before
   0.16) and the pre-freeze MessagePack are rejected with a regenerate hint, version checked
-  before the body (ADR 0005). `from_bytes` reads every CRLF line break as LF before parsing, so a
-  lock git converted holds its LF twin's config and content hashes (issue #488; the writer escapes
-  every carriage return a value holds as `\r`, so an LF lock reads as written; a YAML schema already
-  folds CRLF; guard `tests/line_endings.rs`). Two guards in `libs/1-config/tests/`: `golden_lock.rs` byte-pins
+  before the body (ADR 0005). `from_bytes` and `loader::load` read every CRLF line break as LF before
+  parsing (`src/line_endings.rs`), so a lock or `flusso.toml` git converted holds its LF twin's config
+  and content hashes (issue #488; the writer escapes every carriage return a value holds as `\r`, so
+  an LF lock reads as written; a YAML schema already folds CRLF; the designer parses `flusso.toml`
+  through `ConfigToml::try_parse` and keeps its bytes; guard `tests/line_endings.rs`). Two guards in `libs/1-config/tests/`: `golden_lock.rs` byte-pins
   the serialized shape against a maximal fixture (`tests/fixtures/golden/`; re-bless with
   `FLUSSO_BLESS=1` after reviewing the diff) and `compat.rs` walks the immutable per-release
   corpus `tests/compat/` (see its README; never edit a snapshot — fix the change instead; `v0.15`

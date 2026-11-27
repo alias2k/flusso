@@ -59,10 +59,13 @@ pub fn load(config_path: impl AsRef<Path>) -> Result<Config, LoadError> {
         source,
     })?;
 
-    let config_toml = ConfigToml::try_parse(&raw).map_err(|source| LoadError::ParseConfig {
-        path: config_path.to_path_buf(),
-        source,
-    })?;
+    let config_toml =
+        ConfigToml::try_parse(crate::line_endings::lf_line_breaks(&raw)).map_err(|source| {
+            LoadError::ParseConfig {
+                path: config_path.to_path_buf(),
+                source,
+            }
+        })?;
 
     let indexes = config_toml.index.clone();
 

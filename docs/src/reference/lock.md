@@ -60,11 +60,12 @@ A lock-write failure is fatal. A lock in an earlier format (the pre-0.16 `format
 
 ## Line endings
 
-A lock whose line endings were converted to CRLF (a Windows checkout with `core.autocrlf`, an editor) holds the same config as the lock flusso wrote:
+A lock whose line endings were converted to CRLF (a Windows checkout with `core.autocrlf`, an editor) holds the same config as the lock flusso wrote, and a converted `flusso.toml` compiles to it:
 
 - **Every CRLF line break reads as `\n`**, inside a multi-line string too. The lock writes a value that spans lines as a multi-line string: a script's source, a raw filter, a filter's value, a column's `default`, an `options` value, a `constant`. Each reads back as written, so its index keeps its content hash and its physical name, and its script runs without `\r`.
 - **A carriage return a value really holds stays.** The lock writes it as the escape `\r`, never as the byte, so no conversion touches it. A bare `\r` byte is not a line break: the lock is unreadable, as before.
-- **`check` reports it as `same_config`**, a note, not an error. `flusso run` with a config rewrites it in LF at its next start.
+- **`flusso.toml` is read the same way.** A multi-line string in it (an adapter option, a per-index sink option such as `index_settings`) reads without `\r`, so a converted `flusso.toml` compiles to the lock its LF twin does. None of its values reaches a content hash.
+- **`check` reports a converted lock as `same_config`**, a note, not an error, whether or not `flusso.toml` was converted too. `flusso run` with a config rewrites it in LF at its next start.
 
 To keep the lock byte for byte as flusso writes it, so `check` says `current` and `run` doesn't rewrite it, mark it `-text` in `.gitattributes`:
 
