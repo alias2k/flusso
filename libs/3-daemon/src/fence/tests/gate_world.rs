@@ -1985,3 +1985,89 @@ fn a_backfill_cut_while_the_slot_is_away_is_asked_again() {
         Event::GapOverOwed { lane: 3 },
     ]);
 }
+
+/// Found by the world at 20,000 cases in the seventh re-check: a backfill
+/// resumed from a walk checkpoint (here another process's, from the rebuild
+/// it began before its drop) whose pages predate a drop the records keep as
+/// a gap seeded over the gap. With a gap kept, the walk starts again from
+/// the first key.
+#[test]
+fn a_walk_resumed_over_a_kept_gap_starts_from_the_first_key() {
+    replay(vec![
+        Event::Release { sink: 0 },
+        Event::Unheld {
+            lane: 3,
+            rebuild: true,
+            then: 5,
+        },
+        Event::GapOverOwed { lane: 3 },
+        Event::Seed { lane: 3 },
+        Event::Detach {
+            lane: 0,
+            fails: false,
+        },
+        Event::WaitDropped { lane: 3 },
+    ]);
+}
+
+/// The same with this process's own failed opening first and a whole-sink
+/// wait.
+#[test]
+fn a_walk_resumed_over_a_kept_gap_starts_from_the_first_key_after_a_failed_opening() {
+    replay(vec![
+        Event::Open {
+            ok: false,
+            jump: 10,
+            drop: None,
+            rebuild: false,
+        },
+        Event::Unheld {
+            lane: 3,
+            rebuild: true,
+            then: 0,
+        },
+        Event::GapOverOwed { lane: 3 },
+        Event::Apply { index: 0 },
+        Event::Seed { lane: 3 },
+        Event::Wait {
+            lane: 2,
+            whole_sink: true,
+            searchable: false,
+            at: 21,
+        },
+    ]);
+}
+
+/// The same after two drops another process finished on `audit`.
+#[test]
+fn a_walk_resumed_over_a_kept_gap_starts_from_the_first_key_after_other_drops() {
+    replay(vec![
+        Event::HolderFinishes {
+            lane: 0,
+            reattach: false,
+        },
+        Event::HolderFinishes {
+            lane: 0,
+            reattach: false,
+        },
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+        Event::Open {
+            ok: false,
+            jump: 20,
+            drop: Some(3),
+            rebuild: true,
+        },
+        Event::GapOverOwed { lane: 3 },
+        Event::Seed { lane: 3 },
+        Event::Wait {
+            lane: 3,
+            whole_sink: false,
+            searchable: false,
+            at: 61,
+        },
+    ]);
+}
