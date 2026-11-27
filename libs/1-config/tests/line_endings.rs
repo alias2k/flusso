@@ -171,6 +171,65 @@ fn a_carriage_return_that_is_not_a_converted_line_ending_stays() {
     );
 }
 
+/// Every kind of multi-line value, each holding a lone carriage return and a
+/// CRLF of its own (YAML `\r` escapes).
+const CARRIAGE_RETURN_SCHEMA: &str = r#"version: 1
+table: products
+primary_key: id
+filters:
+  - raw: "price > 0\r AND\r\n currency = 'USD'"
+  - { column: note, op: eq, value: "note\r one\r\nnote two" }
+fields:
+  - integer: id
+    required: true
+  - keyword: name
+    required: false
+    default: "default\r one\r\ndefault two"
+    options:
+      null_value: "option\r one\r\noption two"
+  - constant: banner
+    value: "constant\r one\r\nconstant two"
+  - keyword: label
+    required: false
+    script: "let a = \"x\ry\";\r\na\n"
+"#;
+
+/// Every kind of value keeps a carriage return it really holds through a
+/// CRLF conversion of its lock: the lock writes each as the escape `\r`.
+#[test]
+fn every_value_keeps_a_carriage_return_it_holds() {
+    let lf = lf_lock("held-cr", CARRIAGE_RETURN_SCHEMA);
+    assert!(
+        !lf.contains('\r'),
+        "a lock holds no carriage return byte:\n{lf}"
+    );
+    assert_eq!(lf.matches("\\r").count(), 12, "{lf}");
+    let from_crlf = config::from_bytes(lf.replace('\n', "\r\n").as_bytes()).unwrap();
+    assert_eq!(relocked(from_crlf), lf);
+}
+
+/// A `flusso.toml` converted to CRLF compiles to the config of its LF twin:
+/// a multi-line string in it (an adapter or per-index sink option) reads
+/// without `\r`, so `check` finds a converted lock beside it the same config.
+/// Nothing in `flusso.toml` reaches a content hash.
+#[test]
+fn a_crlf_flusso_toml_compiles_to_the_config_of_its_lf_twin() {
+    let options = "\n[sinks.primary.extra]\nbanner = \"\"\"\nfirst\nsecond\n\"\"\"\n\n\
+                   [index.sinks.primary.index_settings]\n\"index.note\" = \"\"\"\none\ntwo\n\"\"\"\n";
+    let lf_dir = project("toml-lf", MULTI_LINE_SCHEMA);
+    let lf_toml = format!("{CONFIG}{options}");
+    std::fs::write(lf_dir.join("flusso.toml"), &lf_toml).unwrap();
+    let crlf_dir = project("toml-crlf", MULTI_LINE_SCHEMA);
+    std::fs::write(crlf_dir.join("flusso.toml"), lf_toml.replace('\n', "\r\n")).unwrap();
+
+    let lf = config::to_bytes(&config::compile(lf_dir.join("flusso.toml")).unwrap()).unwrap();
+    let crlf = config::to_bytes(&config::compile(crlf_dir.join("flusso.toml")).unwrap()).unwrap();
+    let text = String::from_utf8(lf.clone()).unwrap();
+    assert!(text.contains("\"\"\"\nfirst\nsecond\n"), "{text}");
+    assert!(text.contains("\"\"\"\none\ntwo\n"), "{text}");
+    assert_eq!(String::from_utf8(crlf).unwrap(), text);
+}
+
 /// An LF lock reads exactly as before: the golden lock and the repository's
 /// own lock hold no carriage return, and the golden lock names its indexes as
 /// they were named before #488.

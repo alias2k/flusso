@@ -506,6 +506,29 @@ mod tests {
         assert_eq!(state.as_str(), "same_config");
     }
 
+    /// A Windows checkout converts `flusso.toml` and the lock alike: a
+    /// multi-line string in `flusso.toml` (a sink option) reads the same on
+    /// both sides, so the lock holds the same config.
+    #[test]
+    fn a_crlf_lock_beside_a_crlf_config_with_a_multi_line_option_holds_the_same_config() {
+        let dir = project("crlf-toml", &["users"], "out");
+        let config = dir.join("flusso.toml");
+        let mut toml = std::fs::read_to_string(&config).unwrap();
+        toml.push_str("\n[sinks.out.extra]\nbanner = \"\"\"\nfirst\nsecond\n\"\"\"\n");
+        std::fs::write(&config, &toml).unwrap();
+        let bytes = config::to_bytes(&compiled(&dir)).unwrap();
+        let lock = dir.join("flusso.lock");
+        std::fs::write(
+            &lock,
+            String::from_utf8(bytes).unwrap().replace('\n', "\r\n"),
+        )
+        .unwrap();
+        std::fs::write(&config, toml.replace('\n', "\r\n")).unwrap();
+
+        let state = LockState::of(&compiled(&dir), &lock);
+        assert_eq!(state, LockState::Respelled);
+    }
+
     /// A lock that fails to parse names where (line and column) and why, never
     /// the text there: a literal secret may sit on that line.
     #[test]
