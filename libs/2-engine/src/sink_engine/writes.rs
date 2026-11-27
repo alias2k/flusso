@@ -3282,7 +3282,6 @@ impl<'a> Run<'a> {
                 continue;
             };
             let failed = |error| super::staging_failed(&index, error);
-            let was_cut = self.engine.is_cut(&index);
             let found = match self.engine.sink.detachment(mapping).await {
                 Ok(found) => found,
                 // A detached lane writes nothing: its read failing leaves it
@@ -3297,12 +3296,21 @@ impl<'a> Run<'a> {
             // The one decision staging takes too (`act_on_records`): another
             // process's rebuild is put back to detached before the lane drops
             // anything (B-2); a failed demotion fails the run.
-            match self
+            let acted = self
                 .engine
                 .act_on_records(mapping, found, false)
                 .await
-                .map_err(failed)?
-            {
+                .map_err(failed)?;
+            // A backfill the read left cut (a gap written since it was
+            // asked, `read_detachment`) is asked again from the first key,
+            // its walk after the drop, whatever the read decided: a cut no
+            // ask follows would leave the index backfilling for good. A lane
+            // the read detaches drops it instead.
+            if self.engine.is_cut(&index) && !matches!(acted, super::Acted::Detached { .. }) {
+                let target = self.engine.asked_target(&index);
+                self.engine.ask_again(vec![(index.clone(), target)]).await?;
+            }
+            match acted {
                 super::Acted::AsBefore { gaps } => {
                     if !detached && !gaps.is_empty() {
                         self.engine
@@ -3338,12 +3346,6 @@ impl<'a> Run<'a> {
                 self.release_awaiting(lane);
             }
             self.sync_rebuild(lane);
-            // A gap the read found new cut the backfill outstanding: it is
-            // asked for again from the first key, its walk after the drop.
-            if !was_cut && self.engine.is_cut(&index) {
-                let target = self.engine.asked_target(&index);
-                self.engine.ask_again(vec![(index.clone(), target)]).await?;
-            }
             // The lane's state now follows its records: its read counts.
             self.engine.rereads.read(&key, read_at);
         }
