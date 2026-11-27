@@ -4703,3 +4703,98 @@ async fn a_stop_while_a_lane_awaits_the_slot_drains_at_once() {
     assert_ne!(rig.applied(&users()), through(1), "nor applied");
     task.abort();
 }
+
+/// Found by the world in the seventh re-check: a gap another process keeps
+/// over an index while this process holds no slot means its drop; a
+/// backfill asked before it walked before the drop. Read once the slot is
+/// held, the fresh gap cuts that backfill and asks a new one, so its
+/// `SnapshotComplete`, granted as an ordinary seed after the reopen, seeds
+/// nothing.
+#[tokio::test(start_paused = true)]
+async fn a_gap_written_since_a_backfill_was_asked_cuts_it() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
+    rig.rereads.closed();
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), vec![gap(Some("1"), Some("2"))]);
+    let (asked, asks) = backfill_asks(&rig);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("the backfill is asked again", || {
+        asked.lock().unwrap().iter().any(|request| {
+            matches!(request, stream::Request::Backfill { index, after: None, .. } if *index == users())
+        })
+    })
+    .await;
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        rig.sink.seeded.lock().unwrap().is_empty(),
+        "the cut backfill seeded over the gap"
+    );
+    task.abort();
+    asks.abort();
+}
+
+/// Found by the world in the seventh re-check: a rebuild this process took
+/// over, whose record another process then removed (it finished it), is
+/// over here once the records read say so. Another process's later rebuild
+/// restarts its attempts with no record, at the same count: it is demoted,
+/// never taken for this process's own.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_whose_record_went_is_not_taken_for_a_later_one() {
+    let rig = Rig::new(64);
+    rig.rereads.will_open();
+    let rebuilding = || {
+        let mut record = Detachment::recorded(
+            DetachRecord::Rebuilding { live_only: false },
+            Some(MarkerAt::Newer { seeded: false }),
+            version(),
+        );
+        record.attempts = Some(1);
+        record
+    };
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), rebuilding());
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(engine.lane_state(&lane(users())).rebuilding, Some(1));
+    let (task, _control) = spawn(&engine);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("read under the stream", || read_all(&rig)).await;
+    rig.rereads.closed();
+    // Another process finishes the rebuild: its seed deletes the record.
+    rig.sink.kept.lock().unwrap().remove("users");
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("the rebuild is over here", || {
+        engine.lane_state(&lane(users())).rebuilding.is_none()
+    })
+    .await;
+    rig.rereads.closed();
+    // Another process begins a new rebuild, its attempts restarting at 1.
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), rebuilding());
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("demoted, not taken for ours", || {
+        *rig.sink.demoted.lock().unwrap() == [("users".to_owned(), false)]
+    })
+    .await;
+    task.abort();
+}

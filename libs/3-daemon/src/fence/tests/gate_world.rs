@@ -696,11 +696,98 @@ enum Event {
         rebuild: bool,
         then: u8,
     },
+    /// Another process holding the slot finishes the rebuild of `lane` it
+    /// began: its seed covers every change so far, its record goes. Only
+    /// while this process holds no stream.
+    Finishes {
+        lane: usize,
+    },
+    /// Another process holding the slot reattaches `lane` it detached: its
+    /// record goes, everything dropped since the detach kept as one gap
+    /// with the marker and given up. Only while this process holds no
+    /// stream.
+    Reattaches {
+        lane: usize,
+    },
+    /// A wait on `lane` at the newest change.
+    WaitNewest {
+        lane: usize,
+    },
+    /// A wait on `lane` just inside the last range another process dropped
+    /// on it.
+    WaitDropped {
+        lane: usize,
+    },
+    /// The seventh re-check's B-1, drawn often: this process's stream ends,
+    /// another process rebuilds (or detaches) `lane`, this process's sink
+    /// run stages with no stream held, the other process finishes (or
+    /// reattaches), then this process opens, a change follows, and a new
+    /// process waits for it. Expanded before the run.
+    HolderFinishes {
+        lane: usize,
+        reattach: bool,
+    },
+    /// G8 drawn often: a backfill of `lane`'s index asked, the stream ends
+    /// with another process dropping `lane`, the backfill completes with no
+    /// stream held (owed), the other process keeps its drop as a gap, then
+    /// this process opens and waits inside the gap. Expanded before the
+    /// run.
+    GapOverOwed {
+        lane: usize,
+    },
 }
 
 impl Event {
     /// The events `self` stands for, in order.
     fn expand(self) -> Vec<Event> {
+        let opens = Event::Open {
+            ok: true,
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        };
+        match self {
+            Event::HolderFinishes { lane, reattach } => {
+                return vec![
+                    Event::StreamEnds {
+                        jump: 10,
+                        drop: Some(lane),
+                        rebuild: !reattach,
+                    },
+                    Event::Restart {
+                        sink: lane / 2,
+                        unreadable: 0,
+                    },
+                    if reattach {
+                        Event::Reattaches { lane }
+                    } else {
+                        Event::Finishes { lane }
+                    },
+                    opens.clone(),
+                    Event::Apply { index: lane % 2 },
+                    Event::NewProcess,
+                    opens,
+                    Event::WaitNewest { lane },
+                ];
+            }
+            Event::GapOverOwed { lane } => {
+                return vec![
+                    Event::Missing { lane },
+                    Event::Apply { index: lane % 2 },
+                    Event::StreamEnds {
+                        jump: 10,
+                        drop: Some(lane),
+                        rebuild: false,
+                    },
+                    Event::Seed { lane },
+                    Event::Reattaches { lane },
+                    opens,
+                    Event::Apply { index: lane % 2 },
+                    Event::WaitDropped { lane },
+                ];
+            }
+            _ => {}
+        }
         let Event::Unheld {
             lane,
             rebuild,
@@ -762,6 +849,13 @@ fn event() -> impl Strategy<Value = Event> {
         6 => (0usize..4, any::<bool>(), 0u8..6).prop_map(
             |(lane, rebuild, then)| Event::Unheld { lane, rebuild, then }
         ),
+        1 => (0usize..4).prop_map(|lane| Event::Finishes { lane }),
+        1 => (0usize..4).prop_map(|lane| Event::Reattaches { lane }),
+        1 => (0usize..4).prop_map(|lane| Event::WaitDropped { lane }),
+        4 => (0usize..4, any::<bool>()).prop_map(
+            |(lane, reattach)| Event::HolderFinishes { lane, reattach }
+        ),
+        3 => (2usize..4).prop_map(|lane| Event::GapOverOwed { lane }),
     ]
 }
 
@@ -1125,6 +1219,76 @@ impl World {
         }
     }
 
+    /// Another process finishes the rebuild of `lane` it began: its seed
+    /// moves the marker (the rows read now, so every change so far is held)
+    /// and deletes the record and the gaps. Only with no stream held here.
+    fn finishes(&mut self, lane: usize) {
+        if self.holding.holds() {
+            return;
+        }
+        let store = &self.stores[Self::sink_of(lane)];
+        let of = Self::index_of(lane);
+        let rebuilding = store.kept.lock().unwrap().get(of).is_some_and(|kept| {
+            matches!(
+                kept.detachment.record,
+                Some(DetachRecord::Rebuilding { .. })
+            )
+        });
+        if !rebuilding {
+            return;
+        }
+        store.kept.lock().unwrap().remove(of);
+        store.gaps.lock().unwrap().remove(of);
+        store.unseeded.lock().unwrap().remove(of);
+        store.walked.lock().unwrap().remove(of);
+        store
+            .seeds
+            .lock()
+            .unwrap()
+            .push((of.to_owned(), self.horizon));
+    }
+
+    /// Another process reattaches `lane`, which it detached: the record
+    /// goes, the range it last dropped is kept as a gap with the marker and
+    /// given up from now. Only with no stream held here.
+    fn reattaches(&mut self, lane: usize) {
+        if self.holding.holds() {
+            return;
+        }
+        let store = &self.stores[Self::sink_of(lane)];
+        let of = Self::index_of(lane);
+        let detached = store.kept.lock().unwrap().get(of).is_some_and(|kept| {
+            matches!(kept.detachment.record, Some(DetachRecord::Detached { .. }))
+        });
+        // A reattach's gap starts where reads stood at the detach (the
+        // record's `through`): every range dropped since the last reattach.
+        let since = self.attached[lane].last().copied().unwrap_or(0);
+        let Some(from) = self.dropped[lane]
+            .iter()
+            .filter(|(_, _, when)| *when > since)
+            .map(|(from, _, _)| *from)
+            .min()
+        else {
+            return;
+        };
+        if !detached {
+            return;
+        }
+        store.kept.lock().unwrap().remove(of);
+        store
+            .gaps
+            .lock()
+            .unwrap()
+            .entry(of.to_owned())
+            .or_default()
+            .push(sink::Gap {
+                from: Some(from.to_string()),
+                to: Some(self.horizon.to_string()),
+            });
+        self.tick += 1;
+        self.attached[lane].push(self.tick);
+    }
+
     /// A change of `index`, published only while the process holds a stream:
     /// none reaches a lane otherwise.
     fn apply(&mut self, at: usize) {
@@ -1292,6 +1456,21 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
         world.restart(at).await;
     }
     for event in events {
+        let event = match event {
+            Event::WaitNewest { lane } => Event::Wait {
+                lane,
+                whole_sink: false,
+                searchable: false,
+                at: world.horizon,
+            },
+            Event::WaitDropped { lane } => Event::Wait {
+                lane,
+                whole_sink: false,
+                searchable: false,
+                at: world.dropped[lane].last().map_or(0, |(from, ..)| from + 1),
+            },
+            event => event,
+        };
         match event.clone() {
             Event::Open {
                 ok,
@@ -1393,7 +1572,14 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
                 },
             ),
             // `/wait` answers `503` until the process's source is live.
-            Event::Unheld { .. } => unreachable!("expanded before the run"),
+            Event::Unheld { .. } | Event::HolderFinishes { .. } | Event::GapOverOwed { .. } => {
+                unreachable!("expanded before the run")
+            }
+            Event::WaitNewest { .. } | Event::WaitDropped { .. } => {
+                unreachable!("made a wait above")
+            }
+            Event::Finishes { lane } => world.finishes(lane),
+            Event::Reattaches { lane } => world.reattaches(lane),
             Event::Wait { .. } if !world.live => {}
             Event::Wait {
                 lane,
@@ -1638,4 +1824,76 @@ fn a_reindex_after_a_new_process_found_anothers_rebuild() {
         Event::NewProcess,
         Event::Reindex { index: 0 },
     ]);
+}
+
+/// Found by the world in the seventh re-check (S-3's new events), as its
+/// shrunk events: a backfill asked, another process's drop kept as a gap
+/// while this process holds no slot, the completion granted as an ordinary
+/// seed after the reopen. The gap cuts the backfill: nothing seeds over it.
+#[test]
+fn a_gap_written_while_unheld_cuts_the_backfill_asked_before_it() {
+    replay(vec![
+        Event::Open {
+            ok: true,
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::Reindex { index: 0 },
+        Event::GapOverOwed { lane: 2 },
+    ]);
+}
+
+/// Found by the world in the seventh re-check: a rebuild taken over at a
+/// start whose record another process removed, then another process's new
+/// rebuild under the same attempt count: demoted, never taken for this
+/// process's own.
+#[test]
+fn a_later_rebuild_under_the_same_attempts_is_not_taken_for_ours() {
+    replay(vec![
+        Event::Unheld {
+            lane: 3,
+            rebuild: true,
+            then: 0,
+        },
+        Event::GapOverOwed { lane: 3 },
+        Event::Open {
+            ok: true,
+            jump: 10,
+            drop: Some(3),
+            rebuild: true,
+        },
+        Event::StreamEnds {
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+    ]);
+}
+
+/// The seventh re-check's B-1 as the world draws it: another process
+/// finishes the rebuild this process met with no slot held, then this
+/// process opens, a change follows, and a new process waits for it.
+#[test]
+fn a_rebuild_the_holder_finished_drops_nothing_unrecorded() {
+    replay(
+        Event::HolderFinishes {
+            lane: 3,
+            reattach: false,
+        }
+        .expand(),
+    );
+}
+
+/// B-1's other half as the world draws it: another process reattaches a
+/// lane this process holds detached under that process's record.
+#[test]
+fn a_lane_the_holder_reattached_drops_nothing_unrecorded() {
+    replay(
+        Event::HolderFinishes {
+            lane: 0,
+            reattach: true,
+        }
+        .expand(),
+    );
 }
