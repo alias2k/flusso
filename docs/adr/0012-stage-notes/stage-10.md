@@ -1711,7 +1711,7 @@ The Same/Foreign table of the cut is unchanged otherwise: nothing known → adop
   - "always Same" (every read judged the same): 3/3;
   - the unknown-outcome handling removed (no states kept, no read back after a failure): 3/3, by the solo property;
   - B-1's seed fix removed (no read back after the seed, the kept record not admitted): 3/3, by the solo property;
-  - `rereads.current` removed from `land_owed_seeds` (S-2): 3/3, and both pinned tests fail;
+  - `rereads.current` removed from `land_owed_seeds` (S-2), run on `1a076bc1` when its world event landed: 3/3 by `gate_world`, and both pinned tests fail;
   - "ignore the version": 0/3 by the properties, by design (above); 8 tests fail.
 
 **The user-visible list, for the docs agent.** This replaces the cut's.
