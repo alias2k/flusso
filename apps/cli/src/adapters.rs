@@ -139,7 +139,11 @@ pub(crate) enum ClusterFinding {
     /// Two sinks write to one cluster: every index, alias and seed marker
     /// flusso owns there is named by the deployment's `prefix` alone, never
     /// by the sink, so both would share them, each taking the other's
-    /// records for another process's. An error; `run` refuses it.
+    /// records for another process's. An error; `run` refuses it. Two URLs
+    /// naming one cluster by different hosts (a DNS alias, an IP) are not
+    /// told apart here: each sink then reads the other's stamped writes as
+    /// another process's, and the deployment stops at the first such read
+    /// (the review of round 10, m-4).
     Shared {
         first: SinkName,
         second: SinkName,
