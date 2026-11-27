@@ -1730,6 +1730,44 @@ The Same/Foreign table of the cut is unchanged otherwise: nothing known → adop
 
 **Not proven.** The world is a model: no ingest engine, no `--skip-backfill`. No live run of two processes, of a lost write answer, or of a failed seed delete yet: §10's checklist.
 
+### After the review of round 10: who wrote it
+
+The review (`target/review-482-round-10/`) found the slot gate and the stop safe, and two promises broken by the shape of `known`: a hand-written prediction, per write kind, of what OpenSearch leaves (B-1: a detach with no `through` keeps the record's, `known` predicted none; S-2: "taken as done" can't tell a landing from records that already were so), and admitted states that can't tell this process's write from an identical one by another process (B-2: the failed-detach clear deleted another process's record). This round replaces the predictions with identity. Designed here first, then built to it.
+
+**The design.**
+- **A stamp on every record and marker write.** A stamp is `{writer, seq}`: `writer` a random token made once per process start (never persisted on the host), `seq` that process's write counter. The engine issues it (`KnownRecords::stamp`); the sink stores it in the documents it writes and returns it on a read (`Detachment.record_stamp`, `Detachment.marker_stamp`). Both documents live in the sink's meta index, not in `flusso.lock`: no format freeze applies. A document without a stamp (written before this version, or by hand) is written by nobody this process knows.
+- **A delete is a tombstone.** `forget_detachment` (and the seed's delete of a finished rebuild's record) writes `{state: "forgotten", stamp}` over the record, conditionally on the version read, instead of deleting it. A read reports a tombstone as no record, with its stamp. A detach over a tombstone overwrites it, conditionally on its version.
+- **Same or Foreign.** Each document is judged on its own. The record (or tombstone): the same when it carries this process's writer, or is exactly what was last read (presence, version, stamp, record, attempts, `through`); else foreign. The marker: the same when it carries this process's writer, or its stamp and gaps are what was last read; else foreign. A read is the same when both are. Nothing known yet: adopted; a read under the same held opening: adopted (unchanged).
+- **An own write with unknown outcome needs nothing kept.** The next read shows the write's own stamp (landed), or what was last read (not landed), or something else (foreign). "Taken as done" is exactly this write's stamp on the record found by the read back.
+- **With nothing read yet, an own write of the record** makes the record known as "only this process's": the next read is the same only when the record carries this process's writer; the marker is still adopted (unknown).
+
+**1. Deletes.** A plain delete leaves nothing to tell "I deleted it" from "another process deleted it", which is round 8's B-2 and this review's B-2. A tombstone keeps the deleter's stamp: this process's own delete, landed or not, is read as its stamp or as the version it targeted; another process's delete is its stamp: foreign. Conditional deletes on the version read alone were weighed and refused: another process reading the same version and deleting it leaves the same absence. A reattach asked again after its own delete landed unseen finds its own tombstone and goes on.
+
+**2. Multi-request sink calls.** Every write that changes the record or the marker's gaps is stamped; the generation deletes and alias swaps around them change neither document. After a failure at any step each document is either exactly as last read or carries this process's stamp, so a read is the same whichever step the failure came at; the engine learns whether the call's own write landed from the stamp. Per call:
+- `detach`: the marker moved (stamped), then the record (stamped), then stale generations deleted. A read after the marker alone finds the marker this process's and no record: the read's put-back of a half-moved marker (stamped) restores it.
+- `begin_rebuild`, `demote`: generations deleted, the marker moved or put back (stamped), the record rewritten (stamped).
+- `mark_seeded`: refresh, alias swap, the marker written whole (stamped), the record's tombstone (stamped, best effort).
+- `reindex`, `ensure_index` when it creates: the marker written whole (stamped).
+- `record_gaps`: the marker's gaps and stamp in one `_update`.
+- `record_walked`, `forget_walked`, the marker's `uuid`: neither gaps nor stamp change; not judged.
+
+**3. OpenSearch semantics relied on.**
+- `if_seq_no`/`if_primary_term` make a write fail when the document changed since it was read (every record write, the tombstone, the put-back, `record_gaps`).
+- `_update` keeps the fields it isn't given: `record_gaps` gives the gaps and the stamp together; the walk checkpoint and the `uuid` keep the stamp they don't give (correct: they change nothing judged).
+- A `PUT` of the whole document keeps nothing it isn't given: every whole-document write of the record or marker carries its stamp; a detach with no `through` copies the record's (`record_body`), which the stamp makes irrelevant to the judgement.
+- A no-op `_update` keeps the version.
+Pinned by the adapter's unit tests over the request bodies (`detachment::tests`); the stand-in sinks (`tests::detach`'s `Gate`, the world's `Store`) store what they are given, stamps included, and predict nothing.
+
+**4. The port.** `sink::Stamp { writer, seq }`. `Detachment` gains `record_stamp` and `marker_stamp`. The writes that keep records take the stamp: `detachment` (for the put-back), `detach`, `forget_detachment`, `begin_rebuild`, `demote`, `record_gaps`; `ensure_index_as`, `mark_seeded_as`, `reindex_as` are provided methods that default to the unstamped ones, for sinks that keep no records. The sink stores and returns; every decision is the engine's.
+
+**5. B-2 again.** Another process's detach carries its writer: foreign, stop. The failed-detach clear deletes only a record carrying this process's writer, by a tombstone conditional on the version read; any other record is never touched by it.
+
+**6. Restarts.** The writer is per process: after a process restart nothing is this process's, and staging adopts the records as before (nothing known). A sink engine's restart inside one process keeps `known` and the writer: a write whose outcome was unknown is read later as this process's stamp (landed) or as what was read before it (not landed); nothing is kept for it.
+
+**7. What stays.** The slot gates (`slot::Plain`/`Erasing`), fresh records before every gated write (`held_fresh`), the stop and its ordering, the read back while held (now it reads the stamp), the simple waits.
+
+**What goes.** The admitted state sets, `Expect`, the per-write `after` rows, their bound, the per-write `landed` predicates, and the "nothing known" special cases they needed.
+
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
 **O29: can a process that staged before another one's detach keep the lane attached? (S3)**
