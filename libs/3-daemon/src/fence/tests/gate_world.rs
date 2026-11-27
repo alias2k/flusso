@@ -150,6 +150,13 @@ struct Store {
     holding: Arc<Holding>,
     live_only: bool,
     kept: Mutex<BTreeMap<String, Kept>>,
+    /// The next record or marker write this process makes fails: `true`,
+    /// after it landed (its response lost); `false`, before.
+    fails: Mutex<Option<bool>>,
+    /// The next seed of an index with a record keeps the record: OpenSearch
+    /// deletes a finished rebuild's record best effort, and a failed delete
+    /// only warns.
+    seed_keeps_record: Mutex<bool>,
     /// Each record write's version, as OpenSearch's `_seq_no` grows with
     /// every write: a record deleted and written again identical reads as
     /// another version.
@@ -188,6 +195,8 @@ impl Store {
             holding,
             live_only,
             kept: Mutex::default(),
+            fails: Mutex::default(),
+            seed_keeps_record: Mutex::default(),
             seq: Mutex::default(),
             gaps: Mutex::default(),
             unreadable: Mutex::default(),
@@ -248,6 +257,21 @@ impl Store {
                 "{what} of {of} over a record ({record:?}, gaps kept: {gaps}) with no stream held"
             ));
         }
+    }
+
+    /// Whether this write fails, and when: `Some(true)` after it lands,
+    /// `Some(false)` before. Taken once.
+    fn failing(&self) -> Option<bool> {
+        self.fails.lock().unwrap().take()
+    }
+
+    /// The error of a write that `landed` or not.
+    fn failed(landed: bool) -> sink::SinkError {
+        sink::SinkError::Write(if landed {
+            "the write landed, the call timed out".to_owned()
+        } else {
+            "the call failed before the write".to_owned()
+        })
     }
 
     /// A new record version.
@@ -370,6 +394,16 @@ impl Sink for Store {
     async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
         self.ensure_hold.pass().await;
         let of = mapping.index.as_ref();
+        let fails = self
+            .missing
+            .lock()
+            .unwrap()
+            .contains(of)
+            .then(|| self.failing())
+            .flatten();
+        if fails == Some(false) {
+            return Err(Self::failed(false));
+        }
         let created = self.missing.lock().unwrap().remove(of);
         if created {
             self.next_generation(of);
@@ -387,6 +421,9 @@ impl Sink for Store {
             .copied()
             .unwrap_or(0);
         let target = Some(sink::TargetId::new(format!("{of}_{generation}")));
+        if fails == Some(true) {
+            return Err(Self::failed(true));
+        }
         Ok(if created {
             sink::Ensured::created(target)
         } else {
@@ -469,6 +506,15 @@ impl Sink for Store {
         detach: &sink::Detach,
     ) -> sink::Result<sink::Recorded> {
         self.touch(mapping.index.as_ref(), "a detach");
+        let fails = self.failing();
+        if fails == Some(false) {
+            return Err(Self::failed(false));
+        }
+        // As OpenSearch: a detach that can rebuild moves the marker, written
+        // whole, so the gaps go.
+        if !detach.live_only {
+            self.gaps.lock().unwrap().remove(mapping.index.as_ref());
+        }
         let marker = if self.live_only {
             MarkerAt::Serving { seeded: true }
         } else {
@@ -486,11 +532,12 @@ impl Sink for Store {
         if let Some(kept) = self.kept.lock().unwrap().get_mut(mapping.index.as_ref()) {
             kept.detachment.through = detach.through.clone();
         }
-        if self
-            .detach_fails
-            .lock()
-            .unwrap()
-            .remove(mapping.index.as_ref())
+        if fails == Some(true)
+            || self
+                .detach_fails
+                .lock()
+                .unwrap()
+                .remove(mapping.index.as_ref())
         {
             return Err(sink::SinkError::Write(
                 "the record landed, the call timed out".to_owned(),
@@ -504,7 +551,26 @@ impl Sink for Store {
         mapping: &IndexMapping,
         version: &RecordVersion,
     ) -> sink::Result<()> {
-        self.touch(mapping.index.as_ref(), "a delete");
+        // A finished rebuild's record (its marker seeded on the newer
+        // generation) is obsolete: deleting it needs no slot (`slot.rs`).
+        let finished = self
+            .kept
+            .lock()
+            .unwrap()
+            .get(mapping.index.as_ref())
+            .is_some_and(|kept| {
+                matches!(
+                    kept.detachment.record,
+                    Some(DetachRecord::Rebuilding { .. })
+                ) && kept.detachment.marker == Some(MarkerAt::Newer { seeded: true })
+            });
+        if !finished {
+            self.touch(mapping.index.as_ref(), "a delete");
+        }
+        let fails = self.failing();
+        if fails == Some(false) {
+            return Err(Self::failed(false));
+        }
         // As OpenSearch: conditional on the version read; a record already
         // gone is not an error.
         let mut kept = self.kept.lock().unwrap();
@@ -517,7 +583,10 @@ impl Sink for Store {
             }
             _ => {
                 kept.remove(mapping.index.as_ref());
-                Ok(())
+                match fails {
+                    Some(landed) => Err(Self::failed(landed)),
+                    None => Ok(()),
+                }
             }
         }
     }
@@ -527,6 +596,10 @@ impl Sink for Store {
         mapping: &IndexMapping,
         decide: &sink::DecideGaps<'_>,
     ) -> sink::Result<Vec<sink::Gap>> {
+        let fails = self.failing();
+        if fails == Some(false) {
+            return Err(Self::failed(false));
+        }
         let mut gaps = self.gaps.lock().unwrap();
         let kept = gaps
             .get(mapping.index.as_ref())
@@ -536,39 +609,60 @@ impl Sink for Store {
             return Ok(kept);
         };
         gaps.insert(mapping.index.to_string(), new.clone());
-        Ok(new)
+        match fails {
+            Some(landed) => Err(Self::failed(landed)),
+            None => Ok(new),
+        }
     }
 
     async fn begin_rebuild(&self, mapping: &IndexMapping) -> sink::Result<u64> {
         let of = mapping.index.as_ref();
         self.touch(of, "a rebuild");
-        let attempts = self
+        let fails = self.failing();
+        if fails == Some(false) {
+            return Err(Self::failed(false));
+        }
+        let (attempts, through) = self
             .kept
             .lock()
             .unwrap()
             .get(of)
-            .and_then(|kept| kept.detachment.attempts)
-            .unwrap_or(0)
-            + 1;
+            .map(|kept| (kept.detachment.attempts, kept.detachment.through.clone()))
+            .unwrap_or_default();
+        let attempts = attempts.unwrap_or(0) + 1;
         self.keep(
             of,
             DetachRecord::Rebuilding { live_only: false },
             MarkerAt::Newer { seeded: false },
             true,
         );
+        // As OpenSearch: the record is rewritten from the one read, so it
+        // keeps where reads stood at the detach.
         if let Some(kept) = self.kept.lock().unwrap().get_mut(of) {
             kept.detachment.attempts = Some(attempts);
+            kept.detachment.through = through;
         }
         self.next_generation(of);
         self.unseeded.lock().unwrap().insert(of.to_owned());
         self.walked.lock().unwrap().remove(of);
-        Ok(attempts)
+        // As OpenSearch: the marker moves, written whole.
+        self.gaps.lock().unwrap().remove(of);
+        match fails {
+            Some(landed) => Err(Self::failed(landed)),
+            None => Ok(attempts),
+        }
     }
 
     async fn demote(&self, mapping: &IndexMapping, live_only: bool) -> sink::Result<()> {
         let of = mapping.index.as_ref();
         self.touch(of, "a demotion");
+        let fails = self.failing();
+        if fails == Some(false) {
+            return Err(Self::failed(false));
+        }
         self.walked.lock().unwrap().remove(of);
+        // As OpenSearch: the marker moves (or is put back), written whole.
+        self.gaps.lock().unwrap().remove(of);
         let held = self.held();
         let version = self.version();
         if let Some(kept) = self.kept.lock().unwrap().get_mut(of) {
@@ -577,7 +671,10 @@ impl Sink for Store {
             kept.ours = true;
             kept.under = held;
         }
-        Ok(())
+        match fails {
+            Some(landed) => Err(Self::failed(landed)),
+            None => Ok(()),
+        }
     }
 
     async fn forget_walked(&self, of: &IndexName) -> sink::Result<()> {
@@ -588,10 +685,20 @@ impl Sink for Store {
     async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
         let of = mapping.index.as_ref();
         self.touch(of, "a reindex");
-        self.next_generation(of);
+        let fails = self.failing();
+        if fails == Some(false) {
+            return Err(Self::failed(false));
+        }
+        // As OpenSearch: the marker moves, written whole, to a generation
+        // the next ensure creates.
+        self.missing.lock().unwrap().insert(of.to_owned());
         self.unseeded.lock().unwrap().insert(of.to_owned());
         self.walked.lock().unwrap().remove(of);
-        Ok(())
+        self.gaps.lock().unwrap().remove(of);
+        match fails {
+            Some(landed) => Err(Self::failed(landed)),
+            None => Ok(()),
+        }
     }
 
     async fn mark_seeded(&self, of: &IndexName) -> sink::Result<()> {
@@ -599,8 +706,23 @@ impl Sink for Store {
         // stands for a read of them under the stream it was made in.
         let name = of.as_ref();
         self.touch(name, "a seed");
+        let fails = self.failing();
+        if fails == Some(false) {
+            return Err(Self::failed(false));
+        }
         self.judge(name, None);
-        self.kept.lock().unwrap().remove(name);
+        // As OpenSearch: the record's delete is best effort; a failed one
+        // leaves it beside the seeded marker, and the seed returns `Ok`.
+        let mut kept = self.kept.lock().unwrap();
+        match kept.get_mut(name) {
+            Some(record) if std::mem::take(&mut *self.seed_keeps_record.lock().unwrap()) => {
+                record.detachment.marker = Some(MarkerAt::Newer { seeded: true });
+            }
+            _ => {
+                kept.remove(name);
+            }
+        }
+        drop(kept);
         self.gaps.lock().unwrap().remove(name);
         self.unseeded.lock().unwrap().remove(name);
         self.walked.lock().unwrap().remove(name);
@@ -608,7 +730,10 @@ impl Sink for Store {
         self.seeds.lock().unwrap().push((name.to_owned(), began));
         let held = self.held();
         self.reads.lock().unwrap().push((name.to_owned(), held));
-        Ok(())
+        match fails {
+            Some(landed) => Err(Self::failed(landed)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -762,6 +887,31 @@ enum Event {
         lane: usize,
         reattach: bool,
     },
+    /// Two seconds pass: a parked lane's probe comes due.
+    Elapse,
+    /// The next record or marker write of `sink` fails: after it landed
+    /// (`lands`, its response lost) or before.
+    Fails {
+        sink: usize,
+        lands: bool,
+    },
+    /// The next seed on `sink` of an index with a record keeps the record
+    /// (its best-effort delete failed).
+    SeedKeepsRecord {
+        sink: usize,
+    },
+    /// The review of the cut's B-2, drawn often: a `primary` lane detached
+    /// here, then rebuilt by a reindex whose `begin_rebuild` lands and fails;
+    /// the stream ends and opens again. Expanded before the run.
+    RebuildLost {
+        lane: usize,
+    },
+    /// The review of the cut's B-1, drawn often: a `primary` lane detached
+    /// here, rebuilt to its seed, whose delete of the finished record fails;
+    /// the stream ends and opens again. Expanded before the run.
+    SeedLeavesRecord {
+        lane: usize,
+    },
     /// G8 drawn often: a backfill of `lane`'s index asked, the stream ends
     /// with another process dropping `lane`, the backfill completes with no
     /// stream held (owed), the other process keeps its drop as a gap, then
@@ -804,6 +954,42 @@ impl Event {
                     opens,
                     Event::WaitNewest { lane },
                 ];
+            }
+            Event::RebuildLost { lane } | Event::SeedLeavesRecord { lane } => {
+                let index = lane % 2;
+                let lost = matches!(self, Event::RebuildLost { .. });
+                let mut events = vec![
+                    opens.clone(),
+                    Event::Detach { lane, fails: false },
+                    Event::Apply { index },
+                    // Its next probe is refused, and it detaches.
+                    Event::Elapse,
+                    Event::Unblock { lane },
+                ];
+                if lost {
+                    events.push(Event::Fails {
+                        sink: lane / 2,
+                        lands: true,
+                    });
+                    events.push(Event::Reindex { index });
+                } else {
+                    events.push(Event::Reindex { index });
+                    // The rebuild is attached and asks its backfill.
+                    events.push(Event::Elapse);
+                    events.push(Event::SeedKeepsRecord { sink: lane / 2 });
+                    events.push(Event::Seed { lane });
+                }
+                events.extend([
+                    Event::StreamEnds {
+                        jump: 0,
+                        drop: None,
+                        rebuild: false,
+                    },
+                    opens,
+                    Event::Apply { index },
+                    Event::WaitNewest { lane },
+                ]);
+                return events;
             }
             Event::GapOverOwed { lane } => {
                 return vec![
@@ -891,6 +1077,11 @@ fn event() -> impl Strategy<Value = Event> {
             |(lane, reattach)| Event::HolderFinishes { lane, reattach }
         ),
         3 => (2usize..4).prop_map(|lane| Event::GapOverOwed { lane }),
+        2 => (0usize..2, any::<bool>()).prop_map(|(sink, lands)| Event::Fails { sink, lands }),
+        1 => (0usize..2).prop_map(|sink| Event::SeedKeepsRecord { sink }),
+        1 => Just(Event::Elapse),
+        1 => (2usize..4).prop_map(|lane| Event::RebuildLost { lane }),
+        1 => (2usize..4).prop_map(|lane| Event::SeedLeavesRecord { lane }),
     ]
 }
 
@@ -1257,13 +1448,16 @@ impl World {
     }
 
     /// Whether `lane` holds every change at or before `p` as far as the slot
-    /// is concerned: written, held by a seed whose walk began after it, or
-    /// given up by a reattach after it (the gap the operator accepted). What
-    /// another process dropped is covered by a seed after it or by a
-    /// reattach since.
+    /// is concerned: written, held by a seed whose walk began after it (or,
+    /// on an unseeded index, by the backfill that will seed it: one asked
+    /// after it, or the one the next staging asks), or given up by a
+    /// reattach after it (the gap the operator accepted). What another
+    /// process dropped is covered the same way, or by a reattach since.
     fn confirmation_held(&self, lane: usize, p: u64) -> std::result::Result<(), String> {
         let store = &self.stores[Self::sink_of(lane)];
         let of = Self::index_of(lane);
+        let unseeded = store.unseeded.lock().unwrap().contains(of);
+        let asked = self.asked[lane];
         let seeded = |at: u64| {
             store
                 .seeds
@@ -1271,6 +1465,7 @@ impl World {
                 .unwrap()
                 .iter()
                 .any(|(index, began)| index == of && *began >= at)
+                || (unseeded && asked.is_none_or(|(_, began)| began >= at))
         };
         let given_up = |when: u64| self.attached[lane].iter().any(|attach| *attach > when);
         for (at, when) in self.changes[lane % 2].iter().filter(|(at, _)| *at <= p) {
@@ -1702,6 +1897,13 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
             Event::Readable { sink: at } => world.stores[at].unreadable.lock().unwrap().clear(),
             Event::HoldReads { sink: at } => world.stores[at].read_hold.hold(),
             Event::HoldEnsure { sink: at } => world.stores[at].ensure_hold.hold(),
+            Event::Fails { sink: at, lands } => {
+                *world.stores[at].fails.lock().unwrap() = Some(lands)
+            }
+            Event::Elapse => tokio::time::sleep(Duration::from_secs(2)).await,
+            Event::SeedKeepsRecord { sink: at } => {
+                *world.stores[at].seed_keeps_record.lock().unwrap() = true;
+            }
             Event::Release { sink: at } => {
                 world.stores[at].read_hold.release();
                 world.stores[at].ensure_hold.release();
@@ -1739,7 +1941,11 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
                 },
             ),
             // `/wait` answers `503` until the process's source is live.
-            Event::Unheld { .. } | Event::HolderFinishes { .. } | Event::GapOverOwed { .. } => {
+            Event::Unheld { .. }
+            | Event::HolderFinishes { .. }
+            | Event::GapOverOwed { .. }
+            | Event::RebuildLost { .. }
+            | Event::SeedLeavesRecord { .. } => {
                 unreachable!("expanded before the run")
             }
             Event::WaitNewest { .. } | Event::WaitDropped { .. } => {
@@ -1942,6 +2148,11 @@ fn solo_event() -> impl Strategy<Value = Event> {
         4 => (0usize..4, any::<bool>(), any::<bool>(), 0u64..140).prop_map(
             |(lane, whole_sink, searchable, at)| Event::Wait { lane, whole_sink, searchable, at }
         ),
+        3 => (0usize..2, any::<bool>()).prop_map(|(sink, lands)| Event::Fails { sink, lands }),
+        1 => (0usize..2).prop_map(|sink| Event::SeedKeepsRecord { sink }),
+        1 => Just(Event::Elapse),
+        2 => (2usize..4).prop_map(|lane| Event::RebuildLost { lane }),
+        2 => (2usize..4).prop_map(|lane| Event::SeedLeavesRecord { lane }),
     ]
 }
 
@@ -2560,4 +2771,85 @@ fn a_lane_detached_here_before_any_read_ends_in_a_stop_once_reattached_elsewhere
         Event::GapOverOwed { lane: 2 },
     ]);
     assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// The review of the cut, B-2: a lone process whose `begin_rebuild` landed
+/// but whose call failed, then whose stream ends and opens again, never
+/// stops: the rebuild it may have begun is its own.
+#[test]
+fn a_rebuild_whose_response_was_lost_never_stops_a_single_process() {
+    assert_eq!(replay(vec![Event::RebuildLost { lane: 2 }]), 0);
+}
+
+/// The review of the cut, B-1: a lone process whose rebuild's seed left the
+/// finished record (the best-effort delete failed), then whose stream ends
+/// and opens again, never stops, and the record goes.
+#[test]
+fn a_seed_that_left_its_record_never_stops_a_single_process() {
+    assert_eq!(replay(vec![Event::SeedLeavesRecord { lane: 3 }]), 0);
+}
+
+/// Each own record or marker write landing and failing, or failing before
+/// it lands, on a lone process: it never stops.
+#[test]
+fn an_own_write_of_unknown_outcome_never_stops_a_single_process() {
+    for lands in [true, false] {
+        for lane in [2, 3] {
+            let index = lane % 2;
+            let opens = Event::Open {
+                ok: true,
+                jump: 0,
+                drop: None,
+                rebuild: false,
+            };
+            let ends = Event::StreamEnds {
+                jump: 0,
+                drop: None,
+                rebuild: false,
+            };
+            let fails = Event::Fails { sink: 1, lands };
+            let cases = [
+                // The detach.
+                vec![
+                    fails.clone(),
+                    Event::Detach { lane, fails: false },
+                    Event::Apply { index },
+                ],
+                // The rebuild.
+                vec![
+                    Event::Detach { lane, fails: false },
+                    Event::Apply { index },
+                    Event::Elapse,
+                    Event::Unblock { lane },
+                    fails.clone(),
+                    Event::Reindex { index },
+                ],
+                // A reindex, and the ensure that creates its generation.
+                vec![fails.clone(), Event::Reindex { index }],
+                vec![
+                    Event::Reindex { index },
+                    fails.clone(),
+                    Event::Apply { index },
+                ],
+                // The seed.
+                vec![
+                    Event::Detach { lane, fails: false },
+                    Event::Apply { index },
+                    Event::Elapse,
+                    Event::Unblock { lane },
+                    Event::Reindex { index },
+                    Event::Elapse,
+                    fails.clone(),
+                    Event::Seed { lane },
+                ],
+            ];
+            for case in cases {
+                let mut events = vec![opens.clone()];
+                events.extend(case);
+                events.extend([ends.clone(), opens.clone(), Event::Apply { index }]);
+                let stops = replay(events.clone());
+                assert_eq!(stops, 0, "{events:?}");
+            }
+        }
+    }
 }
