@@ -3312,19 +3312,17 @@ impl<'a> Run<'a> {
     }
 
     /// The records read showed no rebuild where the run keeps one: the
-    /// engine dropped it (`act_on_records`), and so does the run's copy, or
-    /// the next store would bring it back.
+    /// engine dropped it (`act_on_records`: its record removed, or recorded
+    /// detached again), and so does the run's copy, an attach it waits for
+    /// included, or the next store would bring it back and the attach open
+    /// the lane as a rebuild the records no longer show (found by the world,
+    /// the seventh re-check).
     fn sync_rebuild(&mut self, lane: usize) {
-        let Some(run) = self.lanes.get_mut(lane) else {
-            return;
-        };
-        if run.health.rebuilding.is_some()
-            && !run.health.health.is_detached()
-            && self.engine.lane_state(&run.key).rebuilding.is_none()
-        {
-            run.health.rebuilding = None;
-            run.health.rebuild_target = None;
-            self.engine.store_lane(&run.key, &run.health, false);
+        let dropped = self.lanes.get(lane).is_some_and(|run| {
+            run.health.rebuilding.is_some() && self.engine.lane_state(&run.key).rebuilding.is_none()
+        });
+        if dropped {
+            self.drop_rebuild(lane);
         }
     }
 

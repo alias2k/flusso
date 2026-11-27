@@ -611,9 +611,18 @@ impl SinkEngine {
                 state.rebuild_target = None;
                 self.store_lane(&lane, &state, true);
             }
+            // Ours only on the generation this process rebuilds into, when
+            // both are known: the attempts alone can't tell a rebuild begun
+            // after the record was removed (found by the world, the seventh
+            // re-check).
+            let same_rebuild = match (&state.rebuild_target, &found.marker_target) {
+                (Some(ours), Some(marker)) => ours == marker,
+                _ => true,
+            };
             let decided = decide(
                 &AtStaging::of(&found),
                 written_rebuildable,
+                same_rebuild,
                 &state,
                 self.options.backfill,
                 self.skip_backfill,
@@ -1940,6 +1949,18 @@ impl SinkEngine {
         };
         let ensured = self.sink.ensure_index(mapping).await?;
         self.check_target(&mapping.index, &ensured, restaged);
+        // A rebuild this process runs is known by the generation it fills
+        // (`rebuilding` sets it for one it begins): a rebuild taken over
+        // here, or restaged into a new target, takes the one just ensured.
+        // The read above found it ours first.
+        let mut state = self.lane_state(&lane);
+        if state.rebuilding.is_some()
+            && ensured.target.is_some()
+            && state.rebuild_target != ensured.target
+        {
+            state.rebuild_target.clone_from(&ensured.target);
+            self.store_lane(&lane, &state, false);
+        }
         let target = ensured.target;
         if !ask_seeded {
             return Ok(Staged::Unseeded {
@@ -2533,6 +2554,7 @@ enum Decision {
 fn decide(
     found: &AtStaging,
     written_rebuildable: bool,
+    same_rebuild: bool,
     lane: &LaneState,
     backfill: bool,
     skip_backfill: bool,
@@ -2540,7 +2562,9 @@ fn decide(
 ) -> Decision {
     let held_detached = lane.health.is_detached();
     match found {
-        AtStaging::Rebuilding(attempts) if lane.rebuilding == Some(*attempts) => Decision::Ours,
+        AtStaging::Rebuilding(attempts) if lane.rebuilding == Some(*attempts) && same_rebuild => {
+            Decision::Ours
+        }
         AtStaging::Rebuilding(attempts)
             if start && !held_detached && backfill && !skip_backfill =>
         {
