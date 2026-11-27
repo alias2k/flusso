@@ -2033,22 +2033,20 @@ impl<'a> Run<'a> {
             let Some(lane) = self.lanes.iter().position(|run| run.key.index == index) else {
                 continue;
             };
-            // Only on records read under the stream now held (the eighth
-            // re-check, B-1: an opening can return while the read again
-            // awaits a read, which then counts for the earlier one). A
-            // change by another process meanwhile stopped the deployment at
-            // that read. A lane parked on this seed (#479's blocked old
-            // generation) is probed by it, on the lane's backoff.
+            // The seed's gate reads records read under an earlier stream
+            // again first (`slot`'s `held_fresh`), so it never stands on a
+            // read from before the opening held. A lane parked on this seed
+            // (#479's blocked old generation) is probed by it, on the lane's
+            // backoff.
             let ready = self.lanes.get(lane).is_some_and(|run| {
-                self.engine.rereads.current(&run.key)
-                    && (run.health.is_open()
-                        || (matches!(
-                            run.health.health,
-                            LaneHealth::Parked {
-                                reason: ParkReason::SeedBlocked { .. },
-                                ..
-                            }
-                        ) && run.health.due <= now))
+                run.health.is_open()
+                    || (matches!(
+                        run.health.health,
+                        LaneHealth::Parked {
+                            reason: ParkReason::SeedBlocked { .. },
+                            ..
+                        }
+                    ) && run.health.due <= now)
             });
             if !ready || self.lane_in_flight(lane) || !self.engine.answers(&index, Some(ticket)) {
                 continue;

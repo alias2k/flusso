@@ -19,7 +19,7 @@
 //! again, so no write lands on a state it didn't read.
 //!
 //! Every write of the marker or the record carries the caller's
-//! [`Stamp`](sink::Stamp). A record is never deleted: forgetting it writes a
+//! [`Stamp`]. A record is never deleted: forgetting it writes a
 //! tombstone (`state: "forgotten"` and the stamp) on the version read, so who
 //! forgot it stays readable. A tombstone counts as no record for every write
 //! here, which replaces it on its version.

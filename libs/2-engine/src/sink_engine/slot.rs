@@ -28,7 +28,7 @@
 //! `SinkEngine::new` and the CLI keeps no clone of it.
 //!
 //! Every request that writes a record, a gap or the marker carries a
-//! [`Stamp`](sink::Stamp) from [`KnownRecords`], which the sink stores in
+//! [`Stamp`] from [`KnownRecords`], which the sink stores in
 //! what it writes (the review of round 10). A write of the record is then
 //! read back while the slot is still held; a call that failed counts as
 //! landed exactly when the record read back carries its own stamp. The gate
@@ -433,5 +433,158 @@ impl Erasing<'_> {
             }
         };
         Ok(recorded)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    use super::*;
+
+    /// Records every read answers with, and every gated write sent.
+    #[derive(Debug, Default)]
+    struct Records {
+        found: Mutex<Detachment>,
+        sent: Mutex<Vec<&'static str>>,
+    }
+
+    impl Records {
+        fn sent(&self, request: &'static str) {
+            self.sent.lock().unwrap().push(request);
+        }
+    }
+
+    #[async_trait]
+    impl Sink for Records {
+        async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+            Ok(WriteReport::clean())
+        }
+
+        async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+            Ok(true)
+        }
+
+        async fn detachment(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<Detachment> {
+            Ok(self.found.lock().unwrap().clone())
+        }
+
+        async fn detach(&self, _: &IndexMapping, _: &Detach) -> sink::Result<Recorded> {
+            self.sent("detach");
+            Ok(Recorded::Kept)
+        }
+
+        async fn forget_detachment(
+            &self,
+            _: &IndexMapping,
+            _: &RecordVersion,
+            _: &Stamp,
+        ) -> sink::Result<()> {
+            self.sent("forget_detachment");
+            Ok(())
+        }
+
+        async fn begin_rebuild(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<u64> {
+            self.sent("begin_rebuild");
+            Ok(1)
+        }
+
+        async fn demote(&self, _: &IndexMapping, _: bool, _: &Stamp) -> sink::Result<()> {
+            self.sent("demote");
+            Ok(())
+        }
+
+        async fn reindex_as(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<()> {
+            self.sent("reindex");
+            Ok(())
+        }
+
+        async fn mark_seeded_as(&self, _: &IndexName, _: &Stamp) -> sink::Result<()> {
+            self.sent("mark_seeded");
+            Ok(())
+        }
+    }
+
+    fn mapping() -> IndexMapping {
+        IndexMapping {
+            index: IndexName::try_new("users").unwrap(),
+            hash: kernel::ContentHash::new(1),
+            fields: Vec::new(),
+        }
+    }
+
+    fn detached(by: &str, version: &str) -> Detachment {
+        let mut found = Detachment::recorded(
+            DetachRecord::Detached { live_only: true },
+            Some(MarkerAt::Serving { seeded: true }),
+            Some(RecordVersion::new(version)),
+        );
+        found.record_stamp = Some(Stamp::new(by, 1));
+        found
+    }
+
+    const GATED: [&str; 6] = [
+        "mark_seeded",
+        "forget_detachment",
+        "reindex",
+        "begin_rebuild",
+        "demote",
+        "detach",
+    ];
+
+    /// Send `request` through `erasing`: whether the gate let it out.
+    async fn send(erasing: Erasing<'_>, request: &str, mapping: &IndexMapping) -> bool {
+        let version = RecordVersion::new("1:1");
+        match request {
+            "mark_seeded" => erasing.mark_seeded(&mapping.index).await.is_ok(),
+            "forget_detachment" => erasing.forget_detachment(mapping, &version).await.is_ok(),
+            "reindex" => erasing.reindex(mapping).await.is_ok(),
+            "begin_rebuild" => erasing.begin_rebuild(mapping).await.is_ok(),
+            "demote" => erasing.demote(mapping, true).await.is_ok(),
+            _ => erasing.detach(mapping, &Detach::new("asked")).await.is_ok(),
+        }
+    }
+
+    /// The review of round 10, S-4: every gated write stands on records read
+    /// under the opening held now. Read under an earlier stream, they are
+    /// read again first: changed by another process, nothing is sent and the
+    /// change is the deployment's stop; unchanged, the write goes out.
+    #[tokio::test]
+    async fn every_gated_write_reads_records_from_an_earlier_stream_first() {
+        for changed in [true, false] {
+            for request in GATED {
+                let sink = Arc::new(Records::default());
+                *sink.found.lock().unwrap() = detached("another process", "1:1");
+                let known = Arc::new(KnownRecords::default());
+                let plain = Plain::new(Arc::clone(&sink) as Arc<dyn Sink>, Arc::clone(&known));
+                let rereads = Rereads::default();
+                rereads.will_open();
+                rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+                let mapping = mapping();
+                let at = rereads.read_begins();
+                let found = plain.detachment(&mapping).await.unwrap();
+                known.judge(&mapping.index, &found, at, true);
+
+                rereads.closed();
+                if changed {
+                    *sink.found.lock().unwrap() = detached("yet another process", "2:1");
+                }
+                rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+
+                let mappings = std::slice::from_ref(&mapping);
+                let let_out = send(plain.erasing(&rereads, mappings), request, &mapping).await;
+                let sent = sink.sent.lock().unwrap().clone();
+                if changed {
+                    assert!(!let_out && sent.is_empty(), "{request}: sent {sent:?}");
+                    assert!(known.foreign().is_some(), "{request}: no stop");
+                } else {
+                    assert!(let_out && sent == [request], "{request}: sent {sent:?}");
+                    assert!(known.foreign().is_none(), "{request}");
+                }
+            }
+        }
     }
 }

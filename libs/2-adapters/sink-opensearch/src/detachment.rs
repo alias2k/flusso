@@ -22,7 +22,7 @@
 //! - **Every document answers for the id asked**, found or not found; an
 //!   entry that says neither, or names another id, is an error.
 //! - **Who wrote each document is returned, never judged.** A record or a
-//!   marker carries the [`Stamp`](sink::Stamp) of its last write (`stamp`),
+//!   marker carries the [`Stamp`] of its last write (`stamp`),
 //!   which is read back as is; deciding on it is the engine's. A record
 //!   forgotten is a tombstone (`state: "forgotten"`, with its stamp): read
 //!   as no record, its stamp and version kept.

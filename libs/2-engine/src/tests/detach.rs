@@ -2186,6 +2186,58 @@ async fn a_rebuild_restart_whose_detach_failed_writes_nothing_onto_its_record() 
     task.abort();
 }
 
+/// The review of round 10, S-4: the same restart whose detach landed and
+/// failed, with the read back failing too, so its outcome stays unknown.
+/// Nothing of the lane is written onto what the detach may have left until
+/// a read settles it (`731c3791`'s `detach_unsure`); here no read does.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_restart_whose_detach_is_unknown_writes_nothing_until_a_read() {
+    let rig = Rig::new(64);
+    let (engine, task, control, attempt) = rebuilding_on_reindex(&rig).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let _backfill = next_request(&rig).await;
+    rig.sink.block(&users(), true);
+    rig.live(&users(), 2, 2).await;
+    eventually("the rebuilding lane parks", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked { .. }
+        )
+    })
+    .await;
+    rig.sink
+        .records
+        .lock()
+        .unwrap()
+        .push_back(Record::FailAfterWriting);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    eventually("the restart's detach was sent", || {
+        !rig.sink.detaches().is_empty()
+    })
+    .await;
+    let detached_at = Instant::now();
+    *rig.sink.reads_fail.lock().unwrap() = 1_000_000;
+    rig.sink.block(&users(), false);
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let late: Vec<Instant> = rig
+        .sink
+        .writes_of(&users())
+        .into_iter()
+        .filter(|at| *at >= detached_at)
+        .collect();
+    assert!(
+        late.is_empty(),
+        "written onto a detach of unknown outcome: {late:?}"
+    );
+    assert!(!task.is_finished(), "{:?}", task.await);
+    task.abort();
+}
+
 /// The process-start attach of a `rebuilding` record: the lane starts
 /// attached and rebuilding, its index ensured and its backfill asked; under
 /// `--skip-backfill` it is demoted (O26), and on a sink with `backfill =
