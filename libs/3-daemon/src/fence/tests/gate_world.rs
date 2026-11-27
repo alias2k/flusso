@@ -150,6 +150,10 @@ struct Store {
     holding: Arc<Holding>,
     live_only: bool,
     kept: Mutex<BTreeMap<String, Kept>>,
+    /// Each record write's version, as OpenSearch's `_seq_no` grows with
+    /// every write: a record deleted and written again identical reads as
+    /// another version.
+    seq: Mutex<u64>,
     gaps: Mutex<BTreeMap<String, Vec<sink::Gap>>>,
     unreadable: Mutex<BTreeSet<String>>,
     unseeded: Mutex<BTreeSet<String>>,
@@ -184,6 +188,7 @@ impl Store {
             holding,
             live_only,
             kept: Mutex::default(),
+            seq: Mutex::default(),
             gaps: Mutex::default(),
             unreadable: Mutex::default(),
             unseeded: Mutex::default(),
@@ -245,10 +250,16 @@ impl Store {
         }
     }
 
+    /// A new record version.
+    fn version(&self) -> RecordVersion {
+        let mut seq = self.seq.lock().unwrap();
+        *seq += 1;
+        RecordVersion::new(format!("{seq}:1"))
+    }
+
     /// Write `of`'s record, keeping the attempts the one before counted.
     fn keep(&self, of: &str, record: DetachRecord, marker: MarkerAt, ours: bool) {
-        let mut detachment =
-            Detachment::recorded(record, Some(marker), Some(RecordVersion::new("1:1")));
+        let mut detachment = Detachment::recorded(record, Some(marker), Some(self.version()));
         detachment.attempts = self
             .kept
             .lock()
@@ -363,8 +374,9 @@ impl Sink for Store {
         if created {
             self.next_generation(of);
             // As OpenSearch: a generation created writes the marker whole,
-            // unseeded, with no gap.
+            // unseeded, with no gap and no walk checkpoint.
             self.gaps.lock().unwrap().remove(of);
+            self.walked.lock().unwrap().remove(of);
             self.unseeded.lock().unwrap().insert(of.to_owned());
         }
         let generation = self
@@ -490,11 +502,24 @@ impl Sink for Store {
     async fn forget_detachment(
         &self,
         mapping: &IndexMapping,
-        _: &RecordVersion,
+        version: &RecordVersion,
     ) -> sink::Result<()> {
         self.touch(mapping.index.as_ref(), "a delete");
-        self.kept.lock().unwrap().remove(mapping.index.as_ref());
-        Ok(())
+        // As OpenSearch: conditional on the version read; a record already
+        // gone is not an error.
+        let mut kept = self.kept.lock().unwrap();
+        match kept.get(mapping.index.as_ref()) {
+            Some(record) if record.detachment.version.as_ref() != Some(version) => {
+                Err(sink::SinkError::Write(format!(
+                    "version conflict: the record is {:?}, the delete asked for {version:?}",
+                    record.detachment.version
+                )))
+            }
+            _ => {
+                kept.remove(mapping.index.as_ref());
+                Ok(())
+            }
+        }
     }
 
     async fn record_gaps(
@@ -545,8 +570,10 @@ impl Sink for Store {
         self.touch(of, "a demotion");
         self.walked.lock().unwrap().remove(of);
         let held = self.held();
+        let version = self.version();
         if let Some(kept) = self.kept.lock().unwrap().get_mut(of) {
             kept.detachment.record = Some(DetachRecord::Detached { live_only });
+            kept.detachment.version = Some(version);
             kept.ours = true;
             kept.under = held;
         }
@@ -1290,15 +1317,49 @@ impl World {
     /// Another process held the slot over `(from, to]`: it applied every
     /// lane but the ones a record keeps it off and `drop`, and dropped those;
     /// with `rebuild` it began rebuilding `drop` halfway.
+    ///
+    /// Its stream starts where the slot confirmed, so it reads again every
+    /// change this process published past that (to `from`): a lane it
+    /// applies gets each one this process left unwritten, and on a lane it
+    /// drops, reads stood before the first of them.
     fn another_process(&mut self, from: u64, to: u64, drop: Option<usize>, rebuild: bool) {
         self.tick += 1;
         let now = self.tick;
+        let confirmed = self.confirmed;
         for lane in 0..4 {
             let store = &self.stores[Self::sink_of(lane)];
             let of = Self::index_of(lane);
+            let unwritten: Vec<u64> = self.changes[lane % 2]
+                .iter()
+                .map(|(at, _)| *at)
+                .filter(|at| *at > confirmed && *at <= from)
+                .filter(|at| {
+                    !store
+                        .written
+                        .lock()
+                        .unwrap()
+                        .contains(&(of.to_owned(), *at))
+                })
+                .collect();
+            let read_from = unwritten.iter().map(|at| at - 1).min().unwrap_or(from);
+            let kept = store.kept.lock().unwrap().get(of).cloned();
+            let applies = drop != Some(lane)
+                && kept
+                    .as_ref()
+                    .is_none_or(|kept| kept.detachment.record.is_none());
+            if applies {
+                store
+                    .written
+                    .lock()
+                    .unwrap()
+                    .extend(unwritten.iter().map(|at| (of.to_owned(), *at)));
+                continue;
+            }
+            let held_to = from;
+            let from = read_from;
             if drop == Some(lane) {
                 if rebuild && !store.live_only {
-                    let half = from + (to - from) / 2;
+                    let half = held_to + (to - held_to) / 2;
                     self.dropped[lane].push((from, half, now));
                     store.rebuilt_by_another(of, half);
                 } else {
@@ -1307,7 +1368,6 @@ impl World {
                 }
                 continue;
             }
-            let kept = store.kept.lock().unwrap().get(of).cloned();
             match kept.and_then(|kept| kept.detachment.record) {
                 // A rebuild it finds not its own is put back to detached
                 // before anything is dropped (B-2).
@@ -1320,6 +1380,8 @@ impl World {
                 _ => {}
             }
         }
+        // It confirmed what it read: the slot's next stream starts past it.
+        self.confirmed = self.confirmed.max(to);
     }
 
     /// Another process finishes the rebuild of `lane` it began: its seed
@@ -2408,6 +2470,94 @@ fn a_rebuild_another_process_finished_ends_in_a_stop() {
             sink: 1,
             unreadable: 0,
         },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// Found at 50,000 cases: another process finishes the rebuild this process
+/// took over, then begins a new one under the same attempt count, while
+/// this process creates the missing generation. The record's version tells
+/// the new rebuild apart: the deployment stops, and nothing seeds over the
+/// drop.
+#[test]
+fn a_rebuild_begun_again_while_a_generation_is_created_here_ends_in_a_stop() {
+    let stops = replay(vec![
+        Event::Open {
+            ok: false,
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::Missing { lane: 2 },
+        Event::Open {
+            ok: true,
+            jump: 10,
+            drop: Some(2),
+            rebuild: true,
+        },
+        Event::Finishes { lane: 2 },
+        Event::Unheld {
+            lane: 2,
+            rebuild: true,
+            then: 0,
+        },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// The same as an identical record deleted and written again: another
+/// process finishes the rebuild this process took over, then begins its
+/// own under the same attempt count. Told apart by the record's version.
+#[test]
+fn a_rebuild_finished_and_begun_again_under_the_same_attempts_ends_in_a_stop() {
+    let stops = replay(vec![
+        Event::Finishes { lane: 0 },
+        Event::Open {
+            ok: true,
+            jump: 10,
+            drop: Some(2),
+            rebuild: true,
+        },
+        Event::Finishes { lane: 2 },
+        Event::Open {
+            ok: true,
+            jump: 10,
+            drop: Some(2),
+            rebuild: true,
+        },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// A lane this process detached before any read of its records succeeded
+/// (they couldn't be read), which another process then reattached: its own
+/// detach is what it knows, so the reattach stops the deployment.
+#[test]
+fn a_lane_detached_here_before_any_read_ends_in_a_stop_once_reattached_elsewhere() {
+    let stops = replay(vec![
+        Event::Restart {
+            sink: 1,
+            unreadable: 1,
+        },
+        Event::HolderFinishes {
+            lane: 0,
+            reattach: false,
+        },
+        Event::Detach {
+            lane: 2,
+            fails: false,
+        },
+        Event::Unblock { lane: 0 },
+        Event::Reattach { index: 0 },
+        Event::Readable { sink: 0 },
+        Event::Detach {
+            lane: 0,
+            fails: false,
+        },
+        Event::Reattach { index: 0 },
+        Event::Reindex { index: 1 },
+        Event::Finishes { lane: 0 },
+        Event::GapOverOwed { lane: 2 },
     ]);
     assert_ne!(stops, 0, "ends in a stop");
 }
