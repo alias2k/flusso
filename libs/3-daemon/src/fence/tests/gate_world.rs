@@ -909,6 +909,13 @@ enum Event {
     },
     /// Two seconds pass: a parked lane's probe comes due.
     Elapse,
+    /// Hole 3's ABA, drawn often: another process rebuilds `lane` (a new
+    /// process takes the rebuild over), finishes it, then begins a new one
+    /// under the same attempt count: an identical record, another version.
+    /// Expanded before the run.
+    RebuildBegunAgain {
+        lane: usize,
+    },
     /// `sink`'s reads take their answer, then wait until `Release`: a read
     /// returns what the records held when it began.
     HoldReadsAnswered {
@@ -1022,6 +1029,23 @@ impl Event {
                     Event::WaitNewest { lane },
                 ]);
                 return events;
+            }
+            Event::RebuildBegunAgain { lane } => {
+                let rebuilds = Event::Open {
+                    ok: true,
+                    jump: 10,
+                    drop: Some(lane),
+                    rebuild: true,
+                };
+                return vec![
+                    rebuilds.clone(),
+                    Event::NewProcess,
+                    opens,
+                    Event::Finishes { lane },
+                    rebuilds,
+                    Event::Apply { index: lane % 2 },
+                    Event::WaitNewest { lane },
+                ];
             }
             Event::GapOverSlowRead { lane } => {
                 let index = lane % 2;
@@ -1141,6 +1165,7 @@ fn event() -> impl Strategy<Value = Event> {
         1 => (2usize..4).prop_map(|lane| Event::SeedLeavesRecord { lane }),
         1 => (0usize..2).prop_map(|sink| Event::HoldReadsAnswered { sink }),
         2 => (2usize..4).prop_map(|lane| Event::GapOverSlowRead { lane }),
+        1 => (2usize..4).prop_map(|lane| Event::RebuildBegunAgain { lane }),
     ]
 }
 
@@ -2010,7 +2035,8 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
             | Event::GapOverOwed { .. }
             | Event::RebuildLost { .. }
             | Event::SeedLeavesRecord { .. }
-            | Event::GapOverSlowRead { .. } => {
+            | Event::GapOverSlowRead { .. }
+            | Event::RebuildBegunAgain { .. } => {
                 unreachable!("expanded before the run")
             }
             Event::WaitNewest { .. } | Event::WaitDropped { .. } => {
