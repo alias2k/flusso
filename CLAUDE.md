@@ -1961,18 +1961,28 @@ is the one concrete piece.
   `ensure_index`'s marker rewrite and auto-created generation delete, the read's put-back of a
   half-moved marker, gap writes, walk checkpoints. **Another process's change stops the
   deployment** (`sink_engine/known.rs`, the one definition, its table in the module docs): every
-  read of the records is judged against what this process last read or wrote of them (each
-  record-writing call in `slot` tells `KnownRecords` what it left, and a record write is read back at
-  once while held, learning its version, so an identical record written later by another process is
-  another version; a marker write keeps the version; with nothing read yet, a write that decides the
-  record is what is known; a read under the same held opening is adopted; an own detach of unknown
-  outcome is recognised by its `through`); anything else that
+  read of the records is judged against the set of states this process knows they may be in
+  (each record or marker write in `slot` tells `KnownRecords` what it leaves on `Ok`, and, when its
+  call failed, every state it may have left: the one before, the one after, its marker alone
+  written; a write of the record, or one that failed, is read back while held, which settles it and
+  learns the record's version, so an identical record written later by another process is another
+  version; a marker write keeps the version; the seed's record delete is best effort, and a record it
+  left is deleted at its read back; with nothing read yet, a detach or delete is what is known; a read
+  under the same held opening, `Rereads::held_or_alone`, never after a clean end, is adopted; never
+  "anything": only what this process's own write may have left; a failed write whose read back shows
+  what it leaves landed and is taken as done; every gated write stands on records read under the
+  opening held now (`slot`'s `held_fresh` reads stale ones again first; an own write keeps the
+  opening of what it stands on), and a change found by any read stops; a lane taken detached on a
+  read from an earlier stream is read again); anything else that
   differs is `Change::Foreign`, the run returns `EngineError::ForeignChange`
   (`stops_the_deployment`) from staging or `Run::advance`, the read is not counted, the supervisor
-  ends the deployment with it (no restart, the other sinks stop too) and the CLI exits 1. Nothing
-  past the opening is confirmed: `Progress::hold_while_unread` holds confirmation while a detached
-  lane is unread, and attached or parked lanes write nothing before their read. One deployment never
-  meets it. A staging that finds the index seeded on another target than its outstanding backfill
+  ends the deployment with it (no restart, the other sinks stop too) and the CLI exits 1. No change
+  of the index is confirmed past what its records cover: `Progress::hold_while_unread` holds
+  confirmation while a detached lane is unread, and attached or parked lanes write nothing before
+  their read. One deployment never meets it, own writes of lost outcome included
+  (`a_single_process_never_stops`, whose world lands and fails every write). Two OpenSearch sinks on
+  one cluster share every name there (the deployment's `prefix` alone), so `check` and `run` refuse
+  them (`adapters::distinct_clusters`). A staging that finds the index seeded on another target than its outstanding backfill
   asked for is foreign too. Every read tells the fence its gap list, empty included (a created
   generation drops the gaps). Open (#490, an owner lease, and reconciliation if ever): a sink call
   already begun when the stream ends (`mark_seeded` refreshes the whole generation and drops others
@@ -2010,7 +2020,21 @@ is the one concrete piece.
   `a_reattach_waiting_*_as_the_stream_ends_deletes_no_record`, `*_ends_in_a_stop*`,
   `*_drops_nothing_unrecorded`, `an_owed_seed_waits_for_a_read_under_the_stream_now_held`,
   `a_reattach_over_anothers_reattach_*`,
-  `a_gap_heard_before_the_index_was_created_again_is_forgotten`;
+  `a_gap_heard_before_the_index_was_created_again_is_forgotten`, `*_never_stops_a_single_process`,
+  `an_owed_seed_never_lands_on_a_read_answered_under_an_earlier_stream`; `known::tests`'
+  `a_*_of_unknown_outcome_admits_before_and_after_only` (one per write kind); `tests::detach`'
+  `a_seed_whose_record_delete_failed_deletes_it_and_never_stops_one_process`,
+  `a_rebuild_that_landed_unseen_never_stops_one_process`,
+  `a_reattach_whose_delete_failed_finishes_either_way_without_a_stop`,
+  `a_read_after_a_clean_end_judges_another_process_s_change`,
+  `a_detach_that_landed_unseen_is_taken_as_done_from_its_read_back`,
+  `a_failed_detach_read_again_before_its_clear_is_left_to_the_clear`,
+  `a_rebuild_restart_whose_detach_failed_writes_nothing_onto_its_record`; `gate_world`'s
+  `a_demotion_never_stands_on_records_read_under_an_earlier_stream`,
+  `a_retried_rebuild_reads_records_from_an_earlier_stream_first`,
+  `a_change_found_by_a_gated_write_s_read_stops_the_deployment`,
+  `a_lane_taken_detached_on_a_read_from_an_earlier_stream_is_read_again`; `adapters::tests`'
+  `two_opensearch_sinks_on_one_cluster_are_refused`;
   `a_process_whose_stream_never_opened_deletes_no_record`, `*_that_spans_an_opening_*`,
   `a_failed_read_of_a_detached_lane_never_fails_the_run`;
   `tests::parking::a_substitute_arriving_with_an_opening_is_written_only_once_read`;

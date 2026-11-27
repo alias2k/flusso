@@ -546,6 +546,8 @@ The owner accepted this order on 2026-11-24. Each slice is safe if nothing after
    - [ ] **No seed without the slot** (the fifth and sixth re-checks). A backfill whose stream ends before its `SnapshotComplete` (drop the walsender mid-backfill): no seed is written until the slot is held again, then the owed seed lands with no second walk. With another process's detach record or gap written meanwhile, that record survives and B stops; its restart backfills.
    - [ ] **Another process's rebuild met without the slot** (the sixth and seventh re-checks, the cut). B restarts a sink's run while A holds the slot and walks a rebuild: A's partial generation and checkpoint survive, and B holds the lane detached, undecided. If A finishes first, B stops at its read once it holds the slot; otherwise B demotes then.
    - [ ] **The stop** (the cut). Two real processes; A changes B's records while B doesn't hold the slot. B exits 1 with the message naming the index and the sink, `/status` shows the error until then, the slot's `confirmed_flush_lsn` is no further than B's stream start, and B's restart converges with every change indexed.
+   - [ ] **A lost answer never stops one process** (the review of the cut). Drop flusso's network to OpenSearch (or delay its responses past the client's timeout) while a reindex of a detached index begins its rebuild, and while a reattach deletes its record; then restart Postgres's walsender. flusso goes on: no exit 1, the rebuild or the reattach finishes.
+   - [ ] **A seed whose record delete fails** (block `DELETE` on the meta index for one request while a rebuild seeds): the record is deleted at the seed's read back or the next staging, and a later reconnect stops nothing.
    - [ ] **A stop during a failed reconnect** (the old walsender still holds the slot until `wal_sender_timeout`): the stop drains the lanes' backlog and exits at once, not at its deadline.
    - [ ] **A process that can't reach Postgres at its start** while another holds the slot: a `reattach` is refused, a `reindex` waits (restaging, with the reason), and no record changes.
    - [ ] **A reconnect on a quiet database.** After `pg_terminate_backend` of the walsender, `/wait` for an already-applied position passes within about 1 s of the reopen (the wake), at both levels.
@@ -1555,7 +1557,7 @@ Unchanged: the narrow rule and its gates (`slot::Plain`/`Erasing`), detach, rebu
   - A write of the marker alone (a created generation, a gap) keeps the record's version.
   - With nothing read yet (every read so far failed), a write that decides the record (a detach, a delete, a seed) is what this process knows.
 - **Own in-flight actions** are recognised without guessing: a failed detach by its `through`; anything else by a read that follows it under the same held opening.
-- **Why one deployment never stops.** Only this process writes the records. Each write it makes is told to `known`; a read with the slot held is adopted; a read across a gap in holding finds only what this process wrote. Proven by `a_single_process_never_stops`: the world with every event of one process (openings, ends, detaches, restarts, unreadable reads, held calls, reindexes, reattaches, new processes) and no other, asserting no stop.
+- **Why one deployment never stops.** (The review of the cut found two exceptions, an own write whose outcome was lost and the seed's best-effort record delete; both closed in the next section.) Only this process writes the records. Each write it makes is told to `known`; a read with the slot held is adopted; a read across a gap in holding finds only what this process wrote. Proven by `a_single_process_never_stops`: the world with every event of one process (openings, ends, detaches, restarts, unreadable reads, held calls, reindexes, reattaches, new processes) and no other, asserting no stop.
 
 **The stop, and confirmation.**
 1. The read finds Foreign. It is not counted (`rereads.read` is never called), so the lane stays unread.
@@ -1625,7 +1627,7 @@ The four reviewer replays (p8, p9, p11, p12) and p10 each end in a clean stop, a
 3. **A missing record is not proof of this process's own lost write** (round 8, B-2): another process's reattach looks the same.
 4. **A rebuild's identity needs more than its attempt count** (round 7, hole 3): attempts restart at one once a record goes; and a seed must never land without a read under the stream now held (round 8, B-1).
 
-**The user-visible list, for the docs agent.** This replaces the seventh re-check's.
+**The user-visible list, for the docs agent.** This replaces the seventh re-check's; the review of the cut replaces it in turn (the error text changed).
 - **Two flusso processes on one slot** (a manual run beside a deployment, compose and a host run): when one finds that the other changed an index's detach records while it didn't hold the replication slot, it stops.
   - The log, at `ERROR`: `another flusso process changed the index's detach records while this one didn't hold the slot: stopping the deployment, nothing past this stream's start confirmed`, with `index`, `sink` and `what`.
   - stderr, and the exit code 1: ``Error: sink `<sink>`, index `<index>`: another flusso process changed the index's detach records while this one didn't hold the replication slot (<what was found>). Stopping: flusso doesn't carry on over another process's record changes. Nothing past this stream's start was confirmed; start flusso again (one process per slot) and its start decides from the records``.
@@ -1639,6 +1641,94 @@ The four reviewer replays (p8, p9, p11, p12) and p10 each end in a clean stop, a
 - **Unchanged:** the fence, the read again after every opening, the confirmation hold.
 
 **Not proven.** The world is a model: no ingest engine, no `--skip-backfill`. No live run of two processes yet: §10's checklist.
+
+### After the review of the cut
+
+The review (`target/review-482-cut/`) found the cut the right shape (both owner rules hold under overlap, the stop safe and final, the world's corrections right, no leftovers) and its own promise broken twice: a single deployment stopped once, exit 1, when a reconnect followed an own write whose outcome it had lost. The design stays; `known` learns what every own write may have left.
+
+**One mechanism for every own write.** `known` keeps a set of states the records may be in, and a read is the same when one state admits it.
+
+| Own write (`slot`) | `Ok` leaves | Call failed: admitted until a read settles it |
+| --- | --- | --- |
+| detach, live only | `detached` (live only), from this `through`, attempts any, gaps as before | before; after |
+| detach that can rebuild | as above, gaps as before or none (the marker moved, written whole, unless a detach moved it already) | before; after (either); before with the marker alone written (no gap) |
+| rebuild (`begin_rebuild`) | `rebuilding`, attempts as returned (failed: one more than before), `through` kept, no gap | before; after; before with no gap |
+| demotion | `detached` (live only as asked or as before), attempts and `through` kept, gaps as before or none | before; after; before with no gap |
+| delete (`forget_detachment`, `forget_finished`) | no record, gaps as before | before; after |
+| seed (`mark_seeded`) | no record, no gap; or, the record's best-effort delete failed, the record as before with no gap | before; after (both); before with no gap |
+| gaps (`record_gaps`) | the list written | before; the list it was deciding |
+| marker alone (a created generation, a reindex) | no gap, the record and its version kept | before; after |
+
+- A write of the record, or any write that failed, is **read back** while the slot is still held: no other process writes then, so the read settles which state landed and learns the record's version. A marker write that returned `Ok` needs no read.
+- **A failed write whose read back shows what it leaves landed**, and is taken as done: a detach record with this detach's `through`, a rebuild record, a demotion's detach record, no record after a delete. The caller then goes on as after a success (the lane detached under its own record, the rebuild begun), instead of staying on the failure path over records that say otherwise.
+- **Every gated write stands on records read under the opening held now** (`slot`'s `held_fresh`). An own write keeps the opening what it stands on was read under; records read under an earlier stream are read again first, and the write goes out only when they are the same. Another process's change found by any read, the gate's or a read back included, stops the deployment (`KnownRecords` keeps the first).
+- **Conservative:** only what this process's own write may have left, never "anything". With nothing known yet, a failed write leaves nothing known (the state before it can't be named), and a detach or delete that returned `Ok` is what is known.
+- **Same opening** is `Rereads::held_or_alone`: held, or no stream ever opens here. A run that ended cleanly may still erase (`may_erase_records`, as a stop on `main`), but a read then is judged, never adopted (m-2).
+
+The Same/Foreign table of the cut is unchanged otherwise: nothing known → adopted; read under the same held opening → adopted; one known state admits the read → Same; anything else → Foreign.
+
+**Per finding.**
+
+| Finding | Outcome | Guard |
+| --- | --- | --- |
+| B-1 a seed whose best-effort record delete failed stops a lone process at its next reconnect | the seed's outcome admits the record kept; its read back finds it and deletes it at once (`forget_finished`), as a staging would | `a_seed_whose_record_delete_failed_deletes_it_and_never_stops_one_process`; `known::tests`' `a_seed_may_leave_the_finished_rebuilds_record`; world `a_seed_that_left_its_record_never_stops_a_single_process` |
+| B-2 an own write that landed but whose call failed stops a lone process | every write's unknown outcome kept and read back (the table above); a reattach asked again after its own delete landed unseen finds the record gone, judged the same, with its own open gap from where the lane was detached, and goes on to the attach | `a_rebuild_that_landed_unseen_never_stops_one_process`; `a_reattach_whose_delete_failed_finishes_either_way_without_a_stop` (the old stop test flipped: no stop and the attach, both ways the delete went); one `a_*_of_unknown_outcome_admits_before_and_after_only` unit test per write kind; world `a_rebuild_whose_response_was_lost_never_stops_a_single_process`, `an_own_write_of_unknown_outcome_never_stops_a_single_process` (every write kind, landing and not) |
+| S-1 the world can't produce them | every own record or marker write can land then fail, or fail before landing (`Fails`); the seed's record delete can fail silently (`SeedKeepsRecord`); a reindex leaves its generation for the next ensure to create; a detach that can rebuild, a rebuild, a demotion and a reindex drop the gaps; `RebuildLost` and `SeedLeavesRecord` draw B-2 and B-1 often | on the cut's engine, `a_single_process_never_stops` fails 3/3 fresh seeds (each shrinks to `RebuildLost`) and the pinned B-1, B-2 and per-write cases fail; on this one they pass |
+| S-2 `rereads.current` unguarded | the reviewer's probe as a test; the world gets reads that take their answer before they wait (`HoldReadsAnswered`) and `GapOverSlowRead` | both `an_owed_seed_never_lands_on_a_read_answered_under_an_earlier_stream` (engine and world); `gate_world` 3/3 without `current` ("orders@seed written with its records last read under stream 1, while 2 is held") |
+| S-3 liveness skips every lane with a record | a lane is left out only when its records say detached, or rebuilding into a generation not yet seeded; a finished rebuild's record beside a seeded marker is judged | the oracle itself (no engine change behind it) |
+| m-1 the error overclaims | "No change of this index was confirmed past what its records cover", in the error, its doc and the log | `a_change_by_another_process_stops_the_deployment` pins the wording |
+| "ignore the version" caught 1/3 | the world draws the ABA often (`RebuildBegunAgain`), but ignoring the version there makes nothing an oracle can call wrong (the engine's target check cuts the old backfill): the stop is the conservative policy, not safety. Pinned by the tests that assert the stop | with it ignored, 8 fail: five `known` unit tests, `a_rebuild_finished_and_begun_again_under_the_same_attempts_ends_in_a_stop`, `a_rebuild_begun_again_while_a_generation_is_created_here_ends_in_a_stop`, `an_identical_record_written_again_by_another_process_after_our_rebuild_stops` |
+| m-2 `finished` adopts a read | `Rereads::held_or_alone` decides adoption | `a_read_after_a_clean_end_judges_another_process_s_change` |
+| m-3 two sinks, one cluster | refused offline (below) | `adapters::tests`' `two_opensearch_sinks_on_one_cluster_are_refused` |
+| m-4 a read back that fails leaves the version unknown | not changed: the version can't be learnt without a read; a failed read back while held is the sink failing, and the version stays unknown until the next read, as for a call in flight when the stream ends (#490's window). Every field the write decides stays exact | — |
+| m-5 gap-lane edges of B-2 | closed by the "marker alone written" state of every marker-writing call | the per-write unit tests |
+| m-6 `Restaged::AwaitingSlot` | renamed `Restaged::WaitsForSlot` | — |
+| m-7 (the author's m-3) | accepted, as described | — |
+
+**Found on the way, by the world.** The first 50,000-case sweep on the fixes failed on 9 of 10 `gate_world` seeds and all 10 solo seeds: the new failure events reached paths no run had before. Each engine hole below has a test that fails without its fix, and each model error was checked against the adapter.
+- **A rebuild's restart (O20) whose detach failed** after landing went on writing onto the detach record it left: the lane now waits for the failed-detach clear, as a probe's own failed detach does (`a_rebuild_restart_whose_detach_failed_writes_nothing_onto_its_record`, since superseded by the read back taking it as done).
+- **A lane's own failed detach, read again before its clear,** was taken as detached and then cleared, detached for good: the read again leaves it to the clear (`a_failed_detach_read_again_before_its_clear_is_left_to_the_clear`).
+- **A failed write that landed** left the engine on the failure path: the read back now takes it as done (`a_detach_that_landed_unseen_is_taken_as_done_from_its_read_back`).
+- **A demotion on records read under an earlier stream**, and **an owed rebuild retried before the read again**, rewrote records another process had changed: every gated write now stands on fresh records, and a change found by the gate's read stops (`a_demotion_never_stands_on_records_read_under_an_earlier_stream`, `a_retried_rebuild_reads_records_from_an_earlier_stream_first`, `a_change_found_by_a_gated_write_s_read_stops_the_deployment`).
+- **A lane taken detached on a read from an earlier stream** (a restage whose read returned after the next opening's read again) was never read again: such a lane makes the read again due (`a_lane_taken_detached_on_a_read_from_an_earlier_stream_is_read_again`).
+- The model: a demotion with no record writes nothing (the adapter returns before the marker); another process's turn counts a change a seed walked past as in the index; its reattach starts the gap where the record says reads stood, with no start when it says nothing.
+- The world's `begin_rebuild` wrote a fresh record and lost `through`; the adapter rewrites the record read, keeping it. Fixed in the model; `known` expects `through` kept, and a demotion keeps attempts and `through` too.
+- A failed detach that overwrote a rebuild's record, then cleared by the failed-detach clear, leaves an unseeded generation with no record. Its backfill covers what it dropped, so the confirmation oracle now counts, on an unseeded index, the backfill that will seed it (asked after the change, or the one the next staging asks).
+- The Foreign message names the reason against the state holding the record found, when one does.
+
+**Two OpenSearch sinks on one cluster (m-3): broken on `main` too, now refused.** Every index, alias, generation, seed marker and detach record flusso keeps on a cluster is named by the deployment's `prefix` alone (`hash_alias`, `convenience_alias`, `meta_index`), never by the sink, so two sinks on one cluster already shared them on `main`: a reindex on one moved the shared marker, its seed dropped the generations the other filled, and per-sink `index_settings` applied only to whichever created the index. Under the cut each would also take the other's record writes for another process's and stop a single deployment. `flusso check` reports it and `flusso run` refuses to start (`adapters::distinct_clusters`), naming both sinks, when their URLs resolve to one cluster (scheme and host case-folded, the default port filled in, a trailing slash dropped, the path kept). `build` resolves no environment and doesn't check it. A breaking change for such a deployment.
+
+**Runs** (regression files set aside, fresh seeds from `/dev/urandom`, `PROPTEST_RNG_SEED`):
+- **On the cut's engine** (`942a0380`, with the corrected world): `a_single_process_never_stops` fails 3/3 fresh seeds (each shrinks to `RebuildLost`); the pinned B-1, B-2 and per-write world cases fail.
+- **The first sweep on the fixes** (`6820a508`): `gate_world` failed 9/10 at 50,000, the solo property 10/10; `gate_property` passed 5/5. What it found is listed above; a second sweep (`c0d91ead`) passed the solo property 10/10 and `gate_world` 8/10, whose two failures were the last two items above.
+- **On `f34c98b4`:**
+  - `gate_world`, 50,000 cases, 10/10 pass: `14505590937704509809`, `8328152354279919408`, `8243136049864277044`, `17544380030640787217`, `7122052349086819789`, `7109168362158659214`, `746909242153028078`, `10926639883715590156`, `15986835245007642195`, `2022788067398891036` (about 225 s each);
+  - `a_single_process_never_stops`, 50,000 cases, 10/10 pass: `8794503679367420561`, `17007995020621156217`, `14432500404984301053`, `15477235028446986029`, `18088754547490046131`, `9691304133450874234`, `15908243079865310575`, `5022801130033315065`, `9133570195975241908`, `10444670630233412093` (about 165 s each);
+  - `gate_property`, 20,000 cases, 5/5 pass: `264410011143798754`, `10430097096019477661`, `12036578562343586838`, `3729341901395365656`, `1280131643207868299`.
+- **Mutations on `f34c98b4`**, default 1,024 cases, 3 fresh runs each, `gate_world` and the solo property together:
+  - each gate removed (`mark_seeded`, `forget_detachment`, `reindex`, `begin_rebuild`, `demote`, `detach`): 3/3 each;
+  - the stop removed (a foreign read carried on over, the gate's found change ignored): 3/3;
+  - "always Same" (every read judged the same): 3/3;
+  - the unknown-outcome handling removed (no states kept, no read back after a failure): 3/3, by the solo property;
+  - B-1's seed fix removed (no read back after the seed, the kept record not admitted): 3/3, by the solo property;
+  - `rereads.current` removed from `land_owed_seeds` (S-2): 3/3, and both pinned tests fail;
+  - "ignore the version": 0/3 by the properties, by design (above); 8 tests fail.
+
+**The user-visible list, for the docs agent.** This replaces the cut's.
+- **Two flusso processes on one slot:** when one finds that the other changed an index's detach records while it didn't hold the slot, it stops.
+  - The log, at `ERROR`, with `index`, `sink` and `what`: `another flusso process changed the index's detach records while this one didn't hold the slot: stopping the deployment; no change of this index confirmed past what its records cover`.
+  - stderr, and the exit code 1: ``Error: sink `<sink>`, index `<index>`: another flusso process changed the index's detach records while this one didn't hold the replication slot (<what was found>). Stopping: flusso doesn't carry on over another process's record changes. No change of this index was confirmed past what its records cover; start flusso again (one process per slot) and its start decides from the records``.
+  - `/status` shows it as the sink's error until the process exits; a supervisor restarts it like any failed run.
+  - **What to do:** run one process per slot. Stop the other one, or let it finish, then start flusso again: it decides from the records with nothing lost.
+- **A single deployment never stops this way**, also when a write's answer is lost (a timeout, a network drop) or a seed couldn't delete a finished rebuild's record: flusso keeps what its own write may have left, reads the records back while it holds the slot, and deletes a leftover finished record at once.
+- **Two OpenSearch sinks on one cluster are refused** by `flusso check` and `flusso run`, naming both: `[sinks.<a>] and [sinks.<b>] write to the same OpenSearch cluster (<url>): every index, alias and seed marker flusso keeps there is named by the deployment's `prefix`, never by the sink, so the two would share them. Give each sink its own cluster, or run each in its own deployment with its own `prefix``. **Breaking** for such a deployment (it shared every index already); the upgrade page should say what stops and how to fix it.
+- A backfill that completes while flusso doesn't hold the slot is written in full; only marking it complete waits. A rebuild resumed at a restart resumes from its checkpoint, unless a gap is kept over the index.
+- An index whose records ask for a demotion or a detach while flusso doesn't hold the slot is held detached until it does.
+- A stop during an outage, with a seed waiting, drains and exits 0, as on `main`.
+- A reattach while the slot isn't held is refused with the reason; a reattach asked again after one whose answer was lost finishes it. A reindex, a rebuild and the clear of a failed detach wait for the slot.
+- Unchanged: the fence, the read again after every opening, the confirmation hold.
+
+**Not proven.** The world is a model: no ingest engine, no `--skip-backfill`. No live run of two processes, of a lost write answer, or of a failed seed delete yet: §10's checklist.
 
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
