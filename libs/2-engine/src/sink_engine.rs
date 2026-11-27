@@ -292,7 +292,7 @@ struct Asked {
 #[derive(Debug)]
 pub struct SinkEngine {
     name: SinkName,
-    sink: Arc<dyn Sink>,
+    sink: slot::Plain,
     stream: Arc<dyn Stream>,
     mappings: Vec<IndexMapping>,
     options: SinkOptions,
@@ -395,7 +395,7 @@ impl SinkEngine {
     ) -> Self {
         Self {
             name,
-            sink,
+            sink: slot::Plain::new(sink),
             stream,
             mappings,
             options: SinkOptions::default(),
@@ -1458,7 +1458,7 @@ impl SinkEngine {
     /// The sink's requests that may erase or loosen a record, each checked
     /// against the slot right before it is sent (`slot`).
     fn erasing(&self) -> slot::Erasing<'_> {
-        slot::Erasing::new(self.sink.as_ref(), &self.rereads)
+        self.sink.erasing(&self.rereads)
     }
 
     /// `gaps` were just kept with an end still unknown or unreadable (a

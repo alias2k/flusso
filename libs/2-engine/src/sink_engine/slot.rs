@@ -9,8 +9,10 @@
 //! (the sixth re-check, B-1). What stays open is a request already sent when
 //! the stream ends: an owner lease closes that (#490).
 //!
-//! The sink's erasing methods are called nowhere else in the engine: a test
-//! here fails if one is (`erasing_requests_go_only_through_the_slot`).
+//! The engine holds its sink only as [`Plain`], whose `Sink` this module
+//! alone can reach: it exposes the requests that erase nothing, and makes
+//! [`Erasing`]. A call of an erasing request anywhere else in the engine
+//! doesn't compile, however it is spelled (the seventh re-check, S-1).
 //!
 //! Every request of the [`Sink`] trait that writes a record, the seed marker
 //! or a generation, from the OpenSearch adapter's requests, and why it is
@@ -40,10 +42,87 @@
 //!   not held -> NotHeld: the caller leaves the record and retries later
 //! ```
 
-use kernel::{IndexMapping, IndexName};
-use sink::{Detach, RecordVersion, Recorded, Sink};
+use std::sync::Arc;
+
+use kernel::{Envelope, IndexMapping, IndexName};
+use sink::{
+    CaughtUp, DecideGaps, Detach, Detachment, Ensured, Gap, RecordVersion, Recorded, Seeding, Sink,
+    WriteReport,
+};
 
 use crate::Rereads;
+
+/// The sink as the engine holds it: only the requests that erase or loosen
+/// no record. The erasing ones exist only on [`Erasing`], made from this,
+/// and the `Sink` inside is reachable from this module alone: a call that
+/// skips the slot's check doesn't compile (the seventh re-check, S-1).
+#[derive(Debug, Clone)]
+pub(super) struct Plain(Arc<dyn Sink>);
+
+impl Plain {
+    pub(super) fn new(sink: Arc<dyn Sink>) -> Self {
+        Self(sink)
+    }
+
+    /// The erasing requests, each checked against `rereads`' slot right
+    /// before its sink call.
+    pub(super) fn erasing<'a>(&'a self, rereads: &'a Rereads) -> Erasing<'a> {
+        Erasing {
+            sink: self.0.as_ref(),
+            rereads,
+        }
+    }
+
+    pub(super) async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<Ensured> {
+        self.0.ensure_index(mapping).await
+    }
+
+    pub(super) async fn write_parts(
+        &self,
+        parts: &[&[Envelope]],
+        caught_up: CaughtUp<'_>,
+    ) -> sink::Result<WriteReport> {
+        self.0.write_parts(parts, caught_up).await
+    }
+
+    pub(super) fn write_limit(&self) -> Option<usize> {
+        self.0.write_limit()
+    }
+
+    pub(super) fn ordered(&self) -> bool {
+        self.0.ordered()
+    }
+
+    pub(super) async fn seeding(&self, index: &IndexName) -> sink::Result<Seeding> {
+        self.0.seeding(index).await
+    }
+
+    pub(super) async fn is_rebuilding(&self, index: &IndexName) -> sink::Result<bool> {
+        self.0.is_rebuilding(index).await
+    }
+
+    /// The records' read; it may put a half-moved marker back, on the
+    /// version read (the table above: safe).
+    pub(super) async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
+        self.0.detachment(mapping).await
+    }
+
+    pub(super) async fn record_gaps(
+        &self,
+        mapping: &IndexMapping,
+        decide: &DecideGaps<'_>,
+    ) -> sink::Result<Vec<Gap>> {
+        self.0.record_gaps(mapping, decide).await
+    }
+
+    pub(super) async fn record_walked(&self, index: &IndexName, mark: &str) -> sink::Result<()> {
+        self.0.record_walked(index, mark).await
+    }
+
+    pub(super) async fn forget_walked(&self, index: &IndexName) -> sink::Result<()> {
+        self.0.forget_walked(index).await
+    }
+}
 
 /// This process may not erase or loosen a record now: it holds no slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,11 +151,7 @@ impl std::fmt::Debug for Erasing<'_> {
     }
 }
 
-impl<'a> Erasing<'a> {
-    pub(super) fn new(sink: &'a dyn Sink, rereads: &'a Rereads) -> Self {
-        Self { sink, rereads }
-    }
-
+impl Erasing<'_> {
     fn held(&self) -> Result<(), NotHeld> {
         if self.rereads.may_erase_records() {
             Ok(())
@@ -165,81 +240,5 @@ impl<'a> Erasing<'a> {
     ) -> Result<sink::Result<Recorded>, NotHeld> {
         self.held()?;
         Ok(self.sink.detach(mapping, detach).await)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::{Path, PathBuf};
-
-    fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if path.is_dir() {
-                if name != "tests" && name != "benches" {
-                    sources(&path, found);
-                }
-            } else if name.ends_with(".rs") && name != "tests.rs" {
-                found.push(path);
-            }
-        }
-    }
-
-    /// The sixth re-check, B-1: every request that may erase or loosen a
-    /// record goes through `Erasing`, which checks the slot immediately
-    /// before it; a call of one of the sink's erasing methods anywhere else
-    /// in the engine fails here. Whitespace is dropped before the search, so
-    /// a call split over lines is found too.
-    #[test]
-    fn erasing_requests_go_only_through_the_slot() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        sources(&root, &mut files);
-        // Spelled in parts so this test doesn't find itself.
-        let calls: Vec<String> = [
-            "mark_seeded",
-            "forget_detachment",
-            "reindex",
-            "begin_rebuild",
-            "demote",
-            "detach",
-        ]
-        .iter()
-        .map(|method| ["sink.", method, "("].concat())
-        .collect();
-        let mut callers = Vec::new();
-        for file in &files {
-            let text: String = std::fs::read_to_string(file)
-                .unwrap()
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .collect::<String>()
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            for call in &calls {
-                if text.contains(call.as_str()) {
-                    callers.push((file.clone(), call.clone()));
-                }
-            }
-        }
-        let outside: Vec<_> = callers
-            .iter()
-            .filter(|(file, _)| !file.ends_with("sink_engine/slot.rs"))
-            .collect();
-        assert!(
-            callers
-                .iter()
-                .any(|(file, _)| file.ends_with("sink_engine/slot.rs")),
-            "the slot makes the requests"
-        );
-        assert!(
-            outside.is_empty(),
-            "erasing requests outside the slot: {outside:?}"
-        );
     }
 }
