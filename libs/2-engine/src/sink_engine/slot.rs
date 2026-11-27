@@ -24,9 +24,12 @@
 //! `SinkEngine::new` and the CLI keeps no clone of it.
 //!
 //! Every request that writes a record, a gap or the marker also tells
-//! [`KnownRecords`] what it left (`known`): the gate keeps this process from
-//! erasing another's record, and `known` tells it when another process
-//! changed one, which stops the deployment (the cut of 2026-11-27).
+//! [`KnownRecords`] what it left (`known`), or, when its call failed, every
+//! state it may have left; a write of the record, or one that failed, is
+//! then read back while the slot is still held, which settles it (the
+//! review of the cut). The gate keeps this process from erasing another's
+//! record, and `known` tells it when another process changed one, which
+//! stops the deployment (the cut of 2026-11-27).
 //!
 //! Every request of the [`Sink`] trait that writes a record, the seed marker
 //! or a generation, from the OpenSearch adapter's requests, and why it is
@@ -34,7 +37,7 @@
 //!
 //! | Request (OpenSearch requests) | Without the slot |
 //! | --- | --- |
-//! | `mark_seeded` (aliases swapped, every other generation deleted, the marker written whole, a finished rebuild's record deleted) | gated: the marker erases any record and the gaps |
+//! | `mark_seeded` (aliases swapped, every other generation deleted, the marker written whole, a finished rebuild's record deleted **best effort**: a failed delete only warns, and the call returns `Ok`) | gated: the marker erases any record and the gaps. Read back while held, a record the delete left is deleted here at once (`forget_finished`, the review of the cut, B-1) |
 //! | `forget_detachment` (`DELETE detach:…` on the version read): the failed-detach clear, a reattach | gated; a reattach also writes its gap first, which stays and is reused when asked again |
 //! | `forget_detachment` of a rebuild a newer seeded generation finished (`forget_finished`) | safe: the record is obsolete, and the delete is conditional on the version read, so any write since fails it |
 //! | `reindex` (the marker moved to a new generation) | gated: the reindex waits, its lane restaging |
