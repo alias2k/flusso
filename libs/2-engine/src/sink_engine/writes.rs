@@ -885,6 +885,12 @@ impl<'a> Run<'a> {
                 reason: ParkReason::AwaitingSlot { .. },
                 ..
             } => false,
+            // Parked on its owed seed: the seed is the probe
+            // (`land_owed_seeds`), nothing behind it is written meanwhile.
+            LaneHealth::Parked {
+                reason: ParkReason::SeedBlocked { .. },
+                ..
+            } if self.engine.owes_seed(&run.key.index) => false,
             LaneHealth::Parked { .. } => {
                 run.health.due <= now
                     && run.detach_due.is_none()
@@ -2031,10 +2037,25 @@ impl<'a> Run<'a> {
             let Some(lane) = self.lanes.iter().position(|run| run.key.index == index) else {
                 continue;
             };
-            let ready = self
-                .lanes
-                .get(lane)
-                .is_some_and(|run| run.health.is_open() && self.engine.rereads.current(&run.key));
+            // Open is enough: the read again ran first in this `advance`, so
+            // an open lane was read under the stream now held (a staging or
+            // an attach that opens one marks it unread: `store_lane`), and a
+            // lane awaiting the slot isn't open. `answers` is a second net:
+            // every path that cuts the backfill asks again at once, which
+            // drops the owed seed.
+            // A lane parked on this seed (#479's blocked old generation) is
+            // probed by it, on the lane's backoff (m-3 of the seventh
+            // re-check).
+            let ready = self.lanes.get(lane).is_some_and(|run| {
+                run.health.is_open()
+                    || (matches!(
+                        run.health.health,
+                        LaneHealth::Parked {
+                            reason: ParkReason::SeedBlocked { .. },
+                            ..
+                        }
+                    ) && run.health.due <= now)
+            });
             if !ready || self.lane_in_flight(lane) || !self.engine.answers(&index, Some(ticket)) {
                 continue;
             }
@@ -2092,6 +2113,9 @@ impl<'a> Run<'a> {
             Ok(Ok(())) => {
                 self.engine.drop_owed_seed(&index);
                 self.engine.seeded(&index, ticket, took);
+                if !self.lane_open(lane) {
+                    self.probed(lane, ProbeOutcome::Landed);
+                }
                 if let Some(run) = self.lanes.get_mut(lane)
                     && run.health.rebuilding.take().is_some()
                 {
@@ -2106,6 +2130,22 @@ impl<'a> Run<'a> {
             Ok(Err(sink::SinkError::TargetChanged(reason))) => {
                 self.engine.drop_owed_seed(&index);
                 self.hold(lane, Held::Missing(reason), false);
+            }
+            // The old generation is blocked (#479): the lane parks on the
+            // owed seed, which is its probe, as a seed's completion is, so
+            // `/status` says why the index stays backfilling (m-3).
+            Ok(Err(sink::SinkError::RetireBlocked {
+                new,
+                old,
+                block,
+                deletable,
+            })) => {
+                let probe = !self.lane_open(lane);
+                self.hold(
+                    lane,
+                    Held::SeedBlocked(retire_blocked_reason(&new, &old, &block, deletable)),
+                    probe,
+                );
             }
             Ok(Err(error)) => {
                 tracing::warn!(%index, sink = %self.engine.name, %error, "the owed seed failed; trying again later");

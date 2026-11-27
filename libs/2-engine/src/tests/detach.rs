@@ -4798,3 +4798,89 @@ async fn a_rebuild_whose_record_went_is_not_taken_for_a_later_one() {
     .await;
     task.abort();
 }
+
+/// The seventh re-check, m-2: an owed seed whose index's target changed
+/// before the reopen (a write found it gone and restaged it) never lands:
+/// the restage cut its backfill and asked a fresh one, which drops it. Once
+/// held, nothing seeds until the fresh backfill completes.
+#[tokio::test(start_paused = true)]
+async fn an_owed_seed_whose_target_changed_meanwhile_never_lands() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
+    rig.rereads.closed();
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (asked, asks) = backfill_asks(&rig);
+    rig.sink.missing.lock().unwrap().insert("users".to_owned());
+    rig.live(&users(), 9, 9).await;
+    eventually("a fresh backfill is asked", || {
+        asked.lock().unwrap().iter().any(|request| {
+            matches!(request, stream::Request::Backfill { index, after: None, .. } if *index == users())
+        })
+    })
+    .await;
+    rig.sink.missing.lock().unwrap().clear();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        rig.sink.seeded.lock().unwrap().is_empty(),
+        "an owed seed of a cut backfill landed"
+    );
+    task.abort();
+    asks.abort();
+}
+
+/// The seventh re-check, m-3: an owed seed refused because the old
+/// generation is blocked (#479) parks its lane `SeedBlocked`, as a seed's
+/// completion does, so `/status` says why the index stays backfilling; the
+/// owed seed is the probe, and lands once the block lifts.
+#[tokio::test(start_paused = true)]
+async fn an_owed_seed_meeting_a_blocked_old_generation_parks_its_lane() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
+    rig.rereads.closed();
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    *rig.sink.retire_blocked.lock().unwrap() = true;
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("parked on the owed seed", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked {
+                reason: crate::ParkReason::SeedBlocked { .. },
+                ..
+            }
+        )
+    })
+    .await;
+    *rig.sink.retire_blocked.lock().unwrap() = false;
+    eventually("the owed seed lands", || {
+        rig.sink
+            .seeded
+            .lock()
+            .unwrap()
+            .contains(&"users".to_owned())
+    })
+    .await;
+    eventually("the lane opens", || {
+        engine.lane_health(&lane(users())).is_open()
+    })
+    .await;
+    task.abort();
+}

@@ -1418,6 +1418,11 @@ impl SinkEngine {
     }
 
     /// The seeds owed, with when each may be tried.
+    /// Whether `index`'s seed is owed.
+    pub(super) fn owes_seed(&self, index: &IndexName) -> bool {
+        self.lock_owed_seeds().contains_key(index)
+    }
+
     pub(super) fn owed_seeds(&self) -> Vec<(IndexName, Ticket, Instant)> {
         self.lock_owed_seeds()
             .iter()
