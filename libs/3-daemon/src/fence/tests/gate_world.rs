@@ -443,6 +443,18 @@ impl Sink for Store {
             .get(of)
             .cloned()
             .unwrap_or_default();
+        // As OpenSearch's marker names its generation's `index.uuid`: each
+        // rebuild moves to a generation of its own.
+        if kept.record.is_some() {
+            let generation = self
+                .generation
+                .lock()
+                .unwrap()
+                .get(of)
+                .copied()
+                .unwrap_or(0);
+            kept.marker_target = Some(sink::TargetId::new(format!("{of}_{generation}")));
+        }
         self.reads.lock().unwrap().push((of.to_owned(), began));
         Ok(kept)
     }
@@ -1934,5 +1946,34 @@ fn a_rebuild_whose_record_was_replaced_meanwhile_is_dropped_by_the_run() {
             rebuild: true,
         },
         Event::Readable { sink: 0 },
+    ]);
+}
+
+/// Found by the world in the seventh re-check: this process takes over a
+/// rebuild at its first staging (no slot held yet); with no read here in
+/// between, the record is removed and another process begins a new rebuild,
+/// its attempts restarting at the same count. Read once held, the new
+/// rebuild's generation is not the one this process fills: it is demoted,
+/// never taken for this process's own.
+#[test]
+fn a_rebuild_begun_again_under_the_same_attempts_is_told_apart_by_its_generation() {
+    replay(vec![
+        Event::Reindex { index: 1 },
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+        Event::Unheld {
+            lane: 3,
+            rebuild: true,
+            then: 3,
+        },
+        Event::GapOverOwed { lane: 3 },
+        Event::Unheld {
+            lane: 3,
+            rebuild: true,
+            then: 1,
+        },
     ]);
 }
