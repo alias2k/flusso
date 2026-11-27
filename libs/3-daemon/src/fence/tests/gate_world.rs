@@ -1722,15 +1722,34 @@ impl World {
             matches!(kept.detachment.record, Some(DetachRecord::Detached { .. }))
         });
         // A reattach's gap starts where reads stood at the detach (the
-        // record's `through`): every range dropped since the last reattach.
+        // record's `through`, as the adapter's reattach takes it), covering
+        // every range dropped since the last reattach: a lane this process
+        // detached dropped from its own `through` on.
         let since = self.attached[lane].last().copied().unwrap_or(0);
-        let Some(from) = self.dropped[lane]
+        let through = store
+            .kept
+            .lock()
+            .unwrap()
+            .get(of)
+            .map(|kept| kept.detachment.through.clone());
+        let Some(dropped_from) = self.dropped[lane]
             .iter()
             .filter(|(_, _, when)| *when > since)
             .map(|(from, _, _)| *from)
             .min()
         else {
             return;
+        };
+        // A record with no `through` keeps a gap with no start, as the
+        // adapter's reattach writes it: every position up to its end.
+        let from = match through {
+            Some(None) => None,
+            Some(Some(through)) => Some(
+                through
+                    .parse::<u64>()
+                    .map_or(dropped_from, |at| at.min(dropped_from)),
+            ),
+            None => Some(dropped_from),
         };
         if !detached {
             return;
@@ -1743,7 +1762,7 @@ impl World {
             .entry(of.to_owned())
             .or_default()
             .push(sink::Gap {
-                from: Some(from.to_string()),
+                from: from.map(|from| from.to_string()),
                 to: Some(self.horizon.to_string()),
             });
         self.tick += 1;
@@ -3052,4 +3071,59 @@ fn a_change_found_by_a_gated_write_s_read_stops_the_deployment() {
         Event::GapOverOwed { lane: 2 },
     ]);
     assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// Found at 50,000 cases after the review of the cut: a restage whose read
+/// took its answer (another process's detach record) under an earlier
+/// stream, and returned after the next opening, took the lane as detached
+/// after that opening's read again had run. The lane is read again: the
+/// other process's reattach meanwhile is found, and the deployment stops
+/// rather than leaving the lane detached for good.
+#[test]
+fn a_lane_taken_detached_on_a_read_from_an_earlier_stream_is_read_again() {
+    replay(vec![
+        Event::Restart {
+            sink: 0,
+            unreadable: 1,
+        },
+        Event::Restart {
+            sink: 1,
+            unreadable: 1,
+        },
+        Event::GapOverOwed { lane: 3 },
+        Event::HoldReadsAnswered { sink: 1 },
+        Event::Readable { sink: 1 },
+        Event::Reattach { index: 0 },
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 3,
+        },
+        Event::Reattach { index: 0 },
+        Event::GapOverOwed { lane: 2 },
+    ]);
+}
+
+/// The other process's reattach of a lane this process detached starts its
+/// gap where this process's record says reads stood (no start when it says
+/// nothing), as the adapter's reattach does.
+#[test]
+fn a_reattach_elsewhere_keeps_the_gap_from_this_process_s_detach() {
+    replay(vec![
+        Event::Detach {
+            lane: 1,
+            fails: false,
+        },
+        Event::SeedLeavesRecord { lane: 3 },
+        Event::HolderFinishes {
+            lane: 1,
+            reattach: true,
+        },
+        Event::Wait {
+            lane: 0,
+            whole_sink: true,
+            searchable: false,
+            at: 5,
+        },
+    ]);
 }

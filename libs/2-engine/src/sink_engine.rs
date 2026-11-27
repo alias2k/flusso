@@ -1059,8 +1059,10 @@ impl SinkEngine {
         }
         // The one place a lane opens (O29, B-1): opened while its records
         // count as read only for an earlier stream, it is read again before
-        // anything of it is written.
-        if state.is_open() && !self.rereads.current(lane) {
+        // anything of it is written. Taken as detached on such a read (a
+        // restage whose read took its answer before the stream now held), it
+        // is read again too: the records may say otherwise now.
+        if (state.is_open() || state.health.is_detached()) && !self.rereads.current(lane) {
             self.opened_unread.store(true, Ordering::Release);
         }
         if before != rebuild {
