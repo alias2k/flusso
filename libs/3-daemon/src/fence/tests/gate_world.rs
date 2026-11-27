@@ -1897,3 +1897,42 @@ fn a_lane_the_holder_reattached_drops_nothing_unrecorded() {
         .expand(),
     );
 }
+
+/// Found by the world in the seventh re-check: this process's rebuild
+/// begins while it holds the slot, then waits in `ensure_index` while its
+/// stream ends and another process drops the lane and reattaches it. Read
+/// once held, the lane is recorded detached again and the rebuild dropped,
+/// in the run as in the engine: its attach opens nothing, and another
+/// process's later rebuild under the same attempt count is not taken for it.
+#[test]
+fn a_rebuild_whose_record_was_replaced_meanwhile_is_dropped_by_the_run() {
+    replay(vec![
+        Event::HolderFinishes {
+            lane: 2,
+            reattach: true,
+        },
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+        Event::Reindex { index: 0 },
+        Event::GapOverOwed { lane: 2 },
+        Event::HoldEnsure { sink: 1 },
+        Event::Open {
+            ok: true,
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::GapOverOwed { lane: 2 },
+        Event::Release { sink: 1 },
+        Event::Open {
+            ok: true,
+            jump: 10,
+            drop: Some(2),
+            rebuild: true,
+        },
+        Event::Readable { sink: 0 },
+    ]);
+}
