@@ -1939,26 +1939,43 @@ is the one concrete piece.
   `Rereads::open(source.live())` (tripwire `the_live_stream_is_opened_only_through_rereads_open`;
   `ChangeCapture::streams_opened`, counted by Postgres, makes the fence read every lane as unread
   while the source opened more streams than `Rereads::opened`); reads count per lane, for the
-  stream they began under (`read_begins`). **Record writes:** every request that may erase or
-  loosen a record goes through `sink_engine/slot.rs`'s `Erasing`, which checks
+  stream they began under (`read_begins`). **Record writes:** the engine holds its sink only as
+  `sink_engine/slot.rs`'s `Plain` (the `Sink` inside reachable from that module alone, so an
+  erasing call elsewhere doesn't compile, however spelled), whose `Erasing` checks
   `Rereads::may_erase_records` (the stream held, or the run ended cleanly: `Held`/`finished`, sound
   because a live stream ends `Ok` only when the deployment is over; with no ingest engine wired,
-  `will_open` unset and nothing opened, as on `main`) **immediately before the request is sent**,
-  never ahead of the awaits before it (tripwire `erasing_requests_go_only_through_the_slot`: the
-  sink's erasing methods are called nowhere else in the engine). Gated: a seed (owed per index,
-  `OwedSeed`: its documents are written and acknowledged, only `mark_seeded` waits; it lands once
-  the slot is held, nothing of the lane in flight and the records read again show no record or gap
-  written over the index (`written_over`), else its backfill is asked again; a parked lane is
-  covered, a detached one drops it), the failed-detach clear, a reattach (refused with the reason;
-  its gap stays and is reused), a reindex (restaging), a rebuild (owed; `retry_rebuilds` waits for
-  the slot so refusals don't grow its backoff), a demotion and a detach (both delete every
-  generation but the serving one: staging and the read again take the lane as detached, its read
-  uncounted, `Acted::Unheld`; a refused lane's detach leaves it as it was). Safe without it, each
-  with its reason in `slot.rs`'s table (the one home of every record, marker and generation write):
-  a finished rebuild's record, the `Fresh` staging's reindex, `ensure_index`'s marker rewrite and
-  auto-created generation delete, the read's put-back of a half-moved marker, gap writes, walk
-  checkpoints. Open (#490, an owner lease): a request already in flight when the stream ends, and
-  the time before this process notices Postgres dropped its walsender. **The read again:** after
+  `will_open` unset and nothing opened, as on `main`) **immediately before each sink call**, never
+  ahead of the awaits before it. Gated: a seed (owed per index, `OwedSeed`, when met on an open
+  lane: its documents are written, only `mark_seeded` waits; it lands once the slot is held and
+  the lane is open with nothing in flight, else its backfill is asked again when the records show
+  a record or gap written over the index (`written_over`); refused on #479's blocked generation it
+  parks its lane `SeedBlocked` as the probe; a seed met on a parked lane is that lane's probe and
+  waits out of the grant until an opening, `seed_waits_for_slot`), the failed-detach clear, a
+  reattach (refused with the reason; its gap stays and is reused), a reindex (restaging), a
+  rebuild (owed; `retry_rebuilds` waits for the slot so refusals don't grow its backoff), a
+  demotion and a detach (both delete every generation but the serving one). **A lane never drops a
+  change no record covers:** when what the records ask waits for the slot (`Acted::Unheld`), the
+  lane stands in, parked `ParkReason::AwaitingSlot` (never granted, never probed, its items
+  unacknowledged, its read uncounted; a restaging lane stays restaging), until a read while held
+  detaches it under the record or opens it with nothing lost; a stop releases its items unapplied,
+  as a restaging lane's. A lane held detached whose records, read while held, show no record or a
+  finished rebuild (another process reattached or finished it) is recorded detached again with
+  this process's place before its read counts (`Decision::RecordAgain`), unless its own reattach is
+  between its delete and its attach. A gap not there at the last read (another process's drop)
+  cuts a backfill outstanding since (`read_detachment`), and any read again that leaves a backfill
+  cut asks it again; a backfill resumes from its walk checkpoint only where no gap is kept
+  (`request_backfill`, the one place every backfill is asked: the pages before the mark may predate
+  the drop, and the seed drops the gaps). A rebuild is this
+  process's own only on its attempts **and** the generation it fills (`Detachment.marker_target`
+  vs `rebuild_target`, when both are known: attempts restart at one once a record is removed); a
+  read showing no rebuild where the engine or the run keeps one drops it in both (`sync_rebuild`).
+  Safe without the slot, each with its reason in `slot.rs`'s table (the one home of every record,
+  marker and generation write): a finished rebuild's record, the `Fresh` staging's reindex,
+  `ensure_index`'s marker rewrite and auto-created generation delete, the read's put-back of a
+  half-moved marker, gap writes, walk checkpoints. Open (#490, an owner lease): a sink call already
+  begun when the stream ends (`mark_seeded` refreshes the whole generation and drops others before
+  its marker write; `begin_rebuild`/`demote` delete generations before their conditional writes),
+  and the time before this process notices Postgres dropped its walsender. **The read again:** after
   every opening (due with no slot held too: it only tightens), `Run::reread` reads each lane's records and decides with
   the function staging uses (`decide`/`act_on_records`): another process's rebuild is put back to
   detached before the lane drops anything; it is taken over only at a process's first staging. A
@@ -1969,8 +1986,9 @@ is the one concrete piece.
   process whose walsender Postgres dropped before it noticed (real fencing is its own issue).
   Guards: `fence::tests::gate_property`; `fence::tests::gate_world::every_lane_vouches_only_for_what_it_holds`
   (real sink engines over a stand-in that judges each write; one capture per process; the world's
-  own record of whether this process holds a stream; streams ending, another process's drop or
-  rebuild, this process's own failed detach, new processes; its mutation results are in the note's
+  own record of whether this process holds a stream; streams ending, another process's drop,
+  rebuild, finished rebuild or reattach, this process's own failed detach, new processes; its
+  mutation results are in the note's
   §10a); `tests::detach`'s `a_stream_that_ended_seeds_nothing_over_a_detach_written_since`,
   `a_stop_while_an_opening_failed_still_drains_the_lanes`, `a_clear_waits_*`,
   `a_reattach_is_refused_while_no_stream_is_held`, `a_reindex_*_while_no_stream_is_held` /
@@ -1979,8 +1997,17 @@ is the one concrete piece.
   `a_staging_without_the_slot_leaves_anothers_rebuild_to_the_holder`,
   `a_start_staging_before_the_stream_opens_demotes_nothing`, `a_detach_with_no_slot_held_waits_for_the_slot`,
   `an_owed_rebuild_begins_at_once_when_the_slot_comes_back`, `gate_world`'s pinned
-  `a_reattach_waiting_*_as_the_stream_ends_deletes_no_record` (event lists, not seeds: a seed
-  replays another list once the strategy changes; `PROPTEST_CASES` sets the property's cases),
+  `a_reattach_waiting_*_as_the_stream_ends_deletes_no_record` and the seventh re-check's cases
+  (event lists, not seeds: a seed replays another list once the strategy changes; `PROPTEST_CASES`
+  sets both properties' cases), `a_parked_seed_without_the_slot_waits_without_spinning`,
+  `a_lane_taken_detached_without_the_slot_*`, `a_lane_held_detached_whose_record_another_process_removed_is_recorded_again`,
+  `a_stand_in_writes_what_it_held_once_the_records_ask_nothing`,
+  `a_stop_while_a_lane_awaits_the_slot_drains_at_once`, `a_gap_written_since_a_backfill_was_asked_cuts_it`,
+  `a_rebuild_whose_record_went_is_not_taken_for_a_later_one`,
+  `an_owed_seed_meeting_a_blocked_old_generation_parks_its_lane`,
+  `an_owed_seed_whose_target_changed_meanwhile_never_lands`, `gate_world`'s pinned
+  `a_walk_resumed_over_a_kept_gap_*`, `a_backfill_cut_while_the_slot_is_away_is_asked_again`,
+  `a_rebuild_begun_again_under_the_same_attempts_is_told_apart_by_its_generation`,
   `a_process_whose_stream_never_opened_deletes_no_record`, `a_staging_*_demotes_*`,
   `*_that_spans_an_opening_*`, `a_failed_read_of_a_detached_lane_never_fails_the_run`;
   `tests::parking::a_substitute_arriving_with_an_opening_is_written_only_once_read`;

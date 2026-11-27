@@ -4,10 +4,17 @@
 //! record unless it holds the slot.
 //!
 //! Each gated method checks [`Rereads::may_erase_records`] immediately before
-//! the request is sent, after every await that precedes it in its caller, so
-//! a stream that ended while the caller read, ensured or waited is seen
-//! (the sixth re-check, B-1). What stays open is a request already sent when
-//! the stream ends: an owner lease closes that (#490).
+//! its **sink call**, after every await that precedes it in its caller, so a
+//! stream that ended while the caller read, ensured or waited is seen (the
+//! sixth re-check, B-1). The check is per sink call, not per HTTP request:
+//! inside the call, OpenSearch's `mark_seeded` refreshes the whole new
+//! generation (seconds on a large index), swaps the aliases and drops other
+//! generations before it writes the marker and deletes the record;
+//! `begin_rebuild` and `demote` delete generations before their conditional
+//! writes, `detach` after its record. What stays open, for an owner lease
+//! to close (#490): a sink call already begun when the stream ends, and the
+//! time before this process notices Postgres dropped its walsender (the
+//! slot still reads as held then).
 //!
 //! The engine holds its sink only as [`Plain`], whose `Sink` this module
 //! alone can reach: it exposes the requests that erase nothing, and makes
@@ -26,8 +33,8 @@
 //! | `reindex` (the marker moved to a new generation) | gated: the reindex waits, its lane restaging |
 //! | `reindex` at a `Fresh` source's staging (`reindex_at_a_fresh_start`) | safe: it runs before `prepare` creates the slot (#120), so no slot exists for another process to hold |
 //! | `begin_rebuild` (every generation but the serving one deleted, the marker moved, the record rewritten) | gated: the rebuild is owed |
-//! | `demote` (every generation but the serving one deleted with its checkpoint, the marker and the record rewritten) | gated (the sixth re-check, S-2): what it deletes may be the rebuild the holder walks. Staging and the read again take the lane as detached and leave its read uncounted, so the read once the slot is held demotes |
-//! | `detach` (the marker moved, the record written, every generation but the serving one deleted), staging's `DetachAgain` | gated, as `demote`: a refused lane stays as it was, staging takes the lane as detached for the read once held |
+//! | `demote` (every generation but the serving one deleted with its checkpoint, the marker and the record rewritten) | gated (the sixth re-check, S-2): what it deletes may be the rebuild the holder walks. Staging and the read again leave the lane standing in, parked [`AwaitingSlot`](crate::ParkReason::AwaitingSlot) with nothing dropped and its read uncounted (the seventh re-check, B-1), so the read once the slot is held decides: it demotes, or, with the record gone, opens the lane |
+//! | `detach` (the marker moved, the record written, every generation but the serving one deleted), staging's `DetachAgain`, the read's `RecordAgain` | gated, as `demote`: a refused lane stays as it was; staging and the read again leave the lane standing in, as for `demote` |
 //! | `ensure_index` (the marker written whole, the generation created) | safe: the marker is written whole only when no marker names an existing generation. Nothing anyone holds is there: no rows, so neither a checkpoint nor a gap means anything; `detaching_from` matters only with no record, and losing it leaves an unseeded generation to backfill while reads stay on the serving one. As on `main` |
 //! | `ensure_index` deleting an unseeded generation whose `index.uuid` isn't the one recorded | safe: such a generation was recreated by a write under auto-create, not built by any process; a process writing to it restages. As on `main` |
 //! | `detachment`, the read, putting a half-moved marker back (`PUT` on the marker read) | safe: only where the marker carries `detaching_from` and no record stands, on the version read. A detach is gated, so one between its two writes is the holder's (or one in flight as its stream ended: #490). Its record landing after the put back still says detached, and the next read detaches again (`DetachAgain`) |

@@ -15,8 +15,9 @@
 //!   ([`Rereads::read`]);
 //! - nothing erases or loosens a record another process may rely on unless
 //!   this process holds the slot ([`Rereads::may_erase_records`]); every
-//!   such write, and why it is gated or not, is listed in the sink engine's
-//!   module doc. Plain writes of what the lanes hold behave as on `main`;
+//!   such write, and why it is gated or not, is listed in the module doc of
+//!   the sink engine's `slot`, the one place that makes them. Plain writes
+//!   of what the lanes hold behave as on `main`;
 //! - a fence vouches for nothing on a lane not read since
 //!   ([`Rereads::current`]): it answers `starting`. The opening wakes every
 //!   sink engine ([`Rereads::openings`]), so the read doesn't wait for

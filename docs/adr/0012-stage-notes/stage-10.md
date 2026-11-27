@@ -544,7 +544,8 @@ The owner accepted this order on 2026-11-24. Each slice is safe if nothing after
    - [ ] **B-2 live.** A process dies mid-rebuild, another takes the slot, then a third starts. With B-2's fix, no seed lands over dropped changes.
    - [ ] **B-1 live.** A restaging index (its target deleted) whose restage is in flight across a replication reconnect (drop the walsender with `pg_terminate_backend`) gets its records read before it writes. After the reconnect, every healthy lane passes `/wait` within a few seconds.
    - [ ] **No seed without the slot** (the fifth and sixth re-checks). A backfill whose stream ends before its `SnapshotComplete` (drop the walsender mid-backfill): no seed is written until the slot is held again, then the owed seed lands with no second walk. With another process's detach record or gap written meanwhile, that record survives and the backfill is asked again.
-   - [ ] **Another process's rebuild met without the slot** (the sixth re-check, S-2). B restarts a sink's run while A holds the slot and walks a rebuild: A's partial generation and checkpoint survive, B shows the lane detached, and B demotes only once its own stream holds the slot.
+   - [ ] **Another process's rebuild met without the slot** (the sixth and seventh re-checks). B restarts a sink's run while A holds the slot and walks a rebuild: A's partial generation and checkpoint survive, and B's lane waits for the slot (blocked, nothing dropped). If A finishes first, B opens the lane with nothing lost; otherwise B demotes once its own stream holds the slot.
+   - [ ] **A rebuild begun again after a reattach** (the seventh re-check). Its marker names a new generation's `index.uuid`, which tells it from the rebuild an earlier process took over at the same attempt count.
    - [ ] **A stop during a failed reconnect** (the old walsender still holds the slot until `wal_sender_timeout`): the stop drains the lanes' backlog and exits at once, not at its deadline.
    - [ ] **A process that can't reach Postgres at its start** while another holds the slot: a `reattach` is refused, a `reindex` waits (restaging, with the reason), and no record changes.
    - [ ] **A reconnect on a quiet database.** After `pg_terminate_backend` of the walsender, `/wait` for an already-applied position passes within about 1 s of the reopen (the wake), at both levels.
@@ -1378,7 +1379,7 @@ The review (`target/review-482-fix-round-6/`) found the narrowed rule held only 
 - Before: the seed's backfill was cut and asked again at the next read while held. A lane parked at that read was never asked again (B-2), and every cut walked the whole index again (S-1).
 - Now: the snapshot's documents are written and acknowledged as before; only `mark_seeded` waits, owed per index (`OwedSeed`, with its ticket).
 - It lands once the slot is held, nothing of the lane is in flight, the ticket still answers the index's target, and the records read again show nothing written over the index (no record, no gap kept: `written_over`). Otherwise the backfill is asked again from the first key.
-- A parked lane keeps its owed seed and lands it once it opens. A detached lane drops it: its rebuild asks for its own. A new backfill request drops it too.
+- A seed owed while its lane was open stays owed if the lane parks later, and lands once it opens. *(Corrected after the seventh re-check: a seed met on a lane already parked is not owed; it is the lane's probe, and spun until B-2's fix.)* A detached lane drops it: its rebuild asks for its own. A new backfill request drops it too.
 - No index is marked seeded with documents missing: an owed seed lands only on the target its snapshot wrote.
 - Tests: `a_seed_met_without_the_slot_on_a_lane_parked_at_the_read_lands_once_it_opens` (the reviewer's probe), `a_seed_met_without_the_slot_lands_once_held_without_a_new_walk`, `a_seed_owed_over_a_gap_written_meanwhile_asks_the_backfill_again`, `a_failed_opening_seeds_nothing_until_an_opening_gets_through`.
 
@@ -1437,12 +1438,95 @@ The review (`target/review-482-fix-round-6/`) found the narrowed rule held only 
 - **A reattach while the slot isn't held** is refused with the reason; ask again once flusso holds the slot.
 - **A reindex, a rebuild, the clear of a failed detach** wait for the slot; a waiting reindex shows its index restaging with the reason. An owed rebuild begins as soon as the slot is back.
 - **A detach flusso decides while the slot isn't held** waits: the index stays as it was (parked, say) and detaches once flusso holds the slot.
-- **Another process's rebuild met while the slot isn't held** is left alone; the index shows detached on this process until its stream opens, then the rebuild is put back to detached.
+- **Another process's rebuild met while the slot isn't held** is left alone; the index shows detached on this process until its stream opens, then the rebuild is put back to detached. *(Corrected after the seventh re-check: the rebuild may finish meanwhile, and this round's stand-in detached the lane with no record, so it dropped unrecorded changes; see B-1 there.)*
 - **A process that can't reach Postgres at its start** changes no record until its stream opens.
 - **A stop while flusso can't reconnect**, with a lane parked unsure of its detach, waits its deadline and exits 1 naming the sink; the next start settles it.
 - **Unchanged:** the fence, the read again after every opening, the confirmation hold while a detached lane is unread.
 
 **Not proven.** As after the fifth re-check: the world is a model (no ingest engine, no stops or `--skip-backfill` events), and there are no live runs.
+
+### After the seventh re-check
+
+The review (`target/review-482-fix-round-7/`) confirmed the chokepoint, the six gates and the owed seed, and found two holes in code the sixth round added. The world, given the events the review asked for, then found five more. The rule is unchanged.
+
+**B-1. A lane never drops a change no record covers (`d2804315` tests, `9b4c486e` fix).**
+- **The hole.** S-2's stand-in took a lane as detached without writing a record. Once the holder finished its rebuild or reattached, the read while held kept the lane detached (`KeepDetached`) and counted it, so the slot passed changes nothing recorded.
+- **The stand-in, chosen as (c).** When what the records ask waits for the slot (`Acted::Unheld`), the lane parks `ParkReason::AwaitingSlot`:
+  - never granted, never probed, its items held unacknowledged, its read uncounted;
+  - the read once the slot is held decides: it detaches the lane under the record, or opens it with every held item still to write. No reindex is forced when the record went;
+  - a restaging lane stays restaging, its own staging being the read that decides; a reindex that meets a stand-in is owed;
+  - `/status` shows it `blocked`, "waiting for the slot: …", with no next probe.
+- **Which items may be discarded.** None, by the stand-in. A lane detached at a read while held discards only under the record that read found, and the record covers what it drops. Items of a stream that ended stay unacknowledged; nothing confirms them without the slot, so the next holder's stream delivers them again.
+- **What bounds it.** No stream is held while it stands in, so no WAL is pinned beyond what the lane held already. The first opening's read again decides before anything is granted; a read that fails fails the run, which restages, as for any lane. A stop releases its items unapplied, as a restaging lane's, so the slot stays behind them and the next start replays them.
+- **(b), for a lane truly held detached** (round 4's m-3). When its records, read while held, show no record or a finished rebuild, it is recorded detached again with this process's place before its read counts (`Decision::RecordAgain`). The exception is this process's own reattach between its delete and its attach.
+- **Tests:**
+  - `a_lane_taken_detached_without_the_slot_never_drops_unrecorded_after_the_holder_finishes` (P1);
+  - `…_opens_after_the_holder_reattaches`;
+  - `a_lane_held_detached_whose_record_another_process_removed_is_recorded_again`;
+  - `a_stand_in_writes_what_it_held_once_the_records_ask_nothing`;
+  - `a_stop_while_a_lane_awaits_the_slot_drains_at_once`.
+
+**B-2. A parked seed refused for want of the slot waits for an opening (`2da96343` test, `b60c68db` fix).**
+- The refusal is no probe result. The lane keeps its seed out of the grant while no slot is held (`seed_waits_for_slot`), and the opening wakes the loop.
+- `a_parked_seed_without_the_slot_waits_without_spinning`: the sink writes its other lanes, at most two probes in 10 s, and the seed lands after the opening.
+- **Owed like an open lane's? No.** A parked lane's completion is #479's barrier: nothing behind it is written until the old generation retires. Owing it would acknowledge the completion and lift the barrier.
+- **The two mechanisms now meet.** An owed seed that meets a blocked old generation parks its lane `SeedBlocked` with the owed seed as the probe (m-3).
+
+**Every `NotHeld` return, and what paces it.**
+
+| Where | What follows | Paced by |
+| --- | --- | --- |
+| a seed on an open lane | owed, its completion acknowledged | `land_owed_seeds` returns at once while no slot is held; the opening |
+| a seed on a parked lane | put back, kept out of the grant (B-2) | the opening's wake |
+| an owed seed | stays owed | as the first row |
+| a reattach's delete | refused to the operator | the operator |
+| the failed-detach clear | the lane parks again | its probe backoff, doubling |
+| a reindex (control or owed) | owed, the lane restaging | the restage backoff, doubling |
+| a rebuild | owed (`rebuild_failed`); `retry_rebuilds` doesn't try while no slot is held | the restage backoff, and the opening |
+| a demotion or detach at a staging or a read again | the lane stands in (B-1) | the next opening's read |
+| the same at a restage | the lane stays restaging | the restage backoff |
+| a refused lane's detach | the lane stays as it was | its probe backoff: each refused probe asks again |
+| O20's restart of a rebuild | skipped | once per reindex control |
+
+The parked seed was the only refusal that left an item grantable at once.
+
+**S-1. The chokepoint is the type (`7732231c`).** The engine holds its sink as `slot::Plain`, which exposes only the requests that erase nothing and makes `Erasing`. The `Sink` inside is reachable from `slot.rs` alone. Both of the reviewer's bypasses (UFCS, a rebinding) fail to compile; the text test is gone.
+
+**S-2. The open window, as it is.** The check is per sink call, not per HTTP request. Inside `mark_seeded`, OpenSearch refreshes the whole new generation (seconds on a large index), swaps the aliases and drops other generations, then writes the marker and deletes the record. `begin_rebuild` and `demote` delete generations before their conditional writes; `detach` deletes after its record. For #490 to close: a sink call already begun when the stream ends, and the time before this process notices Postgres dropped its walsender. A lease must be checked before the call's last write.
+
+**S-3. The world's other process now removes records (`0b69d631`).**
+- New events: another process finishes a rebuild (its seed: the record and the gaps go), and reattaches a lane (the record goes, every drop since the detach kept as one gap).
+- Two composite events draw them often: B-1's path, and a gap over an owed seed (G8).
+- **What they found**, each pinned as its event list (a seed replays another list once the strategy changes) and fixed:
+  1. **A fresh gap cuts the backfill asked before it (`f3f28265`).** A completion granted as an ordinary seed after the reopen seeded over another process's gap; the owed-seed check alone missed it. A gap not there at the last read now cuts the outstanding backfill, and any read that leaves it cut asks it again (`40a9fb83`: a read returning early never asked, and the index stayed backfilling).
+  2. **A removed rebuild is over, in the run too (`f3f28265`, `ee7d5260`).** A read showing no rebuild where this process keeps one drops it in the engine; the run's copy kept it, so its attach opened the lane as a rebuild.
+  3. **A rebuild is ours only on its generation (`d7a39d84` test and port field, `ee7d5260`).** Attempts restart at one once a record is removed, so a later rebuild by another process read as this one's. `Detachment.marker_target` (the marker's `index.uuid` on OpenSearch) must match the generation this process fills, when both are known.
+  4. **A walk resumes from its checkpoint only where no gap is kept (`44dcebcd` tests, `019143b7` fix).** Pages before the mark may predate a drop the gap records, and the seed drops the gaps. With a gap kept, the walk starts from the first key.
+- The world cannot see a hot loop: B-2 stays a unit test.
+- **Runs, regression file set aside, fresh seeds, default 1024 cases, 3 runs each:**
+  - each gate removed: `mark_seeded` 3/3, `forget_detachment` 3/3, `reindex` 3/3, `begin_rebuild` 3/3, `demote` 3/3, `detach` 3/3;
+  - B-1 reverted, both halves: 3/3. (b) alone reverted: 3/3. (c) alone reverted: 1/3, by design: with (b) still in place the drops are recorded at the held read, so no fence hole is left, only a needless rebuild, which the B-1 unit tests catch.
+- **`PROPTEST_CASES=20000`, head `019143b7`, fixed fresh seeds (`PROPTEST_RNG_SEED`):**
+  - `gate_world` passes on `14218805350463452646`, `15928503808928437918`, `5384963679989482508`, `17358906531569235568`, `848786780898807453` (about 64 s each). Before the last two fixes, eight of ten seeds failed, which found holes 1 and 4.
+  - `gate_property` (which now reads `PROPTEST_CASES` too) passes on `16884303745865196505`, `14296209190638332650`, `4183942642373773587`, `16477602683537168056`, `5598586321357990883`.
+
+**Minors.**
+- **m-2:** `land_owed_seeds` no longer checks `current`. The read again runs first in the same pass, and a lane it leaves open was read then. `answers` stays as a second net: every path that cuts a backfill asks again at once, which drops the owed seed. `an_owed_seed_whose_target_changed_meanwhile_never_lands` pins the scenario, and passes without `answers` for that reason.
+- **m-3:** `an_owed_seed_meeting_a_blocked_old_generation_parks_its_lane`.
+- **m-4, not changed.** Reporting `on_index_rebuilding` after the reindex would break #379's order: the fence stops vouching before the sink moves its writes. It would change nothing either: a refused reindex is owed, and an owed reindex reports rebuilding by design (review of #470, 5).
+- **m-5:** the `rereads.rs` pointer, `reattach`'s doc, and the sixth section's two sentences, corrected in place.
+
+**The user-visible list, for the docs agent.** This replaces the sixth re-check's.
+- Writes during a reconnect or a stop: as on `main`.
+- **A backfill that completes while flusso doesn't hold the slot** is written in full; only marking it complete waits. If its lane was parked on that completion, it waits for the slot without retrying. Once the slot is back it completes with no second walk, unless another process left a detach record or a gap over the index meanwhile; then it runs again from the start. A backfill resumed from its checkpoint also starts from the beginning when a gap is kept over the index.
+- **An index whose records ask for something flusso may not do without the slot** (another process's rebuild to put back, a detach to record) shows `blocked`, "waiting for the slot: …". Nothing of it is written or dropped meanwhile. Once flusso holds the slot it detaches the index, or, when the other process finished or reattached it, simply goes on with nothing lost.
+- **An index flusso holds detached whose record another process removed** is detached again (recorded), and needs a reindex or a reattach as before.
+- **A seed blocked by the old generation (#479) that completed during an outage** shows the lane `blocked` with the block's reason.
+- **A reattach while the slot isn't held** is refused with the reason. A reindex, a rebuild and the clear of a failed detach wait for the slot; an owed rebuild begins as soon as it is back.
+- **A stop while flusso can't reconnect** releases a waiting index's changes for the next start; with a lane parked unsure of its detach, it waits its deadline and exits 1 naming the sink.
+- **Unchanged:** the fence, the read again after every opening, the confirmation hold.
+
+**Not proven.** The world is a model: no ingest engine, no stops or `--skip-backfill` events. A rebuild's identity rests on the marker naming its generation's target. No live runs yet: §10's checklist.
 
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
