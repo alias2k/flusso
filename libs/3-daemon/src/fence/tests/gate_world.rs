@@ -680,6 +680,14 @@ impl Sink for Store {
         if fails == Some(false) {
             return Err(Self::failed(false));
         }
+        // As OpenSearch: with no record there is nothing to demote, and
+        // nothing is written.
+        if !self.kept.lock().unwrap().contains_key(of) {
+            return match fails {
+                Some(landed) => Err(Self::failed(landed)),
+                None => Ok(()),
+            };
+        }
         self.walked.lock().unwrap().remove(of);
         // As OpenSearch: the marker moves (or is put back), written whole.
         self.gaps.lock().unwrap().remove(of);
@@ -2966,4 +2974,26 @@ fn an_own_write_of_unknown_outcome_never_stops_a_single_process() {
 fn an_owed_seed_never_lands_on_a_read_answered_under_an_earlier_stream() {
     let stops = replay(vec![Event::GapOverSlowRead { lane: 2 }]);
     assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// Found at 50,000 cases after the review of the cut: a read again that took
+/// its answer under one opening and returned under the next, after another
+/// process detached and reattached the lane, never demotes on that stale
+/// answer: a decision that rewrites the records waits for a read under the
+/// stream now held, which finds the change and stops.
+#[test]
+fn a_demotion_never_stands_on_records_read_under_an_earlier_stream() {
+    replay(vec![
+        Event::Open {
+            ok: false,
+            jump: 10,
+            drop: Some(2),
+            rebuild: true,
+        },
+        Event::Fails {
+            sink: 0,
+            lands: false,
+        },
+        Event::GapOverSlowRead { lane: 2 },
+    ]);
 }

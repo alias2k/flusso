@@ -458,6 +458,12 @@ impl KnownRecords {
         }
     }
 
+    /// The opening `index`'s records were last read or written under, if
+    /// any.
+    pub(crate) fn learnt_at(&self, index: &IndexName) -> Option<u64> {
+        self.lock().get(index).map(|known| known.at)
+    }
+
     /// Whether `index`'s records may keep a gap: one is known, or an own
     /// write may have left one. Nothing known yet: none known.
     pub(crate) fn keeps_gaps(&self, index: &IndexName) -> bool {
