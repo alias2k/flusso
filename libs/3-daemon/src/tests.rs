@@ -1655,7 +1655,11 @@ impl Sink for ChangedAfterTheFirstRead {
         Ok(true)
     }
 
-    async fn detachment(&self, _: &IndexMapping) -> sink::Result<sink::Detachment> {
+    async fn detachment(
+        &self,
+        _: &IndexMapping,
+        _: &sink::Stamp,
+    ) -> sink::Result<sink::Detachment> {
         if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
             return Ok(sink::Detachment::default());
         }

@@ -54,7 +54,8 @@ enum Record {
     NotKept,
     Fail,
     /// The record lands, and the call still fails (a timeout after
-    /// OpenSearch applied it).
+    /// OpenSearch applied it), and so does the read right after it: the
+    /// outcome stays unknown until a later read.
     FailAfterWriting,
     /// The record lands exactly as asked, then the call fails.
     LandsAsAskedThenFails,
@@ -128,9 +129,82 @@ struct Gate {
     rebuild_lands_then_fails: Mutex<bool>,
     /// A read takes its answer, then waits on `read_gate`.
     read_first: Mutex<bool>,
+    /// The next demotion fails before writing anything.
+    demote_fails: Mutex<bool>,
+    /// The last version this sink gave a record or a tombstone: every write
+    /// gets a new one, as OpenSearch's sequence numbers do.
+    versions: Mutex<u64>,
+    /// Where a forget left a tombstone in place of a record: its version
+    /// and stamp.
+    tombstones: Mutex<BTreeMap<String, (RecordVersion, Option<sink::Stamp>)>>,
+    /// The stamp of each index's marker's last stamped write.
+    marker_stamps: Mutex<BTreeMap<String, sink::Stamp>>,
 }
 
 impl Gate {
+    /// A version no write of this sink gave before (and never the `7:1` a
+    /// test writes by hand).
+    fn next_version(&self) -> RecordVersion {
+        let mut versions = self.versions.lock().unwrap();
+        *versions += 1;
+        RecordVersion::new(format!("{}:9", 100 + *versions))
+    }
+
+    /// `record` stored for `index` as a write stamped `stamp` leaves it: a
+    /// new version, the stamp kept, any tombstone replaced.
+    fn store(&self, index: &str, mut record: Detachment, stamp: Option<&sink::Stamp>) {
+        record.version = Some(self.next_version());
+        record.record_stamp = stamp.cloned();
+        self.tombstones.lock().unwrap().remove(index);
+        self.kept.lock().unwrap().insert(index.to_owned(), record);
+    }
+
+    /// The marker of `index` written by `stamp`.
+    fn stamp_marker(&self, index: &str, stamp: Option<&sink::Stamp>) {
+        let mut stamps = self.marker_stamps.lock().unwrap();
+        match stamp {
+            Some(stamp) => stamps.insert(index.to_owned(), stamp.clone()),
+            None => stamps.remove(index),
+        };
+    }
+
+    /// What a read of `index`'s records finds: the record or its
+    /// tombstone, the marker's gaps and stamp.
+    fn read_kept(&self, index: &str) -> Detachment {
+        let mut kept = self
+            .kept
+            .lock()
+            .unwrap()
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+        if kept.record.is_none()
+            && let Some((version, stamp)) = self.tombstones.lock().unwrap().get(index)
+        {
+            kept.version = Some(version.clone());
+            kept.record_stamp = stamp.clone();
+        }
+        kept.gaps = self
+            .marker_gaps
+            .lock()
+            .unwrap()
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+        kept.marker_stamp = self.marker_stamps.lock().unwrap().get(index).cloned();
+        kept
+    }
+
+    /// The record of `index` forgotten by `stamp`: a tombstone in its place.
+    fn tombstone(&self, index: &str, stamp: Option<&sink::Stamp>) {
+        self.kept.lock().unwrap().remove(index);
+        let version = self.next_version();
+        self.tombstones
+            .lock()
+            .unwrap()
+            .insert(index.to_owned(), (version, stamp.cloned()));
+    }
+
     fn dies_before(&self, call: &'static str) -> sink::Result<()> {
         if self.dead.lock().unwrap().contains(call) {
             return Err(SinkError::Write(format!("the process died before {call}")));
@@ -257,22 +331,13 @@ impl Sink for Gate {
         Ok(!self.unseeded.lock().unwrap().contains(index.as_ref()))
     }
 
-    async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
+    async fn detachment(
+        &self,
+        mapping: &IndexMapping,
+        _: &sink::Stamp,
+    ) -> sink::Result<Detachment> {
         if *self.read_first.lock().unwrap() {
-            let mut kept = self
-                .kept
-                .lock()
-                .unwrap()
-                .get(mapping.index.as_ref())
-                .cloned()
-                .unwrap_or_default();
-            kept.gaps = self
-                .marker_gaps
-                .lock()
-                .unwrap()
-                .get(mapping.index.as_ref())
-                .cloned()
-                .unwrap_or_default();
+            let kept = self.read_kept(mapping.index.as_ref());
             let gate = self.read_gate.lock().unwrap().clone();
             if let Some(gate) = gate {
                 gate.acquire().await.unwrap().forget();
@@ -301,27 +366,14 @@ impl Sink for Gate {
                 mapping.index
             )));
         }
-        let mut kept = self
-            .kept
-            .lock()
-            .unwrap()
-            .get(mapping.index.as_ref())
-            .cloned()
-            .unwrap_or_default();
-        kept.gaps = self
-            .marker_gaps
-            .lock()
-            .unwrap()
-            .get(mapping.index.as_ref())
-            .cloned()
-            .unwrap_or_default();
-        Ok(kept)
+        Ok(self.read_kept(mapping.index.as_ref()))
     }
 
     async fn record_gaps(
         &self,
         mapping: &IndexMapping,
         decide: &sink::DecideGaps<'_>,
+        stamp: &sink::Stamp,
     ) -> sink::Result<Vec<sink::Gap>> {
         self.dies_before("record_gap")?;
         let kept = self
@@ -342,6 +394,7 @@ impl Sink for Gate {
             .lock()
             .unwrap()
             .insert(mapping.index.to_string(), gaps.clone());
+        self.stamp_marker(mapping.index.as_ref(), Some(stamp));
         Ok(gaps)
     }
 
@@ -363,7 +416,7 @@ impl Sink for Gate {
             // Kept as a real sink keeps it: the next staging reads it
             // (review of step 3, S2).
             kind @ (Record::Kept | Record::LandsAsAskedThenFails) => {
-                let mut kept = self.kept.lock().unwrap();
+                let kept = self.kept.lock().unwrap().clone();
                 let attempts = kept
                     .get(mapping.index.as_ref())
                     .and_then(|kept| kept.attempts);
@@ -380,8 +433,16 @@ impl Sink for Gate {
                     version(),
                 );
                 record.attempts = attempts;
-                record.through = detach.through.clone();
-                kept.insert(mapping.index.to_string(), record);
+                let earlier = kept
+                    .get(mapping.index.as_ref())
+                    .and_then(|kept| kept.through.clone());
+                // As the adapter's `record_body`: a detach with no `through`
+                // keeps the record's.
+                record.through = detach.through.clone().or(earlier);
+                if !detach.live_only {
+                    self.stamp_marker(mapping.index.as_ref(), detach.stamp.as_ref());
+                }
+                self.store(mapping.index.as_ref(), record, detach.stamp.as_ref());
                 if matches!(kind, Record::LandsAsAskedThenFails) {
                     return Err(SinkError::Write(
                         "the record landed, the call timed out".to_owned(),
@@ -394,29 +455,38 @@ impl Sink for Gate {
                 "the meta index refused the record".to_owned(),
             )),
             Record::FailAfterWriting => {
-                self.kept.lock().unwrap().insert(
-                    mapping.index.to_string(),
+                self.stamp_marker(mapping.index.as_ref(), detach.stamp.as_ref());
+                self.store(
+                    mapping.index.as_ref(),
                     Detachment::recorded(
                         DetachRecord::Detached { live_only: false },
                         Some(MarkerAt::Newer { seeded: false }),
                         version(),
                     ),
+                    detach.stamp.as_ref(),
                 );
+                *self.reads_fail.lock().unwrap() += 1;
                 Err(SinkError::Write("the record write timed out".to_owned()))
             }
         }
     }
 
-    async fn begin_rebuild(&self, mapping: &IndexMapping) -> sink::Result<u64> {
+    async fn begin_rebuild(
+        &self,
+        mapping: &IndexMapping,
+        stamp: &sink::Stamp,
+    ) -> sink::Result<u64> {
         self.dies_before("begin_rebuild")?;
-        let mut kept = self.kept.lock().unwrap();
-        let Some(record) = kept.get_mut(mapping.index.as_ref()) else {
+        let index = mapping.index.as_ref();
+        let Some(mut record) = self.kept.lock().unwrap().get(index).cloned() else {
             return Err(SinkError::Write("no detach record".to_owned()));
         };
         let attempts = record.attempts.unwrap_or(0) + 1;
         record.record = Some(DetachRecord::Rebuilding { live_only: false });
         record.attempts = Some(attempts);
         record.marker = Some(MarkerAt::Newer { seeded: false });
+        self.stamp_marker(index, Some(stamp));
+        self.store(index, record, Some(stamp));
         self.rebuilds
             .lock()
             .unwrap()
@@ -452,15 +522,29 @@ impl Sink for Gate {
         })
     }
 
-    async fn demote(&self, mapping: &IndexMapping, live_only: bool) -> sink::Result<()> {
+    async fn demote(
+        &self,
+        mapping: &IndexMapping,
+        live_only: bool,
+        stamp: &sink::Stamp,
+    ) -> sink::Result<()> {
+        if std::mem::take(&mut *self.demote_fails.lock().unwrap()) {
+            return Err(SinkError::Write(
+                "the demotion was refused (nothing written)".to_owned(),
+            ));
+        }
+        let index = mapping.index.as_ref();
         // A demotion forgets the walk, as the real sink's does.
-        self.walked.lock().unwrap().remove(mapping.index.as_ref());
-        if let Some(record) = self.kept.lock().unwrap().get_mut(mapping.index.as_ref()) {
+        self.walked.lock().unwrap().remove(index);
+        let record = self.kept.lock().unwrap().get(index).cloned();
+        if let Some(mut record) = record {
             record.record = Some(DetachRecord::Detached { live_only });
             // R14: live only, the marker is back on the generation reads see.
             if live_only {
                 record.marker = Some(MarkerAt::Serving { seeded: true });
             }
+            self.stamp_marker(index, Some(stamp));
+            self.store(index, record, Some(stamp));
         }
         self.demoted
             .lock()
@@ -469,15 +553,20 @@ impl Sink for Gate {
         Ok(())
     }
 
-    async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
+    async fn reindex_as(&self, mapping: &IndexMapping, stamp: &sink::Stamp) -> sink::Result<()> {
         self.reindexed
             .lock()
             .unwrap()
             .push(mapping.index.to_string());
+        self.marker_gaps
+            .lock()
+            .unwrap()
+            .remove(mapping.index.as_ref());
+        self.stamp_marker(mapping.index.as_ref(), Some(stamp));
         Ok(())
     }
 
-    async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
+    async fn mark_seeded_as(&self, index: &IndexName, stamp: &sink::Stamp) -> sink::Result<()> {
         if *self.retire_blocked.lock().unwrap() {
             return Err(SinkError::RetireBlocked {
                 new: format!("{index}_2"),
@@ -486,13 +575,16 @@ impl Sink for Gate {
                 deletable: false,
             });
         }
-        // r4: the seed deletes a finished rebuild's record.
+        // The marker written whole: no gap, this seed's stamp.
+        self.marker_gaps.lock().unwrap().remove(index.as_ref());
+        self.stamp_marker(index.as_ref(), Some(stamp));
+        // r4: the seed forgets a finished rebuild's record.
         if *self.seed_keeps_record.lock().unwrap() {
             if let Some(kept) = self.kept.lock().unwrap().get_mut(index.as_ref()) {
                 kept.marker = Some(MarkerAt::Newer { seeded: true });
             }
-        } else {
-            self.kept.lock().unwrap().remove(index.as_ref());
+        } else if self.kept.lock().unwrap().contains_key(index.as_ref()) {
+            self.tombstone(index.as_ref(), Some(stamp));
         }
         self.seeded.lock().unwrap().push(index.to_string());
         Ok(())
@@ -502,10 +594,19 @@ impl Sink for Gate {
         &self,
         mapping: &IndexMapping,
         version: &RecordVersion,
+        stamp: &sink::Stamp,
     ) -> sink::Result<()> {
         self.dies_before("forget_detachment")?;
+        let index = mapping.index.as_ref();
+        // Conditional on the version read, as the adapter's tombstone is.
+        if self.read_kept(index).version.as_ref() != Some(version) {
+            return Err(SinkError::Write(format!(
+                "{index}: version conflict, the record changed since {}",
+                version.as_str()
+            )));
+        }
         if *self.forget_lands_then_fails.lock().unwrap() {
-            self.kept.lock().unwrap().remove(mapping.index.as_ref());
+            self.tombstone(index, Some(stamp));
             *self.reads_fail.lock().unwrap() =
                 std::mem::take(&mut *self.reads_fail_after_forget.lock().unwrap());
             return Err(SinkError::Write("the delete timed out".to_owned()));
@@ -514,7 +615,7 @@ impl Sink for Gate {
             .lock()
             .unwrap()
             .push(format!("{}@{}", mapping.index, version.as_str()));
-        self.kept.lock().unwrap().remove(mapping.index.as_ref());
+        self.tombstone(index, Some(stamp));
         Ok(())
     }
 }
@@ -1154,6 +1255,13 @@ fn version() -> Option<RecordVersion> {
     Some(RecordVersion::new("7:1"))
 }
 
+/// `record` as another process's write leaves it: its own stamp, a new
+/// version.
+fn by_another_process(record: &mut Detachment) {
+    record.record_stamp = Some(sink::Stamp::new("another process", 1));
+    record.version = Some(RecordVersion::new("9:1"));
+}
+
 /// What a staging does with each record and marker pair (§4): detached
 /// indexes are neither ensured nor backfilled and their lanes leave the
 /// minimum; a record a rebuild outlived is deleted; a record whose marker is
@@ -1448,7 +1556,7 @@ async fn a_record_that_landed_although_its_call_failed_goes_before_the_lane_open
     .await;
     rig.sink.block(&users(), false);
     eventually("the probe lands", || rig.applied(&users()) == through(1)).await;
-    assert_eq!(*rig.sink.forgotten.lock().unwrap(), ["users@7:1"]);
+    assert_eq!(rig.sink.forgotten.lock().unwrap().len(), 1);
     assert!(rig.sink.kept.lock().unwrap().is_empty());
     assert!(engine.lane_health(&lane(users())).is_open());
     task.abort();
@@ -2048,7 +2156,7 @@ async fn a_rebuild_restart_whose_detach_failed_writes_nothing_onto_its_record() 
         .records
         .lock()
         .unwrap()
-        .push_back(Record::FailAfterWriting);
+        .push_back(Record::LandsAsAskedThenFails);
     control
         .send(SinkControl::Reindex {
             indexes: vec![users()],
@@ -3632,6 +3740,7 @@ async fn a_rebuild_another_process_began_since_ours_stops_the_deployment() {
     .await;
     if let Some(record) = rig.sink.kept.lock().unwrap().get_mut("users") {
         record.attempts = Some(2);
+        by_another_process(record);
     }
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     stops(task).await;
@@ -3657,7 +3766,7 @@ async fn an_identical_record_written_again_by_another_process_after_our_rebuild_
     .await;
     rig.rereads.closed();
     if let Some(record) = rig.sink.kept.lock().unwrap().get_mut("users") {
-        record.version = Some(RecordVersion::new("9:1"));
+        by_another_process(record);
     }
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     stops(task).await;
@@ -5286,5 +5395,165 @@ async fn a_fresh_process_converges_over_lost_outcomes() {
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     tokio::time::sleep(Duration::from_secs(30)).await;
     assert!(!task.is_finished(), "{:?}", task.await);
+    task.abort();
+}
+
+/// The review of round 10, B-1: O20's restart detaches a parked rebuild with
+/// no `through`; the adapter keeps the record's. The detach returns `Ok`
+/// while the stream ends during the call, so no read back. One process, no
+/// other: the next opening doesn't stop it.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_restart_detach_with_no_through_never_stops_one_process() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task, control, attempt) = rebuilding_on_reindex(&rig).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let _backfill = next_request(&rig).await;
+    rig.sink.block(&users(), true);
+    rig.live(&users(), 2, 2).await;
+    eventually("the rebuilding lane parks", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked { .. }
+        )
+    })
+    .await;
+    *rig.sink.detach_takes.lock().unwrap() = Some(Duration::from_secs(5));
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // The stream ends while the detach is in flight.
+    rig.rereads.closed();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    *rig.sink.detach_takes.lock().unwrap() = None;
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(!task.is_finished(), "one process stopped: {:?}", task.await);
+    task.abort();
+}
+
+/// The review of round 10, S-2: on a `backfill = false` sink, staging finds a record
+/// written while the sink could rebuild and demotes it to live only first.
+/// The demotion fails having written nothing. Its read back finds the record
+/// `Detached { live_only: false }`, as before the call: that is not the
+/// demotion having landed.
+#[tokio::test(start_paused = true)]
+async fn a_failed_live_only_demotion_is_not_taken_as_done() {
+    let rig = Rig::new(64);
+    let mut record = Detachment::recorded(
+        DetachRecord::Detached { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    );
+    record.through = Some("3".to_owned());
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), record);
+    *rig.sink.demote_fails.lock().unwrap() = true;
+    let engine = rig.live_only_engine();
+    let _ = engine.stage(Continuity::Resumed).await;
+    let kept = rig.sink.kept.lock().unwrap().get("users").cloned().unwrap();
+    let health = engine.lane_health(&lane(users()));
+    assert!(
+        !(health.is_detached() && kept.record == Some(DetachRecord::Detached { live_only: false })),
+        "the failed demotion was taken as done: the lane is detached under a record that still says it can rebuild"
+    );
+}
+
+/// The review of round 10, B-2: this process's detach of `users` fails with nothing
+/// landed, the stream ending during the call (no read back). Another process
+/// takes the slot, meets the same block at the same place and detaches
+/// `users` from the same `through` (its own record, another version), drops
+/// what it can't write and confirms past it. This process holds the slot
+/// again: the record is another process's change and must stop the
+/// deployment, never be deleted by the failed-detach clear.
+#[tokio::test(start_paused = true)]
+async fn anothers_detach_from_the_same_place_is_never_taken_for_ours() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.sink.block(&users(), true);
+    rig.sink.records.lock().unwrap().push_back(Record::Fail);
+    *rig.sink.detach_takes.lock().unwrap() = Some(Duration::from_secs(5));
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 1, 1).await;
+    eventually("the detach is sent", || !rig.sink.detaches().is_empty()).await;
+    rig.rereads.closed();
+    let through = rig.sink.detaches()[0].1.through.clone();
+    // Another process's detach, from the same place, another version,
+    // landing while this one's call is still out.
+    let mut theirs = Detachment::recorded(
+        DetachRecord::Detached { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        Some(RecordVersion::new("42:1")),
+    );
+    theirs.through = through.clone();
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), theirs);
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    *rig.sink.detach_takes.lock().unwrap() = None;
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.sink.block(&users(), false);
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    let forgotten = rig.sink.forgotten.lock().unwrap().clone();
+    let health = engine.lane_health(&lane(users()));
+    let done = task.is_finished();
+    if done {
+        assert!(
+            stopped(&task.await.unwrap()),
+            "the run stops on another process's change"
+        );
+        assert!(forgotten.is_empty());
+        return;
+    }
+    assert!(
+        forgotten.is_empty(),
+        "another process's detach record was deleted as this process's own: {forgotten:?}, lane {health:?}"
+    );
+    task.abort();
+}
+
+/// The review of round 10, S-1: an owed rebuild retried for hours while the
+/// sink refuses it, each try's read back failing too. Nothing of those tries
+/// landed: the records are as first read, and a reconnect doesn't stop one
+/// process.
+#[tokio::test(start_paused = true)]
+async fn many_failed_rebuild_tries_never_stop_one_process() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task) = detached_on_a_block(&rig).await;
+    rig.sink.block(&users(), false);
+    task.abort();
+    let _ = task.await;
+    rig.sink.dead.lock().unwrap().insert("begin_rebuild");
+    *rig.sink.reads_fail.lock().unwrap() = 1_000_000;
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2 * 3600)).await;
+    rig.sink.dead.lock().unwrap().clear();
+    *rig.sink.reads_fail.lock().unwrap() = 0;
+    rig.rereads.closed();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(!task.is_finished(), "one process stopped: {:?}", task.await);
     task.abort();
 }

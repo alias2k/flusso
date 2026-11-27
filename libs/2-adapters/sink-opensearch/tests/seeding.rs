@@ -116,6 +116,11 @@ fn sink(base_url: &str) -> Buffered {
     Buffered::new(OpensearchSink::from_config(&name, &config).unwrap())
 }
 
+/// The stamp the record tests write with.
+fn stamp() -> sink::Stamp {
+    sink::Stamp::new("seeding", 1)
+}
+
 fn mapping(logical: &str, hash: u32) -> IndexMapping {
     let field = |name: &str, ty: MappingType| ResolvedField {
         name: FieldName::try_new(name).unwrap(),
@@ -1071,7 +1076,7 @@ async fn staging_reads_the_records_in_one_request_then_asks_what_it_asked_before
     let mapping = mapping("users", 1);
 
     let reading = prefixed(&proxy.url, "a_");
-    let read = reading.detachment(&mapping).await.unwrap();
+    let read = reading.detachment(&mapping, &stamp()).await.unwrap();
     assert!(read.is_empty(), "nothing kept on a fresh cluster: {read:?}");
     reading.ensure_index(&mapping).await.unwrap();
     reading.seeding(&mapping.index).await.unwrap();
@@ -1090,7 +1095,10 @@ async fn staging_reads_the_records_in_one_request_then_asks_what_it_asked_before
     );
 
     // Once the meta index exists, nothing kept still reads as nothing kept.
-    let again = prefixed(&base, "a_").detachment(&mapping).await.unwrap();
+    let again = prefixed(&base, "a_")
+        .detachment(&mapping, &stamp())
+        .await
+        .unwrap();
     assert!(again.is_empty(), "{again:?}");
 }
 
@@ -1142,7 +1150,7 @@ async fn a_record_written_by_hand_is_read_and_left_as_it_is() {
     let written = meta_documents(&client, &base, &ids).await;
 
     let restart = sink(&base);
-    let read = restart.detachment(&mapping).await.unwrap();
+    let read = restart.detachment(&mapping, &stamp()).await.unwrap();
     assert_eq!(
         read.record,
         Some(sink::DetachRecord::Detached { live_only: false })
@@ -1168,11 +1176,106 @@ async fn a_record_written_by_hand_is_read_and_left_as_it_is() {
         serde_json::json!({ "state": "frozen" }),
     )
     .await;
-    let read = sink(&base).detachment(&mapping).await.unwrap();
+    let read = sink(&base).detachment(&mapping, &stamp()).await.unwrap();
     assert!(
         matches!(&read.record, Some(sink::DetachRecord::Unreadable { reason }) if reason.contains("frozen")),
         "{read:?}"
     );
+}
+
+/// What the stamps of round 11 rely on, on a real OpenSearch (the adapter's
+/// unit tests pin the requests; this pins the answers):
+/// - a stamped detach and a stamped forget leave each stamp readable, the
+///   forget as a tombstone that reads as no record, with its own version;
+/// - a forget at a version the tombstone replaced conflicts, never deletes;
+/// - a detach over the tombstone replaces it on its version;
+/// - the checkpoint's and the uuid's partial `_update`s keep the marker's
+///   stamp, and the gaps' `_update` replaces it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn who_wrote_each_record_survives_every_write_as_opensearch_answers_it() {
+    let (_container, base) = start_opensearch().await;
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let mine = sink::Stamp::new("mine", 1);
+    let theirs = sink::Stamp::new("theirs", 7);
+
+    let first = sink(&base);
+    first.ensure_index_as(&mapping, &mine).await.unwrap();
+    write(&first, &index, &[1]).await;
+    first.mark_seeded_as(&index, &mine).await.unwrap();
+    let read = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(read.marker_stamp, Some(mine.clone()), "{read:?}");
+
+    first.record_walked(&index, "k").await.unwrap();
+    let read = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(
+        read.marker_stamp,
+        Some(mine.clone()),
+        "a checkpoint keeps the stamp"
+    );
+
+    let detach = sink::Detach::new("blocked")
+        .live_only(true)
+        .through(Some("0/10".to_owned()))
+        .stamp(mine.clone());
+    first.detach(&mapping, &detach).await.unwrap();
+    let detached = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(detached.record_stamp, Some(mine.clone()));
+
+    first
+        .record_gaps(
+            &mapping,
+            &|_| {
+                Some(vec![sink::Gap {
+                    from: Some("0/10".to_owned()),
+                    to: None,
+                }])
+            },
+            &theirs,
+        )
+        .await
+        .unwrap();
+    let read = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(
+        read.marker_stamp,
+        Some(theirs.clone()),
+        "the gaps' write stamps"
+    );
+
+    let version = detached.version.clone().unwrap();
+    first
+        .forget_detachment(&mapping, &version, &theirs)
+        .await
+        .unwrap();
+    let forgotten = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(forgotten.record, None, "a tombstone is no record");
+    assert_eq!(forgotten.record_stamp, Some(theirs.clone()));
+    assert!(forgotten.version.is_some() && forgotten.version != Some(version.clone()));
+    assert!(
+        first
+            .forget_detachment(&mapping, &version, &mine)
+            .await
+            .is_err(),
+        "a forget at the replaced version conflicts"
+    );
+    assert_eq!(
+        first
+            .detachment(&mapping, &mine)
+            .await
+            .unwrap()
+            .record_stamp,
+        Some(theirs.clone()),
+        "and leaves the tombstone as it was"
+    );
+
+    first.detach(&mapping, &detach).await.unwrap();
+    let again = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(
+        again.record,
+        Some(sink::DetachRecord::Detached { live_only: true })
+    );
+    assert_eq!(again.record_stamp, Some(mine.clone()));
 }
 
 /// Each of `ids` in the meta index: its sequence number and source.
@@ -1208,7 +1311,7 @@ async fn a_refused_read_is_never_nothing_kept() {
 
     proxy.refuse(|seen, _| seen.path.contains("_mget"));
     let error = sink(&proxy.url)
-        .detachment(&mapping)
+        .detachment(&mapping, &stamp())
         .await
         .expect_err("a refused read fails");
     assert!(error.to_string().contains("503"), "{error}");
@@ -1258,7 +1361,7 @@ async fn a_half_detached_marker_is_put_back_and_the_old_generation_serves() {
     assert!(status.is_success(), "moving the marker returned {status}");
 
     let restart = sink(&base);
-    let read = restart.detachment(&mapping).await.unwrap();
+    let read = restart.detachment(&mapping, &stamp()).await.unwrap();
     assert_eq!(read.restored, Some(1));
     assert_eq!(marker(&client, &base, &hash_alias).await, (1, true));
     let source: Value = client
@@ -1283,7 +1386,11 @@ async fn a_half_detached_marker_is_put_back_and_the_old_generation_serves() {
     );
     assert_eq!(alias_targets(&client, &base, &hash_alias).await, [gen1]);
     assert!(
-        restart.detachment(&mapping).await.unwrap().is_empty(),
+        restart
+            .detachment(&mapping, &stamp())
+            .await
+            .unwrap()
+            .is_empty(),
         "nothing is left to put back"
     );
 }

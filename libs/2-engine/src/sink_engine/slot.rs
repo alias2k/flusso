@@ -27,12 +27,13 @@
 //! wall covers the engine crate: the daemon moves `SinkParts.sink` into
 //! `SinkEngine::new` and the CLI keeps no clone of it.
 //!
-//! Every request that writes a record, a gap or the marker also tells
-//! [`KnownRecords`] what it left (`known`), or, when its call failed, every
-//! state it may have left; a write of the record, or one that failed, is
-//! then read back while the slot is still held, which settles it (the
-//! review of the cut). The gate keeps this process from erasing another's
-//! record, and `known` tells it when another process changed one, which
+//! Every request that writes a record, a gap or the marker carries a
+//! [`Stamp`](sink::Stamp) from [`KnownRecords`], which the sink stores in
+//! what it writes (the review of round 10). A write of the record is then
+//! read back while the slot is still held; a call that failed counts as
+//! landed exactly when the record read back carries its own stamp. The gate
+//! keeps this process from erasing another's record, and `known` tells it,
+//! by who wrote what it reads, when another process changed one, which
 //! stops the deployment (the cut of 2026-11-27).
 //!
 //! Every request of the [`Sink`] trait that writes a record, the seed marker
@@ -41,9 +42,9 @@
 //!
 //! | Request (OpenSearch requests) | Without the slot |
 //! | --- | --- |
-//! | `mark_seeded` (aliases swapped, every other generation deleted, the marker written whole, a finished rebuild's record deleted **best effort**: a failed delete only warns, and the call returns `Ok`) | gated: the marker erases any record and the gaps. Read back while held, a record the delete left is deleted here at once (`forget_finished`, the review of the cut, B-1) |
-//! | `forget_detachment` (`DELETE detach:…` on the version read): the failed-detach clear, a reattach | gated; a reattach also writes its gap first, which stays and is reused when asked again |
-//! | `forget_detachment` of a rebuild a newer seeded generation finished (`forget_finished`) | safe: the record is obsolete, and the delete is conditional on the version read, so any write since fails it |
+//! | `mark_seeded` (aliases swapped, every other generation deleted, the marker written whole, a finished rebuild's record forgotten **best effort**: a failed forget only warns, and the call returns `Ok`) | gated: the marker erases any record and the gaps. Read back while held, a record the forget left is forgotten here at once (`forget_finished`, the review of the cut, B-1) |
+//! | `forget_detachment` (a tombstone over `detach:…`, on the version read): the failed-detach clear (only a record this process wrote), a reattach | gated; a reattach also writes its gap first, which stays and is reused when asked again |
+//! | `forget_detachment` of a rebuild a newer seeded generation finished (`forget_finished`) | safe: the record is obsolete, and the tombstone is conditional on the version read, so any write since fails it |
 //! | `reindex` (the marker moved to a new generation) | gated: the reindex waits, its lane restaging |
 //! | `reindex` at a `Fresh` source's staging (`reindex_at_a_fresh_start`) | safe: it runs before `prepare` creates the slot (#120), so no slot exists for another process to hold |
 //! | `begin_rebuild` (every generation but the serving one deleted, the marker moved, the record rewritten) | gated: the rebuild is owed |
@@ -68,19 +69,19 @@ use std::sync::Arc;
 use kernel::{Envelope, IndexMapping, IndexName};
 use sink::{
     CaughtUp, DecideGaps, Detach, DetachRecord, Detachment, Ensured, Gap, MarkerAt, RecordVersion,
-    Recorded, Seeding, Sink, WriteReport,
+    Recorded, Seeding, Sink, Stamp, WriteReport,
 };
 
-use super::known::{Change, KnownRecords, Wrote};
+use super::known::{Change, KnownRecords};
 use crate::Rereads;
 
 /// The sink as the engine holds it: only the requests that erase or loosen
 /// no record. The erasing ones exist only on [`Erasing`], made from this,
 /// and the `Sink` inside is reachable from this module alone: a call that
 /// skips the slot's check doesn't compile (the seventh re-check, S-1).
-/// Every request that writes a record or the marker also tells
-/// [`KnownRecords`] what it left, so this process's own writes are never
-/// taken for another's (`known`).
+/// Every request that writes a record or the marker is stamped by
+/// [`KnownRecords`], so this process's own writes are never taken for
+/// another's (`known`).
 #[derive(Debug, Clone)]
 pub(super) struct Plain(Arc<dyn Sink>, Arc<KnownRecords>);
 
@@ -105,16 +106,9 @@ impl Plain {
         }
     }
 
-    /// Ensure `mapping`'s index; one created writes the marker whole. A
-    /// failed ensure may have written it.
+    /// Ensure `mapping`'s index; a marker it writes is stamped.
     pub(super) async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<Ensured> {
-        let ensured = self.0.ensure_index(mapping).await;
-        match &ensured {
-            Ok(ensured) if ensured.created => self.1.wrote(&mapping.index, &Wrote::Marker, None),
-            Ok(_) => {}
-            Err(_) => self.1.unsure(&mapping.index, &Wrote::Marker, None),
-        }
-        ensured
+        self.0.ensure_index_as(mapping, &self.1.stamp()).await
     }
 
     pub(super) async fn write_parts(
@@ -142,13 +136,13 @@ impl Plain {
     }
 
     /// The records' read; it may put a half-moved marker back, on the
-    /// version read (the table above: safe).
+    /// version read, stamped (the table above: safe).
     pub(super) async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
-        self.0.detachment(mapping).await
+        self.0.detachment(mapping, &self.1.stamp()).await
     }
 
-    /// The gaps kept with the marker as `decide` says. A failed write may
-    /// have landed the list it was deciding.
+    /// The gaps kept with the marker as `decide` says, stamped. A failed
+    /// write may have landed the list it was deciding.
     pub(super) async fn record_gaps(
         &self,
         mapping: &IndexMapping,
@@ -162,16 +156,18 @@ impl Plain {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = new.clone();
             new
         };
-        let gaps = self.0.record_gaps(mapping, &deciding).await;
+        let gaps = self
+            .0
+            .record_gaps(mapping, &deciding, &self.1.stamp())
+            .await;
         match &gaps {
-            Ok(gaps) => self
-                .1
-                .wrote(&mapping.index, &Wrote::Gaps(Some(gaps.clone())), None),
+            Ok(gaps) => self.1.wrote_gaps(&mapping.index, gaps, true),
             Err(_) => {
                 let decided = decided
                     .into_inner()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                self.1.unsure(&mapping.index, &Wrote::Gaps(decided), None);
+                self.1
+                    .wrote_gaps(&mapping.index, &decided.unwrap_or_default(), false);
             }
         }
         gaps
@@ -216,65 +212,50 @@ impl std::fmt::Debug for Erasing<'_> {
 }
 
 impl Erasing<'_> {
-    /// `result`, of an own write that leaves `wrote` on `mapping`'s index
-    /// when it returns `Ok`, told to [`KnownRecords`]: what it leaves, or,
-    /// when it failed, every state it may have left. A write of the record,
-    /// or one that failed, is then read back while the slot is still held,
-    /// which settles it; a marker write that returned `Ok` keeps the
-    /// record's version and needs no read.
-    async fn told<T>(
-        &self,
-        mapping: &IndexMapping,
-        wrote: Wrote,
-        result: sink::Result<T>,
-    ) -> sink::Result<T> {
-        self.settled(mapping, wrote, result, |_| None).await
-    }
-
-    /// [`told`](Self::told), and a failed call whose read back (the slot
-    /// held throughout, so nothing but this process wrote) shows what the
-    /// write leaves, `landed`, is the write having landed: `Ok`, so the
-    /// caller goes on as after a success (the review of the cut, B-2).
+    /// `result`, of an own write of `mapping`'s record stamped `stamp`, read
+    /// back while the slot is still held. A failed call counts as landed
+    /// exactly when the record read back carries `stamp` (no other process
+    /// writes it): `Ok` with what `landed` reads off it, so the caller goes
+    /// on as after a success (the review of the cut, B-2; of round 10,
+    /// S-2).
     async fn settled<T>(
         &self,
         mapping: &IndexMapping,
-        wrote: Wrote,
+        stamp: &Stamp,
         result: sink::Result<T>,
-        landed: impl Fn(&Detachment) -> Option<T>,
+        landed: impl FnOnce(&Detachment) -> Option<T>,
     ) -> sink::Result<T> {
-        let at = Some(self.rereads.read_begins());
-        match &result {
-            Ok(_) => self.known.wrote(&mapping.index, &wrote, at),
-            Err(_) => self.known.unsure(&mapping.index, &wrote, at),
-        }
-        if result.is_ok() && matches!(wrote, Wrote::Marker) {
-            return result;
-        }
+        self.known
+            .wrote_record(&mapping.index, self.rereads.read_begins());
         let found = self.read_back(mapping).await;
         match (result, found) {
-            (Err(error), Some(found)) => match landed(&found) {
-                Some(value) => {
-                    tracing::warn!(index = %mapping.index, %error, "the call failed, yet its write landed (read back while this process holds the slot): taken as done");
-                    Ok(value)
+            (Err(error), Some(found)) if found.record_stamp.as_ref() == Some(stamp) => {
+                match landed(&found) {
+                    Some(value) => {
+                        tracing::warn!(index = %mapping.index, %error, "the call failed, yet its write landed (its own stamp read back while this process holds the slot): taken as done");
+                        Ok(value)
+                    }
+                    None => Err(error),
                 }
-                None => Err(error),
-            },
+            }
             (result, _) => result,
         }
     }
 
     /// Right after an own write, the records read back while the slot is
     /// still held. No other process writes while this one holds the slot,
-    /// so what the read finds is this process's own write: it settles a
-    /// write whose outcome was unknown, and learns the record's version, so
-    /// an identical record another process writes later is told apart. A
-    /// stream that ended meanwhile, or a failed read, leaves what was known
-    /// (a call in flight as the stream ends: #490). The records read, when
-    /// held throughout.
+    /// so what the read finds is adopted: it learns the record's version
+    /// and stamp. A stream that ended meanwhile, or a failed read, leaves
+    /// what was known; the next read judges by the stamps (a call in flight
+    /// as the stream ends: #490). The records read, when held throughout.
     async fn read_back(&self, mapping: &IndexMapping) -> Option<Detachment> {
         let at = self.rereads.read_begins();
         self.held().ok()?;
-        let found = self.sink.detachment(mapping).await.ok()?;
+        let found = self
+            .sink
+            .detachment(mapping, &self.known.stamp())
+            .await
+            .ok()?;
         let held_throughout = self.rereads.held_or_alone() && self.rereads.read_begins() == at;
         if !held_throughout {
             return None;
@@ -313,7 +294,11 @@ impl Erasing<'_> {
             .iter()
             .find(|mapping| &mapping.index == index)
             .ok_or(NotHeld)?;
-        let found = self.sink.detachment(mapping).await.map_err(|_| NotHeld)?;
+        let found = self
+            .sink
+            .detachment(mapping, &self.known.stamp())
+            .await
+            .map_err(|_| NotHeld)?;
         if !(self.rereads.held_or_alone() && self.rereads.read_begins() == now) {
             return Err(NotHeld);
         }
@@ -327,20 +312,16 @@ impl Erasing<'_> {
     }
 
     /// Seed `index`: its marker is written whole, erasing any gap; a
-    /// finished rebuild's record is deleted best effort. Read back while
-    /// held, a record the delete left is deleted again here, as a staging
+    /// finished rebuild's record is forgotten best effort. Read back while
+    /// held, a record the forget left is forgotten again here, as a staging
     /// would (the review of the cut, B-1).
     pub(super) async fn mark_seeded(&self, index: &IndexName) -> Result<sink::Result<()>, NotHeld> {
         self.held_fresh(index).await?;
-        let seeded = self.sink.mark_seeded(index).await;
+        let seeded = self.sink.mark_seeded_as(index, &self.known.stamp()).await;
         let Some(mapping) = self.mappings.iter().find(|mapping| &mapping.index == index) else {
             return Ok(seeded);
         };
-        let at = Some(self.rereads.read_begins());
-        match &seeded {
-            Ok(()) => self.known.wrote(index, &Wrote::Seed, at),
-            Err(_) => self.known.unsure(index, &Wrote::Seed, at),
-        }
+        self.known.wrote_record(index, self.rereads.read_begins());
         if let Some(found) = self.read_back(mapping).await
             && seeded.is_ok()
             && let (
@@ -349,48 +330,45 @@ impl Erasing<'_> {
                 Some(version),
             ) = (&found.record, found.marker, &found.version)
         {
-            tracing::warn!(%index, "the seed left the finished rebuild's detach record (its delete failed); deleting it now");
+            tracing::warn!(%index, "the seed left the finished rebuild's detach record (its forget failed); forgetting it now");
             let _ = self.forget_finished(mapping, version).await;
         }
         Ok(seeded)
     }
 
-    /// Delete the detach record read at `version`.
+    /// Forget the detach record read at `version`: a tombstone, stamped.
     pub(super) async fn forget_detachment(
         &self,
         mapping: &IndexMapping,
         version: &RecordVersion,
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held_fresh(&mapping.index).await?;
-        let forgotten = self.sink.forget_detachment(mapping, version).await;
-        Ok(self
-            .settled(mapping, Wrote::Forget, forgotten, |found| {
-                found.record.is_none().then_some(())
-            })
-            .await)
+        let stamp = self.known.stamp();
+        let forgotten = self.sink.forget_detachment(mapping, version, &stamp).await;
+        Ok(self.settled(mapping, &stamp, forgotten, |_| Some(())).await)
     }
 
-    /// Delete the record of a rebuild a newer seeded generation finished.
-    /// Ungated: the record is obsolete, and the delete is conditional on the
-    /// version read, so any write since fails it.
+    /// Forget the record of a rebuild a newer seeded generation finished.
+    /// Ungated: the record is obsolete, and the tombstone is conditional on
+    /// the version read, so any write since fails it.
     pub(super) async fn forget_finished(
         &self,
         mapping: &IndexMapping,
         version: &RecordVersion,
     ) -> sink::Result<()> {
-        let forgotten = self.sink.forget_detachment(mapping, version).await;
-        self.told(mapping, Wrote::Forget, forgotten).await
+        let stamp = self.known.stamp();
+        let forgotten = self.sink.forget_detachment(mapping, version, &stamp).await;
+        self.settled(mapping, &stamp, forgotten, |_| Some(())).await
     }
 
     /// Move `mapping`'s index to a new generation; its marker is written
-    /// whole, for the ensure that follows to create its generation.
+    /// whole, stamped, for the ensure that follows to create its generation.
     pub(super) async fn reindex(
         &self,
         mapping: &IndexMapping,
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held_fresh(&mapping.index).await?;
-        let reindexed = self.sink.reindex(mapping).await;
-        Ok(self.told(mapping, Wrote::Marker, reindexed).await)
+        Ok(self.sink.reindex_as(mapping, &self.known.stamp()).await)
     }
 
     /// [`reindex`](Self::reindex) at a `Fresh` source's staging, ungated by
@@ -400,13 +378,7 @@ impl Erasing<'_> {
         &self,
         mapping: &IndexMapping,
     ) -> sink::Result<()> {
-        let reindexed = self.sink.reindex(mapping).await;
-        let at = Some(self.rereads.read_begins());
-        match &reindexed {
-            Ok(()) => self.known.wrote(&mapping.index, &Wrote::Marker, at),
-            Err(_) => self.known.unsure(&mapping.index, &Wrote::Marker, at),
-        }
-        reindexed
+        self.sink.reindex_as(mapping, &self.known.stamp()).await
     }
 
     /// Begin a rebuild: other generations deleted, the marker moved, the
@@ -416,16 +388,10 @@ impl Erasing<'_> {
         mapping: &IndexMapping,
     ) -> Result<sink::Result<u64>, NotHeld> {
         self.held_fresh(&mapping.index).await?;
-        let begun = self.sink.begin_rebuild(mapping).await;
-        let wrote = Wrote::Rebuild {
-            attempts: begun.as_ref().ok().copied(),
-        };
-        // A rebuild begins only from a record that says detached.
+        let stamp = self.known.stamp();
+        let begun = self.sink.begin_rebuild(mapping, &stamp).await;
         Ok(self
-            .settled(mapping, wrote, begun, |found| match found.record {
-                Some(DetachRecord::Rebuilding { .. }) => found.attempts,
-                _ => None,
-            })
+            .settled(mapping, &stamp, begun, |found| found.attempts)
             .await)
     }
 
@@ -439,13 +405,9 @@ impl Erasing<'_> {
         live_only: bool,
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held_fresh(&mapping.index).await?;
-        let demoted = self.sink.demote(mapping, live_only).await;
-        // A demotion puts back a record that says rebuilding.
-        Ok(self
-            .settled(mapping, Wrote::Demote { live_only }, demoted, |found| {
-                matches!(found.record, Some(DetachRecord::Detached { .. })).then_some(())
-            })
-            .await)
+        let stamp = self.known.stamp();
+        let demoted = self.sink.demote(mapping, live_only, &stamp).await;
+        Ok(self.settled(mapping, &stamp, demoted, |_| Some(())).await)
     }
 
     /// Detach `mapping`'s index: the marker moved, the record written, every
@@ -457,23 +419,17 @@ impl Erasing<'_> {
         detach: &Detach,
     ) -> Result<sink::Result<Recorded>, NotHeld> {
         self.held_fresh(&mapping.index).await?;
-        let recorded = self.sink.detach(mapping, detach).await;
-        let wrote = Wrote::Detach {
-            live_only: detach.live_only,
-            through: detach.through.clone(),
-        };
-        let through = detach.through.clone();
-        let live_only = detach.live_only;
+        let stamp = self.known.stamp();
+        let recorded = self
+            .sink
+            .detach(mapping, &detach.clone().stamp(stamp.clone()))
+            .await;
         let recorded = match recorded {
             // The sink keeps no records: nothing was written.
             Ok(Recorded::NotKept) => Ok(Recorded::NotKept),
             recorded => {
-                self.settled(mapping, wrote, recorded, |found| {
-                    (found.record == Some(DetachRecord::Detached { live_only })
-                        && found.through == through)
-                        .then_some(Recorded::Kept)
-                })
-                .await
+                self.settled(mapping, &stamp, recorded, |_| Some(Recorded::Kept))
+                    .await
             }
         };
         Ok(recorded)

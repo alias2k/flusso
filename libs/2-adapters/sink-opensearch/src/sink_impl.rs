@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
 use serde_json::{Value, json};
 use sink::{
-    CaughtUp, Ensured, RejectedDocument, Result, Seeding, Sink, SinkError, TargetId, Visibility,
-    WriteReport,
+    CaughtUp, Ensured, RejectedDocument, Result, Seeding, Sink, SinkError, Stamp, TargetId,
+    Visibility, WriteReport,
 };
 use tracing::{debug, info, warn};
 
@@ -23,265 +23,12 @@ use crate::{IndexTarget, OpensearchSink};
 
 #[async_trait]
 impl Sink for OpensearchSink {
-    /// Ensure a concrete generation index exists for `mapping`, reachable through
-    /// the stable hash alias `{logical}_{hash}`.
-    ///
-    /// The addressable name `{logical}_{hash}` is an **alias**; the data lives in
-    /// a concrete generation `{logical}_{hash}_{gen}` behind it (created
-    /// `dynamic: strict`, `refresh_interval: -1` for fast bulk seeding). The
-    /// per-index meta doc records the active generation and whether it's seeded:
-    ///
-    /// - **seeded** — reuse that generation; (re)assert the aliases onto it.
-    /// - **unseeded** (fresh, or a [`reindex`](Self::reindex) staged a new
-    ///   generation) — make sure the generation index exists, but point the alias
-    ///   at it *only* when nothing else is serving yet. A reindex leaves the alias
-    ///   on the old generation until [`mark_seeded`](Self::mark_seeded) swaps it,
-    ///   so reads never see a half-built index.
-    /// - **seeded, but the generation is gone** — the marker is retracted
-    ///   (rewritten unseeded, with a warning) and the generation recreated
-    ///   empty, so the engine's [`is_seeded`](Self::is_seeded) reports `false`
-    ///   and the backfill refills it. Deleting the generation index is therefore
-    ///   a "rebuild this index on the next start" signal, never a way to end up
-    ///   serving an empty index that claims to be seeded.
-    /// - **unseeded, but the generation is not the one flusso created** — its
-    ///   `index.uuid` differs from the one the meta doc recorded at creation.
-    ///   An unseeded generation is written by its concrete name, so after it
-    ///   is deleted, a write under OpenSearch's default
-    ///   `action.auto_create_index` recreates it, dynamically mapped and
-    ///   holding only what came after. It is deleted and created again,
-    ///   strict and empty, with no checkpoint. (A seeded generation is
-    ///   written only through its alias with `require_alias`, so nothing
-    ///   auto-creates it; another uuid there is a restore, adopted.)
-    ///
-    /// The answer names the generation by its `index.uuid`, and says it was
-    /// created when it did not exist (or was replaced) on this call.
-    ///
-    /// The outcome also picks where [`write`](Self::write) writes: a seeded
-    /// index through its hash alias, an unseeded one through its generation.
-    ///
-    /// Safe to run for several indexes at once: each has its own meta
-    /// document (keyed by its hash alias), generations and aliases, and the
-    /// shared meta index is created by its first write, which OpenSearch's
-    /// auto-create takes from several writers at once.
-    #[tracing::instrument(
-        name = "os.ensure_index",
-        skip_all,
-        fields(index = mapping.index.as_ref()),
-        err,
-    )]
     async fn ensure_index(&self, mapping: &IndexMapping) -> Result<Ensured> {
-        let logical = mapping.index.as_ref();
-        let hash_alias = self.hash_alias(logical, &mapping.hash.to_string());
+        self.ensure_generation(mapping, None).await
+    }
 
-        // The previous scheme created `{logical}_{hash}` as a *concrete* index;
-        // the new scheme needs that name free for an alias. Refuse rather than
-        // clobber, so an operator migrates deliberately.
-        if self.concrete_index_exists(&hash_alias).await? {
-            return Err(SinkError::Write(format!(
-                "{hash_alias} exists as a concrete index from an older flusso version; \
-                 reindex it into {hash_alias}_1 and delete {hash_alias} so the name can become an alias"
-            )));
-        }
-
-        let meta = self.read_meta(&hash_alias).await?;
-        let (generation, mut seeded, recorded) = match &meta {
-            Some(meta) => (meta.generation, meta.seeded, meta.uuid.clone()),
-            None => {
-                // No meta doc, but a generation of ours already holds the hash
-                // alias: a start that died between creating it (with its
-                // aliases) and writing the doc. Reuse it, unseeded: a second
-                // generation beside it would leave readers on the empty first
-                // until the seed. Any other generation is swept by the seed.
-                let holding = self
-                    .alias_holders(&hash_alias)
-                    .await?
-                    .iter()
-                    .find_map(|holder| parse_generation(&hash_alias, holder));
-                let generation = match holding {
-                    Some(generation) => generation,
-                    None => {
-                        next_generation(&self.list_generations(&hash_alias).await?, &hash_alias)
-                    }
-                };
-                (generation, false, None)
-            }
-        };
-        let index = generation_name(&hash_alias, generation);
-        let convenience = self.convenience_alias(logical);
-        let mut live = self.index_uuid(&index).await?;
-        if let (Some(found), Some(made)) = (&live, &recorded)
-            && found != made
-        {
-            if seeded {
-                info!(
-                    index,
-                    "the seeded generation has another index.uuid than when it was created \
-                     (restored from a snapshot, or recreated by hand?); keeping it"
-                );
-            } else {
-                warn!(
-                    index,
-                    "this generation is not the one flusso created (deleted, then recreated by a \
-                     write under action.auto_create_index); deleting it and creating it again"
-                );
-                self.delete_index(&index).await?;
-                live = None;
-            }
-        }
-        let exists = live.is_some();
-        if exists {
-            debug!(index, "generation exists; leaving its mapping untouched");
-            // What an earlier run wrote without a refresh is remembered
-            // nowhere. One refresh per start makes it searchable, so a run can
-            // begin from "everything written so far is searchable". A closed
-            // generation is skipped, not a failure: staging it must not stop
-            // the sink, and its lane parks as blocked at its first write
-            // (stage 9 slice 3, C2).
-            if seeded {
-                self.refresh_index_if_open(&index).await?;
-            }
-        } else if seeded {
-            warn!(
-                index,
-                "the seed marker names a generation that no longer exists; \
-                 recreating it empty and reseeding",
-            );
-            seeded = false;
-        }
-
-        let mut holders = self
-            .alias_map(&[hash_alias.as_str(), convenience.as_str()])
-            .await?;
-        let held = |holders: &generations::Holders, alias: &str| {
-            holders.get(alias).cloned().unwrap_or_default()
-        };
-        // Point the aliases at this generation when it's the live seeded one,
-        // or when nothing serves yet (the first generation). A rebuild of an
-        // already-served index leaves them on the old generation until
-        // mark_seeded swaps them, so reads never hit a half-built index.
-        let first = held(&holders, &hash_alias).is_empty();
-
-        if !exists {
-            // Before the create: from here on the doc says unseeded and names
-            // no uuid, so a failure after the create can't leave a "seeded"
-            // or another generation's uuid beside the new, empty one. The
-            // next staging adopts what it finds, unseeded.
-            self.write_index_meta(&hash_alias, generation, false, None)
-                .await?;
-            // The aliases this generation takes anyway, attached at creation:
-            // one cluster-state update instead of one per alias. Never the
-            // convenience alias while another index holds it: an alias added
-            // at creation removes it from nothing.
-            let mut attached: Vec<&str> = Vec::new();
-            if first {
-                attached.push(&hash_alias);
-                if held(&holders, &convenience).is_empty() {
-                    attached.push(&convenience);
-                }
-            }
-            let created = match self.create_index(&index, mapping, &attached).await {
-                // An index (not an alias) already has the convenience alias's
-                // name: OpenSearch refuses the whole create. The convenience
-                // alias is best effort; create with the hash alias alone and
-                // let the alias step below warn, as before #403.
-                Err(SinkError::Write(refused))
-                    if attached.contains(&convenience.as_str())
-                        && refused.contains("invalid_alias_name_exception") =>
-                {
-                    warn!(
-                        index,
-                        alias = %convenience,
-                        "an index holds the convenience alias's name; creating the generation \
-                         with the hash alias alone"
-                    );
-                    attached.retain(|alias| *alias != convenience.as_str());
-                    self.create_index(&index, mapping, &attached).await?
-                }
-                other => other?,
-            };
-            if created {
-                for alias in attached {
-                    holders.insert(alias.to_owned(), vec![index.clone()]);
-                }
-            } else {
-                holders = self
-                    .alias_map(&[hash_alias.as_str(), convenience.as_str()])
-                    .await?;
-            }
-            live = self.index_uuid(&index).await?;
-            let Some(uuid) = &live else {
-                return Err(SinkError::Write(format!(
-                    "{index} was created but is gone again"
-                )));
-            };
-            self.record_uuid(&hash_alias, uuid).await?;
-        }
-
-        // Persist the active generation and its uuid, so a resumed run
-        // targets the same one and can tell it from one recreated under its
-        // name. A generation that did not exist (created here, or by a
-        // concurrent creator since the check) holds nothing: its doc was
-        // rewritten above without a checkpoint. One that already existed
-        // keeps its doc, checkpoint (`walked`) included; a doc with no uuid
-        // (an older flusso's, or a staging that failed after its create)
-        // gains it.
-        if exists {
-            if meta.is_none() {
-                self.write_index_meta(&hash_alias, generation, false, live.as_deref())
-                    .await?;
-            } else if recorded.is_none()
-                && let Some(uuid) = &live
-            {
-                self.record_uuid(&hash_alias, uuid).await?;
-            }
-        }
-
-        // A caught-up write may skip refreshing an index only when its own
-        // `?refresh=true` bulk refreshed all of it: one primary shard. Unknown
-        // counts as several.
-        let single_shard = match self.primary_shards(&index).await {
-            Ok(shards) => shards == Some(1),
-            Err(error) => {
-                debug!(%error, index = %index, "could not read the shard count; a caught-up write will refresh it separately");
-                false
-            }
-        };
-
-        // The hash alias is load-bearing (the query client reads through it),
-        // so its failure propagates; the convenience alias stays best-effort.
-        if seeded || first {
-            let serving = held(&holders, &hash_alias);
-            let named = held(&holders, &convenience);
-            let hash = (hash_alias.as_str(), serving.as_slice());
-            let both = [hash, (convenience.as_str(), named.as_slice())];
-            let none = BTreeSet::new();
-            if let Some(actions) = plan_seed_actions(&index, &both, &none)
-                && self.update_aliases(&actions).await.is_err()
-            {
-                if let Some(hash_only) =
-                    plan_seed_actions(&index, std::slice::from_ref(&hash), &none)
-                {
-                    self.update_aliases(&hash_only).await?;
-                }
-                self.ensure_alias(&convenience, &index).await;
-            }
-        }
-        let target = live.clone().map(TargetId::new);
-        self.set_target(
-            logical,
-            IndexTarget {
-                generation: index,
-                hash_alias,
-                seeded,
-                single_shard,
-                uuid: live,
-            },
-        );
-        Ok(if exists {
-            Ensured::existing(target)
-        } else {
-            Ensured::created(target)
-        })
+    async fn ensure_index_as(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<Ensured> {
+        self.ensure_generation(mapping, Some(stamp)).await
     }
 
     /// Write `envelopes` as one or more bulk requests.
@@ -482,8 +229,8 @@ impl Sink for OpensearchSink {
         Ok(!serving.is_empty() && !serving.contains(&target.generation))
     }
 
-    async fn detachment(&self, mapping: &IndexMapping) -> Result<sink::Detachment> {
-        self.read_detachment(mapping).await
+    async fn detachment(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<sink::Detachment> {
+        self.read_detachment(mapping, stamp).await
     }
 
     async fn detach(
@@ -498,24 +245,26 @@ impl Sink for OpensearchSink {
         &self,
         mapping: &IndexMapping,
         version: &sink::RecordVersion,
+        stamp: &Stamp,
     ) -> Result<()> {
-        self.delete_detach(mapping, version).await
+        self.forget_detach(mapping, version, stamp).await
     }
 
     async fn record_gaps(
         &self,
         mapping: &IndexMapping,
         decide: &sink::DecideGaps<'_>,
+        stamp: &Stamp,
     ) -> Result<Vec<sink::Gap>> {
-        self.write_gaps(mapping, decide).await
+        self.write_gaps(mapping, decide, stamp).await
     }
 
-    async fn begin_rebuild(&self, mapping: &IndexMapping) -> Result<u64> {
-        self.write_rebuild(mapping).await
+    async fn begin_rebuild(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<u64> {
+        self.write_rebuild(mapping, stamp).await
     }
 
-    async fn demote(&self, mapping: &IndexMapping, live_only: bool) -> Result<()> {
-        self.write_demotion(mapping, live_only).await
+    async fn demote(&self, mapping: &IndexMapping, live_only: bool, stamp: &Stamp) -> Result<()> {
+        self.write_demotion(mapping, live_only, stamp).await
     }
 
     async fn seeding(&self, index: &IndexName) -> Result<Seeding> {
@@ -559,162 +308,20 @@ impl Sink for OpensearchSink {
         self.update_walked(&target.hash_alias, Value::Null).await
     }
 
-    /// Record that `index`'s active generation has been seeded, and make it the
-    /// one the aliases serve.
-    ///
-    /// First makes the freshly-seeded generation searchable (one refresh) and
-    /// hands it back to automatic refresh, *then* atomically repoints the hash
-    /// alias (and the `{logical}` convenience alias) onto it and drops the
-    /// superseded generation(s), *then* writes the seed marker. The ordering
-    /// matters: on a fresh seed the alias is already on this generation (a no-op
-    /// swap); on a reindex the swap is the moment the rebuild becomes visible —
-    /// until here reads stayed on the old generation. If any step fails the
-    /// marker isn't written, so the next run re-runs the (idempotent) backfill.
-    ///
-    /// Every other `{hash_alias}_{n}` is dropped too, not only the ones the
-    /// alias moved off: a generation nothing serves and nothing builds (an
-    /// orphan from a crash, or from an older flusso staging a second reindex
-    /// over an in-flight one) would otherwise hold a full copy forever.
     async fn mark_seeded(&self, index: &IndexName) -> Result<()> {
-        let logical = index.as_ref();
-        let Some(target) = self.target(logical) else {
-            return Err(SinkError::Write(format!(
-                "cannot mark {logical} seeded: it has no active generation (ensure_index not run?)"
-            )));
-        };
-        let IndexTarget {
-            generation,
-            hash_alias,
-            uuid,
-            ..
-        } = &target;
-        let active = parse_generation(hash_alias, generation).unwrap_or(1);
-
-        // A generation deleted since staging, or recreated under its name by
-        // a write under auto-create, holds only part of the rows: never seed
-        // it. The engine stages the index again, which replaces it.
-        let live = self.index_uuid(generation).await?;
-        if live.is_none() || (uuid.is_some() && live != *uuid) {
-            return Err(SinkError::TargetChanged(format!(
-                "{generation} is not the generation staged for {logical} (deleted, or recreated \
-                 by a write under action.auto_create_index)"
-            )));
-        }
-
-        // The refresh, the steady-state refresh interval and the lookups are
-        // independent: run at once, the step costs the slowest of them. The
-        // aliases move only after the refresh, so they never point readers at
-        // an unrefreshed generation.
-        let mut steps = Steps::start();
-        let convenience = self.convenience_alias(logical);
-        let ((), (), (serving, named, stale)) = tokio::try_join!(
-            self.refresh_index(generation),
-            self.restore_auto_refresh(generation),
-            self.seed_lookup(hash_alias, &convenience, generation),
-        )?;
-        steps.mark("refresh+settings+lookup");
-
-        // One atomic call moves both aliases and drops the old generations:
-        // readers see the old generation or the new one. Refused (the
-        // convenience alias's name taken by an index, or a stale generation
-        // gone meanwhile), the holders are read again and the hash alias
-        // moves alone; the convenience alias stays best-effort.
-        let hash = (hash_alias.as_str(), serving.as_slice());
-        let both = [hash, (convenience.as_str(), named.as_slice())];
-        let retired: Vec<&String> = serving
-            .iter()
-            .chain(&stale)
-            .filter(|name| *name != generation)
-            .collect();
-        let first = match plan_seed_actions(generation, &both, &stale) {
-            Some(actions) => {
-                self.update_seed_aliases(&actions, generation, &retired)
-                    .await
-            }
-            None => Ok(()),
-        };
-        if let Err(error) = first {
-            // The old generation is blocked (#479): no other request form
-            // would pass; the engine parks the seed and retries it.
-            if matches!(error, SinkError::RetireBlocked { .. }) {
-                return Err(error);
-            }
-            warn!(
-                index = logical,
-                %error,
-                "could not swap the aliases and drop the old generations in one call; \
-                 reading them again and moving the hash alias alone",
-            );
-            let (serving, _, stale) = self
-                .seed_lookup(hash_alias, &convenience, generation)
-                .await?;
-            let hash = (hash_alias.as_str(), serving.as_slice());
-            if let Some(hash_only) =
-                plan_seed_actions(generation, std::slice::from_ref(&hash), &stale)
-            {
-                let retired: Vec<&String> = serving
-                    .iter()
-                    .chain(&stale)
-                    .filter(|name| *name != generation)
-                    .collect();
-                self.update_seed_aliases(&hash_only, generation, &retired)
-                    .await?;
-            }
-            self.ensure_alias(&convenience, generation).await;
-        }
-        steps.mark("aliases");
-
-        self.write_index_meta(hash_alias, active, true, live.as_deref())
-            .await?;
-        steps.mark("marker");
-        // A rebuild after a detach is finished with the seed (r4): its record
-        // goes, after the marker. One left by a failure here is found
-        // finished by the next staging and deleted then.
-        if let Err(error) = self.forget_finished_rebuild(hash_alias).await {
-            warn!(index = logical, %error, "could not delete the finished rebuild's detach record; the next staging does");
-        }
-        debug!(index = logical, %generation, steps = %steps, "marked seeded");
-        self.set_target(
-            logical,
-            IndexTarget {
-                seeded: true,
-                ..target
-            },
-        );
-        Ok(())
+        self.seed(index, None).await
     }
 
-    /// Stage a from-scratch rebuild of `index` into a fresh generation, leaving
-    /// the current one serving reads. Only flips meta to the next (unseeded)
-    /// generation; the following [`ensure_index`](Self::ensure_index) builds
-    /// it, the backfill seeds it, and [`mark_seeded`](Self::mark_seeded) swaps
-    /// the alias and drops the old generation. Creating the index is deferred
-    /// to `ensure_index` because that's where the mapping is available.
-    ///
-    /// A no-op when the index isn't seeded (no meta doc, or `seeded: false`):
-    /// a from-scratch rebuild is already pending, and staging yet another
-    /// generation would orphan the one being built.
+    async fn mark_seeded_as(&self, index: &IndexName, stamp: &Stamp) -> Result<()> {
+        self.seed(index, Some(stamp)).await
+    }
+
     async fn reindex(&self, mapping: &IndexMapping) -> Result<()> {
-        let logical = mapping.index.as_ref();
-        let hash_alias = self.hash_alias(logical, &mapping.hash.to_string());
-        if !matches!(self.read_index_meta(&hash_alias).await?, Some((_, true))) {
-            info!(
-                logical,
-                hash_alias,
-                "reindex requested while a rebuild is already pending; nothing to stage"
-            );
-            return Ok(());
-        }
-        // Past everything that currently exists, so a crashed earlier reindex
-        // can't make us reuse a live generation's name.
-        let next = next_generation(&self.list_generations(&hash_alias).await?, &hash_alias);
-        self.write_index_meta(&hash_alias, next, false, None)
-            .await?;
-        debug!(
-            logical,
-            hash_alias, next, "staged reindex into a new generation"
-        );
-        Ok(())
+        self.stage_reindex(mapping, None).await
+    }
+
+    async fn reindex_as(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<()> {
+        self.stage_reindex(mapping, Some(stamp)).await
     }
 }
 
@@ -861,6 +468,435 @@ impl std::fmt::Display for Steps {
             let sep = if n == 0 { "" } else { " " };
             write!(f, "{sep}{step}={:.1}ms", took.as_secs_f64() * 1000.0)?;
         }
+        Ok(())
+    }
+}
+
+impl OpensearchSink {
+    /// Ensure a concrete generation index exists for `mapping`, reachable through
+    /// the stable hash alias `{logical}_{hash}`.
+    ///
+    /// The addressable name `{logical}_{hash}` is an **alias**; the data lives in
+    /// a concrete generation `{logical}_{hash}_{gen}` behind it (created
+    /// `dynamic: strict`, `refresh_interval: -1` for fast bulk seeding). The
+    /// per-index meta doc records the active generation and whether it's seeded:
+    ///
+    /// - **seeded** — reuse that generation; (re)assert the aliases onto it.
+    /// - **unseeded** (fresh, or a [`reindex`](Self::reindex) staged a new
+    ///   generation) — make sure the generation index exists, but point the alias
+    ///   at it *only* when nothing else is serving yet. A reindex leaves the alias
+    ///   on the old generation until [`mark_seeded`](Self::mark_seeded) swaps it,
+    ///   so reads never see a half-built index.
+    /// - **seeded, but the generation is gone** — the marker is retracted
+    ///   (rewritten unseeded, with a warning) and the generation recreated
+    ///   empty, so the engine's [`is_seeded`](Self::is_seeded) reports `false`
+    ///   and the backfill refills it. Deleting the generation index is therefore
+    ///   a "rebuild this index on the next start" signal, never a way to end up
+    ///   serving an empty index that claims to be seeded.
+    /// - **unseeded, but the generation is not the one flusso created** — its
+    ///   `index.uuid` differs from the one the meta doc recorded at creation.
+    ///   An unseeded generation is written by its concrete name, so after it
+    ///   is deleted, a write under OpenSearch's default
+    ///   `action.auto_create_index` recreates it, dynamically mapped and
+    ///   holding only what came after. It is deleted and created again,
+    ///   strict and empty, with no checkpoint. (A seeded generation is
+    ///   written only through its alias with `require_alias`, so nothing
+    ///   auto-creates it; another uuid there is a restore, adopted.)
+    ///
+    /// The answer names the generation by its `index.uuid`, and says it was
+    /// created when it did not exist (or was replaced) on this call.
+    ///
+    /// The outcome also picks where [`write`](Self::write) writes: a seeded
+    /// index through its hash alias, an unseeded one through its generation.
+    ///
+    /// Safe to run for several indexes at once: each has its own meta
+    /// document (keyed by its hash alias), generations and aliases, and the
+    /// shared meta index is created by its first write, which OpenSearch's
+    /// auto-create takes from several writers at once.
+    #[tracing::instrument(
+        name = "os.ensure_index",
+        skip_all,
+        fields(index = mapping.index.as_ref()),
+        err,
+    )]
+    pub(crate) async fn ensure_generation(
+        &self,
+        mapping: &IndexMapping,
+        stamp: Option<&Stamp>,
+    ) -> Result<Ensured> {
+        let logical = mapping.index.as_ref();
+        let hash_alias = self.hash_alias(logical, &mapping.hash.to_string());
+
+        // The previous scheme created `{logical}_{hash}` as a *concrete* index;
+        // the new scheme needs that name free for an alias. Refuse rather than
+        // clobber, so an operator migrates deliberately.
+        if self.concrete_index_exists(&hash_alias).await? {
+            return Err(SinkError::Write(format!(
+                "{hash_alias} exists as a concrete index from an older flusso version; \
+                 reindex it into {hash_alias}_1 and delete {hash_alias} so the name can become an alias"
+            )));
+        }
+
+        let meta = self.read_meta(&hash_alias).await?;
+        let (generation, mut seeded, recorded) = match &meta {
+            Some(meta) => (meta.generation, meta.seeded, meta.uuid.clone()),
+            None => {
+                // No meta doc, but a generation of ours already holds the hash
+                // alias: a start that died between creating it (with its
+                // aliases) and writing the doc. Reuse it, unseeded: a second
+                // generation beside it would leave readers on the empty first
+                // until the seed. Any other generation is swept by the seed.
+                let holding = self
+                    .alias_holders(&hash_alias)
+                    .await?
+                    .iter()
+                    .find_map(|holder| parse_generation(&hash_alias, holder));
+                let generation = match holding {
+                    Some(generation) => generation,
+                    None => {
+                        next_generation(&self.list_generations(&hash_alias).await?, &hash_alias)
+                    }
+                };
+                (generation, false, None)
+            }
+        };
+        let index = generation_name(&hash_alias, generation);
+        let convenience = self.convenience_alias(logical);
+        let mut live = self.index_uuid(&index).await?;
+        if let (Some(found), Some(made)) = (&live, &recorded)
+            && found != made
+        {
+            if seeded {
+                info!(
+                    index,
+                    "the seeded generation has another index.uuid than when it was created \
+                     (restored from a snapshot, or recreated by hand?); keeping it"
+                );
+            } else {
+                warn!(
+                    index,
+                    "this generation is not the one flusso created (deleted, then recreated by a \
+                     write under action.auto_create_index); deleting it and creating it again"
+                );
+                self.delete_index(&index).await?;
+                live = None;
+            }
+        }
+        let exists = live.is_some();
+        if exists {
+            debug!(index, "generation exists; leaving its mapping untouched");
+            // What an earlier run wrote without a refresh is remembered
+            // nowhere. One refresh per start makes it searchable, so a run can
+            // begin from "everything written so far is searchable". A closed
+            // generation is skipped, not a failure: staging it must not stop
+            // the sink, and its lane parks as blocked at its first write
+            // (stage 9 slice 3, C2).
+            if seeded {
+                self.refresh_index_if_open(&index).await?;
+            }
+        } else if seeded {
+            warn!(
+                index,
+                "the seed marker names a generation that no longer exists; \
+                 recreating it empty and reseeding",
+            );
+            seeded = false;
+        }
+
+        let mut holders = self
+            .alias_map(&[hash_alias.as_str(), convenience.as_str()])
+            .await?;
+        let held = |holders: &generations::Holders, alias: &str| {
+            holders.get(alias).cloned().unwrap_or_default()
+        };
+        // Point the aliases at this generation when it's the live seeded one,
+        // or when nothing serves yet (the first generation). A rebuild of an
+        // already-served index leaves them on the old generation until
+        // mark_seeded swaps them, so reads never hit a half-built index.
+        let first = held(&holders, &hash_alias).is_empty();
+
+        if !exists {
+            // Before the create: from here on the doc says unseeded and names
+            // no uuid, so a failure after the create can't leave a "seeded"
+            // or another generation's uuid beside the new, empty one. The
+            // next staging adopts what it finds, unseeded.
+            self.write_index_meta(&hash_alias, generation, false, None, stamp)
+                .await?;
+            // The aliases this generation takes anyway, attached at creation:
+            // one cluster-state update instead of one per alias. Never the
+            // convenience alias while another index holds it: an alias added
+            // at creation removes it from nothing.
+            let mut attached: Vec<&str> = Vec::new();
+            if first {
+                attached.push(&hash_alias);
+                if held(&holders, &convenience).is_empty() {
+                    attached.push(&convenience);
+                }
+            }
+            let created = match self.create_index(&index, mapping, &attached).await {
+                // An index (not an alias) already has the convenience alias's
+                // name: OpenSearch refuses the whole create. The convenience
+                // alias is best effort; create with the hash alias alone and
+                // let the alias step below warn, as before #403.
+                Err(SinkError::Write(refused))
+                    if attached.contains(&convenience.as_str())
+                        && refused.contains("invalid_alias_name_exception") =>
+                {
+                    warn!(
+                        index,
+                        alias = %convenience,
+                        "an index holds the convenience alias's name; creating the generation \
+                         with the hash alias alone"
+                    );
+                    attached.retain(|alias| *alias != convenience.as_str());
+                    self.create_index(&index, mapping, &attached).await?
+                }
+                other => other?,
+            };
+            if created {
+                for alias in attached {
+                    holders.insert(alias.to_owned(), vec![index.clone()]);
+                }
+            } else {
+                holders = self
+                    .alias_map(&[hash_alias.as_str(), convenience.as_str()])
+                    .await?;
+            }
+            live = self.index_uuid(&index).await?;
+            let Some(uuid) = &live else {
+                return Err(SinkError::Write(format!(
+                    "{index} was created but is gone again"
+                )));
+            };
+            self.record_uuid(&hash_alias, uuid).await?;
+        }
+
+        // Persist the active generation and its uuid, so a resumed run
+        // targets the same one and can tell it from one recreated under its
+        // name. A generation that did not exist (created here, or by a
+        // concurrent creator since the check) holds nothing: its doc was
+        // rewritten above without a checkpoint. One that already existed
+        // keeps its doc, checkpoint (`walked`) included; a doc with no uuid
+        // (an older flusso's, or a staging that failed after its create)
+        // gains it.
+        if exists {
+            if meta.is_none() {
+                self.write_index_meta(&hash_alias, generation, false, live.as_deref(), stamp)
+                    .await?;
+            } else if recorded.is_none()
+                && let Some(uuid) = &live
+            {
+                self.record_uuid(&hash_alias, uuid).await?;
+            }
+        }
+
+        // A caught-up write may skip refreshing an index only when its own
+        // `?refresh=true` bulk refreshed all of it: one primary shard. Unknown
+        // counts as several.
+        let single_shard = match self.primary_shards(&index).await {
+            Ok(shards) => shards == Some(1),
+            Err(error) => {
+                debug!(%error, index = %index, "could not read the shard count; a caught-up write will refresh it separately");
+                false
+            }
+        };
+
+        // The hash alias is load-bearing (the query client reads through it),
+        // so its failure propagates; the convenience alias stays best-effort.
+        if seeded || first {
+            let serving = held(&holders, &hash_alias);
+            let named = held(&holders, &convenience);
+            let hash = (hash_alias.as_str(), serving.as_slice());
+            let both = [hash, (convenience.as_str(), named.as_slice())];
+            let none = BTreeSet::new();
+            if let Some(actions) = plan_seed_actions(&index, &both, &none)
+                && self.update_aliases(&actions).await.is_err()
+            {
+                if let Some(hash_only) =
+                    plan_seed_actions(&index, std::slice::from_ref(&hash), &none)
+                {
+                    self.update_aliases(&hash_only).await?;
+                }
+                self.ensure_alias(&convenience, &index).await;
+            }
+        }
+        let target = live.clone().map(TargetId::new);
+        self.set_target(
+            logical,
+            IndexTarget {
+                generation: index,
+                hash_alias,
+                seeded,
+                single_shard,
+                uuid: live,
+            },
+        );
+        Ok(if exists {
+            Ensured::existing(target)
+        } else {
+            Ensured::created(target)
+        })
+    }
+
+    /// Record that `index`'s active generation has been seeded, and make it the
+    /// one the aliases serve.
+    ///
+    /// First makes the freshly-seeded generation searchable (one refresh) and
+    /// hands it back to automatic refresh, *then* atomically repoints the hash
+    /// alias (and the `{logical}` convenience alias) onto it and drops the
+    /// superseded generation(s), *then* writes the seed marker. The ordering
+    /// matters: on a fresh seed the alias is already on this generation (a no-op
+    /// swap); on a reindex the swap is the moment the rebuild becomes visible —
+    /// until here reads stayed on the old generation. If any step fails the
+    /// marker isn't written, so the next run re-runs the (idempotent) backfill.
+    ///
+    /// Every other `{hash_alias}_{n}` is dropped too, not only the ones the
+    /// alias moved off: a generation nothing serves and nothing builds (an
+    /// orphan from a crash, or from an older flusso staging a second reindex
+    /// over an in-flight one) would otherwise hold a full copy forever.
+    pub(crate) async fn seed(&self, index: &IndexName, stamp: Option<&Stamp>) -> Result<()> {
+        let logical = index.as_ref();
+        let Some(target) = self.target(logical) else {
+            return Err(SinkError::Write(format!(
+                "cannot mark {logical} seeded: it has no active generation (ensure_index not run?)"
+            )));
+        };
+        let IndexTarget {
+            generation,
+            hash_alias,
+            uuid,
+            ..
+        } = &target;
+        let active = parse_generation(hash_alias, generation).unwrap_or(1);
+
+        // A generation deleted since staging, or recreated under its name by
+        // a write under auto-create, holds only part of the rows: never seed
+        // it. The engine stages the index again, which replaces it.
+        let live = self.index_uuid(generation).await?;
+        if live.is_none() || (uuid.is_some() && live != *uuid) {
+            return Err(SinkError::TargetChanged(format!(
+                "{generation} is not the generation staged for {logical} (deleted, or recreated \
+                 by a write under action.auto_create_index)"
+            )));
+        }
+
+        // The refresh, the steady-state refresh interval and the lookups are
+        // independent: run at once, the step costs the slowest of them. The
+        // aliases move only after the refresh, so they never point readers at
+        // an unrefreshed generation.
+        let mut steps = Steps::start();
+        let convenience = self.convenience_alias(logical);
+        let ((), (), (serving, named, stale)) = tokio::try_join!(
+            self.refresh_index(generation),
+            self.restore_auto_refresh(generation),
+            self.seed_lookup(hash_alias, &convenience, generation),
+        )?;
+        steps.mark("refresh+settings+lookup");
+
+        // One atomic call moves both aliases and drops the old generations:
+        // readers see the old generation or the new one. Refused (the
+        // convenience alias's name taken by an index, or a stale generation
+        // gone meanwhile), the holders are read again and the hash alias
+        // moves alone; the convenience alias stays best-effort.
+        let hash = (hash_alias.as_str(), serving.as_slice());
+        let both = [hash, (convenience.as_str(), named.as_slice())];
+        let retired: Vec<&String> = serving
+            .iter()
+            .chain(&stale)
+            .filter(|name| *name != generation)
+            .collect();
+        let first = match plan_seed_actions(generation, &both, &stale) {
+            Some(actions) => {
+                self.update_seed_aliases(&actions, generation, &retired)
+                    .await
+            }
+            None => Ok(()),
+        };
+        if let Err(error) = first {
+            // The old generation is blocked (#479): no other request form
+            // would pass; the engine parks the seed and retries it.
+            if matches!(error, SinkError::RetireBlocked { .. }) {
+                return Err(error);
+            }
+            warn!(
+                index = logical,
+                %error,
+                "could not swap the aliases and drop the old generations in one call; \
+                 reading them again and moving the hash alias alone",
+            );
+            let (serving, _, stale) = self
+                .seed_lookup(hash_alias, &convenience, generation)
+                .await?;
+            let hash = (hash_alias.as_str(), serving.as_slice());
+            if let Some(hash_only) =
+                plan_seed_actions(generation, std::slice::from_ref(&hash), &stale)
+            {
+                let retired: Vec<&String> = serving
+                    .iter()
+                    .chain(&stale)
+                    .filter(|name| *name != generation)
+                    .collect();
+                self.update_seed_aliases(&hash_only, generation, &retired)
+                    .await?;
+            }
+            self.ensure_alias(&convenience, generation).await;
+        }
+        steps.mark("aliases");
+
+        self.write_index_meta(hash_alias, active, true, live.as_deref(), stamp)
+            .await?;
+        steps.mark("marker");
+        // A rebuild after a detach is finished with the seed (r4): its record
+        // goes, after the marker. One left by a failure here is found
+        // finished by the next staging and deleted then.
+        if let Err(error) = self.forget_finished_rebuild(hash_alias, stamp).await {
+            warn!(index = logical, %error, "could not delete the finished rebuild's detach record; the next staging does");
+        }
+        debug!(index = logical, %generation, steps = %steps, "marked seeded");
+        self.set_target(
+            logical,
+            IndexTarget {
+                seeded: true,
+                ..target
+            },
+        );
+        Ok(())
+    }
+
+    /// Stage a from-scratch rebuild of `index` into a fresh generation, leaving
+    /// the current one serving reads. Only flips meta to the next (unseeded)
+    /// generation; the following [`ensure_index`](Self::ensure_index) builds
+    /// it, the backfill seeds it, and [`mark_seeded`](Self::mark_seeded) swaps
+    /// the alias and drops the old generation. Creating the index is deferred
+    /// to `ensure_index` because that's where the mapping is available.
+    ///
+    /// A no-op when the index isn't seeded (no meta doc, or `seeded: false`):
+    /// a from-scratch rebuild is already pending, and staging yet another
+    /// generation would orphan the one being built.
+    pub(crate) async fn stage_reindex(
+        &self,
+        mapping: &IndexMapping,
+        stamp: Option<&Stamp>,
+    ) -> Result<()> {
+        let logical = mapping.index.as_ref();
+        let hash_alias = self.hash_alias(logical, &mapping.hash.to_string());
+        if !matches!(self.read_index_meta(&hash_alias).await?, Some((_, true))) {
+            info!(
+                logical,
+                hash_alias,
+                "reindex requested while a rebuild is already pending; nothing to stage"
+            );
+            return Ok(());
+        }
+        // Past everything that currently exists, so a crashed earlier reindex
+        // can't make us reuse a live generation's name.
+        let next = next_generation(&self.list_generations(&hash_alias).await?, &hash_alias);
+        self.write_index_meta(&hash_alias, next, false, None, stamp)
+            .await?;
+        debug!(
+            logical,
+            hash_alias, next, "staged reindex into a new generation"
+        );
         Ok(())
     }
 }

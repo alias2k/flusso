@@ -215,16 +215,22 @@ impl OpensearchSink {
         Ok(())
     }
 
-    /// Write an index's meta doc: its active generation, seeded-state, and
-    /// the `index.uuid` the generation was created with, once it exists.
+    /// Write an index's meta doc: its active generation, seeded-state, the
+    /// `index.uuid` the generation was created with, once it exists, and who
+    /// wrote it (`stamp`, `null` for a caller that keeps no records).
     pub(crate) async fn write_index_meta(
         &self,
         hash_alias: &str,
         generation: u64,
         seeded: bool,
         uuid: Option<&str>,
+        stamp: Option<&sink::Stamp>,
     ) -> Result<()> {
-        let mut doc = json!({ "active_generation": generation, "seeded": seeded });
+        let mut doc = json!({
+            "active_generation": generation,
+            "seeded": seeded,
+            "stamp": crate::detachment::stamp_value(stamp),
+        });
         if let (Some(uuid), Some(fields)) = (uuid, doc.as_object_mut()) {
             fields.insert("uuid".to_owned(), Value::from(uuid));
         }

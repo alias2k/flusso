@@ -109,7 +109,11 @@ struct Kept {
 
 #[async_trait]
 impl Sink for Kept {
-    async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
+    async fn detachment(
+        &self,
+        mapping: &IndexMapping,
+        _: &sink::Stamp,
+    ) -> sink::Result<Detachment> {
         let index = mapping.index.as_ref();
         self.plain.calls.push("detachment", index);
         let read = self.reads.lock().unwrap().get(index).cloned();

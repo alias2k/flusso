@@ -21,6 +21,11 @@
 //!   nowhere: the index is staged as before, never failed for it (O24).
 //! - **Every document answers for the id asked**, found or not found; an
 //!   entry that says neither, or names another id, is an error.
+//! - **Who wrote each document is returned, never judged.** A record or a
+//!   marker carries the [`Stamp`](sink::Stamp) of its last write (`stamp`),
+//!   which is read back as is; deciding on it is the engine's. A record
+//!   forgotten is a tombstone (`state: "forgotten"`, with its stamp): read
+//!   as no record, its stamp and version kept.
 //!
 //! ```text
 //! POST {meta}/_mget  {"ids": [alias, "detach:" + alias, "stuck:" + alias]}
@@ -29,7 +34,9 @@
 
 use kernel::IndexMapping;
 use serde_json::{Value, json};
-use sink::{DetachRecord, Detachment, MarkerAt, RecordVersion, Result, SinkError, StuckClock};
+use sink::{
+    DetachRecord, Detachment, MarkerAt, RecordVersion, Result, SinkError, Stamp, StuckClock,
+};
 
 use crate::OpensearchSink;
 use crate::transport::request_error;
@@ -53,12 +60,42 @@ impl Found {
     fn version(&self) -> Option<(u64, u64)> {
         self.seq_no.zip(self.primary_term)
     }
+
+    /// Whether this is a record's tombstone, left where a record was
+    /// forgotten.
+    fn is_tombstone(&self) -> bool {
+        self.source.get("state").and_then(Value::as_str) == Some(FORGOTTEN)
+    }
+}
+
+/// The `state` of a record's tombstone.
+pub(crate) const FORGOTTEN: &str = "forgotten";
+
+/// A stamp as the documents keep it: `null` with none.
+pub(crate) fn stamp_value(stamp: Option<&Stamp>) -> Value {
+    stamp.map_or(
+        Value::Null,
+        |stamp| json!({ "writer": stamp.writer, "seq": stamp.seq }),
+    )
+}
+
+/// The stamp a document keeps, when it keeps one this version reads.
+fn read_stamp(source: &Value) -> Option<Stamp> {
+    let stamp = source.get("stamp")?;
+    Some(Stamp::new(
+        stamp.get("writer").and_then(Value::as_str)?,
+        stamp.get("seq").and_then(Value::as_u64)?,
+    ))
 }
 
 impl OpensearchSink {
     /// What the meta index keeps about detaching `mapping`'s index, with a
-    /// half-moved seed marker put back first.
-    pub(crate) async fn read_detachment(&self, mapping: &IndexMapping) -> Result<Detachment> {
+    /// half-moved seed marker put back first, stamped `stamp`.
+    pub(crate) async fn read_detachment(
+        &self,
+        mapping: &IndexMapping,
+        stamp: &Stamp,
+    ) -> Result<Detachment> {
         let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
         let Kept {
             marker,
@@ -67,14 +104,19 @@ impl OpensearchSink {
         } = self.read_kept(&hash_alias).await?;
 
         let mut kept = Detachment::default();
+        if let Some(found) = &record {
+            kept.record_stamp = read_stamp(&found.source);
+            kept.version = found
+                .version()
+                .map(|(seq_no, term)| RecordVersion::new(format!("{seq_no}:{term}")));
+        }
+        let record = record.filter(|found| !found.is_tombstone());
+        kept.marker_stamp = marker.as_ref().and_then(|found| read_stamp(&found.source));
         if let Some(record) = &record {
             let serving = record.source.get("serving").and_then(Value::as_u64);
             kept.marker = marker
                 .as_ref()
                 .and_then(|marker| marker_at(&marker.source, serving));
-            kept.version = record
-                .version()
-                .map(|(seq_no, term)| RecordVersion::new(format!("{seq_no}:{term}")));
             kept.attempts = record.source.get("attempts").and_then(Value::as_u64);
             kept.through = record
                 .source
@@ -104,9 +146,10 @@ impl OpensearchSink {
             match generation_of(from) {
                 Ok(generation) => {
                     kept.restored = Some(
-                        self.put_back(&hash_alias, &marker, from, generation)
+                        self.put_back(&hash_alias, &marker, from, generation, stamp)
                             .await?,
                     );
+                    kept.marker_stamp = Some(stamp.clone());
                 }
                 Err(why) => kept.unreadable_marker = Some(why),
             }
@@ -168,13 +211,15 @@ impl OpensearchSink {
     }
 
     /// Put the seed marker back on `generation`, as `from` says it was,
-    /// conditionally on `marker` as read: the generation put back.
+    /// stamped `stamp`, conditionally on `marker` as read: the generation
+    /// put back.
     async fn put_back(
         &self,
         hash_alias: &str,
         marker: &Found,
         from: &Value,
         generation: u64,
+        stamp: &Stamp,
     ) -> Result<u64> {
         let (Some(seq_no), Some(primary_term)) = (marker.seq_no, marker.primary_term) else {
             return Err(SinkError::Write(format!(
@@ -184,6 +229,7 @@ impl OpensearchSink {
         let mut doc = json!({
             "active_generation": generation,
             "seeded": from.get("seeded").and_then(Value::as_bool).unwrap_or(false),
+            "stamp": stamp_value(Some(stamp)),
         });
         if let Some(fields) = doc.as_object_mut() {
             if let Some(uuid) = from.get("uuid").and_then(Value::as_str) {

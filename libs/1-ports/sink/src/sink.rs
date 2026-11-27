@@ -312,6 +312,30 @@ pub enum Seeding {
     Unseeded { walked: Option<String> },
 }
 
+/// Who wrote a detach record or a seed marker (ADR 0012 stage 10, after the
+/// review of round 10): a process's `writer` (random, made once per process
+/// start) and the number of its write. The engine issues one for every write
+/// of either document; a sink that keeps them stores it in the document it
+/// writes and returns it when it reads the document, deciding nothing on
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Stamp {
+    /// The writing process's token.
+    pub writer: String,
+    /// The write's number in that process.
+    pub seq: u64,
+}
+
+impl Stamp {
+    /// The stamp of `writer`'s write number `seq`.
+    pub fn new(writer: impl Into<String>, seq: u64) -> Self {
+        Self {
+            writer: writer.into(),
+            seq,
+        }
+    }
+}
+
 /// What a sink keeps about detaching an index from the slot's minimum (ADR
 /// 0012 stage 10), as [`Sink::detachment`] read it at staging, before
 /// anything else touches the index.
@@ -333,8 +357,16 @@ pub struct Detachment {
     /// beside a record: `None` with no record, or no marker.
     pub marker: Option<MarkerAt>,
     /// The record's version as read, for a write conditional on it
-    /// ([`Sink::forget_detachment`]): `None` with no record.
+    /// ([`Sink::forget_detachment`]): the record's, or the tombstone's a
+    /// forget left; `None` with neither.
     pub version: Option<RecordVersion>,
+    /// Who wrote the record, or the tombstone a forget left in its place
+    /// (`record` is then `None`): `None` when neither is kept, or the
+    /// document carries no stamp.
+    pub record_stamp: Option<Stamp>,
+    /// Who last wrote the seed marker's gaps (a whole marker, or its gaps):
+    /// `None` with no marker, or none stamped.
+    pub marker_stamp: Option<Stamp>,
     /// The rebuilds the record counts as started: the attempt of the last.
     pub attempts: Option<u64>,
     /// Where reads stood at the detach, in the source's own text: the
@@ -436,6 +468,8 @@ pub struct Detach {
     /// Where reads of the index stood at the detach, in the source's own
     /// text, when the engine knows: the start of a later reattach's gap.
     pub through: Option<String>,
+    /// Who writes it, stored in the record and the marker it moves.
+    pub stamp: Option<Stamp>,
 }
 
 impl Detach {
@@ -462,6 +496,12 @@ impl Detach {
     /// Where reads stood at the detach, in the source's own text.
     pub fn through(mut self, through: Option<String>) -> Self {
         self.through = through;
+        self
+    }
+
+    /// Who writes it.
+    pub fn stamp(mut self, stamp: Stamp) -> Self {
+        self.stamp = Some(stamp);
         self
     }
 }
@@ -565,6 +605,13 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// The default names none and creates nothing.
     async fn ensure_index(&self, _mapping: &IndexMapping) -> Result<Ensured> {
         Ok(Ensured::default())
+    }
+
+    /// [`ensure_index`](Self::ensure_index), a seed marker it writes stamped
+    /// `stamp`. The default, for a sink that keeps no detach records, is
+    /// `ensure_index`.
+    async fn ensure_index_as(&self, mapping: &IndexMapping, _stamp: &Stamp) -> Result<Ensured> {
+        self.ensure_index(mapping).await
     }
 
     /// Write `envelopes`: index each upserted document, remove each deleted
@@ -690,10 +737,10 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// What this sink keeps about detaching `mapping`'s index, read at the
     /// start of every staging step, before anything else touches the index.
     /// A seed marker a detach left half moved, with no record beside it, is
-    /// put back first. Only "nothing kept" reads as empty: any other failure
-    /// to read is an `Err`, so a record is never missed. The default keeps
-    /// nothing.
-    async fn detachment(&self, _: &IndexMapping) -> Result<Detachment> {
+    /// put back first, stamped `stamp`. Only "nothing kept" reads as empty:
+    /// any other failure to read is an `Err`, so a record is never missed.
+    /// The default keeps nothing.
+    async fn detachment(&self, _: &IndexMapping, _stamp: &Stamp) -> Result<Detachment> {
         Ok(Detachment::default())
     }
 
@@ -710,11 +757,17 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         Ok(Recorded::NotKept)
     }
 
-    /// Delete `mapping`'s detach record, if it is still the one read at
-    /// `version`: a later write wins, and the call fails so the caller reads
-    /// again. A record already gone is not an error. The default has nothing
-    /// to delete.
-    async fn forget_detachment(&self, _: &IndexMapping, _: &RecordVersion) -> Result<()> {
+    /// Forget `mapping`'s detach record, if it is still the one read at
+    /// `version`: a tombstone stamped `stamp` takes its place, so who forgot
+    /// it can be read back. A later write wins, and the call fails so the
+    /// caller reads again. A record already gone is not an error. The
+    /// default has nothing to forget.
+    async fn forget_detachment(
+        &self,
+        _: &IndexMapping,
+        _: &RecordVersion,
+        _stamp: &Stamp,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -723,9 +776,10 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// fails the attempt), move the seed marker past every existing copy,
     /// unseeded, and record the rebuild as started, counting one more
     /// attempt, each write conditional on what was read. Returns the
-    /// attempt, the one the attach names. The default keeps no records and
-    /// refuses: a sink without records never detaches.
-    async fn begin_rebuild(&self, mapping: &IndexMapping) -> Result<u64> {
+    /// attempt, the one the attach names. The marker and the record are
+    /// stamped `stamp`. The default keeps no records and refuses: a sink
+    /// without records never detaches.
+    async fn begin_rebuild(&self, mapping: &IndexMapping, _stamp: &Stamp) -> Result<u64> {
         Err(crate::SinkError::Write(format!(
             "{} keeps no detach records to rebuild from",
             mapping.index
@@ -738,8 +792,14 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// was read: another writer meanwhile makes the sink read again and ask
     /// `decide` again. Returns the list kept after. So a fence never vouches
     /// inside any gap, after a restart too. A seed or a reindex drops them:
-    /// the index then holds every change. The default keeps nothing.
-    async fn record_gaps(&self, _: &IndexMapping, _: &DecideGaps<'_>) -> Result<Vec<Gap>> {
+    /// the index then holds every change. The gaps written are stamped
+    /// `stamp`. The default keeps nothing.
+    async fn record_gaps(
+        &self,
+        _: &IndexMapping,
+        _: &DecideGaps<'_>,
+        _stamp: &Stamp,
+    ) -> Result<Vec<Gap>> {
         Ok(Vec::new())
     }
 
@@ -747,8 +807,9 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// 10, O26, R14): the record says `detached` again, the partial copy and
     /// its checkpoint go. `live_only`: the sink can't rebuild any more, so
     /// the marker goes back on the serving copy as it was; otherwise it
-    /// moves past every existing copy. The default keeps nothing to change.
-    async fn demote(&self, _: &IndexMapping, _live_only: bool) -> Result<()> {
+    /// moves past every existing copy. The marker and the record are stamped
+    /// `stamp`. The default keeps nothing to change.
+    async fn demote(&self, _: &IndexMapping, _live_only: bool, _stamp: &Stamp) -> Result<()> {
         Ok(())
     }
 
@@ -816,6 +877,13 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         Ok(())
     }
 
+    /// [`mark_seeded`](Self::mark_seeded), the marker it writes and the
+    /// tombstone of a finished rebuild's record stamped `stamp`. The
+    /// default, for a sink that keeps no detach records, is `mark_seeded`.
+    async fn mark_seeded_as(&self, index: &IndexName, _stamp: &Stamp) -> Result<()> {
+        self.mark_seeded(index).await
+    }
+
     /// Request a from-scratch rebuild of `index` on the next backfill: mark it
     /// unseeded so [`is_seeded`](Self::is_seeded) reports `false` again, *without*
     /// disturbing what currently serves reads. A sink that builds into a fresh,
@@ -835,6 +903,12 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// the index, not the running engine's state.
     async fn reindex(&self, _: &IndexMapping) -> Result<()> {
         Ok(())
+    }
+
+    /// [`reindex`](Self::reindex), the marker it writes stamped `stamp`. The
+    /// default, for a sink that keeps no detach records, is `reindex`.
+    async fn reindex_as(&self, mapping: &IndexMapping, _stamp: &Stamp) -> Result<()> {
+        self.reindex(mapping).await
     }
 
     /// Whether the destination is a stream its readers consume in order (an

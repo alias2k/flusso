@@ -8,12 +8,18 @@ use kernel::{ColumnName, GenericValue, RowKey};
 use serde_json::{Value, json};
 use sink::{Detach, DetachRecord, MarkerAt, Recorded, Sink};
 
-use super::{ALIAS, DETACH, Stub, mapping};
+use super::{ALIAS, DETACH, Stub, mapping, stamp};
 
 /// The seed marker of a seeded index on generation 3, with a checkpoint
 /// left from its backfill: a put-back restores it byte for byte.
 fn marker() -> Value {
     json!({ "active_generation": 3, "seeded": true, "uuid": "u3", "walked": { "generation": 3, "mark": "k" } })
+}
+
+/// `doc` as a write stamped [`stamp`] leaves it.
+fn stamped(mut doc: Value) -> Value {
+    doc["stamp"] = json!({ "writer": "w", "seq": 3 });
+    doc
 }
 
 /// A meta index, the generations of [`ALIAS`] and its holder, answering the
@@ -228,6 +234,7 @@ fn key(id: i64) -> RowKey {
 fn blocked() -> Detach {
     Detach::new("blocked: index [users_00000001_3] blocked by: [FORBIDDEN/8/index write (api)]")
         .refused_keys(vec![key(7)])
+        .stamp(stamp())
 }
 
 /// A detach killed before each of its writes, and the next staging's read of
@@ -256,7 +263,7 @@ async fn a_detach_killed_after_any_step_comes_back_correct() {
 
         store.lock().unwrap().killed_at = None;
         let next = serve(&store).await;
-        let read = next.sink().detachment(&mapping()).await.unwrap();
+        let read = next.sink().detachment(&mapping(), &stamp()).await.unwrap();
         let store = store.lock().unwrap();
         assert!(
             store.generations.contains("users_00000001_3"),
@@ -272,8 +279,8 @@ async fn a_detach_killed_after_any_step_comes_back_correct() {
                 assert_eq!(read.record, None);
                 assert_eq!(
                     store.doc(ALIAS).unwrap(),
-                    marker(),
-                    "the marker is put back as it was"
+                    stamped(marker()),
+                    "the marker is put back as it was, stamped by the read"
                 );
             }
             _ => {
@@ -333,9 +340,11 @@ async fn a_detach_moves_the_marker_first_then_records_serving() {
         json!({
             "active_generation": 5, "seeded": false, "walked": null, "uuid": null,
             "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3", "walked": { "generation": 3, "mark": "k" } },
+            "stamp": { "writer": "w", "seq": 3 },
         })
     );
     let record = store.doc(DETACH).unwrap();
+    assert_eq!(record["stamp"], json!({ "writer": "w", "seq": 3 }));
     assert_eq!(record["state"], "detached");
     assert_eq!(record["live_only"], false);
     assert_eq!(record["serving"], 3);
@@ -390,7 +399,7 @@ async fn a_live_only_detach_leaves_the_marker_on_serving() {
         .detach(&mapping(), &blocked().live_only(true))
         .await
         .unwrap();
-    let read = stub.sink().detachment(&mapping()).await.unwrap();
+    let read = stub.sink().detachment(&mapping(), &stamp()).await.unwrap();
     assert_eq!(
         read.record,
         Some(DetachRecord::Detached { live_only: true })
@@ -471,7 +480,7 @@ async fn a_live_only_detach_with_nothing_serving_reads_as_no_known_serving() {
         .detach(&mapping(), &blocked().live_only(true))
         .await
         .unwrap();
-    let read = stub.sink().detachment(&mapping()).await.unwrap();
+    let read = stub.sink().detachment(&mapping(), &stamp()).await.unwrap();
     assert_eq!(
         read.record,
         Some(DetachRecord::Detached { live_only: true })
@@ -492,29 +501,143 @@ async fn with_nothing_serving_no_generation_is_deleted() {
     assert_eq!(store.generations.len(), 2);
 }
 
-/// A record is deleted only at the version read; a later write wins and the
-/// delete fails; a record already gone is no error.
+/// A record is forgotten only at the version read, by a tombstone stamped
+/// with who forgot it; a later write wins and the forget fails, and so does
+/// one at a version the tombstone replaced. A read finds no record, and the
+/// tombstone's stamp and version.
 #[tokio::test]
-async fn forgetting_a_record_deletes_only_the_version_read() {
+async fn forgetting_a_record_leaves_a_tombstone_only_on_the_version_read() {
     let store = Arc::new(Mutex::new(Store::seeded()));
     let stub = serve(&store).await;
     let sink = stub.sink();
     sink.detach(&mapping(), &blocked()).await.unwrap();
-    let read = sink.detachment(&mapping()).await.unwrap();
+    let read = sink.detachment(&mapping(), &stamp()).await.unwrap();
     let version = read.version.unwrap();
 
     let newer = store.lock().unwrap().doc(DETACH).unwrap();
-    store.lock().unwrap().put(DETACH, newer);
-    assert!(sink.forget_detachment(&mapping(), &version).await.is_err());
+    store.lock().unwrap().put(DETACH, newer.clone());
     assert!(
-        store.lock().unwrap().doc(DETACH).is_some(),
+        sink.forget_detachment(&mapping(), &version, &stamp())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.lock().unwrap().doc(DETACH),
+        Some(newer),
         "the newer record stays"
     );
 
-    let version = sink.detachment(&mapping()).await.unwrap().version.unwrap();
-    sink.forget_detachment(&mapping(), &version).await.unwrap();
-    assert!(store.lock().unwrap().doc(DETACH).is_none());
-    sink.forget_detachment(&mapping(), &version).await.unwrap();
+    let version = sink
+        .detachment(&mapping(), &stamp())
+        .await
+        .unwrap()
+        .version
+        .unwrap();
+    let forgetter = sink::Stamp::new("f", 11);
+    sink.forget_detachment(&mapping(), &version, &forgetter)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.lock().unwrap().doc(DETACH),
+        Some(json!({ "state": "forgotten", "stamp": { "writer": "f", "seq": 11 } }))
+    );
+    let read = sink.detachment(&mapping(), &stamp()).await.unwrap();
+    assert_eq!(read.record, None);
+    assert_eq!(read.record_stamp, Some(forgetter.clone()));
+    assert!(read.version.is_some() && read.version != Some(version.clone()));
+    assert!(
+        sink.forget_detachment(&mapping(), &version, &forgetter)
+            .await
+            .is_err(),
+        "the version forgotten is gone: a forget asked again reads again"
+    );
+}
+
+/// A detach over a tombstone replaces it on its version, not as a create,
+/// and keeps nothing of it: no attempts, no `through`.
+#[tokio::test]
+async fn a_detach_over_a_tombstone_replaces_it_and_keeps_nothing_of_it() {
+    let mut seeded = Store::seeded();
+    seeded.put(
+        DETACH,
+        json!({ "state": "forgotten", "stamp": { "writer": "f", "seq": 1 }, "attempts": 4, "through": "0/99" }),
+    );
+    let at = seeded.next_seq;
+    let store = Arc::new(Mutex::new(seeded));
+    let stub = serve(&store).await;
+    stub.sink().detach(&mapping(), &blocked()).await.unwrap();
+    assert!(
+        stub.lines().contains(&format!(
+            "PUT /flusso_meta/_doc/{DETACH}?if_seq_no={at}&if_primary_term=1"
+        )),
+        "{:?}",
+        stub.lines()
+    );
+    let record = store.lock().unwrap().doc(DETACH).unwrap();
+    assert_eq!(record["state"], "detached");
+    assert_eq!(record["attempts"], 0);
+    assert_eq!(record["through"], Value::Null);
+    assert_eq!(record["stamp"], json!({ "writer": "w", "seq": 3 }));
+}
+
+/// A rebuild, a demotion and the seed's forget find no record in a
+/// tombstone: the rebuild refuses, the others write nothing.
+#[tokio::test]
+async fn a_tombstone_is_no_record_to_rebuild_demote_or_forget() {
+    let mut seeded = detached_store();
+    seeded.put(
+        DETACH,
+        json!({ "state": "forgotten", "stamp": { "writer": "f", "seq": 1 } }),
+    );
+    let store = Arc::new(Mutex::new(seeded));
+    let stub = serve(&store).await;
+    assert!(
+        stub.sink()
+            .begin_rebuild(&mapping(), &stamp())
+            .await
+            .is_err()
+    );
+    stub.sink()
+        .demote(&mapping(), false, &stamp())
+        .await
+        .unwrap();
+    stub.sink()
+        .forget_finished_rebuild(ALIAS, Some(&stamp()))
+        .await
+        .unwrap();
+    assert_eq!(store.lock().unwrap().writes, 0, "{:?}", stub.lines());
+}
+
+/// Every whole write of the seed marker carries the stamp it is given, and
+/// `null` for a caller that keeps no records; the checkpoint's and the
+/// uuid's partial updates name no stamp, so `_update` keeps the one there.
+#[tokio::test]
+async fn whole_marker_writes_carry_their_stamp_and_partial_ones_keep_it() {
+    let store = Arc::new(Mutex::new(Store::seeded()));
+    let stub = serve(&store).await;
+    let sink = stub.sink();
+    sink.write_index_meta(ALIAS, 4, false, None, Some(&stamp()))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.lock().unwrap().doc(ALIAS),
+        Some(stamped(json!({ "active_generation": 4, "seeded": false })))
+    );
+    sink.update_walked(ALIAS, json!({ "mark": "k", "generation": 4 }))
+        .await
+        .unwrap();
+    sink.record_uuid(ALIAS, "u4").await.unwrap();
+    assert_eq!(
+        store.lock().unwrap().doc(ALIAS).unwrap()["stamp"],
+        json!({ "writer": "w", "seq": 3 })
+    );
+    sink.write_index_meta(ALIAS, 5, false, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.lock().unwrap().doc(ALIAS),
+        Some(json!({ "active_generation": 5, "seeded": false, "stamp": null }))
+    );
 }
 
 /// A store with `users` detached as a detach leaves it: the marker moved to
@@ -544,16 +667,24 @@ fn detached_store() -> Store {
 async fn a_rebuild_begins_by_clearing_partials_moving_the_marker_and_counting_an_attempt() {
     let store = Arc::new(Mutex::new(detached_store()));
     let stub = serve(&store).await;
-    assert_eq!(stub.sink().begin_rebuild(&mapping()).await.unwrap(), 2);
+    assert_eq!(
+        stub.sink()
+            .begin_rebuild(&mapping(), &stamp())
+            .await
+            .unwrap(),
+        2
+    );
     let store = store.lock().unwrap();
     assert_eq!(store.generations, ["users_00000001_3".to_owned()].into());
     assert_eq!(
         store.doc(ALIAS).unwrap(),
         json!({ "active_generation": 4, "seeded": false, "walked": null, "uuid": null,
-                "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3" } }),
+                "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3" },
+                "stamp": { "writer": "w", "seq": 3 } }),
         "past every generation left: the partial is gone, its checkpoint with it"
     );
     let record = store.doc(DETACH).unwrap();
+    assert_eq!(record["stamp"], json!({ "writer": "w", "seq": 3 }));
     assert_eq!(record["state"], "rebuilding");
     assert_eq!(record["attempts"], 2);
     assert_eq!(record["serving"], 3);
@@ -571,12 +702,12 @@ async fn a_rebuild_killed_after_any_step_comes_back_correct() {
         let store = Arc::new(Mutex::new(detached_store()));
         store.lock().unwrap().killed_at = Some(killed_at);
         let dying = serve(&store).await;
-        let begun = dying.sink().begin_rebuild(&mapping()).await;
+        let begun = dying.sink().begin_rebuild(&mapping(), &stamp()).await;
         let done = killed_at - 1;
         assert_eq!(begun.is_ok(), done == 3, "after {done} writes: {begun:?}");
         store.lock().unwrap().killed_at = None;
         let next = serve(&store).await;
-        let read = next.sink().detachment(&mapping()).await.unwrap();
+        let read = next.sink().detachment(&mapping(), &stamp()).await.unwrap();
         let store = store.lock().unwrap();
         assert!(
             store.generations.contains("users_00000001_3"),
@@ -614,14 +745,20 @@ async fn a_demotion_puts_a_rebuild_back_to_detached() {
     for live_only in [false, true] {
         let store = Arc::new(Mutex::new(detached_store()));
         let stub = serve(&store).await;
-        stub.sink().begin_rebuild(&mapping()).await.unwrap();
+        stub.sink()
+            .begin_rebuild(&mapping(), &stamp())
+            .await
+            .unwrap();
         store
             .lock()
             .unwrap()
             .generations
             .insert("users_00000001_4".to_owned());
-        stub.sink().demote(&mapping(), live_only).await.unwrap();
-        let read = stub.sink().detachment(&mapping()).await.unwrap();
+        stub.sink()
+            .demote(&mapping(), live_only, &stamp())
+            .await
+            .unwrap();
+        let read = stub.sink().detachment(&mapping(), &stamp()).await.unwrap();
         let store = store.lock().unwrap();
         assert_eq!(
             read.record,
@@ -636,24 +773,38 @@ async fn a_demotion_puts_a_rebuild_back_to_detached() {
             assert_eq!(read.marker, Some(MarkerAt::Serving { seeded: true }));
             assert_eq!(
                 store.doc(ALIAS).unwrap(),
-                json!({ "active_generation": 3, "seeded": true, "uuid": "u3" })
+                stamped(json!({ "active_generation": 3, "seeded": true, "uuid": "u3" }))
             );
         } else {
             assert_eq!(read.marker, Some(MarkerAt::Newer { seeded: false }));
             assert_eq!(store.doc(ALIAS).unwrap()["walked"], Value::Null);
         }
+        assert_eq!(read.marker_stamp, Some(stamp()), "{live_only}");
+        assert_eq!(read.record_stamp, Some(stamp()), "{live_only}");
     }
 }
 
-/// r4's last write: the seed deletes the finished rebuild's record on the
-/// version it reads; with none, nothing is asked.
+/// r4's last write: the seed forgets the finished rebuild's record on the
+/// version it reads, by a tombstone stamped as the seed; with none (or the
+/// tombstone), nothing is written.
 #[tokio::test]
-async fn the_seed_deletes_the_finished_rebuilds_record() {
+async fn the_seed_forgets_the_finished_rebuilds_record() {
     let store = Arc::new(Mutex::new(detached_store()));
     let stub = serve(&store).await;
-    stub.sink().forget_finished_rebuild(ALIAS).await.unwrap();
-    assert!(store.lock().unwrap().doc(DETACH).is_none());
-    stub.sink().forget_finished_rebuild(ALIAS).await.unwrap();
+    stub.sink()
+        .forget_finished_rebuild(ALIAS, Some(&stamp()))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.lock().unwrap().doc(DETACH),
+        Some(json!({ "state": "forgotten", "stamp": { "writer": "w", "seq": 3 } }))
+    );
+    let writes = store.lock().unwrap().writes;
+    stub.sink()
+        .forget_finished_rebuild(ALIAS, Some(&stamp()))
+        .await
+        .unwrap();
+    assert_eq!(store.lock().unwrap().writes, writes);
 }
 
 /// O16, S3: a detach keeps where reads stood (`through`); a reattach keeps
@@ -670,7 +821,7 @@ async fn a_reattach_keeps_its_gap_with_the_seed_marker() {
     )
     .await
     .unwrap();
-    let read = sink.detachment(&mapping()).await.unwrap();
+    let read = sink.detachment(&mapping(), &stamp()).await.unwrap();
     assert_eq!(read.through.as_deref(), Some("0/10"));
     assert!(read.gaps.is_empty());
 
@@ -678,14 +829,14 @@ async fn a_reattach_keeps_its_gap_with_the_seed_marker() {
         from: read.through.clone(),
         to: None,
     };
-    sink.record_gaps(&mapping(), &|_| Some(vec![open.clone()]))
+    sink.record_gaps(&mapping(), &|_| Some(vec![open.clone()]), &stamp())
         .await
         .unwrap();
-    sink.forget_detachment(&mapping(), read.version.as_ref().unwrap())
+    sink.forget_detachment(&mapping(), read.version.as_ref().unwrap(), &stamp())
         .await
         .unwrap();
-    let read = sink.detachment(&mapping()).await.unwrap();
-    assert_eq!(read.record, None, "the record is gone");
+    let read = sink.detachment(&mapping(), &stamp()).await.unwrap();
+    assert_eq!(read.record, None, "the record is forgotten");
     assert_eq!(read.gaps, [open], "the gap stays with the marker");
 
     let first = sink::Gap {
@@ -697,10 +848,13 @@ async fn a_reattach_keeps_its_gap_with_the_seed_marker() {
         to: Some("0/40".to_owned()),
     };
     let both = [first, second];
-    sink.record_gaps(&mapping(), &|_| Some(both.to_vec()))
+    sink.record_gaps(&mapping(), &|_| Some(both.to_vec()), &stamp())
         .await
         .unwrap();
-    assert_eq!(sink.detachment(&mapping()).await.unwrap().gaps, both);
+    assert_eq!(
+        sink.detachment(&mapping(), &stamp()).await.unwrap().gaps,
+        both
+    );
     let mut kept = store.lock().unwrap().doc(ALIAS).unwrap();
     assert_eq!(
         kept["gaps"],
@@ -709,6 +863,11 @@ async fn a_reattach_keeps_its_gap_with_the_seed_marker() {
     let fields = kept.as_object_mut().unwrap();
     fields.remove("gaps");
     fields.remove("gap");
+    assert_eq!(
+        fields.remove("stamp"),
+        Some(json!({ "writer": "w", "seq": 3 })),
+        "the gaps' write is stamped"
+    );
     assert_eq!(kept, marker(), "nothing else of the marker changed");
 }
 
@@ -722,7 +881,11 @@ async fn a_single_gap_an_earlier_build_kept_reads_as_a_list_of_one() {
     let store = Arc::new(Mutex::new(seeded));
     let stub = serve(&store).await;
     assert_eq!(
-        stub.sink().detachment(&mapping()).await.unwrap().gaps,
+        stub.sink()
+            .detachment(&mapping(), &stamp())
+            .await
+            .unwrap()
+            .gaps,
         [sink::Gap {
             from: Some("0/10".to_owned()),
             to: Some("0/20".to_owned()),
@@ -744,25 +907,29 @@ async fn a_gap_write_meeting_another_writer_reads_again_and_decides_again() {
     let seen = Mutex::new(Vec::new());
     let kept = stub
         .sink()
-        .record_gaps(&mapping(), &|kept| {
-            seen.lock().unwrap().push(kept.to_vec());
-            // Settle an open end only: one known already stays.
-            let open = kept.iter().any(|gap| gap.to.is_none());
-            open.then(|| {
-                vec![sink::Gap {
-                    from: Some("0/10".to_owned()),
-                    to: Some("0/20".to_owned()),
-                }]
-            })
-            .or_else(|| {
-                kept.is_empty().then(|| {
+        .record_gaps(
+            &mapping(),
+            &|kept| {
+                seen.lock().unwrap().push(kept.to_vec());
+                // Settle an open end only: one known already stays.
+                let open = kept.iter().any(|gap| gap.to.is_none());
+                open.then(|| {
                     vec![sink::Gap {
                         from: Some("0/10".to_owned()),
-                        to: None,
+                        to: Some("0/20".to_owned()),
                     }]
                 })
-            })
-        })
+                .or_else(|| {
+                    kept.is_empty().then(|| {
+                        vec![sink::Gap {
+                            from: Some("0/10".to_owned()),
+                            to: None,
+                        }]
+                    })
+                })
+            },
+            &stamp(),
+        )
         .await
         .unwrap();
     let seen = seen.into_inner().unwrap();
@@ -793,7 +960,11 @@ async fn a_gap_entry_that_cannot_be_read_is_a_gap_with_unknown_ends() {
     let store = Arc::new(Mutex::new(seeded));
     let stub = serve(&store).await;
     assert_eq!(
-        stub.sink().detachment(&mapping()).await.unwrap().gaps,
+        stub.sink()
+            .detachment(&mapping(), &stamp())
+            .await
+            .unwrap()
+            .gaps,
         [
             sink::Gap {
                 from: Some("0/10".to_owned()),

@@ -729,19 +729,19 @@ impl SinkEngine {
         // Another process's reattach (the record gone) is foreign here: the
         // read stops the deployment (the eighth re-check, B-2).
         let found = self.read_records(mapping).await?;
-        // The record gone, and the read the same: only this process's own
-        // earlier try of this reattach, whose delete landed unseen, removes
-        // it (`known` keeps that outcome). Its gap is the open one starting
-        // where this lane was detached: the reattach goes on to the attach
-        // (the review of the cut, B-2).
+        // The record forgotten by this process's own tombstone: its earlier
+        // try of this reattach, whose forget landed unseen. Its gap is the
+        // open one starting where this lane was detached: the reattach goes
+        // on to the attach (the review of the cut, B-2).
         if found.record.is_none()
+            && self.known.is_mine(found.record_stamp.as_ref())
             && let LaneHealth::Detached { through, .. } = self.lane_health(&lane)
             && found
                 .gaps
                 .last()
                 .is_some_and(|last| last.to.is_none() && last.from == through)
         {
-            tracing::warn!(%lane, "the record is gone: this process's own earlier reattach deleted it, unseen; the attach goes on");
+            tracing::warn!(%lane, "the record is forgotten: this process's own earlier reattach forgot it, unseen; the attach goes on");
             return Ok(Ok(found.gaps));
         }
         let restart = "restart flusso: a start on this backfill = false sink puts the \
@@ -961,9 +961,10 @@ impl SinkEngine {
         Ok(())
     }
 
-    /// Delete the detach record a failed `Sink::detach` of `index` may have
+    /// Forget the detach record a failed `Sink::detach` of `index` may have
     /// left, on the version read, then read again, which puts the moved
-    /// marker back (§5). A record of another state is left as it is.
+    /// marker back (§5). Only a record this process wrote is forgotten
+    /// (its stamp, the review of round 10, B-2); any other is left as it is.
     pub(super) async fn clear_failed_detach(&self, index: &IndexName) -> Result<()> {
         let Some(mapping) = self.mappings.iter().find(|m| &m.index == index) else {
             return Ok(());
@@ -972,6 +973,7 @@ impl SinkEngine {
         let found = self.read_records(mapping).await.map_err(failed)?;
         if let (Some(sink::DetachRecord::Detached { .. }), Some(version)) =
             (&found.record, &found.version)
+            && self.known.is_mine(found.record_stamp.as_ref())
         {
             // O29: refused while this process holds no slot (`slot`): the
             // record stays, the lane stays parked and tries again.
@@ -980,7 +982,7 @@ impl SinkEngine {
                 .await
                 .map_err(|not_held| failed(sink::SinkError::Write(not_held.to_string())))?
                 .map_err(failed)?;
-            tracing::info!(%index, sink = %self.name, "a failed detach had left its record; deleted before the lane's probe");
+            tracing::info!(%index, sink = %self.name, "a failed detach had left its record; forgotten before the lane's probe");
         }
         self.read_records(mapping).await.map_err(failed)?;
         Ok(())

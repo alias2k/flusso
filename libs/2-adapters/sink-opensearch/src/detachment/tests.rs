@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use kernel::{ContentHash, IndexMapping, IndexName, SinkName};
 use serde_json::{Value, json};
-use sink::{DetachRecord, Detachment, Sink, StuckClock};
+use sink::{DetachRecord, Detachment, Sink, Stamp, StuckClock};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::{OpensearchConfig, OpensearchSink, TextAnalysis};
@@ -13,6 +13,11 @@ mod record;
 const ALIAS: &str = "users_00000001";
 const DETACH: &str = "detach:users_00000001";
 const STUCK: &str = "stuck:users_00000001";
+
+/// The stamp every write of these tests carries.
+fn stamp() -> Stamp {
+    Stamp::new("w", 3)
+}
 
 fn mapping() -> IndexMapping {
     IndexMapping {
@@ -166,7 +171,7 @@ async fn read(
     answer: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static,
 ) -> (Stub, sink::Result<Detachment>) {
     let stub = Stub::start(answer).await;
-    let read = stub.sink().detachment(&mapping()).await;
+    let read = stub.sink().detachment(&mapping(), &stamp()).await;
     (stub, read)
 }
 
@@ -279,7 +284,7 @@ async fn an_unreachable_meta_index_fails_the_read() {
         url: format!("http://127.0.0.1:{port}"),
         seen: Arc::default(),
     };
-    assert!(stub.sink().detachment(&mapping()).await.is_err());
+    assert!(stub.sink().detachment(&mapping(), &stamp()).await.is_err());
 }
 
 /// Each record state this version knows, with `live_only`.
@@ -407,7 +412,16 @@ async fn a_half_detached_marker_with_no_record_is_put_back() {
     );
     assert_eq!(
         stub.body(1),
-        json!({ "active_generation": 1, "seeded": true, "uuid": "u1" })
+        json!({
+            "active_generation": 1, "seeded": true, "uuid": "u1",
+            "stamp": { "writer": "w", "seq": 3 },
+        }),
+        "put back as it was, stamped by the read"
+    );
+    assert_eq!(
+        read.marker_stamp,
+        Some(stamp()),
+        "the read returns the put-back's stamp"
     );
 }
 
@@ -497,7 +511,7 @@ async fn a_prefixed_sink_reads_its_own_meta_index() {
     })
     .await;
     let sink = stub.sink().with_index_prefix("dev_");
-    sink.detachment(&mapping()).await.unwrap();
+    sink.detachment(&mapping(), &stamp()).await.unwrap();
     assert_eq!(stub.lines(), ["POST /dev_flusso_meta/_mget"]);
     assert_eq!(
         stub.body(0),
