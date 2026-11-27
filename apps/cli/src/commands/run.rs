@@ -321,6 +321,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         },
     );
     adapters::validate(&config)?;
+    adapters::distinct_clusters(&config)?;
     crate::backends::compile_scripts(&config).context("compiling the scripts")?;
     if let Some(warning) =
         crate::memory::over_budget(daemon::max_built_bytes(&config), crate::memory::ceiling())

@@ -132,6 +132,8 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     // Every entry must instantiate its adapter config, offline or not: a
     // misspelled sink option is a config error, and `check` exists to catch it.
     adapters::validate(&config).with_context(|| format!("validating {}", path.display()))?;
+    adapters::distinct_clusters(&config)
+        .with_context(|| format!("validating {}", path.display()))?;
     daemon::backoff(&config).with_context(|| format!("validating {}", path.display()))?;
     daemon::index_budget_share(&config)
         .with_context(|| format!("validating {}", path.display()))?;

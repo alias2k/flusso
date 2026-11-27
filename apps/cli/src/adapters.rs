@@ -132,6 +132,48 @@ pub(crate) fn index_sink_config(
     }
 }
 
+/// Refuse two OpenSearch sinks on one cluster (the review of the cut,
+/// m-3): every index, alias and seed marker flusso owns there is named by
+/// the deployment's `prefix` alone, never by the sink, so both would share
+/// them, each taking the other's records for another process's. A URL that
+/// can't be resolved here is left to the sink's own start.
+pub(crate) fn distinct_clusters(config: &Config) -> anyhow::Result<()> {
+    let mut seen: std::collections::BTreeMap<String, &SinkName> = std::collections::BTreeMap::new();
+    for (name, entry) in &config.sinks {
+        let Ok(SinkConfig::Opensearch(sink)) = sink_config(name, entry) else {
+            continue;
+        };
+        let Some(cluster) = sink
+            .resolve_url(name)
+            .ok()
+            .and_then(|url| cluster_of(url.as_ref()))
+        else {
+            continue;
+        };
+        if let Some(first) = seen.insert(cluster.clone(), name) {
+            return Err(anyhow!(
+                "[sinks.{first}] and [sinks.{name}] write to the same OpenSearch cluster \
+                 ({cluster}): every index, alias and seed marker flusso keeps there is named by \
+                 the deployment's `prefix`, never by the sink, so the two would share them. Give \
+                 each sink its own cluster, or run each in its own deployment with its own \
+                 `prefix`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The cluster `url` names, however it is spelled: scheme and host in lower
+/// case, the port with its default filled in, the path without a trailing
+/// slash.
+fn cluster_of(url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let port = url.port_or_known_default()?;
+    let path = url.path().trim_end_matches('/');
+    Some(format!("{}://{host}:{port}{path}", url.scheme()))
+}
+
 /// The source entry as its adapter's typed config.
 pub(crate) fn source_config(config: &Config) -> anyhow::Result<PostgresConfig> {
     let entry = &config.source;
@@ -273,6 +315,65 @@ mod tests {
         validate(&cfg).unwrap();
         assert_eq!(source_config(&cfg).unwrap().slot, "flusso");
         assert_eq!(stream_config(&cfg).unwrap().capacity, None);
+    }
+
+    fn two_opensearch_sinks(primary: &str, audit: &str) -> Config {
+        config(&format!(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "{primary}"
+
+            [sinks.audit]
+            type = "opensearch"
+            url = "{audit}"
+            "#
+        ))
+    }
+
+    /// The review of the cut, m-3: two OpenSearch sinks on one cluster
+    /// share every index flusso owns there; refused, naming both sinks,
+    /// however the same URL is spelled.
+    #[test]
+    fn two_opensearch_sinks_on_one_cluster_are_refused() {
+        for (primary, audit) in [
+            ("https://search:9200", "https://search:9200"),
+            ("https://search:9200/", "https://SEARCH:9200"),
+            ("https://search", "https://search:443/"),
+        ] {
+            let error = distinct_clusters(&two_opensearch_sinks(primary, audit))
+                .map(|()| String::new())
+                .unwrap_or_else(|error| format!("{error:#}"));
+            assert!(
+                error.contains("[sinks.audit]") && error.contains("[sinks.primary]"),
+                "{primary} and {audit}: {error}"
+            );
+        }
+        for (primary, audit) in [
+            ("https://search:9200", "https://audit:9200"),
+            ("https://search:9200", "https://search:9201"),
+            ("http://search:9200", "https://search:9200"),
+            ("https://proxy/a", "https://proxy/b"),
+        ] {
+            distinct_clusters(&two_opensearch_sinks(primary, audit)).unwrap();
+        }
+        let one_and_stdout = config(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "https://search:9200"
+
+            [sinks.audit]
+            type = "stdout"
+            "#,
+        );
+        distinct_clusters(&one_and_stdout).unwrap();
     }
 
     #[test]
