@@ -22,7 +22,7 @@ A deployment ships one file instead of a source tree. The lock needs no database
 | --- | --- |
 | `flusso run` with `flusso.toml` present | Recompile, rewrite the lock if changed, run it. The committed lock stays current. |
 | `flusso run` with no config | Load `flusso.lock` and run it. |
-| `flusso run --locked` | Run the lock as is. No recompile, no rewrite. A lock whose line endings were converted runs the config the lock flusso wrote holds: see [Line endings](#line-endings). |
+| `flusso run --locked` | Run the lock as is. No recompile, no rewrite, CRLF line endings included: [Line endings](#line-endings). |
 | `flusso run --config other.toml` | Recompile from that file; an explicit path that doesn't exist is an error. |
 
 A lock-write failure is fatal. A lock in an earlier format (the pre-0.16 `format_version = 2`, or the MessagePack binary before that) is rejected with a regenerate hint: run `flusso build` once and commit the result. `flusso run` without `--locked` regenerates it on its own.
@@ -60,20 +60,18 @@ A lock-write failure is fatal. A lock in an earlier format (the pre-0.16 `format
 
 ## Line endings
 
-A lock whose line endings were converted to CRLF (a Windows checkout with `core.autocrlf`, an editor) holds the same config as the lock flusso wrote, and a converted `flusso.toml` compiles to it:
+A CRLF line break reads as LF in `flusso.lock` and in `flusso.toml`, so a file converted on checkout (git's `core.autocrlf` on Windows, an editor) holds the same config as the one flusso wrote.
 
-- **Every CRLF line break reads as `\n`**, inside a multi-line string too. The lock writes a value that spans lines as a multi-line string: a script's source, a raw filter, a filter's value, a column's `default`, an `options` value, a `constant`. Each reads back as written, so its index keeps its content hash and its physical name, and its script runs without `\r`.
-- **A carriage return a value really holds stays.** The lock writes it as the escape `\r`, never as the byte, so no conversion touches it. A bare `\r` byte is not a line break: the lock is unreadable, as before.
-- **`flusso.toml` is read the same way.** A multi-line string in it (an adapter option, a per-index sink option such as `index_settings`) reads without `\r`, so a converted `flusso.toml` compiles to the lock its LF twin does. None of its values reaches a content hash.
-- **`check` reports a converted lock as `same_config`**, a note, not an error, whether or not `flusso.toml` was converted too. `flusso run` with a config rewrites it in LF at its next start.
+- **Multi-line values read as written.** The lock writes a value that spans lines as a multi-line string: a script's source, a raw filter, a filter's `value`, a column's `default`, an `options` value, a `constant`. Converted, each still reads with `\n` line breaks, so its index keeps its content hash and physical name, and a script holds no `\r`. The same goes for a multi-line string in `flusso.toml`, such as `index_settings`.
+- **A carriage return a value really holds stays.** The lock writes it as the escape `\r`, never as the byte, so a conversion can't touch it. A bare `\r` byte inside a string isn't a line break: the lock is [unreadable](#checked-by-flusso-check).
+- **`check` reports a converted lock as `same_config`**, a note, whether or not `flusso.toml` was converted too. `check --fix` and `flusso run` with a config rewrite it in LF; `run --locked` runs it as it is.
+- **`*.schema.yml` files need nothing.** YAML reads a CRLF line break as an LF one in every kind of string.
 
 To keep the lock byte for byte as flusso writes it, so `check` says `current` and `run` doesn't rewrite it, mark it `-text` in `.gitattributes`:
 
 ```text
 flusso.lock -text
 ```
-
-A `*.schema.yml` with CRLF line endings is no concern: YAML reads a CRLF line break as it reads an LF one, in every kind of string, so the schema compiles to the same lock as its LF twin.
 
 ## Format stability
 
