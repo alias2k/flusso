@@ -527,7 +527,7 @@ impl SinkEngine {
     /// first such stops this engine's stagings and runs, which stop the
     /// deployment. The error a step that met it fails with.
     fn foreign_change(&self, index: &IndexName, what: String) -> sink::SinkError {
-        tracing::error!(%index, sink = %self.name, %what, "another flusso process changed the index's detach records while this one didn't hold the slot: stopping the deployment, nothing past this stream's start confirmed");
+        tracing::error!(%index, sink = %self.name, %what, "another flusso process changed the index's detach records while this one didn't hold the slot: stopping the deployment; no change of this index confirmed past what its records cover");
         let mut foreign = self.foreign.lock().unwrap_or_else(PoisonError::into_inner);
         if foreign.is_none() {
             *foreign = Some((index.clone(), what.clone()));

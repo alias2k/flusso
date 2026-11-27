@@ -80,15 +80,17 @@ pub enum EngineError {
 
     /// Another process changed an index's detach records while this one
     /// didn't hold the slot (ADR 0012 stage 10, the cut of 2026-11-27):
-    /// flusso doesn't reconcile with it, the deployment stops. Nothing past
-    /// the opening under which it was read was confirmed, so the next start,
-    /// which decides from the records, replays every change from there.
+    /// flusso doesn't reconcile with it, the deployment stops. No change of
+    /// the index was confirmed past what its records cover (an unread
+    /// detached lane holds confirmation; an attached one wrote what was
+    /// confirmed), so the next start, which decides from the records, loses
+    /// nothing.
     #[error(
         "sink `{sink}`, index `{index}`: another flusso process changed the index's detach \
          records while this one didn't hold the replication slot ({found}). Stopping: flusso \
-         doesn't carry on over another process's record changes. Nothing past this stream's \
-         start was confirmed; start flusso again (one process per slot) and its start decides \
-         from the records"
+         doesn't carry on over another process's record changes. No change of this index was \
+         confirmed past what its records cover; start flusso again (one process per slot) and \
+         its start decides from the records"
     )]
     ForeignChange {
         sink: String,

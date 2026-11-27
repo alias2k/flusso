@@ -1700,7 +1700,8 @@ async fn a_change_by_another_process_stops_the_deployment() {
     assert!(
         error.contains("another flusso process changed")
             && error.contains("users")
-            && error.contains("primary"),
+            && error.contains("primary")
+            && error.contains("No change of this index was confirmed past what its records cover"),
         "{error}"
     );
     assert_eq!(sink.reads.load(Ordering::SeqCst), 2, "not restaged");
