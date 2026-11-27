@@ -190,6 +190,26 @@ impl Erasing<'_> {
         result
     }
 
+    /// Right after an own record write, the record read back while the slot
+    /// is still held. No other process writes while this one holds the slot,
+    /// so what the read finds is this process's own write, version included:
+    /// an identical record another process writes later is told apart by
+    /// it. A stream that ended meanwhile, or a failed read, leaves the
+    /// version unknown (a call in flight as the stream ends: #490).
+    async fn read_back(&self, mapping: &IndexMapping) {
+        let at = self.rereads.read_begins();
+        if self.held().is_err() {
+            return;
+        }
+        let Ok(found) = self.sink.detachment(mapping).await else {
+            return;
+        };
+        let held_throughout = self.rereads.may_erase_records() && self.rereads.read_begins() == at;
+        if held_throughout {
+            let _ = self.known.judge(&mapping.index, &found, at, true);
+        }
+    }
+
     fn held(&self) -> Result<(), NotHeld> {
         if self.rereads.may_erase_records() {
             Ok(())
@@ -266,6 +286,7 @@ impl Erasing<'_> {
                 },
                 Some(self.rereads.read_begins()),
             );
+            self.read_back(mapping).await;
         }
         Ok(begun)
     }
@@ -281,7 +302,11 @@ impl Erasing<'_> {
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held()?;
         let demoted = self.sink.demote(mapping, live_only).await;
-        Ok(self.told(&mapping.index, Wrote::Demote { live_only }, demoted))
+        let demoted = self.told(&mapping.index, Wrote::Demote { live_only }, demoted);
+        if demoted.is_ok() {
+            self.read_back(mapping).await;
+        }
+        Ok(demoted)
     }
 
     /// Detach `mapping`'s index: the marker moved, the record written, every
@@ -295,14 +320,17 @@ impl Erasing<'_> {
         self.held()?;
         let recorded = self.sink.detach(mapping, detach).await;
         match &recorded {
-            Ok(Recorded::Kept) => self.known.wrote(
-                &mapping.index,
-                &Wrote::Detach {
-                    live_only: detach.live_only,
-                    through: detach.through.clone(),
-                },
-                Some(self.rereads.read_begins()),
-            ),
+            Ok(Recorded::Kept) => {
+                self.known.wrote(
+                    &mapping.index,
+                    &Wrote::Detach {
+                        live_only: detach.live_only,
+                        through: detach.through.clone(),
+                    },
+                    Some(self.rereads.read_begins()),
+                );
+                self.read_back(mapping).await;
+            }
             Ok(_) => {}
             // The record may have landed: recognised by its `through`.
             Err(_) => {

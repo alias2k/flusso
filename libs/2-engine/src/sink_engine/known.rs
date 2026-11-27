@@ -16,6 +16,13 @@
 //!   whatever it finds: no other process can write while this one holds the
 //!   slot (the narrowed O29 rule, `slot`). This is also how an own write
 //!   whose outcome is unknown is learnt, when a read follows it in time.
+//! - **An own write of the record** (a detach, a rebuild, a demotion) is read
+//!   back at once while the slot is still held (`slot`'s `read_back`), which
+//!   learns the version it left; a write of the marker alone (a created
+//!   generation, a gap) keeps the record's version. With nothing read yet, a
+//!   write that decides the record is what this process knows. So an
+//!   identical record another process writes later is told apart by its
+//!   version.
 //! - **An own detach whose outcome is unknown** (the call failed after its
 //!   record may have landed) is recognised by its content: a `Detached`
 //!   record with this process's `through`.
@@ -123,6 +130,20 @@ impl Known {
         }
     }
 
+    /// Nothing read yet: every field but the record may hold anything. Only
+    /// a write that decides the record starts from it.
+    fn unknown(at: u64) -> Self {
+        Self {
+            record: None,
+            attempts: Expect::Any,
+            through: Expect::Any,
+            gaps: Expect::Any,
+            version: None,
+            at,
+            unsure_detach: None,
+        }
+    }
+
     /// What `wrote`, returned `Ok` under opening `at`, leaves.
     pub(crate) fn wrote(&self, wrote: &Wrote, at: u64) -> Self {
         let mut next = Self {
@@ -178,8 +199,15 @@ impl Known {
                 next.through = Expect::Exactly(None);
                 next.gaps = Expect::Exactly(Vec::new());
             }
-            Wrote::Gaps(gaps) => next.gaps = Expect::Exactly(gaps.clone()),
-            Wrote::Created => next.gaps = Expect::Exactly(Vec::new()),
+            // The marker, never the record: its version stays known.
+            Wrote::Gaps(gaps) => {
+                next.gaps = Expect::Exactly(gaps.clone());
+                next.version = self.version.clone();
+            }
+            Wrote::Created => {
+                next.gaps = Expect::Exactly(Vec::new());
+                next.version = self.version.clone();
+            }
         }
         next
     }
@@ -294,15 +322,20 @@ impl KnownRecords {
     }
 
     /// An own write of `index`'s records returned `Ok`, under opening `at`
-    /// (`None`: it moves no record, the opening known stays). Nothing known
-    /// yet stays so: the next read is adopted.
+    /// (`None`: it moves no record, the opening known stays). With nothing
+    /// known yet, a write that decides the record (a detach, a delete, a
+    /// seed) is what this process knows from now on; any other leaves
+    /// nothing known, and the next read is adopted.
     pub(crate) fn wrote(&self, index: &IndexName, wrote: &Wrote, at: Option<u64>) {
         let mut known = self.lock();
-        if let Some(before) = known.get(index) {
-            let at = at.unwrap_or(before.at);
-            let after = before.wrote(wrote, at);
-            known.insert(index.clone(), after);
-        }
+        let after = match known.get(index) {
+            Some(before) => before.wrote(wrote, at.unwrap_or(before.at)),
+            None if matches!(wrote, Wrote::Detach { .. } | Wrote::Forget | Wrote::Seed) => {
+                Known::unknown(at.unwrap_or(0)).wrote(wrote, at.unwrap_or(0))
+            }
+            None => return,
+        };
+        known.insert(index.clone(), after);
     }
 
     /// Whether `index`'s records may keep a gap: one is known, or an own
@@ -355,6 +388,63 @@ mod tests {
         Gap {
             from: Some(from.to_owned()),
             to: Some("9".to_owned()),
+        }
+    }
+
+    /// Found by the world at 50,000 cases: a lane this process detached
+    /// before any read of its records succeeded. Its own detach is what it
+    /// knows, so another process's reattach is foreign; its own record read
+    /// back is the same.
+    #[test]
+    fn an_own_write_with_nothing_read_before_is_known() {
+        let known = KnownRecords::default();
+        known.wrote(
+            &index(),
+            &Wrote::Detach {
+                live_only: false,
+                through: Some("14".to_owned()),
+            },
+            Some(1),
+        );
+        let mut reattached = Detachment::default();
+        reattached.gaps = vec![gap("14")];
+        assert!(matches!(
+            known.judge(&index(), &reattached, 2, false),
+            Change::Foreign(_)
+        ));
+        let ours = detached("14", "3:1");
+        assert_eq!(known.judge(&index(), &ours, 2, false), Change::Same);
+
+        let forgotten = KnownRecords::default();
+        forgotten.wrote(&index(), &Wrote::Forget, Some(1));
+        assert!(matches!(
+            forgotten.judge(&index(), &detached("1", "1:1"), 2, false),
+            Change::Foreign(_)
+        ));
+    }
+
+    /// Found by the world at 50,000 cases: creating a generation, or
+    /// writing a gap, writes the marker, never the record. The record's
+    /// version read before stays known, so another process's identical
+    /// record written since is told apart by its version.
+    #[test]
+    fn a_marker_write_keeps_the_record_version() {
+        let mut rebuilding = Detachment::recorded(
+            DetachRecord::Rebuilding { live_only: false },
+            Some(MarkerAt::Newer { seeded: false }),
+            Some(RecordVersion::new("1:1")),
+        );
+        rebuilding.attempts = Some(1);
+        for wrote in [Wrote::Created, Wrote::Gaps(Vec::new())] {
+            let known = KnownRecords::default();
+            assert_eq!(known.judge(&index(), &rebuilding, 1, false), Change::Same);
+            known.wrote(&index(), &wrote, None);
+            let mut again = rebuilding.clone();
+            again.version = Some(RecordVersion::new("3:1"));
+            assert!(
+                matches!(known.judge(&index(), &again, 2, false), Change::Foreign(_)),
+                "after {wrote:?}"
+            );
         }
     }
 

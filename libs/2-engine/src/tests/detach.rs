@@ -3497,13 +3497,14 @@ async fn a_failed_opening_seeds_nothing_until_an_opening_gets_through() {
     task.abort();
 }
 
-/// The world property: whose rebuild a `rebuilding` record is, its attempts
-/// say. A lane rebuilding here under attempt 1 whose record, read again once
-/// the slot is held, counts attempt 2 (another process put this one back
-/// and began its own) is not taken as ours: the record is put back to
-/// detached before the lane drops anything (B-2).
+/// Whose rebuild a `rebuilding` record is, its attempts say. A lane
+/// rebuilding here under attempt 1 whose record, read again once the slot is
+/// held, counts attempt 2 (another process put this one back and began its
+/// own) stops the deployment, even with no read of the records before this
+/// process's own rebuild: what it wrote is what it knows (found by the world
+/// at 50,000 cases). Nothing is demoted.
 #[tokio::test(start_paused = true)]
-async fn a_rebuild_another_process_began_since_ours_is_demoted() {
+async fn a_rebuild_another_process_began_since_ours_stops_the_deployment() {
     let rig = Rig::new(64);
     let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
     publish(&rig, LaneItem::Attached { attempt }).await;
@@ -3515,15 +3516,33 @@ async fn a_rebuild_another_process_began_since_ours_is_demoted() {
         record.attempts = Some(2);
     }
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    eventually("taken as detached", || {
-        engine.lane_health(&lane(users())).is_detached()
+    stops(task).await;
+    assert!(
+        rig.sink.demoted.lock().unwrap().is_empty(),
+        "nothing demoted"
+    );
+}
+
+/// An own record write is followed by a read while the slot is still held,
+/// which learns the version it left: another process that later deletes it
+/// and writes an identical record (its own rebuild under the same attempt
+/// count) is told apart by the version, and the deployment stops.
+#[tokio::test(start_paused = true)]
+async fn an_identical_record_written_again_by_another_process_after_our_rebuild_stops() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    eventually("the rebuild is attached", || {
+        engine.lane_health(&lane(users())).is_open()
     })
     .await;
-    assert_eq!(
-        *rig.sink.demoted.lock().unwrap(),
-        [("users".to_owned(), false)]
-    );
-    task.abort();
+    rig.rereads.closed();
+    if let Some(record) = rig.sink.kept.lock().unwrap().get_mut("users") {
+        record.version = Some(RecordVersion::new("9:1"));
+    }
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    stops(task).await;
 }
 
 /// The cut: a lane held detached while its rebuild waits to attach, whose
