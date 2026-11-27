@@ -418,9 +418,13 @@ impl Store {
                 MarkerAt::Newer { seeded: false },
             )
         };
+        // The marker its detach moves keeps the gaps here, unlike
+        // OpenSearch's: the world's other process may reattach a
+        // rebuildable sink's detach, which the real reattach refuses, and
+        // with the gaps gone that unreal reattach would leave a drop no gap
+        // covers (round 11's sweep, seed `15942218590030476190`).
         let stamp = self.anothers();
         if !self.live_only {
-            self.gaps.lock().unwrap().remove(of);
             self.stamp_marker(of, &stamp);
         }
         self.keep(of, record, marker, false, &stamp);
@@ -432,8 +436,8 @@ impl Store {
     /// Another process detached `of` from `through`, began its rebuild
     /// (whose walk began at `began`), then went away.
     fn rebuilt_by_another(&self, of: &str, began: u64, through: Option<String>) {
+        // The gaps stay, as for `dropped`.
         let stamp = self.anothers();
-        self.gaps.lock().unwrap().remove(of);
         self.stamp_marker(of, &stamp);
         self.keep(
             of,
@@ -2582,6 +2586,53 @@ fn replay_as(events: Vec<Event>, solo: bool) -> usize {
         .unwrap()
         .block_on(run(events, solo))
         .unwrap()
+}
+
+/// Round 11's sweep, seed `15942218590030476190` of `gate_world` at
+/// 50,000 cases, shrunk: a model error, not the engine's. The other
+/// process's detach of a rebuildable sink dropped the gaps (as OpenSearch's
+/// moved marker does), then its reattach, which the real reattach refuses
+/// on such a sink, left the drop uncovered. The world keeps the gaps there.
+#[test]
+fn another_process_s_reattach_of_a_rebuildable_sink_keeps_the_gaps() {
+    replay(vec![
+        Event::HolderFinishes {
+            lane: 0,
+            reattach: false,
+        },
+        Event::RebuildBegunAgain { lane: 3 },
+        Event::GapOverSlowRead { lane: 3 },
+        Event::Open {
+            ok: false,
+            jump: 20,
+            drop: None,
+            rebuild: false,
+        },
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+        Event::HolderFinishes {
+            lane: 2,
+            reattach: true,
+        },
+        Event::HolderFinishes {
+            lane: 2,
+            reattach: true,
+        },
+        Event::Wait {
+            lane: 2,
+            whole_sink: false,
+            searchable: false,
+            at: 86,
+        },
+    ]);
 }
 
 /// The review of round 10, S-3: seed `14283768201718162447` of
