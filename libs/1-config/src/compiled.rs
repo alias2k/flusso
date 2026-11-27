@@ -465,8 +465,16 @@ mod tests {
 /// Decode a [`Compiled`] envelope from its TOML bytes, checking the format
 /// version. A non-UTF-8 input is diagnosed as the pre-freeze binary format
 /// with a regenerate hint.
+///
+/// A CRLF line break reads as `\n`, inside a multi-line string too: a lock
+/// whose line endings git or an editor converted holds the config its LF
+/// twin holds, so the same content hashes (issue #488). flusso writes every
+/// carriage return a value holds as the escape `\r`, never as the byte, so
+/// an LF lock reads exactly as written, and a bare `\r` byte stays as it is.
 pub fn from_bytes(bytes: &[u8]) -> Result<Config, CompileError> {
     let text = std::str::from_utf8(bytes).map_err(|_| CompileError::LegacyFormat)?;
+    let text = lf_line_breaks(text);
+    let text = text.as_ref();
     // The version is checked before the body is decoded, so a lock written in
     // another format reports the version mismatch (and its regenerate hint)
     // rather than whichever field of the old shape fails first.
@@ -479,6 +487,15 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Config, CompileError> {
     }
     let compiled: Compiled = toml::from_str(text).map_err(|error| decode_error(text, &error))?;
     Ok(compiled.config)
+}
+
+/// `text` with every CRLF line break as LF; borrowed when it holds none.
+fn lf_line_breaks(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains("\r\n") {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 /// A TOML error as where it is and why, without the excerpt the parser's own

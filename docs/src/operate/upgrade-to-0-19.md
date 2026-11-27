@@ -8,6 +8,7 @@
 - **`flusso check` fails on an index that won't work as its schema says** (breaking for its exit code): a `[]` column without `array: true`, `required` over a nullable column, a lossy `ids` element type, a duplicate field name that leaves a wrong value, a capture gap `run` won't close, and a time-of-day `format` over a date are errors now. A plain `run` still starts on them: [check fails on an index that won't work as written](#check-fails-on-an-index-that-wont-work-as-written).
 - **`flusso check` compares `flusso.lock` with the config** and fails on a stale or unreadable one; `check --fix` rewrites it: [check compares the lock](#check-compares-the-lock).
 - **`check` no longer prints the config or the mapping**, and its JSON lost `config` and `mappings` (breaking for a script reading them): `flusso show config` and `flusso show mapping` print them: [check only checks](#check-only-checks).
+- **A lock with Windows line endings names its indexes as its LF twin does**: a deployment that ran such a lock holding a script, or another multi-line value, under `--locked` rebuilds those indexes once: [A lock with Windows line endings keeps its index names](#a-lock-with-windows-line-endings-keeps-its-index-names).
 - **An index with a date `format` that can't read what flusso writes is rebuilt once**: flusso appends `||strict_date_optional_time` to such a format, and the `timestamp_format` warning is gone: [A date format reads what flusso writes](#a-date-format-reads-what-flusso-writes).
 
 **Running flusso**
@@ -502,7 +503,7 @@ Every other failure with one index restarts the ingest engine, as in 0.18. The w
 
 **What changed.** `flusso check` compiles the config as `run` does and compares the result with `flusso.lock` (`--lock`, `FLUSSO_LOCK`), offline too. A lock compiled from another config, or one it can't read, is an error; a missing lock, or the same config written in other bytes, is a note. Given no config, `check` checks the lock itself. The states: [Checked by flusso check](../reference/lock.md#checked-by-flusso-check).
 
-**Who is affected.** A repository whose committed `flusso.lock` trails `flusso.toml` or a schema: `check` in CI now fails until the lock is regenerated. A lock checked out with Windows line endings reads as the same config, unless it holds a script, whose text then differs.
+**Who is affected.** A repository whose committed `flusso.lock` trails `flusso.toml` or a schema: `check` in CI now fails until the lock is regenerated. A lock checked out with Windows line endings reads as the same config, a note: [Line endings](../reference/lock.md#line-endings).
 
 **What to do.** Regenerate the lock and commit it: `flusso check --fix`, or `flusso build`, as before. `--fix` writes only the lock, and only after the config validates.
 
@@ -534,6 +535,16 @@ The full shape: [JSON output](../reference/checks.md#json-output).
 **Who is affected.** A schema with such a field: a `format` of space patterns only (`yyyy-MM-dd HH:mm:ss`), `epoch_millis` alone, `yyyy/MM/dd` on a `date` field, and the like. Its hash moves, so the index is rebuilt once into a new physical index at the first 0.19 start, a lock compiled by 0.18 included. Every other index keeps its name.
 
 **What to do.** Nothing. To see which indexes move before upgrading, run 0.19's `flusso show mapping`: it notes each field it completes. Plan for their backfill.
+
+## A lock with Windows line endings keeps its index names
+
+**What changed.** A `flusso.lock` whose line endings were converted to CRLF (git's `core.autocrlf` on Windows, a `.gitattributes` that treats it as text) reads every CRLF line break as `\n`, inside a multi-line value too. In 0.18 a script's source, a raw filter, or a filter value, `default`, `options` value or `constant` that spans lines kept a `\r` at the end of each line: its index got another content hash than the same config compiled in LF, so another physical index, and its scripts ran with `\r` in their text. Now a converted lock holds the config flusso wrote. Details: [Line endings](../reference/lock.md#line-endings).
+
+**Who is affected.** A deployment that runs a converted lock as is (`flusso run --locked`, `flusso run` with no config, an image baked from the lock) holding such a value. Its index was built under the CRLF name; 0.19 names it as the LF lock does, so it is rebuilt once into a new physical index at the first 0.19 start, and the one built under the CRLF name is left behind. An LF lock, a lock with no multi-line value, and a deployment that compiles its config at start (`flusso run` with `flusso.toml`) keep every index name.
+
+A `flusso-query` consumer bakes the hash it compiles from the schemas, which is the LF one, so it finds that index again once it is seeded.
+
+**What to do.** Plan for that index's backfill, then remove the old index as in [Upgrade to 0.17](upgrade-to-0-17.md#steps), step 8. To see whether a lock is affected: `file flusso.lock` says `with CRLF line terminators`, and it holds `"""` or `'''`.
 
 ## Errors a start goes on with are logged and counted
 

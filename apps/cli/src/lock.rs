@@ -78,10 +78,8 @@ pub(crate) enum LockState {
     /// It holds the same config in other bytes (line endings, formatting):
     /// `run --locked` runs this config, and `run` would rewrite it.
     Respelled,
-    /// It holds another config; `differs` names what, at the top level, and
-    /// `crlf` whether its line endings are Windows ones, which change a
-    /// multi-line value (a script's source) and so can be the whole cause.
-    Stale { differs: Vec<String>, crlf: bool },
+    /// It holds another config; `differs` names what, at the top level.
+    Stale { differs: Vec<String> },
     /// No file there: `run` with the config writes one.
     Missing,
     /// It can't be read as a lock; `reason` says why.
@@ -119,7 +117,6 @@ impl LockState {
             Ok(old) if same(&old, &compiled.config) => Self::Respelled,
             Ok(old) => Self::Stale {
                 differs: differences(&old, &compiled.config),
-                crlf: existing.windows(2).any(|pair| pair == b"\r\n"),
             },
             Err(config::CompileError::VersionMismatch { got, expected }) => Self::Unreadable {
                 reason: format!("it is format {got}, and this flusso reads format {expected}"),
@@ -184,25 +181,16 @@ impl LockState {
             Self::NotCompared => {
                 format!("no config to compare {lock} with: the lock is what was checked")
             }
-            Self::Stale { differs, crlf } => {
+            Self::Stale { differs } => {
                 let what = if differs.is_empty() {
                     String::new()
                 } else {
                     format!(" ({})", differs.join("; "))
                 };
-                let endings = if *crlf {
-                    format!(
-                        ". `{lock}` has Windows line endings (CRLF), which change multi-line \
-                         values such as script sources. Rewrite it as above, and mark it `-text` \
-                         in `.gitattributes` (`{lock} -text`) so git does not convert it again"
-                    )
-                } else {
-                    String::new()
-                };
                 format!(
                     "`{lock}` was compiled from another config than this one{what}: `flusso run \
                      --locked`, or an image baked from this lock, would run the older config. {} \
-                     and commit the result{endings}",
+                     and commit the result",
                     at.rewrite()
                 )
             }
@@ -410,11 +398,7 @@ mod tests {
         )
         .unwrap();
         let state = LockState::of(&compiled(&now), &now.join("flusso.lock"));
-        let LockState::Stale {
-            differs,
-            crlf: false,
-        } = &state
-        else {
+        let LockState::Stale { differs } = &state else {
             panic!("{state:?}");
         };
         assert_eq!(
@@ -572,7 +556,6 @@ mod tests {
         let elsewhere = Path::new("deploy/flusso.lock");
         let stale = LockState::Stale {
             differs: Vec::new(),
-            crlf: false,
         };
         let unreadable = LockState::Unreadable {
             reason: "line 1, column 1: invalid key".to_owned(),
@@ -617,7 +600,6 @@ mod tests {
             state,
             LockState::Stale {
                 differs: vec!["the deployment settings `sinks`".to_owned()],
-                crlf: false,
             }
         );
     }

@@ -22,7 +22,7 @@ A deployment ships one file instead of a source tree. The lock needs no database
 | --- | --- |
 | `flusso run` with `flusso.toml` present | Recompile, rewrite the lock if changed, run it. The committed lock stays current. |
 | `flusso run` with no config | Load `flusso.lock` and run it. |
-| `flusso run --locked` | Run the lock as is. No recompile, no rewrite. A lock whose line endings git converted holds other script text, so an index with a script gets another content hash: a new physical index, rebuilt from scratch. Keep the lock `-text` in `.gitattributes`. |
+| `flusso run --locked` | Run the lock as is. No recompile, no rewrite. A lock whose line endings were converted runs the config the lock flusso wrote holds: see [Line endings](#line-endings). |
 | `flusso run --config other.toml` | Recompile from that file; an explicit path that doesn't exist is an error. |
 
 A lock-write failure is fatal. A lock in an earlier format (the pre-0.16 `format_version = 2`, or the MessagePack binary before that) is rejected with a regenerate hint: run `flusso build` once and commit the result. `flusso run` without `--locked` regenerates it on its own.
@@ -34,7 +34,7 @@ A lock-write failure is fatal. A lock in an earlier format (the pre-0.16 `format
 | The lock | Report line | Error | `lock.state` in JSON |
 | --- | --- | --- | --- |
 | holds exactly what the config compiles to | `✓ flusso.lock is current` | | `current` |
-| holds the same config in other bytes (Windows line endings, hand formatting) | `` ! flusso.lock holds this config in other bytes than flusso writes (line endings or formatting); `flusso run` would rewrite it `` | | `same_config` |
+| holds the same config in other bytes ([Windows line endings](#line-endings), hand formatting) | `` ! flusso.lock holds this config in other bytes than flusso writes (line endings or formatting); `flusso run` would rewrite it `` | | `same_config` |
 | isn't there | `! flusso.lock not found; flusso build writes it` | | `missing` |
 | holds another config | `` `flusso.lock` was compiled from another config than this one (the index `users` changed): … `` | yes | `lock_stale` |
 | can't be read, or is of an older format | `` `flusso.lock` can't be read as a lock, so `flusso run --locked` would fail on it: … `` | yes | `lock_unreadable` |
@@ -43,13 +43,6 @@ A lock-write failure is fatal. A lock in an earlier format (the pre-0.16 `format
 
 - **A stale lock** names what differs at the top level: which indexes changed, are new or are gone, and which deployment settings (`sinks`, `source`, …).
 - **An unreadable lock** names the line, the column and the reason, never the text there, since a secret may sit on that line: ``failed to decode compiled config at line 21, column 24: unexpected key or value, expected newline, `#` ``, or `it is format 2, and this flusso reads format 3`.
-- **Line endings inside a string count.** A script's source is a multi-line string in the lock, so a lock whose line endings were converted (a Windows checkout with `core.autocrlf`) holds other scripts and reads as stale. The message names the cause and the fix:
-
-  ```text
-  [error] flusso.lock  `flusso.lock` was compiled from another config than this one (the index `products` changed): `flusso run --locked`, or an image baked from this lock, would run the older config. Run `flusso check --offline --fix` or `flusso build` (or `flusso run`, which rewrites it) and commit the result. `flusso.lock` has Windows line endings (CRLF), which change multi-line values such as script sources. Rewrite it as above, and mark it `-text` in `.gitattributes` (`flusso.lock -text`) so git does not convert it again
-  ```
-
-  A converted lock with no multi-line value in it holds the same config and is only a note (`same_config`).
 - **A lock that can't be read, with no config,** stops every command before it starts, naming the lock and the reason, never its text:
 
   ```text
@@ -64,6 +57,22 @@ A lock-write failure is fatal. A lock in an earlier format (the pre-0.16 `format
 - **The advice runs as printed.** It names `--config`, `--offline` and the lock's path when they aren't the defaults: `` Run `flusso check --offline --fix` or `flusso build` (or `flusso run`, which rewrites it) and commit the result ``.
 
 **`--fix`** rewrites a lock that is stale, unreadable, written differently or missing, with exactly what `flusso build` writes (a temporary file beside it, renamed over it), once the config has validated. The report says `✓ lock rewritten: flusso.lock`, and JSON keeps the state found before the fix with `"rewritten": true`. It fixes the lock only: every other finding is reported and decides the exit code as without it. With no config there's nothing to write from, and it says `no config to write flusso.lock from: --fix wrote nothing`. A write that fails is an error naming the path; a failure after the write (an unreachable database) says the lock was rewritten. No environment variable turns it on, so a CI job can't rewrite a lock through an inherited variable.
+
+## Line endings
+
+A lock whose line endings were converted to CRLF (a Windows checkout with `core.autocrlf`, an editor) holds the same config as the lock flusso wrote:
+
+- **Every CRLF line break reads as `\n`**, inside a multi-line string too. The lock writes a value that spans lines as a multi-line string: a script's source, a raw filter, a filter's value, a column's `default`, an `options` value, a `constant`. Each reads back as written, so its index keeps its content hash and its physical name, and its script runs without `\r`.
+- **A carriage return a value really holds stays.** The lock writes it as the escape `\r`, never as the byte, so no conversion touches it. A bare `\r` byte is not a line break: the lock is unreadable, as before.
+- **`check` reports it as `same_config`**, a note, not an error. `flusso run` with a config rewrites it in LF at its next start.
+
+To keep the lock byte for byte as flusso writes it, so `check` says `current` and `run` doesn't rewrite it, mark it `-text` in `.gitattributes`:
+
+```text
+flusso.lock -text
+```
+
+A `*.schema.yml` with CRLF line endings is no concern: YAML reads a CRLF line break as it reads an LF one, in every kind of string, so the schema compiles to the same lock as its LF twin.
 
 ## Format stability
 
