@@ -3816,7 +3816,17 @@ impl<'a> Run<'a> {
                 Ok(Ok(sink::Recorded::Kept)) => self.detached(lane, why.to_owned(), None).await?,
                 Ok(Ok(_)) => continue,
                 Ok(Err(error)) => {
-                    tracing::warn!(%index, %error, "could not detach the rebuild to restart it; it goes on as it was");
+                    // The record may have landed: as for a probe's detach,
+                    // nothing of the lane is written until the clear has
+                    // read and deleted what it left.
+                    if let Some(run) = self.lanes.get_mut(lane) {
+                        if matches!(run.health.health, LaneHealth::Restaging { .. }) {
+                            run.health.restage_failed(Instant::now());
+                        }
+                        run.health.detach_unsure = true;
+                        self.engine.store_lane(&run.key, &run.health, false);
+                    }
+                    tracing::warn!(%index, %error, "could not detach the rebuild to restart it; it goes on as it was once what the detach may have left is cleared");
                     continue;
                 }
             }

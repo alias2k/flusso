@@ -2017,6 +2017,53 @@ async fn a_reindex_of_a_rebuild_is_ignored_unless_it_parked() {
     task.abort();
 }
 
+/// O20's restart of a parked rebuild detaches it first. That detach landing
+/// but failing (found by the world at 50,000 cases, after the review of the
+/// cut) leaves a record that says detached: the lane writes nothing onto it,
+/// and the clear deletes it before the lane's next probe, as for any detach
+/// whose outcome is unknown.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_restart_whose_detach_failed_writes_nothing_onto_its_record() {
+    let rig = Rig::new(64);
+    let (engine, task, control, attempt) = rebuilding_on_reindex(&rig).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let _backfill = next_request(&rig).await;
+    rig.sink.block(&users(), true);
+    rig.live(&users(), 2, 2).await;
+    eventually("the rebuilding lane parks", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked { .. }
+        )
+    })
+    .await;
+    rig.sink
+        .records
+        .lock()
+        .unwrap()
+        .push_back(Record::FailAfterWriting);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    rig.sink.block(&users(), false);
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let written_with_a_record = rig.sink.kept.lock().unwrap().get("users").is_some()
+        && written(&rig).contains(&"users/2".to_owned());
+    assert!(
+        !written_with_a_record,
+        "users/2 written onto the detach record the failed restart left"
+    );
+    assert!(
+        rig.sink.kept.lock().unwrap().get("users").is_none(),
+        "the record the failed detach left is cleared"
+    );
+    task.abort();
+}
+
 /// The process-start attach of a `rebuilding` record: the lane starts
 /// attached and rebuilding, its index ensured and its backfill asked; under
 /// `--skip-backfill` it is demoted (O26), and on a sink with `backfill =
