@@ -4884,3 +4884,150 @@ async fn an_owed_seed_meeting_a_blocked_old_generation_parks_its_lane() {
     .await;
     task.abort();
 }
+
+/// The eighth re-check, S-1: a rebuild taken over at a process start
+/// resumes its walk from its checkpoint. Only a gap kept over the index
+/// sends it back to the first key; its own `rebuilding` record doesn't.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_taken_over_at_a_start_resumes_its_walk() {
+    let rig = Rig::new(64);
+    let mut record = Detachment::recorded(
+        DetachRecord::Rebuilding { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    );
+    record.attempts = Some(1);
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), record);
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    rig.sink
+        .walked
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), "k500".to_owned());
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(engine.lane_state(&lane(users())).rebuilding, Some(1));
+    let stream::Request::Backfill { after, .. } = next_request(&rig).await else {
+        panic!("a backfill is asked");
+    };
+    assert!(after.is_some(), "walked from the first key");
+}
+
+/// The eighth re-check, S-2: a lane held detached is asked no backfill at
+/// the next opening, though the backfill outstanding at its detach was cut.
+#[tokio::test(start_paused = true)]
+async fn a_detached_lane_is_asked_no_backfill_at_the_next_opening() {
+    let rig = Rig::new(64);
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, control) = spawn(&engine);
+    let stream::Request::Backfill { .. } = next_request(&rig).await else {
+        panic!("a backfill is asked at staging");
+    };
+    eventually("read under the stream", || read_all(&rig)).await;
+    rig.sink.block(&users(), true);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 1, 1).await;
+    eventually("the lane detaches", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    rig.rereads.closed();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let asked = tokio::time::timeout(Duration::from_secs(2), next_request(&rig)).await;
+    assert!(
+        asked.is_err(),
+        "a detached lane was asked a backfill: {:?}",
+        asked.map(|request| format!("{request:?}"))
+    );
+    task.abort();
+}
+
+/// The eighth re-check, S-3 (a): a stop while no slot is held drains a lane
+/// parked on a seed that waits for the slot, as `main` does: the
+/// completion is acknowledged unseeded, and the next start backfills.
+#[tokio::test(start_paused = true)]
+async fn a_stop_drains_a_lane_parked_on_a_seed_waiting_for_the_slot() {
+    let rig = Rig::new(64);
+    let stop = crate::Stop::new();
+    let engine = Arc::new(
+        rig.built("primary", Arc::clone(&rig.sink))
+            .with_stop(stop.clone()),
+    );
+    let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
+    *rig.sink.retire_blocked.lock().unwrap() = true;
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    eventually("parked on its seed", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked { .. }
+        )
+    })
+    .await;
+    rig.rereads.closed();
+    *rig.sink.retire_blocked.lock().unwrap() = false;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    stop.request();
+    eventually("drained", || rig.stream.is_idle()).await;
+    assert!(rig.sink.seeded.lock().unwrap().is_empty(), "seeded unheld");
+    task.abort();
+}
+
+/// The eighth re-check, S-3 (b): a stop with the slot held drains a lane
+/// parked on an owed seed that its blocked old generation refuses (#479):
+/// the owed seed is dropped unseeded, and what is behind it is written.
+#[tokio::test(start_paused = true)]
+async fn a_stop_drains_a_lane_parked_on_a_blocked_owed_seed() {
+    let rig = Rig::new(64);
+    let stop = crate::Stop::new();
+    let engine = Arc::new(
+        rig.built("primary", Arc::clone(&rig.sink))
+            .with_stop(stop.clone()),
+    );
+    let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
+    rig.rereads.closed();
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    *rig.sink.retire_blocked.lock().unwrap() = true;
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    eventually("parked on the owed seed", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked {
+                reason: crate::ParkReason::SeedBlocked { .. },
+                ..
+            }
+        )
+    })
+    .await;
+    rig.live(&users(), 7, 7).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    stop.request();
+    eventually("drained", || rig.stream.is_idle()).await;
+    assert!(written(&rig).contains(&"users/7".to_owned()));
+    task.abort();
+}
