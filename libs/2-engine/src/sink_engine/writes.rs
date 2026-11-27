@@ -1102,7 +1102,7 @@ impl<'a> Run<'a> {
             // What the records ask waits for the slot (B-1): the lane stays
             // restaging, its items held, and is staged again after its
             // backoff; each staging reads the records again.
-            Ok(super::Restaged::AwaitingSlot) => {
+            Ok(super::Restaged::WaitsForSlot) => {
                 run.health.restage_failed(now);
                 tracing::warn!(lane = %run.key, retry_in = ?run.health.due.saturating_duration_since(now), "the records ask for a demotion or a detach, which waits until this process holds the slot; the lane stays restaging, nothing of it dropped");
                 self.engine.store_lane(&run.key, &run.health, false);

@@ -1083,7 +1083,7 @@ impl SinkEngine {
             .map_err(|error| staging_failed(index, error))?;
         match staged {
             Staged::Detached => return Ok(Restaged::Detached),
-            Staged::Unheld { .. } => return Ok(Restaged::AwaitingSlot),
+            Staged::Unheld { .. } => return Ok(Restaged::WaitsForSlot),
             _ => {}
         }
         let Staged::Unseeded { walked, target } = staged else {
@@ -1130,7 +1130,7 @@ impl SinkEngine {
             .map_err(|error| staging_failed(index, error))?;
         match staged {
             Staged::Detached => return Ok(Restaged::Detached),
-            Staged::Unheld { .. } => return Ok(Restaged::AwaitingSlot),
+            Staged::Unheld { .. } => return Ok(Restaged::WaitsForSlot),
             _ => {}
         }
         let Staged::Unseeded { walked, target } = staged else {
@@ -2428,7 +2428,7 @@ pub(super) enum Restaged {
     Detached,
     /// What the records ask waits for the slot: the lane stays restaging,
     /// staged again on its backoff.
-    AwaitingSlot,
+    WaitsForSlot,
 }
 
 /// What a staging does with what an index's detach records say (ADR 0012
