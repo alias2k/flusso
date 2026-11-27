@@ -1969,3 +1969,19 @@ fn a_rebuild_begun_again_under_the_same_attempts_is_told_apart_by_its_generation
         },
     ]);
 }
+
+/// Found by the world at 20,000 cases in the seventh re-check: a backfill
+/// cut by a gap the read found while what the records asked waited for the
+/// slot was never asked again, and its index stayed backfilling.
+#[test]
+fn a_backfill_cut_while_the_slot_is_away_is_asked_again() {
+    replay(vec![
+        Event::Unheld {
+            lane: 3,
+            rebuild: true,
+            then: 0,
+        },
+        Event::Finishes { lane: 3 },
+        Event::GapOverOwed { lane: 3 },
+    ]);
+}
