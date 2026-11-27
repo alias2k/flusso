@@ -16,3 +16,5 @@ cc f6faf5ff017b09b3b5b98322969b604e63a3bd4655028d96f4e4708dcaf7aaf6 # shrinks to
 cc 453bd374c95f302cb5fe3ab875c552129abdbb5853fb0f06b35c03d282ed53fb # shrinks to events = [Unheld { lane: 0, rebuild: false, then: 0 }, Reattach { index: 0 }, GapOverOwed { lane: 2 }, Reattaches { lane: 0 }, StreamEnds { jump: 0, drop: None, rebuild: false }, Missing { lane: 0 }]
 cc c06a14c6a620ffed29b3753e03826580bc248ba6b1e3fe9722570555277142ff # shrinks to events = [Restart { sink: 1, unreadable: 2 }, RebuildLost { lane: 3 }]
 cc 24cbcc4bca7e32567166edc6ce789f129600f740348a17ee1a691c7b40eaf219 # shrinks to events = [Open { ok: false, jump: 10, drop: Some(2), rebuild: true }, Fails { sink: 0, lands: false }, GapOverSlowRead { lane: 2 }]
+cc 2b4398abd9b8d526da80add8b3809e51ff477f9ba0a84854c55f6a0f3a55a614 # shrinks to events = [Reindex { index: 0 }, Detach { lane: 2, fails: false }, GapOverOwed { lane: 2 }]
+cc bfe3b12dfc373d15f523bb966aad606ad7580360f9440ad08aab05ade2c0b12e # shrinks to events = [HoldEnsure { sink: 0 }, Unheld { lane: 2, rebuild: false, then: 4 }, Restart { sink: 1, unreadable: 1 }, GapOverOwed { lane: 2 }]

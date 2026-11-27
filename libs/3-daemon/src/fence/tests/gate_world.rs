@@ -1627,6 +1627,15 @@ impl World {
                         .unwrap()
                         .contains(&(of.to_owned(), *at))
                 })
+                // A change a seed walked past is in the index too.
+                .filter(|at| {
+                    !store
+                        .seeds
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(index, began)| index == of && began >= at)
+                })
                 .collect();
             let read_from = unwritten.iter().map(|at| at - 1).min().unwrap_or(from);
             let kept = store.kept.lock().unwrap().get(of).cloned();
@@ -2996,4 +3005,51 @@ fn a_demotion_never_stands_on_records_read_under_an_earlier_stream() {
         },
         Event::GapOverSlowRead { lane: 2 },
     ]);
+}
+
+/// Found at 50,000 cases after the review of the cut: an owed rebuild
+/// retried as the slot came back, before the read again, on records read
+/// under an earlier stream while another process had reattached the lane
+/// meanwhile. A gated write reads stale records first: here it finds the
+/// change, and the deployment stops instead of writing.
+#[test]
+fn a_retried_rebuild_reads_records_from_an_earlier_stream_first() {
+    let stops = replay(vec![
+        Event::Unblock { lane: 0 },
+        Event::Unheld {
+            lane: 3,
+            rebuild: false,
+            then: 0,
+        },
+        Event::RebuildLost { lane: 3 },
+        Event::Reattach { index: 0 },
+        Event::HoldEnsure { sink: 0 },
+        Event::Fails {
+            sink: 1,
+            lands: false,
+        },
+        Event::GapOverOwed { lane: 3 },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// The same with a restaging lane whose own detach waits: the gate's read
+/// finds another process's change, which stops the deployment wherever it
+/// is found (never retried forever).
+#[test]
+fn a_change_found_by_a_gated_write_s_read_stops_the_deployment() {
+    let stops = replay(vec![
+        Event::HoldEnsure { sink: 0 },
+        Event::Unheld {
+            lane: 2,
+            rebuild: false,
+            then: 4,
+        },
+        Event::Restart {
+            sink: 1,
+            unreadable: 1,
+        },
+        Event::GapOverOwed { lane: 2 },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
 }

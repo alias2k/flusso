@@ -6,7 +6,11 @@
 //! Each gated method checks [`Rereads::may_erase_records`] immediately before
 //! its **sink call**, after every await that precedes it in its caller, so a
 //! stream that ended while the caller read, ensured or waited is seen (the
-//! sixth re-check, B-1). The check is per sink call, not per HTTP request:
+//! sixth re-check, B-1). It also needs the index's records read under the
+//! opening held now: records read under an earlier stream are read again
+//! first, and the write goes out only when they are the same; another
+//! process's change found there stops the deployment (the review of the
+//! cut). The check is per sink call, not per HTTP request:
 //! inside the call, OpenSearch's `mark_seeded` refreshes the whole new
 //! generation (seconds on a large index), swaps the aliases and drops other
 //! generations before it writes the marker and deletes the record;
@@ -67,7 +71,7 @@ use sink::{
     Recorded, Seeding, Sink, WriteReport,
 };
 
-use super::known::{KnownRecords, Wrote};
+use super::known::{Change, KnownRecords, Wrote};
 use crate::Rereads;
 
 /// The sink as the engine holds it: only the requests that erase or loosen
@@ -287,12 +291,47 @@ impl Erasing<'_> {
         }
     }
 
+    /// [`held`](Self::held), and `index`'s records read under the opening
+    /// held now (or, before any opening, at all): a write that may erase a
+    /// record stands on records no other process changed since they were
+    /// read (the review of the cut). Records read under an earlier stream
+    /// are read again here first: the same, the decision made on them still
+    /// stands; changed by another process, nothing is written, and the
+    /// engine's next read finds the change and stops.
+    async fn held_fresh(&self, index: &IndexName) -> Result<(), NotHeld> {
+        self.held()?;
+        let now = self.rereads.read_begins();
+        let fresh = match self.known.learnt_at(index) {
+            Some(at) => at == now,
+            None => self.rereads.opened() == 0,
+        };
+        if fresh {
+            return Ok(());
+        }
+        let mapping = self
+            .mappings
+            .iter()
+            .find(|mapping| &mapping.index == index)
+            .ok_or(NotHeld)?;
+        let found = self.sink.detachment(mapping).await.map_err(|_| NotHeld)?;
+        if !(self.rereads.held_or_alone() && self.rereads.read_begins() == now) {
+            return Err(NotHeld);
+        }
+        match self.known.judge(index, &found, now, false) {
+            Change::Same => self.held(),
+            Change::Foreign(what) => {
+                tracing::error!(%index, %what, "another flusso process changed the index's detach records while this one didn't hold the slot: stopping the deployment; no change of this index confirmed past what its records cover");
+                Err(NotHeld)
+            }
+        }
+    }
+
     /// Seed `index`: its marker is written whole, erasing any gap; a
     /// finished rebuild's record is deleted best effort. Read back while
     /// held, a record the delete left is deleted again here, as a staging
     /// would (the review of the cut, B-1).
     pub(super) async fn mark_seeded(&self, index: &IndexName) -> Result<sink::Result<()>, NotHeld> {
-        self.held()?;
+        self.held_fresh(index).await?;
         let seeded = self.sink.mark_seeded(index).await;
         let Some(mapping) = self.mappings.iter().find(|mapping| &mapping.index == index) else {
             return Ok(seeded);
@@ -322,7 +361,7 @@ impl Erasing<'_> {
         mapping: &IndexMapping,
         version: &RecordVersion,
     ) -> Result<sink::Result<()>, NotHeld> {
-        self.held()?;
+        self.held_fresh(&mapping.index).await?;
         let forgotten = self.sink.forget_detachment(mapping, version).await;
         Ok(self
             .settled(mapping, Wrote::Forget, forgotten, |found| {
@@ -349,7 +388,7 @@ impl Erasing<'_> {
         &self,
         mapping: &IndexMapping,
     ) -> Result<sink::Result<()>, NotHeld> {
-        self.held()?;
+        self.held_fresh(&mapping.index).await?;
         let reindexed = self.sink.reindex(mapping).await;
         Ok(self.told(mapping, Wrote::Marker, reindexed).await)
     }
@@ -376,7 +415,7 @@ impl Erasing<'_> {
         &self,
         mapping: &IndexMapping,
     ) -> Result<sink::Result<u64>, NotHeld> {
-        self.held()?;
+        self.held_fresh(&mapping.index).await?;
         let begun = self.sink.begin_rebuild(mapping).await;
         let wrote = Wrote::Rebuild {
             attempts: begun.as_ref().ok().copied(),
@@ -399,7 +438,7 @@ impl Erasing<'_> {
         mapping: &IndexMapping,
         live_only: bool,
     ) -> Result<sink::Result<()>, NotHeld> {
-        self.held()?;
+        self.held_fresh(&mapping.index).await?;
         let demoted = self.sink.demote(mapping, live_only).await;
         // A demotion puts back a record that says rebuilding.
         Ok(self
@@ -417,7 +456,7 @@ impl Erasing<'_> {
         mapping: &IndexMapping,
         detach: &Detach,
     ) -> Result<sink::Result<Recorded>, NotHeld> {
-        self.held()?;
+        self.held_fresh(&mapping.index).await?;
         let recorded = self.sink.detach(mapping, detach).await;
         let wrote = Wrote::Detach {
             live_only: detach.live_only,

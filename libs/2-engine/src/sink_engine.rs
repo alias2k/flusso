@@ -539,11 +539,12 @@ impl SinkEngine {
         self.foreign
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
+            .clone()
+            .or_else(|| self.known.foreign())
             .map(|(index, found)| EngineError::ForeignChange {
                 sink: self.name.to_string(),
                 index: index.to_string(),
-                found: found.clone(),
+                found,
             })
     }
 
@@ -610,34 +611,7 @@ impl SinkEngine {
                 self.skip_backfill,
                 start,
             );
-            // A decision that rewrites the records stands only on records
-            // read under the opening now held: one read under an earlier
-            // stream (it took its answer, then the stream ended and another
-            // opened) waits like one made without the slot, the read due
-            // again (the review of the cut).
-            let stale = self.known.learnt_at(&mapping.index) != Some(self.rereads.read_begins());
             match decided {
-                Decision::Demote { .. } | Decision::DetachAgain if stale => {
-                    return Ok(self.unheld(
-                        &lane,
-                        found,
-                        "the records were read under an earlier stream; decided once read again \
-                         under the one now held",
-                        through,
-                    ));
-                }
-                Decision::Detach {
-                    live_only_first: true,
-                    ..
-                } if stale => {
-                    return Ok(self.unheld(
-                        &lane,
-                        found,
-                        "the records were read under an earlier stream; decided once read again \
-                         under the one now held",
-                        through,
-                    ));
-                }
                 Decision::Demote { live_only } if round == 0 => {
                     let Ok(demoted) = self.erasing().demote(mapping, live_only).await else {
                         return Ok(self.unheld(

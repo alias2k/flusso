@@ -399,13 +399,26 @@ pub(crate) fn change(
 /// [`Known`] for each of a sink engine's indexes: what every read judges
 /// against, and what every own write updates (`slot` and `Plain`).
 #[derive(Debug, Default)]
-pub(crate) struct KnownRecords(std::sync::Mutex<std::collections::BTreeMap<IndexName, Known>>);
+pub(crate) struct KnownRecords {
+    known: std::sync::Mutex<std::collections::BTreeMap<IndexName, Known>>,
+    /// The first read judged another process's change, wherever it was
+    /// read: it stops the deployment.
+    foreign: std::sync::Mutex<Option<(IndexName, String)>>,
+}
 
 impl KnownRecords {
     fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<IndexName, Known>> {
-        self.0
+        self.known
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The first change of another process any read found, by index.
+    pub(crate) fn foreign(&self) -> Option<(IndexName, String)> {
+        self.foreign
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Judge a read of `index`'s records ([`change`]); one that is the same
@@ -419,8 +432,16 @@ impl KnownRecords {
     ) -> Change {
         let mut known = self.lock();
         let judged = change(index, known.get(index), found, read_at, same_opening);
-        if judged == Change::Same {
-            known.insert(index.clone(), Known::read(found, read_at));
+        match &judged {
+            Change::Same => {
+                known.insert(index.clone(), Known::read(found, read_at));
+            }
+            Change::Foreign(what) => {
+                self.foreign
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_or_insert_with(|| (index.clone(), what.clone()));
+            }
         }
         judged
     }
@@ -432,8 +453,10 @@ impl KnownRecords {
     /// next read is adopted.
     pub(crate) fn wrote(&self, index: &IndexName, wrote: &Wrote, at: Option<u64>) {
         let mut known = self.lock();
+        // An own write keeps the opening what it stands on was read under:
+        // only a read under the opening held now makes the records current.
         let after = match known.get(index) {
-            Some(before) => before.wrote(wrote, at.unwrap_or(before.at)),
+            Some(before) => before.wrote(wrote, before.at),
             None if matches!(wrote, Wrote::Detach { .. } | Wrote::Forget) => {
                 let at = at.unwrap_or(0);
                 Known {
@@ -453,7 +476,8 @@ impl KnownRecords {
     pub(crate) fn unsure(&self, index: &IndexName, wrote: &Wrote, at: Option<u64>) {
         let mut known = self.lock();
         if let Some(before) = known.get(index) {
-            let after = before.unsure(wrote, at.unwrap_or(before.at));
+            let _ = at;
+            let after = before.unsure(wrote, before.at);
             known.insert(index.clone(), after);
         }
     }
