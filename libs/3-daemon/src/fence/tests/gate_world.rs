@@ -2413,7 +2413,9 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
     let start = world.horizon;
     world.open(true, start).await.unwrap();
     // Then a change on every index, so no wait below falls in a gap a
-    // reattach accepted meanwhile; and settled again.
+    // reattach accepted meanwhile; and settled again, for longer than the
+    // longest backoff after it (the staging backoff doubles to a minute: 40
+    // rounds of 2 s, the review of round 10, S-3).
     for round in 0..50 {
         // A process started after a stop opens its own stream, as its
         // ingest engine would.
@@ -2421,7 +2423,7 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
             let start = world.horizon;
             world.open(true, start).await.unwrap();
         }
-        if round == 40 {
+        if round == 10 {
             for at in 0..2 {
                 world.apply(at);
             }
@@ -2566,6 +2568,12 @@ fn replay(events: Vec<Event>) -> usize {
     replay_as(events, false)
 }
 
+/// [`replay`] with no other process, as `a_single_process_never_stops`
+/// runs.
+fn replay_solo(events: Vec<Event>) -> usize {
+    replay_as(events, true)
+}
+
 fn replay_as(events: Vec<Event>, solo: bool) -> usize {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2574,6 +2582,32 @@ fn replay_as(events: Vec<Event>, solo: bool) -> usize {
         .unwrap()
         .block_on(run(events, solo))
         .unwrap()
+}
+
+/// The review of round 10, S-3: seed `14283768201718162447` of
+/// `a_single_process_never_stops` at 50,000 cases, shrunk. A lane restaging
+/// on a backoff doubled to a minute is judged only once its last change had
+/// that long to land: the liveness phase applies it early enough.
+#[test]
+fn a_lane_restaging_on_its_longest_backoff_is_served_by_the_end() {
+    assert_eq!(
+        replay_solo(vec![
+            Event::Restart {
+                sink: 0,
+                unreadable: 2,
+            },
+            Event::SeedLeavesRecord { lane: 2 },
+            Event::SeedLeavesRecord { lane: 2 },
+            Event::Elapse,
+            Event::RebuildLost { lane: 2 },
+            Event::Restart {
+                sink: 0,
+                unreadable: 0,
+            },
+            Event::Missing { lane: 1 },
+        ]),
+        0
+    );
 }
 
 /// The sixth re-check, B-1, the reviewer's first seed, as its shrunk events:
