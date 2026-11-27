@@ -2109,6 +2109,9 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
     for store in &world.stores {
         store.unreadable.lock().unwrap().clear();
         store.blocked.lock().unwrap().clear();
+        store.fails.lock().unwrap().take();
+        *store.seed_keeps_record.lock().unwrap() = false;
+        *store.reads_answered_first.lock().unwrap() = false;
         store.read_hold.release();
         store.ensure_hold.release();
     }
@@ -2154,16 +2157,26 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
                 held.unwrap_err()
             );
         }
-        // Liveness from the world's own records, not the engine's reports:
-        // an index whose records keep nothing must be served at the newest
-        // change (the eighth re-check's review).
-        if world.stores[World::sink_of(lane)]
+        // Liveness from the world's own records, not the engine's reports
+        // (the eighth re-check's review): an index its records say is
+        // attached and seeded must be served at the newest change. Only one
+        // they say is detached, or rebuilding into a generation not yet
+        // seeded, is not; a finished rebuild's record left beside a seeded
+        // marker is judged (the review of the cut, S-3).
+        let store = &world.stores[World::sink_of(lane)];
+        let of = World::index_of(lane);
+        let record = store
             .kept
             .lock()
             .unwrap()
-            .get(World::index_of(lane))
-            .is_some()
-        {
+            .get(of)
+            .and_then(|kept| kept.detachment.record.clone());
+        let unserved = match record {
+            Some(DetachRecord::Detached { .. }) => true,
+            Some(DetachRecord::Rebuilding { .. }) => store.unseeded.lock().unwrap().contains(of),
+            _ => false,
+        };
+        if unserved {
             continue;
         }
         prop_assert!(
