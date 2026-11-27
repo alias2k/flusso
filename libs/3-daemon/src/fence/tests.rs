@@ -1978,7 +1978,7 @@ mod gate_property {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+        #![proptest_config(ProptestConfig { cases: proptest_cases(512), ..ProptestConfig::default() })]
 
         #[test]
         fn a_lane_vouches_only_for_what_it_covered_while_its_sink_was_read(
@@ -2092,4 +2092,13 @@ async fn a_rebuild_begun_while_unread_vouches_for_nothing() {
         fence.wait(&request("40", FenceLevel::Applied, None)).await,
         Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Rebuilding)]
     ));
+}
+
+/// `PROPTEST_CASES` when set, else `default`: a property's own count would
+/// otherwise override the variable.
+fn proptest_cases(default: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(default)
 }

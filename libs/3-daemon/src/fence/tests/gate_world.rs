@@ -1731,16 +1731,8 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
     Ok(())
 }
 
-/// `PROPTEST_CASES` when set, else 1024.
-fn cases() -> u32 {
-    std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|cases| cases.parse().ok())
-        .unwrap_or(1024)
-}
-
 proptest! {
-    #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: super::proptest_cases(1024), ..ProptestConfig::default() })]
 
     #[test]
     fn every_lane_vouches_only_for_what_it_holds(
