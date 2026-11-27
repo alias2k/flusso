@@ -32,9 +32,13 @@
 //!   show nothing written over the index, else its backfill is asked again;
 //!   a clear and an owed rebuild wait for a turn that may; a reindex waits,
 //!   its lane restaging; a demotion or a detach found by staging or a read
-//!   again takes the lane as detached, its read uncounted; a reattach is
-//!   refused with the reason. Plain writes of what the lanes hold behave as
-//!   on `main`.
+//!   again leaves the lane standing in, parked awaiting the slot with
+//!   nothing dropped and its read uncounted, until a read while held
+//!   detaches it under the record or opens it; a lane held detached whose
+//!   record vanished is recorded detached again before its read counts; a
+//!   reattach is refused with the reason. Plain writes of what the lanes
+//!   hold behave as on `main`. A lane never drops a change no record
+//!   covers (the seventh re-check, B-1).
 //! - **What the records say is read again once the slot is held.** After
 //!   every opening the run reads each lane's records (`Run::reread`; read
 //!   once the stream ended too, which only tightens: what may erase waits
@@ -1998,7 +2002,20 @@ impl SinkEngine {
         tracing::info!(indexes = requests.len(), "requesting backfill");
         let producer = self.stream.requests()?.producer;
         let mut indexes = Vec::with_capacity(requests.len());
-        for (index, after, target) in requests {
+        for (index, mut after, target) in requests {
+            // A walk resumes from its checkpoint only where the records keep
+            // no gap: a drop kept as a gap may postdate the pages before the
+            // mark, and the seed drops the gaps. It walks from the first key
+            // then (found by the world at 20,000 cases, the seventh
+            // re-check).
+            if after.is_some() && self.written_over(&index) {
+                tracing::warn!(%index, sink = %self.name, "the records keep a gap over the index, which the pages before the walk's checkpoint may predate: walking from the first key");
+                self.sink
+                    .forget_walked(&index)
+                    .await
+                    .map_err(|error| staging_failed(&index, error))?;
+                after = None;
+            }
             if after.is_some() {
                 tracing::info!(%index, sink = %self.name, "requesting a resumed backfill: its last walk recorded how far it got");
             }
