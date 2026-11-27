@@ -1633,3 +1633,81 @@ async fn a_disabled_index_has_no_ingest_entry() {
         "the older indexes.<name> section is unchanged"
     );
 }
+
+/// A sink whose detach records another process changes after this one's
+/// first read: from the second read on, `users` reads detached.
+#[derive(Debug, Default)]
+struct ChangedAfterTheFirstRead {
+    reads: AtomicU64,
+    ops: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl Sink for ChangedAfterTheFirstRead {
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        for envelope in envelopes {
+            self.ops.lock().unwrap().push(envelope.id.clone());
+        }
+        Ok(WriteReport::clean())
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+
+    async fn detachment(&self, _: &IndexMapping) -> sink::Result<sink::Detachment> {
+        if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(sink::Detachment::default());
+        }
+        Ok(sink::Detachment::recorded(
+            sink::DetachRecord::Detached { live_only: false },
+            Some(sink::MarkerAt::Newer { seeded: false }),
+            Some(sink::RecordVersion::new("1:1")),
+        ))
+    }
+}
+
+/// The cut of 2026-11-27: a read that finds another process changed the
+/// records stops the whole deployment. `run` returns the error naming the
+/// index, the sink and what was found; the sink engine is not restarted
+/// (staged and read again), nothing of the lane is written, and nothing is
+/// confirmed past the stream's start.
+#[tokio::test]
+async fn a_change_by_another_process_stops_the_deployment() {
+    let sink = Arc::new(ChangedAfterTheFirstRead::default());
+    let (source, _end) = ScriptedSource::new(vec![row_event(false, 1)]).held_open();
+    let confirmed = Arc::clone(&source.confirmed);
+    let backends = backends(
+        source,
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let running = Daemon::new(fast_restarts(), backends)
+        .start()
+        .await
+        .unwrap();
+    let status = running.status();
+    let ended = tokio::time::timeout(
+        Duration::from_secs(10),
+        running.run(std::future::pending::<()>()),
+    )
+    .await
+    .expect("the deployment stops at once");
+    let error = format!("{:#}", ended.unwrap_err());
+    assert!(
+        error.contains("another flusso process changed")
+            && error.contains("users")
+            && error.contains("primary"),
+        "{error}"
+    );
+    assert_eq!(sink.reads.load(Ordering::SeqCst), 2, "not restaged");
+    assert!(sink.ops.lock().unwrap().is_empty(), "nothing written");
+    assert!(confirmed.lock().unwrap().is_empty(), "nothing confirmed");
+    assert!(
+        status.snapshot().errors >= 1,
+        "the error reaches the status"
+    );
+}

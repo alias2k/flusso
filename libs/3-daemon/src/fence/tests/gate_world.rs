@@ -362,6 +362,10 @@ impl Sink for Store {
         let created = self.missing.lock().unwrap().remove(of);
         if created {
             self.next_generation(of);
+            // As OpenSearch: a generation created writes the marker whole,
+            // unseeded, with no gap.
+            self.gaps.lock().unwrap().remove(of);
+            self.unseeded.lock().unwrap().insert(of.to_owned());
         }
         let generation = self
             .generation
@@ -443,18 +447,6 @@ impl Sink for Store {
             .get(of)
             .cloned()
             .unwrap_or_default();
-        // As OpenSearch's marker names its generation's `index.uuid`: each
-        // rebuild moves to a generation of its own.
-        if kept.record.is_some() {
-            let generation = self
-                .generation
-                .lock()
-                .unwrap()
-                .get(of)
-                .copied()
-                .unwrap_or(0);
-            kept.marker_target = Some(sink::TargetId::new(format!("{of}_{generation}")));
-        }
         self.reads.lock().unwrap().push((of.to_owned(), began));
         Ok(kept)
     }
@@ -478,6 +470,10 @@ impl Sink for Store {
             marker,
             true,
         );
+        // As OpenSearch keeps it: where reads stood at the detach.
+        if let Some(kept) = self.kept.lock().unwrap().get_mut(mapping.index.as_ref()) {
+            kept.detachment.through = detach.through.clone();
+        }
         if self
             .detach_fails
             .lock()
@@ -910,6 +906,9 @@ struct World {
     /// Per lane, the backfill asked and not yet completed: its ticket and
     /// where its walk began.
     asked: Vec<Option<(stream::Ticket, u64)>>,
+    /// How often this process stopped for another process's change to the
+    /// records (the cut of 2026-11-27), each time followed by a new process.
+    stops: usize,
 }
 
 /// One process's pipeline over the stores.
@@ -1016,6 +1015,7 @@ impl World {
             dropped: vec![Vec::new(); 4],
             attached: vec![Vec::new(); 4],
             asked: vec![None; 4],
+            stops: 0,
         }
     }
 
@@ -1096,8 +1096,13 @@ impl World {
         let (send, mut control) = mpsc::channel(8);
         let engine = Arc::clone(&self.engines[at]);
         let task = tokio::spawn(async move {
-            while engine.stage(Continuity::Resumed).await.is_err() {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+            loop {
+                match engine.stage(Continuity::Resumed).await {
+                    Ok(()) => break,
+                    // Another process's change: the deployment stops.
+                    Err(error) if error.stops_the_deployment() => return Err(error),
+                    Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+                }
             }
             engine.run(&mut control).await
         });
@@ -1112,7 +1117,15 @@ impl World {
 
     /// Let the runs take what is ready, playing each index's builder: an
     /// attach is answered at once, a backfill only at its `Seed`.
+    /// Let the runs take what is ready (`settle_once`); when this process
+    /// stopped for another process's change, a new one starts over the same
+    /// stores, as an orchestrator restarts it, and settles in turn.
     async fn settle(&mut self) {
+        while self.settle_once().await {}
+    }
+
+    /// One pass of [`settle`](Self::settle): whether this process stopped.
+    async fn settle_once(&mut self) -> bool {
         let mut requests = self.stream.requests().unwrap().consumer;
         for _ in 0..4 {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1163,16 +1176,94 @@ impl World {
                 }
                 let _ = handle.ack().await;
             }
-            // A run that ended on a failed read is restarted by the daemon.
+            // A run that ended on a failed read is restarted by the daemon;
+            // one that stopped for another process's change ends the
+            // process, and a new one starts.
             for at in 0..2 {
-                if self.runs[at]
+                if !self.runs[at]
                     .as_ref()
                     .is_some_and(|(task, _)| task.is_finished())
                 {
-                    self.restart(at).await;
+                    continue;
+                }
+                let Some((task, _)) = self.runs[at].take() else {
+                    continue;
+                };
+                match task.await {
+                    Ok(Err(error)) if error.stops_the_deployment() => {
+                        self.stops += 1;
+                        self.new_process().await;
+                        return true;
+                    }
+                    _ => self.restart(at).await,
                 }
             }
         }
+        false
+    }
+
+    /// Every lane whose index keeps no record holds what the slot confirmed:
+    /// a stop confirms nothing it dropped or held (the cut of 2026-11-27),
+    /// and neither does any other moment. A lane under a record is covered
+    /// by it.
+    fn unheld_confirmations(&self) -> Vec<String> {
+        (0..4)
+            .filter(|lane| {
+                self.stores[Self::sink_of(*lane)]
+                    .kept
+                    .lock()
+                    .unwrap()
+                    .get(Self::index_of(*lane))
+                    .is_none()
+            })
+            .filter_map(|lane| {
+                self.confirmation_held(lane, self.confirmed)
+                    .err()
+                    .map(|why| {
+                        format!(
+                            "{} confirmed through {}: {why}",
+                            self.lanes[lane], self.confirmed
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// Whether `lane` holds every change at or before `p` as far as the slot
+    /// is concerned: written, held by a seed whose walk began after it, or
+    /// given up by a reattach after it (the gap the operator accepted). What
+    /// another process dropped is covered by a seed after it or by a
+    /// reattach since.
+    fn confirmation_held(&self, lane: usize, p: u64) -> std::result::Result<(), String> {
+        let store = &self.stores[Self::sink_of(lane)];
+        let of = Self::index_of(lane);
+        let seeded = |at: u64| {
+            store
+                .seeds
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(index, began)| index == of && *began >= at)
+        };
+        let given_up = |when: u64| self.attached[lane].iter().any(|attach| *attach > when);
+        for (at, when) in self.changes[lane % 2].iter().filter(|(at, _)| *at <= p) {
+            let written = store
+                .written
+                .lock()
+                .unwrap()
+                .contains(&(of.to_owned(), *at));
+            if !(written || seeded(*at) || given_up(*when)) {
+                return Err(format!("the change at {at} is not held"));
+            }
+        }
+        for (from, to, when) in &self.dropped[lane] {
+            if *from < p && !seeded((*to).min(p)) && !given_up(*when) {
+                return Err(format!(
+                    "({from}, {to}], which another process dropped, is not held"
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn seed(&mut self, lane: usize) {
@@ -1461,7 +1552,9 @@ impl World {
     }
 }
 
-async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
+/// Run `events` and judge the world; answers how many times this process
+/// stopped over another process's change.
+async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestCaseError> {
     let events: Vec<Event> = events.into_iter().flat_map(Event::expand).collect();
     let mut world = World::new();
     for at in 0..2 {
@@ -1639,6 +1732,18 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
                     }
                 }
                 if let Ok(FenceOutcome::Reached { .. }) = answer {
+                    // A fence never covers a backfill (ADR 0009): a lane
+                    // whose index backfills is judged once it is seeded.
+                    let selected: Vec<usize> = selected
+                        .into_iter()
+                        .filter(|lane| {
+                            !world.stores[World::sink_of(*lane)]
+                                .unseeded
+                                .lock()
+                                .unwrap()
+                                .contains(World::index_of(*lane))
+                        })
+                        .collect();
                     for lane in selected {
                         let held = world.holds(lane, at);
                         prop_assert!(
@@ -1660,6 +1765,8 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
         world.confirm();
         let violations = world.violations();
         prop_assert!(violations.is_empty(), "after {event:?}: {violations:?}");
+        let unheld = world.unheld_confirmations();
+        prop_assert!(unheld.is_empty(), "after {event:?}: {unheld:?}");
     }
 
     // Liveness: every record readable, nothing held, the slot held, the runs
@@ -1677,6 +1784,12 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
     // Then a change on every index, so no wait below falls in a gap a
     // reattach accepted meanwhile; and settled again.
     for round in 0..50 {
+        // A process started after a stop opens its own stream, as its
+        // ingest engine would.
+        if !world.holding.holds() {
+            let start = world.horizon;
+            world.open(true, start).await.unwrap();
+        }
         if round == 40 {
             for at in 0..2 {
                 world.apply(at);
@@ -1708,8 +1821,15 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
                 held.unwrap_err()
             );
         }
-        if world.tap.detached.lock().unwrap().contains(&key)
-            || world.tap.rebuilding.lock().unwrap().contains(&key)
+        // Liveness from the world's own records, not the engine's reports:
+        // an index whose records keep nothing must be served at the newest
+        // change (the eighth re-check's review).
+        if world.stores[World::sink_of(lane)]
+            .kept
+            .lock()
+            .unwrap()
+            .get(World::index_of(lane))
+            .is_some()
         {
             continue;
         }
@@ -1725,10 +1845,42 @@ async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
                 .map(|(task, _)| task.is_finished()),
         );
     }
+    // A world with no other process never stops: nothing but this process
+    // changes the records (the cut of 2026-11-27).
+    if solo {
+        prop_assert_eq!(world.stops, 0, "a single process stopped");
+    }
     for at in 0..2 {
         world.stop(at).await;
     }
-    Ok(())
+    Ok(world.stops)
+}
+
+/// The events of a world with no other process: no stream end or opening
+/// over another process's holding, no record another process writes.
+fn solo_event() -> impl Strategy<Value = Event> {
+    prop_oneof![
+        3 => any::<bool>().prop_map(|ok| Event::Open { ok, jump: 0, drop: None, rebuild: false }),
+        2 => Just(Event::StreamEnds { jump: 0, drop: None, rebuild: false }),
+        2 => (0usize..4, any::<bool>()).prop_map(|(lane, fails)| Event::Detach { lane, fails }),
+        1 => (0usize..4).prop_map(|lane| Event::Unblock { lane }),
+        3 => (0usize..2, 0u8..4).prop_map(|(sink, unreadable)| Event::Restart { sink, unreadable }),
+        2 => (0usize..2).prop_map(|sink| Event::Readable { sink }),
+        1 => (0usize..2).prop_map(|sink| Event::HoldReads { sink }),
+        1 => (0usize..2).prop_map(|sink| Event::HoldEnsure { sink }),
+        2 => (0usize..2).prop_map(|sink| Event::Release { sink }),
+        1 => (0usize..4).prop_map(|lane| Event::Missing { lane }),
+        4 => (0usize..2).prop_map(|index| Event::Apply { index }),
+        2 => (0usize..4).prop_map(|lane| Event::Seed { lane }),
+        1 => (1u64..10).prop_map(|by| Event::Horizon { by }),
+        1 => Just(Event::Status),
+        2 => Just(Event::NewProcess),
+        2 => (0usize..2).prop_map(|index| Event::Reindex { index }),
+        2 => (0usize..2).prop_map(|index| Event::Reattach { index }),
+        4 => (0usize..4, any::<bool>(), any::<bool>(), 0u64..140).prop_map(
+            |(lane, whole_sink, searchable, at)| Event::Wait { lane, whole_sink, searchable, at }
+        ),
+    ]
 }
 
 proptest! {
@@ -1743,19 +1895,33 @@ proptest! {
             .start_paused(true)
             .build()
             .unwrap()
-            .block_on(run(events))?;
+            .block_on(run(events, false))?;
+    }
+
+    /// The cut of 2026-11-27: with no other process, this one never stops.
+    #[test]
+    fn a_single_process_never_stops(
+        events in prop::collection::vec(solo_event(), 1..40)
+    ) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap()
+            .block_on(run(events, true))?;
     }
 }
 
 /// Run `events` in the world, as the property does.
-fn replay(events: Vec<Event>) {
+/// Replay `events`, judged; answers how many times this process stopped.
+fn replay(events: Vec<Event>) -> usize {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .start_paused(true)
         .build()
         .unwrap()
-        .block_on(run(events))
-        .unwrap();
+        .block_on(run(events, false))
+        .unwrap()
 }
 
 /// The sixth re-check, B-1, the reviewer's first seed, as its shrunk events:
@@ -1830,13 +1996,13 @@ fn a_reindex_after_a_new_process_found_anothers_rebuild() {
     ]);
 }
 
-/// Found by the world in the seventh re-check (S-3's new events), as its
-/// shrunk events: a backfill asked, another process's drop kept as a gap
-/// while this process holds no slot, the completion granted as an ordinary
-/// seed after the reopen. The gap cuts the backfill: nothing seeds over it.
+/// Found by the world in the seventh re-check: a backfill asked, then
+/// another process's drop kept as a gap while this process holds no slot.
+/// Under the cut the read once held finds the gap foreign and stops: nothing
+/// seeds over it.
 #[test]
-fn a_gap_written_while_unheld_cuts_the_backfill_asked_before_it() {
-    replay(vec![
+fn a_gap_kept_while_unheld_over_an_asked_backfill_ends_in_a_stop() {
+    let stops = replay(vec![
         Event::Open {
             ok: true,
             jump: 0,
@@ -1846,15 +2012,16 @@ fn a_gap_written_while_unheld_cuts_the_backfill_asked_before_it() {
         Event::Reindex { index: 0 },
         Event::GapOverOwed { lane: 2 },
     ]);
+    assert_ne!(stops, 0, "ends in a stop");
 }
 
 /// Found by the world in the seventh re-check: a rebuild taken over at a
 /// start whose record another process removed, then another process's new
-/// rebuild under the same attempt count: demoted, never taken for this
-/// process's own.
+/// rebuild under the same attempt count. Never taken for this process's
+/// own: the record changed since this process read it, so it stops.
 #[test]
 fn a_later_rebuild_under_the_same_attempts_is_not_taken_for_ours() {
-    replay(vec![
+    let stops = replay(vec![
         Event::Unheld {
             lane: 3,
             rebuild: true,
@@ -1873,44 +2040,47 @@ fn a_later_rebuild_under_the_same_attempts_is_not_taken_for_ours() {
             rebuild: false,
         },
     ]);
+    assert_ne!(stops, 0, "ends in a stop");
 }
 
 /// The seventh re-check's B-1 as the world draws it: another process
 /// finishes the rebuild this process met with no slot held, then this
-/// process opens, a change follows, and a new process waits for it.
+/// process opens: it stops at the read, and drops nothing no record covers.
 #[test]
 fn a_rebuild_the_holder_finished_drops_nothing_unrecorded() {
-    replay(
+    let stops = replay(
         Event::HolderFinishes {
             lane: 3,
             reattach: false,
         }
         .expand(),
     );
+    assert_ne!(stops, 0, "ends in a stop");
 }
 
 /// B-1's other half as the world draws it: another process reattaches a
-/// lane this process holds detached under that process's record.
+/// lane this process holds detached under that process's record. This
+/// process stops at the read, and drops nothing no record covers.
 #[test]
 fn a_lane_the_holder_reattached_drops_nothing_unrecorded() {
-    replay(
+    let stops = replay(
         Event::HolderFinishes {
             lane: 0,
             reattach: true,
         }
         .expand(),
     );
+    assert_ne!(stops, 0, "ends in a stop");
 }
 
 /// Found by the world in the seventh re-check: this process's rebuild
 /// begins while it holds the slot, then waits in `ensure_index` while its
 /// stream ends and another process drops the lane and reattaches it. Read
-/// once held, the lane is recorded detached again and the rebuild dropped,
-/// in the run as in the engine: its attach opens nothing, and another
-/// process's later rebuild under the same attempt count is not taken for it.
+/// once held, the records changed since this process wrote them: it stops,
+/// and its attach opens nothing.
 #[test]
-fn a_rebuild_whose_record_was_replaced_meanwhile_is_dropped_by_the_run() {
-    replay(vec![
+fn a_rebuild_whose_record_was_replaced_meanwhile_ends_in_a_stop() {
+    let stops = replay(vec![
         Event::HolderFinishes {
             lane: 2,
             reattach: true,
@@ -1939,17 +2109,18 @@ fn a_rebuild_whose_record_was_replaced_meanwhile_is_dropped_by_the_run() {
         },
         Event::Readable { sink: 0 },
     ]);
+    assert_ne!(stops, 0, "ends in a stop");
 }
 
 /// Found by the world in the seventh re-check: this process takes over a
-/// rebuild at its first staging (no slot held yet); with no read here in
-/// between, the record is removed and another process begins a new rebuild,
-/// its attempts restarting at the same count. Read once held, the new
-/// rebuild's generation is not the one this process fills: it is demoted,
-/// never taken for this process's own.
+/// rebuild at its first staging (no slot held yet); then the record is
+/// removed and another process begins a new rebuild, its attempts
+/// restarting at the same count. Read once held, the records differ from
+/// what this process read: it stops, never taking the new rebuild for its
+/// own.
 #[test]
-fn a_rebuild_begun_again_under_the_same_attempts_is_told_apart_by_its_generation() {
-    replay(vec![
+fn a_rebuild_begun_again_under_the_same_attempts_ends_in_a_stop() {
+    let stops = replay(vec![
         Event::Reindex { index: 1 },
         Event::Unheld {
             lane: 0,
@@ -1968,14 +2139,16 @@ fn a_rebuild_begun_again_under_the_same_attempts_is_told_apart_by_its_generation
             then: 1,
         },
     ]);
+    assert_ne!(stops, 0, "ends in a stop");
 }
 
-/// Found by the world at 20,000 cases in the seventh re-check: a backfill
-/// cut by a gap the read found while what the records asked waited for the
-/// slot was never asked again, and its index stayed backfilling.
+/// Found by the world at 20,000 cases in the seventh re-check: a gap
+/// another process kept over a backfill this process asked, while the slot
+/// was away. The read once held stops; the next process asks its own
+/// backfill, so the index never stays backfilling.
 #[test]
-fn a_backfill_cut_while_the_slot_is_away_is_asked_again() {
-    replay(vec![
+fn a_gap_kept_while_the_slot_is_away_ends_in_a_stop() {
+    let stops = replay(vec![
         Event::Unheld {
             lane: 3,
             rebuild: true,
@@ -1984,16 +2157,17 @@ fn a_backfill_cut_while_the_slot_is_away_is_asked_again() {
         Event::Finishes { lane: 3 },
         Event::GapOverOwed { lane: 3 },
     ]);
+    assert_ne!(stops, 0, "ends in a stop");
 }
 
 /// Found by the world at 20,000 cases in the seventh re-check: a backfill
 /// resumed from a walk checkpoint (here another process's, from the rebuild
 /// it began before its drop) whose pages predate a drop the records keep as
-/// a gap seeded over the gap. With a gap kept, the walk starts again from
-/// the first key.
+/// a gap. The gap is another process's: this process stops, and the next
+/// one, finding the gap at its start, walks from the first key.
 #[test]
-fn a_walk_resumed_over_a_kept_gap_starts_from_the_first_key() {
-    replay(vec![
+fn a_walk_over_anothers_gap_ends_in_a_stop() {
+    let stops = replay(vec![
         Event::Release { sink: 0 },
         Event::Unheld {
             lane: 3,
@@ -2008,13 +2182,14 @@ fn a_walk_resumed_over_a_kept_gap_starts_from_the_first_key() {
         },
         Event::WaitDropped { lane: 3 },
     ]);
+    assert_ne!(stops, 0, "ends in a stop");
 }
 
 /// The same with this process's own failed opening first and a whole-sink
 /// wait.
 #[test]
-fn a_walk_resumed_over_a_kept_gap_starts_from_the_first_key_after_a_failed_opening() {
-    replay(vec![
+fn a_walk_over_anothers_gap_ends_in_a_stop_after_a_failed_opening() {
+    let stops = replay(vec![
         Event::Open {
             ok: false,
             jump: 10,
@@ -2036,12 +2211,13 @@ fn a_walk_resumed_over_a_kept_gap_starts_from_the_first_key_after_a_failed_openi
             at: 21,
         },
     ]);
+    assert_ne!(stops, 0, "ends in a stop");
 }
 
 /// The same after two drops another process finished on `audit`.
 #[test]
-fn a_walk_resumed_over_a_kept_gap_starts_from_the_first_key_after_other_drops() {
-    replay(vec![
+fn a_walk_over_anothers_gap_ends_in_a_stop_after_other_drops() {
+    let stops = replay(vec![
         Event::HolderFinishes {
             lane: 0,
             reattach: false,
@@ -2070,4 +2246,168 @@ fn a_walk_resumed_over_a_kept_gap_starts_from_the_first_key_after_other_drops() 
             at: 61,
         },
     ]);
+    assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// A gap heard before the index was created again is forgotten at the next
+/// read: the created generation keeps no gap, and the lane vouches again.
+#[test]
+fn a_gap_heard_before_the_index_was_created_again_is_forgotten() {
+    let stops = replay(vec![
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+        Event::Reattach { index: 0 },
+        Event::GapOverOwed { lane: 2 },
+        Event::Reattaches { lane: 0 },
+        Event::StreamEnds {
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::Missing { lane: 0 },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// The eighth re-check, B-1: an owed seed lands only once its lane's
+/// records were read under the stream now held. Here another process wrote
+/// a gap while a read waited across two openings: the deployment stops at
+/// that read, and no seed writes the marker over the gap.
+#[test]
+fn an_owed_seed_waits_for_a_read_under_the_stream_now_held() {
+    let stops = replay(vec![
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 2,
+        },
+        Event::Release { sink: 0 },
+        Event::Reattach { index: 0 },
+        Event::Readable { sink: 0 },
+        Event::GapOverOwed { lane: 3 },
+        Event::Finishes { lane: 0 },
+        Event::Open {
+            ok: false,
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::Seed { lane: 2 },
+        Event::HoldReads { sink: 1 },
+        Event::GapOverOwed { lane: 3 },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// The eighth re-check, B-2: another process reattached a lane this one
+/// holds detached, then detached it again; a reattach asked here meanwhile
+/// stops the deployment instead of taking the missing record for its own,
+/// so nothing is written onto the second record.
+#[test]
+fn a_reattach_over_anothers_reattach_writes_nothing_onto_its_next_record() {
+    let stops = replay(vec![
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+        Event::HoldEnsure { sink: 0 },
+        Event::Reattaches { lane: 0 },
+        Event::Reattach { index: 0 },
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// The eighth re-check, B-2, on the other index, with a reindex staged in
+/// between.
+#[test]
+fn a_reattach_over_anothers_reattach_writes_nothing_after_a_reindex() {
+    let stops = replay(vec![
+        Event::Unheld {
+            lane: 1,
+            rebuild: false,
+            then: 2,
+        },
+        Event::HoldEnsure { sink: 0 },
+        Event::Reindex { index: 0 },
+        Event::Reattaches { lane: 1 },
+        Event::Reattach { index: 1 },
+        Event::Unheld {
+            lane: 1,
+            rebuild: false,
+            then: 0,
+        },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// The eighth re-check, B-4a: a reindex whose new generation another
+/// process rebuilt and seeded while this one held no slot stops the
+/// deployment at the staging that finds it; the next process serves the
+/// index, so the fence is never left rebuilding over an open lane.
+#[test]
+fn a_reindex_whose_generation_another_process_seeded_ends_in_a_stop() {
+    let stops = replay(vec![
+        Event::HolderFinishes {
+            lane: 0,
+            reattach: false,
+        },
+        Event::Reindex { index: 0 },
+        Event::Open {
+            ok: false,
+            jump: 10,
+            drop: Some(2),
+            rebuild: true,
+        },
+        Event::Finishes { lane: 2 },
+        Event::Restart {
+            sink: 1,
+            unreadable: 1,
+        },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// The eighth re-check, B-4b: a rebuild another process finished while this
+/// one held no slot stops the deployment instead of being dropped unheard,
+/// so the fence is never left detached over an open lane.
+#[test]
+fn a_rebuild_another_process_finished_ends_in_a_stop() {
+    let stops = replay(vec![
+        Event::Unheld {
+            lane: 3,
+            rebuild: false,
+            then: 0,
+        },
+        Event::Unheld {
+            lane: 2,
+            rebuild: false,
+            then: 0,
+        },
+        Event::Restart {
+            sink: 1,
+            unreadable: 0,
+        },
+        Event::HoldEnsure { sink: 1 },
+        Event::HolderFinishes {
+            lane: 0,
+            reattach: false,
+        },
+        Event::Reindex { index: 1 },
+        Event::NewProcess,
+        Event::Finishes { lane: 3 },
+        Event::Restart {
+            sink: 1,
+            unreadable: 0,
+        },
+    ]);
+    assert_ne!(stops, 0, "ends in a stop");
 }

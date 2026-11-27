@@ -38,7 +38,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine::{IngestEngine, SinkControl, SinkEngine, Stop, drain_lanes};
-use futures::future::{self, FutureExt};
+use futures::future;
 use kernel::{IndexName, SinkName};
 use source::cdc::{ChangeCapture, Continuity};
 use stream::Stream;
@@ -228,7 +228,7 @@ pub(crate) async fn run_all(
     let staged = future::join_all(
         sink_engines
             .iter()
-            .map(|engine| stage_until_ok(engine, continuity, schedule).map(|()| ())),
+            .map(|engine| stage_until_ok(engine, continuity, schedule)),
     );
     tokio::select! {
         biased;
@@ -236,7 +236,11 @@ pub(crate) async fn run_all(
             tracing::info!("stop requested while staging; nothing was captured");
             return Ok(());
         }
-        _ = staged => {}
+        staged = staged => {
+            if let Some(stopped) = staged.into_iter().find_map(std::result::Result::err) {
+                return Err(stopped);
+            }
+        }
     }
     if stop.is_requested() {
         tracing::info!("stop requested as staging ended; nothing was captured");
@@ -253,12 +257,17 @@ pub(crate) async fn run_all(
             let mut first = true;
             loop {
                 if !first {
-                    stage_until_ok(&engine, Continuity::Resumed, schedule).await;
+                    stage_until_ok(&engine, Continuity::Resumed, schedule).await?;
                 }
                 first = false;
                 let acknowledged = engine.advanced();
                 match engine.run(&mut receiver).await {
                     Ok(()) => return Ok::<(), anyhow::Error>(()),
+                    // Another process changed the records: the deployment
+                    // stops, no restart (the cut of 2026-11-27).
+                    Err(error) if error.stops_the_deployment() => {
+                        return Err(anyhow::Error::new(error));
+                    }
                     Err(_) => {
                         if engine.advanced() > acknowledged {
                             backoff.reset();
@@ -348,11 +357,21 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-async fn stage_until_ok(engine: &SinkEngine, continuity: Continuity, schedule: engine::Backoff) {
+/// Stage `engine` until it succeeds; a staging that found another process's
+/// change to the records stops the deployment instead.
+async fn stage_until_ok(
+    engine: &SinkEngine,
+    continuity: Continuity,
+    schedule: engine::Backoff,
+) -> anyhow::Result<()> {
     let mut backoff = Backoff::new(schedule);
     loop {
         match engine.stage(continuity).await {
-            Ok(()) => return,
+            Ok(()) => return Ok(()),
+            Err(error) if error.stops_the_deployment() => {
+                tracing::error!(sink = %engine.name(), %error, "stopping the deployment");
+                return Err(anyhow::Error::new(error));
+            }
             Err(error) => {
                 tracing::error!(sink = %engine.name(), %error, "staging failed; retrying");
                 backoff.wait().await;

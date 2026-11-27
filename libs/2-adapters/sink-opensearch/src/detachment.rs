@@ -76,11 +76,6 @@ impl OpensearchSink {
                 .version()
                 .map(|(seq_no, term)| RecordVersion::new(format!("{seq_no}:{term}")));
             kept.attempts = record.source.get("attempts").and_then(Value::as_u64);
-            kept.marker_target = marker
-                .as_ref()
-                .and_then(|marker| marker.source.get("uuid"))
-                .and_then(Value::as_str)
-                .map(sink::TargetId::new);
             kept.through = record
                 .source
                 .get("through")

@@ -337,13 +337,6 @@ pub struct Detachment {
     pub version: Option<RecordVersion>,
     /// The rebuilds the record counts as started: the attempt of the last.
     pub attempts: Option<u64>,
-    /// The generation the seed marker names, as the target
-    /// [`Sink::ensure_index`] reports it, read beside a record: `None` when
-    /// the sink doesn't say, or before that generation exists. Each rebuild
-    /// moves the marker to a generation of its own, so this tells two
-    /// rebuilds apart where the attempts can't: a rebuild begun after its
-    /// index's record was removed counts its attempts from one again.
-    pub marker_target: Option<TargetId>,
     /// Where reads stood at the detach, in the source's own text: the
     /// record's `through`, the start of a reattach's gap.
     pub through: Option<String>,

@@ -520,6 +520,10 @@ impl Observer for Heard {
     }
 
     fn on_lane_gaps(&self, lane: &LaneKey, gaps: &[sink::Gap]) {
+        // Every read tells its list; these tests follow the lists kept.
+        if gaps.is_empty() {
+            return;
+        }
         let heard = self.health.lock().unwrap().len();
         self.gaps
             .lock()
@@ -2281,11 +2285,12 @@ async fn a_reattach_cut_short_before_its_attach_completes_its_gap_once_the_slot_
     task.abort();
 }
 
-/// O29: a lane another process detached after this one staged is taken as
-/// detached once the slot is held, before anything of it is written: the
-/// sink engine reads its records again first.
+/// The cut of 2026-11-27: a lane another process detached after this one
+/// read its records is not taken as detached: the read once the slot is
+/// held finds the change and the deployment stops, nothing of the lane
+/// written and its read uncounted, so confirmation never passes it.
 #[tokio::test(start_paused = true)]
-async fn a_lane_the_records_say_detached_once_the_slot_is_held_is_taken_as_detached() {
+async fn a_detach_another_process_recorded_since_this_one_read_stops_the_deployment() {
     let rig = Rig::new(64);
     let engine = rig.engine();
     engine.stage(Continuity::Resumed).await.unwrap();
@@ -2297,15 +2302,13 @@ async fn a_lane_the_records_say_detached_once_the_slot_is_held_is_taken_as_detac
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let (task, _control) = spawn(&engine);
     rig.live(&users(), 1, 1).await;
-    eventually("the lane is taken as detached", || {
-        engine.lane_health(&lane(users())).is_detached()
-    })
-    .await;
-    assert!(rig.progress.is_detached(&lane(users())));
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    stops(task).await;
     assert!(written(&rig).is_empty(), "nothing of it is written");
-    assert!(read_all(&rig));
-    task.abort();
+    assert!(!rig.rereads.current(&lane(users())), "its read uncounted");
+    assert_eq!(
+        rig.sink.kept.lock().unwrap().get("users"),
+        Some(&detached_record())
+    );
 }
 
 /// O29: a staging after the slot opened reads every record: it is the read
@@ -2668,8 +2671,8 @@ async fn a_detached_record_on_a_sink_switched_to_backfill_false_is_put_back_live
 
 /// Review of step 4, S5: the slot can open again while a turn awaits (here a
 /// reindex's staging of another index), and another process may have
-/// detached a lane meanwhile. What the turn then takes was published after
-/// the opening: it is read again before anything is written.
+/// detached a lane meanwhile: the read before anything the turn takes is
+/// written finds it, and the deployment stops.
 #[tokio::test(start_paused = true)]
 async fn a_slot_reopened_while_a_reindex_stages_is_read_before_the_items_it_brought() {
     let rig = Rig::new(64);
@@ -2700,13 +2703,8 @@ async fn a_slot_reopened_while_a_reindex_stages_is_read_before_the_items_it_brou
     rig.live(&users(), 1, 1).await;
     *rig.sink.ensure_gate.lock().unwrap() = None;
     gate.add_permits(1);
-    eventually("the lane is taken as detached", || {
-        engine.lane_health(&lane(users())).is_detached()
-    })
-    .await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    stops(task).await;
     assert!(written(&rig).is_empty(), "nothing of it is written");
-    task.abort();
 }
 
 /// Review of step 4, m1: a rebuild resumed at a start serves `rebuilding`
@@ -2733,11 +2731,11 @@ async fn a_rebuild_resumed_at_a_start_serves_rebuilding() {
     assert_eq!(engine.lane_state(&lane(users())).rebuilding, Some(1));
 }
 
-/// Review of step 4, m3: read again once the slot is held, a `rebuilding`
-/// record another process began on a lane this process holds open takes the
-/// lane as detached before anything of it is written.
+/// The cut: a rebuild another process began on a lane this one holds open
+/// stops the deployment at the read once the slot is held; the rebuild is
+/// left to its process, nothing of the lane written.
 #[tokio::test(start_paused = true)]
-async fn a_lane_another_process_began_rebuilding_is_taken_as_detached_once_the_slot_is_held() {
+async fn a_rebuild_another_process_began_since_this_one_read_stops_the_deployment() {
     let rig = Rig::new(64);
     let engine = rig.engine();
     engine.stage(Continuity::Resumed).await.unwrap();
@@ -2752,13 +2750,12 @@ async fn a_lane_another_process_began_rebuilding_is_taken_as_detached_once_the_s
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let (task, _control) = spawn(&engine);
     rig.live(&users(), 1, 1).await;
-    eventually("the lane is taken as detached", || {
-        engine.lane_health(&lane(users())).is_detached()
-    })
-    .await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    stops(task).await;
     assert!(written(&rig).is_empty(), "nothing of it is written");
-    task.abort();
+    assert!(
+        rig.sink.demoted.lock().unwrap().is_empty(),
+        "left to its process"
+    );
 }
 
 /// Review of step 4, m2 (§6a item 2): a rebuild that can't begin is owed:
@@ -2997,13 +2994,15 @@ async fn a_corrupt_gap_kept_before_a_reattach_is_settled_after_it() {
     task.abort();
 }
 
-/// Review of the second fix round, m-i: the record's delete landed though
-/// its call failed, and reading it again failed too. The operator hears
-/// both errors and that a reattach finds out; asked again, the reattach
-/// reads no record and finishes what the first began, with the one gap.
+/// The eighth re-check, B-2: the record's delete landed though its call
+/// failed, and reading it again failed too. Asked again under a later
+/// opening, the reattach reads no record and can't tell its own lost delete
+/// from another process's reattach: the deployment stops, and the next
+/// start decides from the records (the gap is kept with the marker).
 #[tokio::test(start_paused = true)]
-async fn a_reattach_after_a_delete_that_landed_unseen_finishes_it() {
+async fn a_reattach_after_a_delete_that_landed_unseen_stops_the_deployment() {
     let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let (_engine, task, control) = detached_live_only(&rig).await;
     *rig.sink.forget_lands_then_fails.lock().unwrap() = true;
     // The reattach's own read succeeds; the read after the failed delete
@@ -3018,14 +3017,15 @@ async fn a_reattach_after_a_delete_that_landed_unseen_finishes_it() {
         "the delete landed"
     );
     *rig.sink.forget_lands_then_fails.lock().unwrap() = false;
-    assert_eq!(verdict(&control).await, crate::ReattachVerdict::Started);
-    assert_eq!(
-        rig.sink.marker_gaps.lock().unwrap().get("users"),
-        Some(&vec![gap(Some("1"), None)]),
-        "one gap"
-    );
-    let _attach = next_request(&rig).await;
-    task.abort();
+    rig.rereads.closed();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let _ = control
+        .send(SinkControl::Reattach {
+            index: users(),
+            reply: crate::Reply::ignored(),
+        })
+        .await;
+    stops(task).await;
 }
 
 /// The third re-check, item 2: an unread lane vouches for nothing, so after
@@ -3259,11 +3259,12 @@ async fn a_reindex_that_spans_an_opening_reads_again_before_its_lane_opens() {
 }
 
 /// B-1's reindex shape, writer half: another process detached `orders`
-/// while the reindex was in flight across an opening; nothing is written.
+/// while the reindex was in flight across an opening: the deployment stops,
+/// nothing written.
 #[tokio::test(start_paused = true)]
-async fn a_reindex_across_an_opening_never_writes_a_lane_another_process_detached() {
+async fn a_reindex_across_an_opening_stops_on_a_lane_another_process_detached() {
     let rig = Rig::new(64);
-    let (engine, task, gate) = reindex_held_across_an_opening(&rig, false).await;
+    let (_engine, task, gate) = reindex_held_across_an_opening(&rig, false).await;
     rig.sink
         .kept
         .lock()
@@ -3272,11 +3273,7 @@ async fn a_reindex_across_an_opening_never_writes_a_lane_another_process_detache
     *rig.sink.ensure_gate.lock().unwrap() = None;
     gate.add_permits(16);
     rig.live(&orders(), 7, 7).await;
-    eventually("orders is taken as detached", || {
-        engine.lane_health(&lane(orders())).is_detached()
-    })
-    .await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    stops(task).await;
     assert!(
         !rig.sink
             .ids
@@ -3285,7 +3282,6 @@ async fn a_reindex_across_an_opening_never_writes_a_lane_another_process_detache
             .contains(&"orders/7".to_owned()),
         "written into an index the records say is detached"
     );
-    task.abort();
 }
 
 /// The attach the rebuild of `orders` asked for, answered by the builder.
@@ -3380,13 +3376,12 @@ async fn a_rebuild_across_an_opening_never_writes_a_lane_another_process_demoted
     task.abort();
 }
 
-/// The fourth re-check, B-2: read again once the slot is held, a rebuild
-/// another process began (its record `rebuilding`, a walk checkpoint kept)
-/// is put back to detached before the lane drops anything: a later start
-/// finds it detached, never resumes the rebuild from its checkpoint over the
-/// changes this run dropped.
+/// The cut, for the fourth re-check's B-2: a rebuild another process began
+/// (its record `rebuilding`, a walk checkpoint kept) is neither demoted nor
+/// written over; the deployment stops, and the rebuild and its checkpoint
+/// stay as its process left them for the next start to decide.
 #[tokio::test(start_paused = true)]
-async fn a_rebuild_another_process_began_is_demoted_before_its_lane_drops_anything() {
+async fn a_rebuild_another_process_began_is_left_as_it_is_when_the_deployment_stops() {
     let rig = Rig::new(64);
     let engine = rig.engine();
     engine.stage(Continuity::Resumed).await.unwrap();
@@ -3410,28 +3405,18 @@ async fn a_rebuild_another_process_began_is_demoted_before_its_lane_drops_anythi
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let (task, _control) = spawn(&engine);
     rig.live(&users(), 1, 1).await;
-    eventually("the lane is taken as detached", || {
-        engine.lane_health(&lane(users())).is_detached()
-    })
-    .await;
+    stops(task).await;
+    assert!(rig.sink.demoted.lock().unwrap().is_empty());
+    assert!(written(&rig).is_empty());
     assert_eq!(
-        *rig.sink.demoted.lock().unwrap(),
-        [("users".to_owned(), false)],
-        "demoted before the lane dropped anything"
-    );
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(written(&rig).is_empty(), "the change at 1 was dropped");
-    task.abort();
-    let _ = task.await;
-    assert!(
-        rig.sink.walked.lock().unwrap().get("users").is_none(),
-        "the walk checkpoint is gone"
-    );
-    let next = rig.engine();
-    next.stage(Continuity::Resumed).await.unwrap();
-    assert!(
-        next.lane_health(&lane(users())).is_detached(),
-        "the next start finds it detached, not a rebuild to resume"
+        rig.sink
+            .walked
+            .lock()
+            .unwrap()
+            .get("users")
+            .map(String::as_str),
+        Some("k"),
+        "the checkpoint stays"
     );
 }
 
@@ -3541,33 +3526,25 @@ async fn a_rebuild_another_process_began_since_ours_is_demoted() {
     task.abort();
 }
 
-/// The world property: a lane held detached while its rebuild waits to
-/// attach, whose record a staging reads put back to detached (another process
-/// took the rebuild as its own), drops the rebuild: the attach it asked for
-/// opens nothing.
+/// The cut: a lane held detached while its rebuild waits to attach, whose
+/// record another process put back to detached, stops the next staging: the
+/// attach it asked for opens nothing.
 #[tokio::test(start_paused = true)]
-async fn a_staging_drops_a_rebuild_the_records_no_longer_show() {
+async fn a_staging_finding_its_rebuild_put_back_by_another_process_stops() {
     let rig = Rig::new(64);
-    let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task, _control, _attempt) = rebuilding_on_reindex(&rig).await;
     task.abort();
     let _ = task.await;
+    rig.rereads.closed();
     rig.sink
         .kept
         .lock()
         .unwrap()
         .insert("users".to_owned(), detached_record());
-    engine.stage(Continuity::Resumed).await.unwrap();
-    assert!(engine.lane_health(&lane(users())).is_detached());
-    publish(&rig, LaneItem::Attached { attempt }).await;
-    let (task, _control) = spawn(&engine);
-    rig.live(&users(), 99, 99).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    assert!(
-        engine.lane_health(&lane(users())).is_detached(),
-        "the dropped rebuild's attach opened the lane"
-    );
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    assert!(stopped(&engine.stage(Continuity::Resumed).await));
     assert!(!written(&rig).contains(&"users/99".to_owned()));
-    task.abort();
 }
 
 /// The fifth re-check, B-1: the stream ended (this process no longer holds
@@ -4212,11 +4189,11 @@ async fn a_seed_met_without_the_slot_lands_once_held_without_a_new_walk() {
     asks.abort();
 }
 
-/// ... and when the records read again show another process kept a gap
-/// over the index meanwhile, the seed would claim what the gap misses: the
-/// backfill is asked again from the first key instead.
+/// ... and when another process kept a gap over the index meanwhile, the
+/// read once the slot is held finds it: the deployment stops, nothing
+/// seeded over the gap.
 #[tokio::test(start_paused = true)]
-async fn a_seed_owed_over_a_gap_written_meanwhile_asks_the_backfill_again() {
+async fn a_seed_owed_over_a_gap_written_meanwhile_stops_the_deployment() {
     let rig = Rig::new(64);
     let engine = rig.engine();
     let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
@@ -4235,40 +4212,22 @@ async fn a_seed_owed_over_a_gap_written_meanwhile_asks_the_backfill_again() {
         .lock()
         .unwrap()
         .insert("users".to_owned(), vec![gap(Some("1"), Some("2"))]);
-    let (asked, asks) = backfill_asks(&rig);
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    eventually("the backfill is asked again", || {
-        asked.lock().unwrap().iter().any(|request| {
-            matches!(request, stream::Request::Backfill { index, after: None, .. } if *index == users())
-        })
-    })
-    .await;
+    stops(task).await;
     assert!(
         rig.sink.seeded.lock().unwrap().is_empty(),
         "seeded over the gap"
     );
-    task.abort();
-    asks.abort();
 }
 
-/// The sixth re-check, S-2: a demotion deletes every generation but the
-/// serving one and the walk checkpoint, so without the slot it would destroy
-/// the rebuild another process holding the slot is walking. This process's
-/// run restarts while its stream is down and stages: the rebuild is left as
-/// it is, and the lane stands in, awaiting the slot (B-1 of the seventh
-/// re-check: nothing of it written or dropped). The next opening makes its
-/// records unread, and the read again, now holding the slot, demotes it.
+/// The sixth re-check's S-2, under the cut: this process's run restarts
+/// while its stream is down and stages over a rebuild another process
+/// began meanwhile. The staging finds the change and the deployment stops:
+/// the rebuild and its checkpoint are left as they are, nothing demoted.
 #[tokio::test(start_paused = true)]
-async fn a_staging_without_the_slot_leaves_anothers_rebuild_to_the_holder() {
+async fn a_staging_without_the_slot_over_anothers_rebuild_stops_and_leaves_it() {
     let rig = Rig::new(64);
     let engine = rig.engine();
-    engine.stage(Continuity::Resumed).await.unwrap();
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    let (task, _control) = spawn(&engine);
-    eventually("read under the stream", || read_all(&rig)).await;
-    task.abort();
-    let _ = task.await;
-    rig.rereads.closed();
     let mut record = Detachment::recorded(
         DetachRecord::Rebuilding { live_only: false },
         Some(MarkerAt::Newer { seeded: false }),
@@ -4276,20 +4235,14 @@ async fn a_staging_without_the_slot_leaves_anothers_rebuild_to_the_holder() {
     );
     record.attempts = Some(1);
     rig.sink
-        .kept
-        .lock()
-        .unwrap()
-        .insert("users".to_owned(), record);
-    rig.sink
         .walked
         .lock()
         .unwrap()
         .insert("users".to_owned(), "k".to_owned());
-    engine.stage(Continuity::Resumed).await.unwrap();
-    assert!(
-        rig.sink.demoted.lock().unwrap().is_empty(),
-        "demoted another process's rebuild with no slot held"
-    );
+    assert!(stopped(
+        &staged_over_without_the_slot(&rig, &engine, record).await
+    ));
+    assert!(rig.sink.demoted.lock().unwrap().is_empty());
     assert_eq!(
         rig.sink
             .walked
@@ -4298,20 +4251,8 @@ async fn a_staging_without_the_slot_leaves_anothers_rebuild_to_the_holder() {
             .get("users")
             .map(String::as_str),
         Some("k"),
-        "the holder's checkpoint stays"
+        "the other process's checkpoint stays"
     );
-    assert!(
-        awaits_slot(&engine),
-        "{:?}",
-        engine.lane_health(&lane(users()))
-    );
-    let (task, _control) = spawn(&engine);
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    eventually("demoted once the slot is held", || {
-        *rig.sink.demoted.lock().unwrap() == [("users".to_owned(), false)]
-    })
-    .await;
-    task.abort();
 }
 
 /// The sixth re-check, S-2, at a process start: the daemon builds the ingest
@@ -4346,7 +4287,7 @@ async fn a_start_staging_before_the_stream_opens_demotes_nothing() {
     assert!(rig.sink.demoted.lock().unwrap().is_empty());
     assert!(rig.sink.walked.lock().unwrap().contains_key("users"));
     assert!(
-        awaits_slot(&engine),
+        engine.lane_health(&lane(users())).is_detached(),
         "{:?}",
         engine.lane_health(&lane(users()))
     );
@@ -4490,8 +4431,12 @@ async fn a_parked_seed_without_the_slot_waits_without_spinning() {
 
 /// Stage a run of `engine` that read its records under a stream, then end
 /// that stream and stage again over `record`, another process's, with no
-/// slot held: what the records ask (a demotion or a detach) waits for it.
-async fn staged_over_without_the_slot(rig: &Rig, engine: &Arc<SinkEngine>, record: Detachment) {
+/// slot held: the staging's result.
+async fn staged_over_without_the_slot(
+    rig: &Rig,
+    engine: &Arc<SinkEngine>,
+    record: Detachment,
+) -> crate::Result<()> {
     engine.stage(Continuity::Resumed).await.unwrap();
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let (task, _control) = spawn(engine);
@@ -4504,16 +4449,15 @@ async fn staged_over_without_the_slot(rig: &Rig, engine: &Arc<SinkEngine>, recor
         .lock()
         .unwrap()
         .insert("users".to_owned(), record);
-    engine.stage(Continuity::Resumed).await.unwrap();
+    engine.stage(Continuity::Resumed).await
 }
 
-/// The seventh re-check, B-1 (probe P1): a lane whose records ask for a
-/// demotion while no slot is held stands in for it without dropping
-/// anything. The holder then finishes its rebuild (its seed deletes the
-/// record): read once this process holds the slot, the records say nothing,
-/// and the lane opens with nothing lost and no record written.
+/// The seventh re-check's B-1 (probe P1), under the cut: a record another
+/// process wrote while this one held no slot stops the deployment at the
+/// next read, before anything of the lane is taken as detached or dropped,
+/// whatever that process does with it afterwards.
 #[tokio::test(start_paused = true)]
-async fn a_lane_taken_detached_without_the_slot_never_drops_unrecorded_after_the_holder_finishes() {
+async fn a_record_another_process_wrote_without_this_ones_slot_stops_the_staging() {
     let rig = Rig::new(64);
     let engine = rig.engine();
     let mut record = Detachment::recorded(
@@ -4522,55 +4466,33 @@ async fn a_lane_taken_detached_without_the_slot_never_drops_unrecorded_after_the
         version(),
     );
     record.attempts = Some(1);
-    staged_over_without_the_slot(&rig, &engine, record).await;
-    rig.sink.kept.lock().unwrap().remove("users");
-    let (task, _control) = spawn(&engine);
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    rig.live(&users(), 5, 5).await;
-    eventually("users/5 is written", || {
-        written(&rig).contains(&"users/5".to_owned())
-    })
-    .await;
-    assert!(engine.lane_health(&lane(users())).is_open());
+    assert!(stopped(
+        &staged_over_without_the_slot(&rig, &engine, record).await
+    ));
+    assert!(!engine.lane_health(&lane(users())).is_detached());
     assert!(rig.sink.detaches().is_empty(), "nothing recorded");
     assert!(rig.sink.demoted.lock().unwrap().is_empty());
-    task.abort();
 }
 
-/// B-1's reattach twin: on a sink with `backfill = false`, the holder
-/// reattaches instead (the record deleted, its gap kept with the marker).
-/// Read once held, the lane opens over that gap, with nothing of its own
-/// dropped.
+/// The same on a sink with `backfill = false`.
 #[tokio::test(start_paused = true)]
-async fn a_lane_taken_detached_without_the_slot_opens_after_the_holder_reattaches() {
+async fn a_record_another_process_wrote_without_this_ones_slot_stops_a_live_only_staging() {
     let rig = Rig::new(64);
     let engine = rig.live_only_engine();
-    staged_over_without_the_slot(&rig, &engine, detached_record()).await;
-    rig.sink.kept.lock().unwrap().remove("users");
-    rig.sink
-        .marker_gaps
-        .lock()
-        .unwrap()
-        .insert("users".to_owned(), vec![gap(Some("1"), Some("2"))]);
-    let (task, _control) = spawn(&engine);
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    rig.live(&users(), 5, 5).await;
-    eventually("users/5 is written", || {
-        written(&rig).contains(&"users/5".to_owned())
-    })
-    .await;
-    assert!(engine.lane_health(&lane(users())).is_open());
+    assert!(stopped(
+        &staged_over_without_the_slot(&rig, &engine, detached_record()).await
+    ));
+    assert!(!engine.lane_health(&lane(users())).is_detached());
     assert!(rig.sink.detaches().is_empty(), "nothing recorded");
-    task.abort();
 }
 
-/// B-1 for a lane this process truly detached (round 4's m-3): it dropped
-/// changes under its record. Another process then removes the record (a
-/// reattach, or a rebuild it finished). Read once this process holds the
-/// slot again, the lane is recorded detached again before its read counts,
-/// so what it drops is never unrecorded.
+/// Round 4's m-3, under the cut: a lane this process detached, whose record
+/// another process then removed (a reattach, or a rebuild it finished),
+/// stops the deployment at the read once this process holds the slot again:
+/// nothing recorded over it, and nothing this process dropped since the
+/// opening confirmed (its read uncounted).
 #[tokio::test(start_paused = true)]
-async fn a_lane_held_detached_whose_record_another_process_removed_is_recorded_again() {
+async fn a_lane_held_detached_whose_record_another_process_removed_stops_the_deployment() {
     let rig = Rig::new(64);
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     let (engine, task) = detached_on_a_block(&rig).await;
@@ -4581,137 +4503,57 @@ async fn a_lane_held_detached_whose_record_another_process_removed_is_recorded_a
     rig.sink.kept.lock().unwrap().remove("users");
     let (task, _control) = spawn(&engine);
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    eventually("recorded detached again", || rig.sink.detaches().len() == 2).await;
-    assert!(rig.sink.kept.lock().unwrap().contains_key("users"));
-    assert!(engine.lane_health(&lane(users())).is_detached());
-    task.abort();
+    stops(task).await;
+    assert_eq!(rig.sink.detaches().len(), 1, "nothing recorded again");
+    assert!(!rig.rereads.current(&lane(users())));
 }
 
-/// Whether `users`' lane stands in for what waits for the slot (B-1).
-fn awaits_slot(engine: &SinkEngine) -> bool {
-    matches!(
-        engine.lane_health(&lane(users())),
-        LaneHealth::Parked {
-            reason: crate::ParkReason::AwaitingSlot { .. },
-            ..
-        }
-    )
-}
-
-/// A lane holding items of a stream that ended, unwritten (parked on a
-/// block), whose records then ask for a demotion with no slot held: B-1's
-/// stand-in keeps them. The holder finishes; once this process holds the
-/// slot and reads no record, the lane opens and writes every item it held.
+/// The eighth re-check, B-2, under the cut: a lane held detached whose
+/// record another process removed (its reattach) is never reattached here
+/// as if the missing record were this process's lost delete. Asked to
+/// reattach while this process holds no slot, the deployment stops, and
+/// nothing of the index is ensured or attached.
 #[tokio::test(start_paused = true)]
-async fn a_stand_in_writes_what_it_held_once_the_records_ask_nothing() {
+async fn a_reattach_asked_over_a_record_another_process_removed_stops_the_deployment() {
     let rig = Rig::new(64);
-    let engine = rig.engine();
-    engine.stage(Continuity::Resumed).await.unwrap();
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    let (task, _control) = spawn(&engine);
-    eventually("read under the stream", || read_all(&rig)).await;
-    rig.sink.block(&users(), true);
-    rig.live(&users(), 1, 1).await;
-    rig.live(&users(), 2, 2).await;
-    eventually("parked on the block", || {
-        matches!(
-            engine.lane_health(&lane(users())),
-            LaneHealth::Parked { .. }
-        )
-    })
-    .await;
-    let mut record = Detachment::recorded(
-        DetachRecord::Rebuilding { live_only: false },
-        Some(MarkerAt::Newer { seeded: false }),
-        version(),
-    );
-    record.attempts = Some(1);
-    rig.sink
-        .kept
-        .lock()
-        .unwrap()
-        .insert("users".to_owned(), record);
-    // An opening whose stream ends before the run reads under it.
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task, control) = detached_live_only(&rig).await;
     rig.rereads.closed();
-    eventually("the lane stands in", || awaits_slot(&engine)).await;
-    rig.sink.block(&users(), false);
-    let tried = rig.sink.writes_of(&users()).len();
-    tokio::time::sleep(Duration::from_secs(60)).await;
-    assert_eq!(
-        rig.sink.writes_of(&users()).len(),
-        tried,
-        "nothing written, nor probed, while it stands in"
-    );
     rig.sink.kept.lock().unwrap().remove("users");
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    eventually("both held items land", || {
-        rig.applied(&users()) == through(2)
-    })
-    .await;
-    assert!(engine.lane_health(&lane(users())).is_open());
-    assert!(rig.sink.demoted.lock().unwrap().is_empty());
-    task.abort();
-}
-
-/// A stop while a lane stands in for what waits for the slot doesn't wait
-/// out its deadline on it: its items are released unapplied, as a
-/// restaging lane's are, and the next start's read of the records decides.
-#[tokio::test(start_paused = true)]
-async fn a_stop_while_a_lane_awaits_the_slot_drains_at_once() {
-    let rig = Rig::new(64);
-    let stop = crate::Stop::new();
-    let engine = Arc::new(
-        rig.built("primary", Arc::clone(&rig.sink))
-            .with_stop(stop.clone()),
-    );
-    engine.stage(Continuity::Resumed).await.unwrap();
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    let (task, _control) = spawn(&engine);
-    eventually("read under the stream", || read_all(&rig)).await;
-    rig.sink.block(&users(), true);
-    rig.live(&users(), 1, 1).await;
-    eventually("parked on the block", || {
-        matches!(
-            engine.lane_health(&lane(users())),
-            LaneHealth::Parked { .. }
-        )
-    })
-    .await;
-    let mut record = Detachment::recorded(
-        DetachRecord::Rebuilding { live_only: false },
-        Some(MarkerAt::Newer { seeded: false }),
-        version(),
-    );
-    record.attempts = Some(1);
-    rig.sink
-        .kept
-        .lock()
-        .unwrap()
-        .insert("users".to_owned(), record);
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    rig.rereads.closed();
-    eventually("the lane stands in", || awaits_slot(&engine)).await;
-    let tried = rig.sink.writes_of(&users()).len();
-    stop.request();
-    eventually("drained", || rig.stream.is_idle()).await;
+    let ensured = rig.sink.ensured.lock().unwrap().len();
+    control.send(reattach(users())).await.unwrap();
+    stops(task).await;
     assert_eq!(
-        rig.sink.writes_of(&users()).len(),
-        tried,
-        "released unwritten"
+        rig.sink.ensured.lock().unwrap().len(),
+        ensured,
+        "nothing of the index ensured"
     );
-    assert_ne!(rig.applied(&users()), through(1), "nor applied");
-    task.abort();
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    assert!(rig.sink.gaps.lock().unwrap().is_empty(), "no gap kept");
 }
 
-/// Found by the world in the seventh re-check: a gap another process keeps
-/// over an index while this process holds no slot means its drop; a
-/// backfill asked before it walked before the drop. Read once the slot is
-/// held, the fresh gap cuts that backfill and asks a new one, so its
-/// `SnapshotComplete`, granted as an ordinary seed after the reopen, seeds
-/// nothing.
+/// Whether `result`, a run's or a staging's, is the deployment's stop for
+/// another process's change to the records (the cut of 2026-11-27).
+fn stopped<T: std::fmt::Debug>(result: &crate::Result<T>) -> bool {
+    matches!(result, Err(crate::EngineError::ForeignChange { .. }))
+}
+
+/// `task`, a run, ends as the deployment's stop for another process's
+/// change to the records.
+async fn stops(task: tokio::task::JoinHandle<crate::Result<()>>) {
+    let ended = tokio::time::timeout(Duration::from_secs(60), task).await;
+    let Ok(Ok(result)) = ended else {
+        panic!("the run never ended as a stop: {ended:?}");
+    };
+    assert!(stopped(&result), "{result:?}");
+}
+
+/// Found by the world in the seventh re-check, under the cut: a gap another
+/// process kept over an index while this process held no slot stops the
+/// deployment at the read once the slot is held, so the backfill asked
+/// before it never seeds over it.
 #[tokio::test(start_paused = true)]
-async fn a_gap_written_since_a_backfill_was_asked_cuts_it() {
+async fn a_gap_written_since_a_backfill_was_asked_stops_the_deployment() {
     let rig = Rig::new(64);
     let engine = rig.engine();
     let (ticket, task) = backfilling_under_a_held_stream(&rig, &engine).await;
@@ -4721,14 +4563,7 @@ async fn a_gap_written_since_a_backfill_was_asked_cuts_it() {
         .lock()
         .unwrap()
         .insert("users".to_owned(), vec![gap(Some("1"), Some("2"))]);
-    let (asked, asks) = backfill_asks(&rig);
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    eventually("the backfill is asked again", || {
-        asked.lock().unwrap().iter().any(|request| {
-            matches!(request, stream::Request::Backfill { index, after: None, .. } if *index == users())
-        })
-    })
-    .await;
     publish(
         &rig,
         LaneItem::SnapshotComplete {
@@ -4737,38 +4572,32 @@ async fn a_gap_written_since_a_backfill_was_asked_cuts_it() {
         },
     )
     .await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    stops(task).await;
     assert!(
         rig.sink.seeded.lock().unwrap().is_empty(),
-        "the cut backfill seeded over the gap"
+        "the backfill seeded over the gap"
     );
-    task.abort();
-    asks.abort();
 }
 
-/// Found by the world in the seventh re-check: a rebuild this process took
-/// over, whose record another process then removed (it finished it), is
-/// over here once the records read say so. Another process's later rebuild
-/// restarts its attempts with no record, at the same count: it is demoted,
-/// never taken for this process's own.
+/// Found by the world in the seventh re-check, under the cut: a rebuild this
+/// process took over, whose record another process removed (it finished
+/// it), stops the deployment at the next read: no later rebuild under the
+/// same attempt count can be taken for this one's.
 #[tokio::test(start_paused = true)]
-async fn a_rebuild_whose_record_went_is_not_taken_for_a_later_one() {
+async fn a_rebuild_whose_record_another_process_removed_stops_the_deployment() {
     let rig = Rig::new(64);
     rig.rereads.will_open();
-    let rebuilding = || {
-        let mut record = Detachment::recorded(
-            DetachRecord::Rebuilding { live_only: false },
-            Some(MarkerAt::Newer { seeded: false }),
-            version(),
-        );
-        record.attempts = Some(1);
-        record
-    };
+    let mut record = Detachment::recorded(
+        DetachRecord::Rebuilding { live_only: false },
+        Some(MarkerAt::Newer { seeded: false }),
+        version(),
+    );
+    record.attempts = Some(1);
     rig.sink
         .kept
         .lock()
         .unwrap()
-        .insert("users".to_owned(), rebuilding());
+        .insert("users".to_owned(), record);
     rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
     let engine = rig.engine();
     engine.stage(Continuity::Resumed).await.unwrap();
@@ -4777,26 +4606,10 @@ async fn a_rebuild_whose_record_went_is_not_taken_for_a_later_one() {
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
     eventually("read under the stream", || read_all(&rig)).await;
     rig.rereads.closed();
-    // Another process finishes the rebuild: its seed deletes the record.
     rig.sink.kept.lock().unwrap().remove("users");
     rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    eventually("the rebuild is over here", || {
-        engine.lane_state(&lane(users())).rebuilding.is_none()
-    })
-    .await;
-    rig.rereads.closed();
-    // Another process begins a new rebuild, its attempts restarting at 1.
-    rig.sink
-        .kept
-        .lock()
-        .unwrap()
-        .insert("users".to_owned(), rebuilding());
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    eventually("demoted, not taken for ours", || {
-        *rig.sink.demoted.lock().unwrap() == [("users".to_owned(), false)]
-    })
-    .await;
-    task.abort();
+    stops(task).await;
+    assert!(rig.sink.demoted.lock().unwrap().is_empty());
 }
 
 /// The seventh re-check, m-2: an owed seed whose index's target changed

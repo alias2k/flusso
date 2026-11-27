@@ -744,6 +744,12 @@ impl<'a> Run<'a> {
     /// reindex once nothing is in flight, and start what may start. An error
     /// here is the run's failure: the caller lets the writes in flight finish.
     async fn advance(&mut self) -> Result<()> {
+        // Another process changed the records (a read found it, here or in a
+        // flight's staging): the deployment stops, with nothing more granted
+        // and the lanes' reads under this stream uncounted.
+        if let Some(foreign) = self.engine.foreign_error() {
+            return Err(foreign);
+        }
         if !self.discards.is_empty() {
             self.drain_detached().await?;
         }
@@ -858,14 +864,6 @@ impl<'a> Run<'a> {
             .is_some_and(|run| matches!(run.health.health, LaneHealth::Restaging { .. }))
     }
 
-    /// Whether `lane` stands in for a demotion or a detach that waits for the
-    /// slot (B-1).
-    fn lane_awaits_slot(&self, lane: usize) -> bool {
-        self.lanes
-            .get(lane)
-            .is_some_and(|run| run.health.awaits_slot())
-    }
-
     /// Whether `lane` is written as usual (not parked, not being staged).
     fn lane_open(&self, lane: usize) -> bool {
         self.lanes.get(lane).is_some_and(|run| run.health.is_open())
@@ -879,12 +877,6 @@ impl<'a> Run<'a> {
         };
         match &run.health.health {
             LaneHealth::Open => true,
-            // A stand-in for what waits for the slot: decided by a read of
-            // the records while it is held, never by a probe (B-1).
-            LaneHealth::Parked {
-                reason: ParkReason::AwaitingSlot { .. },
-                ..
-            } => false,
             // Parked on its owed seed: the seed is the probe
             // (`land_owed_seeds`), nothing behind it is written meanwhile.
             LaneHealth::Parked {
@@ -926,7 +918,19 @@ impl<'a> Run<'a> {
         }
         self.stop_probed = true;
         let now = Instant::now();
+        let slot_held = self.engine.rereads.may_erase_records();
         for run in &mut self.lanes {
+            // A seed that can't land before the drain ends (one waiting for
+            // the slot, or an owed seed this lane parked on) is cut short, as
+            // a stop cuts a backfill: its completion is acknowledged unseeded,
+            // the lane's next item probes, and the next start backfills the
+            // index (the eighth re-check, S-3).
+            if (run.seed_waits_for_slot && !slot_held) || self.engine.owes_seed(&run.key.index) {
+                run.seed_waits_for_slot = false;
+                self.engine.drop_owed_seed(&run.key.index);
+                self.engine.lock_skipped().insert(run.key.index.clone());
+                tracing::info!(lane = %run.key, "stopping: the seed waiting on this lane can't land before the drain ends; the index stays unseeded and is backfilled on the next start");
+            }
             if run.health.probe_now(now) {
                 tracing::info!(lane = %run.key, "stopping: probing the parked lane once more now");
                 self.engine.store_lane(&run.key, &run.health, true);
@@ -1107,11 +1111,6 @@ impl<'a> Run<'a> {
             _ => {}
         }
         let result = result.map(|_| ());
-        if run.health.rebuilding.is_some() && self.engine.lane_state(&run.key).rebuilding.is_none()
-        {
-            run.health.rebuilding = None;
-            run.health.rebuild_target = None;
-        }
         if !run.health.unensured {
             run.walked.reset();
         }
@@ -2019,11 +2018,8 @@ impl<'a> Run<'a> {
 
     /// Land each owed seed that may (the sixth re-check, S-1): this process
     /// holds the slot, the lane's records were read under the current
-    /// stream, and the lane is open with nothing in flight. When that read
-    /// shows a record or a gap over the index (another process wrote over it
-    /// meanwhile), the seed would claim what they miss: the backfill is asked
-    /// again from the first key instead. A seed whose backfill was cut since
-    /// waits for the backfill asked in its place.
+    /// stream, and the lane is open with nothing in flight. A seed whose
+    /// backfill was cut since waits for the backfill asked in its place.
     async fn land_owed_seeds(&mut self) -> Result<()> {
         let owed = self.engine.owed_seeds();
         if owed.is_empty() || !self.engine.rereads.may_erase_records() {
@@ -2037,33 +2033,24 @@ impl<'a> Run<'a> {
             let Some(lane) = self.lanes.iter().position(|run| run.key.index == index) else {
                 continue;
             };
-            // Open is enough: the read again ran first in this `advance`, so
-            // an open lane was read under the stream now held (a staging or
-            // an attach that opens one marks it unread: `store_lane`), and a
-            // lane awaiting the slot isn't open. `answers` is a second net:
-            // every path that cuts the backfill asks again at once, which
-            // drops the owed seed.
-            // A lane parked on this seed (#479's blocked old generation) is
-            // probed by it, on the lane's backoff (m-3 of the seventh
-            // re-check).
+            // Only on records read under the stream now held (the eighth
+            // re-check, B-1: an opening can return while the read again
+            // awaits a read, which then counts for the earlier one). A
+            // change by another process meanwhile stopped the deployment at
+            // that read. A lane parked on this seed (#479's blocked old
+            // generation) is probed by it, on the lane's backoff.
             let ready = self.lanes.get(lane).is_some_and(|run| {
-                run.health.is_open()
-                    || (matches!(
-                        run.health.health,
-                        LaneHealth::Parked {
-                            reason: ParkReason::SeedBlocked { .. },
-                            ..
-                        }
-                    ) && run.health.due <= now)
+                self.engine.rereads.current(&run.key)
+                    && (run.health.is_open()
+                        || (matches!(
+                            run.health.health,
+                            LaneHealth::Parked {
+                                reason: ParkReason::SeedBlocked { .. },
+                                ..
+                            }
+                        ) && run.health.due <= now))
             });
             if !ready || self.lane_in_flight(lane) || !self.engine.answers(&index, Some(ticket)) {
-                continue;
-            }
-            if self.engine.written_over(&index) {
-                tracing::warn!(%index, sink = %self.engine.name, "the seed owed since the slot was lost is not landed: the records read again keep a record or a gap over the index, which the backfill's documents may miss; asking for the backfill again from the first key");
-                self.engine.drop_owed_seed(&index);
-                let target = self.engine.asked_target(&index);
-                self.engine.ask_again(vec![(index, target)]).await?;
                 continue;
             }
             self.owed_seed(index, ticket, lane).await?;
@@ -2650,8 +2637,7 @@ impl<'a> Run<'a> {
     }
 
     /// Once stopping, the live items and the completion of a `restaging`
-    /// lane (its target gone, or owed its reindex), or of one awaiting the
-    /// slot (B-1: its records decide at the next start), are acknowledged unwritten
+    /// lane (its target gone, or owed its reindex) are acknowledged unwritten
     /// and unapplied, as held items are (X10): it is not staged again, so the
     /// drain doesn't wait for it, its applied mark (so the slot) stays before
     /// their changes, its index stays unseeded, and the next start stages it
@@ -2664,8 +2650,7 @@ impl<'a> Run<'a> {
                     Queue::Batch { batch, .. } => batch.position.is_some(),
                     Queue::Complete { .. } => true,
                 };
-                positioned
-                    && (self.lane_restaging(queued.lane) || self.lane_awaits_slot(queued.lane))
+                positioned && self.lane_restaging(queued.lane)
             });
             if !release {
                 index += 1;
@@ -3260,6 +3245,11 @@ impl<'a> Run<'a> {
     /// detached and unread. Run with no slot held too: what the records ask
     /// that may erase waits for it (`Acted::Unheld`).
     async fn reread(&mut self) -> Result<()> {
+        // While no slot is held the read decides nothing: it is due again
+        // once an opening returns (the cut of 2026-11-27).
+        if !self.engine.rereads.may_erase_records() {
+            return Ok(());
+        }
         let read_at = self.engine.rereads.read_begins();
         self.engine.settling_gaps();
         for lane in 0..self.lanes.len() {
@@ -3274,16 +3264,21 @@ impl<'a> Run<'a> {
             }
             let key = run.key.clone();
             let detached = run.health.health.is_detached();
-            let awaiting = run.health.awaits_slot();
-            let runs = run.health.rebuilding;
-            let rebuilding = runs.is_some();
             let index = run.key.index.clone();
             let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
                 continue;
             };
             let failed = |error| super::staging_failed(&index, error);
-            let found = match self.engine.sink.detachment(mapping).await {
+            let found = match self.engine.read_records(mapping).await {
                 Ok(found) => found,
+                // Another process changed the records: the deployment stops.
+                Err(_) if self.engine.foreign_error().is_some() => {
+                    return Err(self.engine.foreign_error().unwrap_or_else(|| {
+                        failed(sink::SinkError::Write(
+                            "another process changed the records".to_owned(),
+                        ))
+                    }));
+                }
                 // A detached lane writes nothing: its read failing leaves it
                 // unread (answering nothing, opened by no attach) and never
                 // fails the run.
@@ -3293,26 +3288,15 @@ impl<'a> Run<'a> {
                 }
                 Err(error) => return Err(failed(error)),
             };
-            // The one decision staging takes too (`act_on_records`): another
-            // process's rebuild is put back to detached before the lane drops
-            // anything (B-2); a failed demotion fails the run.
-            let acted = self
-                .engine
-                .act_on_records(mapping, found, false)
-                .await
-                .map_err(failed)?;
-            // A backfill the read left cut (a gap written since it was
-            // asked, `read_detachment`) is asked again from the first key,
-            // its walk after the drop, whatever the read decided: a cut no
-            // ask follows would leave the index backfilling for good. A lane
-            // the read detaches drops it instead.
-            if self.engine.is_cut(&index) && !matches!(acted, super::Acted::Detached { .. }) {
-                let target = self.engine.asked_target(&index);
-                self.engine.ask_again(vec![(index.clone(), target)]).await?;
+            // The one decision staging takes too (`act_on_records`), from
+            // records this process knows to be its own or unchanged.
+            let acted = self.engine.act_on_records(mapping, found, false).await;
+            if let Some(foreign) = self.engine.foreign_error() {
+                return Err(foreign);
             }
-            match acted {
+            match acted.map_err(failed)? {
                 super::Acted::AsBefore { gaps } => {
-                    if !detached && !gaps.is_empty() {
+                    if !detached {
                         self.engine
                             .known_gaps(mapping, gaps, true)
                             .await
@@ -3323,96 +3307,23 @@ impl<'a> Run<'a> {
                     tracing::warn!(%index, sink = %self.engine.name, %why, "read again once the slot is held, the records say the index is detached: taken as detached before anything of it is written (O29)");
                     self.detached(lane, why, through).await?;
                 }
-                super::Acted::KeepDetached => {
-                    if rebuilding && self.engine.lane_state(&key).rebuilding.is_none() {
-                        self.drop_rebuild(lane);
-                    }
-                }
-                // What the records ask waits for the slot: the lane stands
-                // in for it, nothing of it written or dropped, the read not
-                // counted (B-1). A lane held detached stays so.
-                super::Acted::Unheld { why, .. } => {
-                    if rebuilding {
-                        self.drop_rebuild(lane);
-                    }
-                    self.await_slot(lane, why);
-                    continue;
-                }
+                super::Acted::KeepDetached => {}
+                // The slot went while reading: nothing decided, the read not
+                // counted; due again at the next opening.
+                super::Acted::Unheld { .. } => continue,
                 super::Acted::Ours | super::Acted::TookOver(_) => {}
             }
-            // Read while held, the records ask nothing of a lane awaiting
-            // the slot (it wasn't detached above): it opens, nothing dropped.
-            if awaiting {
-                self.release_awaiting(lane);
+            // Decided with the slot held: a lane a start took as detached
+            // undecided is decided now.
+            self.engine.decided(&key);
+            if let Some(run) = self.lanes.get_mut(lane) {
+                run.health.undecided = false;
             }
-            self.sync_rebuild(lane);
             // The lane's state now follows its records: its read counts.
             self.engine.rereads.read(&key, read_at);
         }
         self.engine.records_read(read_at);
         Ok(())
-    }
-
-    /// The records read showed no rebuild where the run keeps one: the
-    /// engine dropped it (`act_on_records`: its record removed, or recorded
-    /// detached again), and so does the run's copy, an attach it waits for
-    /// included, or the next store would bring it back and the attach open
-    /// the lane as a rebuild the records no longer show (found by the world,
-    /// the seventh re-check).
-    fn sync_rebuild(&mut self, lane: usize) {
-        let dropped = self.lanes.get(lane).is_some_and(|run| {
-            run.health.rebuilding.is_some() && self.engine.lane_state(&run.key).rebuilding.is_none()
-        });
-        if dropped {
-            self.drop_rebuild(lane);
-        }
-    }
-
-    /// `lane` stands in for what the records ask, which waits for the slot
-    /// (B-1): parked awaiting it, its items held unacknowledged, never
-    /// probed. A lane held detached or restaging stays as it is.
-    fn await_slot(&mut self, lane: usize, why: String) {
-        let Some(run) = self.lanes.get_mut(lane) else {
-            return;
-        };
-        let was_open = run.health.is_open();
-        if run.health.await_slot(why, Instant::now()) {
-            if was_open {
-                self.unhealthy += 1;
-            }
-            tracing::warn!(lane = %run.key, "this process holds no slot: the lane waits for it, nothing of it written or dropped");
-            self.engine.store_lane(&run.key, &run.health, true);
-        }
-    }
-
-    /// `lane` awaited the slot and its records, read while it is held, ask
-    /// nothing of it: it opens, with every item it held still to write.
-    fn release_awaiting(&mut self, lane: usize) {
-        let Some(run) = self.lanes.get_mut(lane) else {
-            return;
-        };
-        if !run.health.awaits_slot() {
-            return;
-        }
-        if let Some(down) = run.health.open(Instant::now()) {
-            self.unhealthy = self.unhealthy.saturating_sub(1);
-            tracing::info!(lane = %run.key, after = ?down, "read while this process holds the slot, the records ask nothing of the lane: it opens, nothing dropped");
-            self.engine.store_lane(&run.key, &run.health, true);
-        }
-    }
-
-    /// Drop the rebuild a detached lane waits to attach for: its records
-    /// say detached again. The lane stays detached; an `Attached` for the
-    /// dropped attempt opens nothing.
-    fn drop_rebuild(&mut self, lane: usize) {
-        let Some(run) = self.lanes.get_mut(lane) else {
-            return;
-        };
-        run.health.rebuilding = None;
-        run.health.rebuild_target = None;
-        run.health.attaching = None;
-        self.to_attach.retain(|at| *at != lane);
-        self.engine.store_lane(&run.key, &run.health, true);
     }
 
     /// Ask `index`'s builder to attach its detached lane again, under a new

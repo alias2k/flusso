@@ -77,6 +77,33 @@ pub enum EngineError {
          the engine's progress"
     )]
     UnkeyedLiveItem(String),
+
+    /// Another process changed an index's detach records while this one
+    /// didn't hold the slot (ADR 0012 stage 10, the cut of 2026-11-27):
+    /// flusso doesn't reconcile with it, the deployment stops. Nothing past
+    /// the opening under which it was read was confirmed, so the next start,
+    /// which decides from the records, replays every change from there.
+    #[error(
+        "sink `{sink}`, index `{index}`: another flusso process changed the index's detach \
+         records while this one didn't hold the replication slot ({found}). Stopping: flusso \
+         doesn't carry on over another process's record changes. Nothing past this stream's \
+         start was confirmed; start flusso again (one process per slot) and its start decides \
+         from the records"
+    )]
+    ForeignChange {
+        sink: String,
+        index: String,
+        found: String,
+    },
+}
+
+impl EngineError {
+    /// Whether this stops the deployment rather than one engine: another
+    /// process changed the records ([`EngineError::ForeignChange`]), which
+    /// no restart of an engine in this process may carry on over.
+    pub fn stops_the_deployment(&self) -> bool {
+        matches!(self, EngineError::ForeignChange { .. })
+    }
 }
 
 /// The indexes a sink failed to stage, in the sink's index order, each with

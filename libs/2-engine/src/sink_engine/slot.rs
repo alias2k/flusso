@@ -19,7 +19,14 @@
 //! The engine holds its sink only as [`Plain`], whose `Sink` this module
 //! alone can reach: it exposes the requests that erase nothing, and makes
 //! [`Erasing`]. A call of an erasing request anywhere else in the engine
-//! doesn't compile, however it is spelled (the seventh re-check, S-1).
+//! doesn't compile, however it is spelled (the seventh re-check, S-1). The
+//! wall covers the engine crate: the daemon moves `SinkParts.sink` into
+//! `SinkEngine::new` and the CLI keeps no clone of it.
+//!
+//! Every request that writes a record, a gap or the marker also tells
+//! [`KnownRecords`] what it left (`known`): the gate keeps this process from
+//! erasing another's record, and `known` tells it when another process
+//! changed one, which stops the deployment (the cut of 2026-11-27).
 //!
 //! Every request of the [`Sink`] trait that writes a record, the seed marker
 //! or a generation, from the OpenSearch adapter's requests, and why it is
@@ -33,8 +40,8 @@
 //! | `reindex` (the marker moved to a new generation) | gated: the reindex waits, its lane restaging |
 //! | `reindex` at a `Fresh` source's staging (`reindex_at_a_fresh_start`) | safe: it runs before `prepare` creates the slot (#120), so no slot exists for another process to hold |
 //! | `begin_rebuild` (every generation but the serving one deleted, the marker moved, the record rewritten) | gated: the rebuild is owed |
-//! | `demote` (every generation but the serving one deleted with its checkpoint, the marker and the record rewritten) | gated (the sixth re-check, S-2): what it deletes may be the rebuild the holder walks. Staging and the read again leave the lane standing in, parked [`AwaitingSlot`](crate::ParkReason::AwaitingSlot) with nothing dropped and its read uncounted (the seventh re-check, B-1), so the read once the slot is held decides: it demotes, or, with the record gone, opens the lane |
-//! | `detach` (the marker moved, the record written, every generation but the serving one deleted), staging's `DetachAgain`, the read's `RecordAgain` | gated, as `demote`: a refused lane stays as it was; staging and the read again leave the lane standing in, as for `demote` |
+//! | `demote` (every generation but the serving one deleted with its checkpoint, the marker and the record rewritten) | gated (the sixth re-check, S-2): what it deletes may be the rebuild the holder walks. A staging with no slot takes the lane as detached, its decision left to the first read while the slot is held, which demotes (`LaneState.undecided`); the read again runs only then |
+//! | `detach` (the marker moved, the record written, every generation but the serving one deleted), staging's `DetachAgain` | gated, as `demote`: a refused lane stays as it was; a staging with no slot takes it as detached and undecided, as for `demote` |
 //! | `ensure_index` (the marker written whole, the generation created) | safe: the marker is written whole only when no marker names an existing generation. Nothing anyone holds is there: no rows, so neither a checkpoint nor a gap means anything; `detaching_from` matters only with no record, and losing it leaves an unseeded generation to backfill while reads stay on the serving one. As on `main` |
 //! | `ensure_index` deleting an unseeded generation whose `index.uuid` isn't the one recorded | safe: such a generation was recreated by a write under auto-create, not built by any process; a process writing to it restages. As on `main` |
 //! | `detachment`, the read, putting a half-moved marker back (`PUT` on the marker read) | safe: only where the marker carries `detaching_from` and no record stands, on the version read. A detach is gated, so one between its two writes is the holder's (or one in flight as its stream ended: #490). Its record landing after the put back still says detached, and the next read detaches again (`DetachAgain`) |
@@ -57,18 +64,22 @@ use sink::{
     WriteReport,
 };
 
+use super::known::{KnownRecords, Wrote};
 use crate::Rereads;
 
 /// The sink as the engine holds it: only the requests that erase or loosen
 /// no record. The erasing ones exist only on [`Erasing`], made from this,
 /// and the `Sink` inside is reachable from this module alone: a call that
 /// skips the slot's check doesn't compile (the seventh re-check, S-1).
+/// Every request that writes a record or the marker also tells
+/// [`KnownRecords`] what it left, so this process's own writes are never
+/// taken for another's (`known`).
 #[derive(Debug, Clone)]
-pub(super) struct Plain(Arc<dyn Sink>);
+pub(super) struct Plain(Arc<dyn Sink>, Arc<KnownRecords>);
 
 impl Plain {
-    pub(super) fn new(sink: Arc<dyn Sink>) -> Self {
-        Self(sink)
+    pub(super) fn new(sink: Arc<dyn Sink>, known: Arc<KnownRecords>) -> Self {
+        Self(sink, known)
     }
 
     /// The erasing requests, each checked against `rereads`' slot right
@@ -77,11 +88,17 @@ impl Plain {
         Erasing {
             sink: self.0.as_ref(),
             rereads,
+            known: &self.1,
         }
     }
 
+    /// Ensure `mapping`'s index; one created writes the marker whole.
     pub(super) async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<Ensured> {
-        self.0.ensure_index(mapping).await
+        let ensured = self.0.ensure_index(mapping).await?;
+        if ensured.created {
+            self.1.wrote(&mapping.index, &Wrote::Created, None);
+        }
+        Ok(ensured)
     }
 
     pub(super) async fn write_parts(
@@ -119,7 +136,10 @@ impl Plain {
         mapping: &IndexMapping,
         decide: &DecideGaps<'_>,
     ) -> sink::Result<Vec<Gap>> {
-        self.0.record_gaps(mapping, decide).await
+        let gaps = self.0.record_gaps(mapping, decide).await?;
+        self.1
+            .wrote(&mapping.index, &Wrote::Gaps(gaps.clone()), None);
+        Ok(gaps)
     }
 
     pub(super) async fn record_walked(&self, index: &IndexName, mark: &str) -> sink::Result<()> {
@@ -150,6 +170,7 @@ impl std::fmt::Display for NotHeld {
 pub(super) struct Erasing<'a> {
     sink: &'a dyn Sink,
     rereads: &'a Rereads,
+    known: &'a KnownRecords,
 }
 
 impl std::fmt::Debug for Erasing<'_> {
@@ -159,6 +180,16 @@ impl std::fmt::Debug for Erasing<'_> {
 }
 
 impl Erasing<'_> {
+    /// `result`, of a write that leaves `wrote` on `index` when it returns
+    /// `Ok`, told to [`KnownRecords`].
+    fn told<T>(&self, index: &IndexName, wrote: Wrote, result: sink::Result<T>) -> sink::Result<T> {
+        if result.is_ok() {
+            self.known
+                .wrote(index, &wrote, Some(self.rereads.read_begins()));
+        }
+        result
+    }
+
     fn held(&self) -> Result<(), NotHeld> {
         if self.rereads.may_erase_records() {
             Ok(())
@@ -170,7 +201,8 @@ impl Erasing<'_> {
     /// Seed `index`: its marker is written whole, erasing any record.
     pub(super) async fn mark_seeded(&self, index: &IndexName) -> Result<sink::Result<()>, NotHeld> {
         self.held()?;
-        Ok(self.sink.mark_seeded(index).await)
+        let seeded = self.sink.mark_seeded(index).await;
+        Ok(self.told(index, Wrote::Seed, seeded))
     }
 
     /// Delete the detach record read at `version`.
@@ -180,7 +212,8 @@ impl Erasing<'_> {
         version: &RecordVersion,
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held()?;
-        Ok(self.sink.forget_detachment(mapping, version).await)
+        let forgotten = self.sink.forget_detachment(mapping, version).await;
+        Ok(self.told(&mapping.index, Wrote::Forget, forgotten))
     }
 
     /// Delete the record of a rebuild a newer seeded generation finished.
@@ -191,7 +224,8 @@ impl Erasing<'_> {
         mapping: &IndexMapping,
         version: &RecordVersion,
     ) -> sink::Result<()> {
-        self.sink.forget_detachment(mapping, version).await
+        let forgotten = self.sink.forget_detachment(mapping, version).await;
+        self.told(&mapping.index, Wrote::Forget, forgotten)
     }
 
     /// Move `mapping`'s index to a new generation; its marker is written
@@ -200,6 +234,8 @@ impl Erasing<'_> {
         &self,
         mapping: &IndexMapping,
     ) -> Result<sink::Result<()>, NotHeld> {
+        // The marker moves to a generation not created yet: the ensure that
+        // follows creates it (`Wrote::Created`); unseeded, nothing moves.
         self.held()?;
         Ok(self.sink.reindex(mapping).await)
     }
@@ -221,7 +257,17 @@ impl Erasing<'_> {
         mapping: &IndexMapping,
     ) -> Result<sink::Result<u64>, NotHeld> {
         self.held()?;
-        Ok(self.sink.begin_rebuild(mapping).await)
+        let begun = self.sink.begin_rebuild(mapping).await;
+        if let Ok(attempts) = &begun {
+            self.known.wrote(
+                &mapping.index,
+                &Wrote::Rebuild {
+                    attempts: *attempts,
+                },
+                Some(self.rereads.read_begins()),
+            );
+        }
+        Ok(begun)
     }
 
     /// Put a rebuild back to detached: every generation but the serving one
@@ -234,7 +280,8 @@ impl Erasing<'_> {
         live_only: bool,
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held()?;
-        Ok(self.sink.demote(mapping, live_only).await)
+        let demoted = self.sink.demote(mapping, live_only).await;
+        Ok(self.told(&mapping.index, Wrote::Demote { live_only }, demoted))
     }
 
     /// Detach `mapping`'s index: the marker moved, the record written, every
@@ -246,6 +293,23 @@ impl Erasing<'_> {
         detach: &Detach,
     ) -> Result<sink::Result<Recorded>, NotHeld> {
         self.held()?;
-        Ok(self.sink.detach(mapping, detach).await)
+        let recorded = self.sink.detach(mapping, detach).await;
+        match &recorded {
+            Ok(Recorded::Kept) => self.known.wrote(
+                &mapping.index,
+                &Wrote::Detach {
+                    live_only: detach.live_only,
+                    through: detach.through.clone(),
+                },
+                Some(self.rereads.read_begins()),
+            ),
+            Ok(_) => {}
+            // The record may have landed: recognised by its `through`.
+            Err(_) => {
+                self.known
+                    .unsure_detach(&mapping.index, detach.live_only, detach.through.clone())
+            }
+        }
+        Ok(recorded)
     }
 }
