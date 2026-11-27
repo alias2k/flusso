@@ -244,7 +244,7 @@ impl Erasing<'_> {
         let at = self.rereads.read_begins();
         self.held().ok()?;
         let found = self.sink.detachment(mapping).await.ok()?;
-        let held_throughout = self.rereads.may_erase_records() && self.rereads.read_begins() == at;
+        let held_throughout = self.rereads.held_or_alone() && self.rereads.read_begins() == at;
         if !held_throughout {
             return None;
         }

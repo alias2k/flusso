@@ -4608,6 +4608,30 @@ async fn a_reattach_asked_over_a_record_another_process_removed_stops_the_deploy
     assert!(rig.sink.gaps.lock().unwrap().is_empty(), "no gap kept");
 }
 
+/// The review of the cut, m-2: once a run ended cleanly, erasing writes may
+/// go on as they do at a stop on `main` (`Rereads::finished`), but no slot is
+/// held any more: a read then is judged, never adopted as if under a held
+/// opening, so another process's change since stops it.
+#[tokio::test(start_paused = true)]
+async fn a_read_after_a_clean_end_judges_another_process_s_change() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    eventually("read under the stream", || read_all(&rig)).await;
+    task.abort();
+    let _ = task.await;
+    rig.rereads.closed();
+    rig.rereads.finished();
+    rig.sink
+        .kept
+        .lock()
+        .unwrap()
+        .insert("users".to_owned(), detached_record());
+    assert!(stopped(&engine.stage(Continuity::Resumed).await));
+}
+
 /// Whether `result`, a run's or a staging's, is the deployment's stop for
 /// another process's change to the records (the cut of 2026-11-27).
 fn stopped<T: std::fmt::Debug>(result: &crate::Result<T>) -> bool {

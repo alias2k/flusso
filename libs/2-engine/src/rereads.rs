@@ -203,6 +203,14 @@ impl Rereads {
             || (self.opened() == 0 && !self.opener.load(Ordering::Acquire))
     }
 
+    /// Whether this process holds the slot now, or no stream ever opens
+    /// here (a sink engine on its own, as on `main`): no other process can
+    /// write the records meanwhile. Unlike [`may_erase_records`](Self::may_erase_records),
+    /// a run that ended cleanly holds nothing (the review of the cut, m-2).
+    pub fn held_or_alone(&self) -> bool {
+        self.holding() || (self.opened() == 0 && !self.opener.load(Ordering::Acquire))
+    }
+
     /// Hear every opening and every read, for a fence to note and wake on.
     pub fn subscribe(&self, listener: RereadListener) {
         self.listeners

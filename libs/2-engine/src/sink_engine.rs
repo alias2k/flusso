@@ -512,8 +512,7 @@ impl SinkEngine {
         // No other process could write while this one held the slot, from
         // the opening the read began under to its return (or with nothing
         // here ever opening a stream: a sink engine on its own, as `main`).
-        let same_opening =
-            self.rereads.may_erase_records() && self.rereads.read_begins() == read_at;
+        let same_opening = self.rereads.held_or_alone() && self.rereads.read_begins() == read_at;
         match self
             .known
             .judge(&mapping.index, &found, read_at, same_opening)
