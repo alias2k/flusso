@@ -157,6 +157,9 @@ struct Store {
     /// deletes a finished rebuild's record best effort, and a failed delete
     /// only warns.
     seed_keeps_record: Mutex<bool>,
+    /// Held reads take their answer before they wait, so one returns what
+    /// the records held when it began.
+    reads_answered_first: Mutex<bool>,
     /// Each record write's version, as OpenSearch's `_seq_no` grows with
     /// every write: a record deleted and written again identical reads as
     /// another version.
@@ -197,6 +200,7 @@ impl Store {
             kept: Mutex::default(),
             fails: Mutex::default(),
             seed_keeps_record: Mutex::default(),
+            reads_answered_first: Mutex::default(),
             seq: Mutex::default(),
             gaps: Mutex::default(),
             unreadable: Mutex::default(),
@@ -257,6 +261,30 @@ impl Store {
                 "{what} of {of} over a record ({record:?}, gaps kept: {gaps}) with no stream held"
             ));
         }
+    }
+
+    /// What a read of `of`'s records answers now.
+    fn answer(&self, of: &str) -> sink::Result<Detachment> {
+        if self.unreadable.lock().unwrap().contains(of) {
+            return Err(sink::SinkError::Write(
+                "the records can't be read".to_owned(),
+            ));
+        }
+        let mut kept = self
+            .kept
+            .lock()
+            .unwrap()
+            .get(of)
+            .map(|kept| kept.detachment.clone())
+            .unwrap_or_default();
+        kept.gaps = self
+            .gaps
+            .lock()
+            .unwrap()
+            .get(of)
+            .cloned()
+            .unwrap_or_default();
+        Ok(kept)
     }
 
     /// Whether this write fails, and when: `Some(true)` after it lands,
@@ -475,29 +503,21 @@ impl Sink for Store {
 
     async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
         let began = self.held();
-        self.read_hold.pass().await;
         let of = mapping.index.as_ref();
-        if self.unreadable.lock().unwrap().contains(of) {
-            return Err(sink::SinkError::Write(
-                "the records can't be read".to_owned(),
-            ));
+        if *self.reads_answered_first.lock().unwrap() {
+            let answer = self.answer(of);
+            self.read_hold.pass().await;
+            if answer.is_ok() {
+                self.reads.lock().unwrap().push((of.to_owned(), began));
+            }
+            return answer;
         }
-        let mut kept = self
-            .kept
-            .lock()
-            .unwrap()
-            .get(of)
-            .map(|kept| kept.detachment.clone())
-            .unwrap_or_default();
-        kept.gaps = self
-            .gaps
-            .lock()
-            .unwrap()
-            .get(of)
-            .cloned()
-            .unwrap_or_default();
-        self.reads.lock().unwrap().push((of.to_owned(), began));
-        Ok(kept)
+        self.read_hold.pass().await;
+        let answer = self.answer(of);
+        if answer.is_ok() {
+            self.reads.lock().unwrap().push((of.to_owned(), began));
+        }
+        answer
     }
 
     async fn detach(
@@ -889,6 +909,18 @@ enum Event {
     },
     /// Two seconds pass: a parked lane's probe comes due.
     Elapse,
+    /// `sink`'s reads take their answer, then wait until `Release`: a read
+    /// returns what the records held when it began.
+    HoldReadsAnswered {
+        sink: usize,
+    },
+    /// The review of the cut, S-2, drawn often: a seed owed on `lane`; the
+    /// read again under the next opening takes its answer and waits; the
+    /// stream ends, another process keeps a gap over the index, the next
+    /// opening returns, then the read. Expanded before the run.
+    GapOverSlowRead {
+        lane: usize,
+    },
     /// The next record or marker write of `sink` fails: after it landed
     /// (`lands`, its response lost) or before.
     Fails {
@@ -991,6 +1023,31 @@ impl Event {
                 ]);
                 return events;
             }
+            Event::GapOverSlowRead { lane } => {
+                let index = lane % 2;
+                return vec![
+                    Event::Missing { lane },
+                    Event::Apply { index },
+                    Event::StreamEnds {
+                        jump: 0,
+                        drop: None,
+                        rebuild: false,
+                    },
+                    Event::Seed { lane },
+                    Event::HoldReadsAnswered { sink: lane / 2 },
+                    opens.clone(),
+                    Event::StreamEnds {
+                        jump: 10,
+                        drop: Some(lane),
+                        rebuild: false,
+                    },
+                    Event::Reattaches { lane },
+                    opens,
+                    Event::Release { sink: lane / 2 },
+                    Event::Apply { index },
+                    Event::WaitDropped { lane },
+                ];
+            }
             Event::GapOverOwed { lane } => {
                 return vec![
                     Event::Missing { lane },
@@ -1082,6 +1139,8 @@ fn event() -> impl Strategy<Value = Event> {
         1 => Just(Event::Elapse),
         1 => (2usize..4).prop_map(|lane| Event::RebuildLost { lane }),
         1 => (2usize..4).prop_map(|lane| Event::SeedLeavesRecord { lane }),
+        1 => (0usize..2).prop_map(|sink| Event::HoldReadsAnswered { sink }),
+        2 => (2usize..4).prop_map(|lane| Event::GapOverSlowRead { lane }),
     ]
 }
 
@@ -1897,6 +1956,10 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
             Event::Readable { sink: at } => world.stores[at].unreadable.lock().unwrap().clear(),
             Event::HoldReads { sink: at } => world.stores[at].read_hold.hold(),
             Event::HoldEnsure { sink: at } => world.stores[at].ensure_hold.hold(),
+            Event::HoldReadsAnswered { sink: at } => {
+                *world.stores[at].reads_answered_first.lock().unwrap() = true;
+                world.stores[at].read_hold.hold();
+            }
             Event::Fails { sink: at, lands } => {
                 *world.stores[at].fails.lock().unwrap() = Some(lands)
             }
@@ -1905,6 +1968,7 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
                 *world.stores[at].seed_keeps_record.lock().unwrap() = true;
             }
             Event::Release { sink: at } => {
+                *world.stores[at].reads_answered_first.lock().unwrap() = false;
                 world.stores[at].read_hold.release();
                 world.stores[at].ensure_hold.release();
             }
@@ -1945,7 +2009,8 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
             | Event::HolderFinishes { .. }
             | Event::GapOverOwed { .. }
             | Event::RebuildLost { .. }
-            | Event::SeedLeavesRecord { .. } => {
+            | Event::SeedLeavesRecord { .. }
+            | Event::GapOverSlowRead { .. } => {
                 unreachable!("expanded before the run")
             }
             Event::WaitNewest { .. } | Event::WaitDropped { .. } => {
@@ -2852,4 +2917,14 @@ fn an_own_write_of_unknown_outcome_never_stops_a_single_process() {
             }
         }
     }
+}
+
+/// The review of the cut, S-2: an owed seed whose read again under one
+/// opening returns only once the next opened, over a gap another process
+/// kept meanwhile, never lands: its lane's records must be read under the
+/// stream now held (`rereads.current`).
+#[test]
+fn an_owed_seed_never_lands_on_a_read_answered_under_an_earlier_stream() {
+    let stops = replay(vec![Event::GapOverSlowRead { lane: 2 }]);
+    assert_ne!(stops, 0, "ends in a stop");
 }
