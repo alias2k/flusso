@@ -56,6 +56,8 @@ enum Record {
     /// The record lands, and the call still fails (a timeout after
     /// OpenSearch applied it).
     FailAfterWriting,
+    /// The record lands exactly as asked, then the call fails.
+    LandsAsAskedThenFails,
 }
 
 /// A sink that blocks, or misses, the indexes it is told to, records every
@@ -360,7 +362,7 @@ impl Sink for Gate {
         match answer.unwrap_or(Record::Kept) {
             // Kept as a real sink keeps it: the next staging reads it
             // (review of step 3, S2).
-            Record::Kept => {
+            kind @ (Record::Kept | Record::LandsAsAskedThenFails) => {
                 let mut kept = self.kept.lock().unwrap();
                 let attempts = kept
                     .get(mapping.index.as_ref())
@@ -380,6 +382,11 @@ impl Sink for Gate {
                 record.attempts = attempts;
                 record.through = detach.through.clone();
                 kept.insert(mapping.index.to_string(), record);
+                if matches!(kind, Record::LandsAsAskedThenFails) {
+                    return Err(SinkError::Write(
+                        "the record landed, the call timed out".to_owned(),
+                    ));
+                }
                 Ok(Recorded::Kept)
             }
             Record::NotKept => Ok(Recorded::NotKept),
@@ -2019,9 +2026,9 @@ async fn a_reindex_of_a_rebuild_is_ignored_unless_it_parked() {
 
 /// O20's restart of a parked rebuild detaches it first. That detach landing
 /// but failing (found by the world at 50,000 cases, after the review of the
-/// cut) leaves a record that says detached: the lane writes nothing onto it,
-/// and the clear deletes it before the lane's next probe, as for any detach
-/// whose outcome is unknown.
+/// cut) left a record that says detached while the lane went on writing onto
+/// it. Read back while the slot is held, the detach is seen to have landed:
+/// taken as done, the restart goes on, and the rebuild begins again.
 #[tokio::test(start_paused = true)]
 async fn a_rebuild_restart_whose_detach_failed_writes_nothing_onto_its_record() {
     let rig = Rig::new(64);
@@ -2051,16 +2058,23 @@ async fn a_rebuild_restart_whose_detach_failed_writes_nothing_onto_its_record() 
     tokio::time::sleep(Duration::from_secs(1)).await;
     rig.sink.block(&users(), false);
     tokio::time::sleep(Duration::from_secs(30)).await;
-    let written_with_a_record = rig.sink.kept.lock().unwrap().get("users").is_some()
-        && written(&rig).contains(&"users/2".to_owned());
-    assert!(
-        !written_with_a_record,
-        "users/2 written onto the detach record the failed restart left"
+    assert_eq!(
+        rig.sink.rebuilds.lock().unwrap().len(),
+        2,
+        "the restart went on: a second rebuild"
     );
+    let record = rig
+        .sink
+        .kept
+        .lock()
+        .unwrap()
+        .get("users")
+        .and_then(|kept| kept.record.clone());
     assert!(
-        rig.sink.kept.lock().unwrap().get("users").is_none(),
-        "the record the failed detach left is cleared"
+        matches!(record, Some(DetachRecord::Rebuilding { .. })),
+        "the record says rebuilding, not detached: {record:?}"
     );
+    assert!(!task.is_finished(), "{:?}", task.await);
     task.abort();
 }
 
@@ -3802,6 +3816,46 @@ async fn a_failed_detach_then_another_process_detaches(
         ),
     );
     task
+}
+
+/// The review of the cut, B-2: a detach whose call fails after its record
+/// landed is read back while the slot is still held; the record found is the
+/// one it wrote, so the detach is taken as done: the lane detaches under its
+/// own record, writes nothing more of the index, and nothing stops.
+#[tokio::test(start_paused = true)]
+async fn a_detach_that_landed_unseen_is_taken_as_done_from_its_read_back() {
+    let rig = Rig::new(64);
+    rig.sink
+        .records
+        .lock()
+        .unwrap()
+        .push_back(Record::LandsAsAskedThenFails);
+    rig.sink.block(&users(), true);
+    let engine = rig.engine();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Detach { index: users() })
+        .await
+        .unwrap();
+    rig.live(&users(), 1, 1).await;
+    eventually("the lane detaches under its own record", || {
+        engine.lane_health(&lane(users())).is_detached()
+    })
+    .await;
+    assert_eq!(rig.sink.detaches().len(), 1, "no second detach");
+    rig.sink.block(&users(), false);
+    rig.live(&users(), 2, 2).await;
+    rig.rereads.closed();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(
+        !written(&rig).contains(&"users/2".to_owned()),
+        "nothing written onto it"
+    );
+    assert!(engine.lane_health(&lane(users())).is_detached());
+    assert!(!task.is_finished(), "{:?}", task.await);
+    task.abort();
 }
 
 /// Found by the world at 50,000 cases: a lane whose detach landed but

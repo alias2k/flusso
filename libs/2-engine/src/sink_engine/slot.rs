@@ -224,15 +224,39 @@ impl Erasing<'_> {
         wrote: Wrote,
         result: sink::Result<T>,
     ) -> sink::Result<T> {
+        self.settled(mapping, wrote, result, |_| None).await
+    }
+
+    /// [`told`](Self::told), and a failed call whose read back (the slot
+    /// held throughout, so nothing but this process wrote) shows what the
+    /// write leaves, `landed`, is the write having landed: `Ok`, so the
+    /// caller goes on as after a success (the review of the cut, B-2).
+    async fn settled<T>(
+        &self,
+        mapping: &IndexMapping,
+        wrote: Wrote,
+        result: sink::Result<T>,
+        landed: impl Fn(&Detachment) -> Option<T>,
+    ) -> sink::Result<T> {
         let at = Some(self.rereads.read_begins());
         match &result {
             Ok(_) => self.known.wrote(&mapping.index, &wrote, at),
             Err(_) => self.known.unsure(&mapping.index, &wrote, at),
         }
-        if result.is_err() || !matches!(wrote, Wrote::Marker) {
-            self.read_back(mapping).await;
+        if result.is_ok() && matches!(wrote, Wrote::Marker) {
+            return result;
         }
-        result
+        let found = self.read_back(mapping).await;
+        match (result, found) {
+            (Err(error), Some(found)) => match landed(&found) {
+                Some(value) => {
+                    tracing::warn!(index = %mapping.index, %error, "the call failed, yet its write landed (read back while this process holds the slot): taken as done");
+                    Ok(value)
+                }
+                None => Err(error),
+            },
+            (result, _) => result,
+        }
     }
 
     /// Right after an own write, the records read back while the slot is
@@ -300,7 +324,11 @@ impl Erasing<'_> {
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held()?;
         let forgotten = self.sink.forget_detachment(mapping, version).await;
-        Ok(self.told(mapping, Wrote::Forget, forgotten).await)
+        Ok(self
+            .settled(mapping, Wrote::Forget, forgotten, |found| {
+                found.record.is_none().then_some(())
+            })
+            .await)
     }
 
     /// Delete the record of a rebuild a newer seeded generation finished.
@@ -353,7 +381,13 @@ impl Erasing<'_> {
         let wrote = Wrote::Rebuild {
             attempts: begun.as_ref().ok().copied(),
         };
-        Ok(self.told(mapping, wrote, begun).await)
+        // A rebuild begins only from a record that says detached.
+        Ok(self
+            .settled(mapping, wrote, begun, |found| match found.record {
+                Some(DetachRecord::Rebuilding { .. }) => found.attempts,
+                _ => None,
+            })
+            .await)
     }
 
     /// Put a rebuild back to detached: every generation but the serving one
@@ -367,8 +401,11 @@ impl Erasing<'_> {
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held()?;
         let demoted = self.sink.demote(mapping, live_only).await;
+        // A demotion puts back a record that says rebuilding.
         Ok(self
-            .told(mapping, Wrote::Demote { live_only }, demoted)
+            .settled(mapping, Wrote::Demote { live_only }, demoted, |found| {
+                matches!(found.record, Some(DetachRecord::Detached { .. })).then_some(())
+            })
             .await)
     }
 
@@ -386,10 +423,19 @@ impl Erasing<'_> {
             live_only: detach.live_only,
             through: detach.through.clone(),
         };
+        let through = detach.through.clone();
+        let live_only = detach.live_only;
         let recorded = match recorded {
             // The sink keeps no records: nothing was written.
             Ok(Recorded::NotKept) => Ok(Recorded::NotKept),
-            recorded => self.told(mapping, wrote, recorded).await,
+            recorded => {
+                self.settled(mapping, wrote, recorded, |found| {
+                    (found.record == Some(DetachRecord::Detached { live_only })
+                        && found.through == through)
+                        .then_some(Recorded::Kept)
+                })
+                .await
+            }
         };
         Ok(recorded)
     }
