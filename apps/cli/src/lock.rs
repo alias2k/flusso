@@ -494,13 +494,11 @@ mod tests {
         );
     }
 
-    /// A CRLF lock holding a multi-line value (a script's source) holds other
-    /// text than the config: stale, and its message names the line endings as
-    /// the cause, with the rewrite and the `.gitattributes` line that keeps
-    /// git from converting it again. A stale lock with LF endings says nothing
-    /// of them.
+    /// A CRLF lock holding a multi-line value (a script's source) holds the
+    /// same config too: the lock reads a converted line break as `\n`, so its
+    /// script and its index name are the LF lock's (issue #488).
     #[test]
-    fn a_crlf_lock_holding_a_script_is_stale_and_names_its_line_endings() {
+    fn a_crlf_lock_holding_a_script_holds_the_same_config() {
         let dir = project("crlf-script", &[], "out");
         std::fs::write(
             dir.join("products.schema.yml"),
@@ -519,40 +517,9 @@ mod tests {
         std::fs::write(&lock, crlf).unwrap();
 
         let state = LockState::of(&compiled(&dir), &lock);
-        assert!(
-            matches!(state, LockState::Stale { crlf: true, .. }),
-            "{state:?}"
-        );
-        assert!(state.is_error());
-        assert_eq!(state.as_str(), "lock_stale");
-        let message = state.message(&LockAt::new(Path::new("flusso.lock")));
-        assert!(
-            message.ends_with(
-                " `flusso.lock` has Windows line endings (CRLF), which change multi-line values \
-                 such as script sources. Rewrite it as above, and mark it `-text` in \
-                 `.gitattributes` (`flusso.lock -text`) so git does not convert it again"
-            ),
-            "{message}"
-        );
-        assert!(message.contains("`flusso check --fix`"), "{message}");
-
-        let edited = project("crlf-script-lf", &["users"], "out");
-        config::write(&compiled(&edited), edited.join("flusso.lock")).unwrap();
-        std::fs::write(
-            edited.join("users.schema.yml"),
-            "version: 1\ntable: users\nprimary_key: id\nfields:\n  - integer: id\n    required: false\n",
-        )
-        .unwrap();
-        let state = LockState::of(&compiled(&edited), &edited.join("flusso.lock"));
-        assert!(
-            matches!(state, LockState::Stale { crlf: false, .. }),
-            "{state:?}"
-        );
-        assert!(
-            !state
-                .message(&LockAt::new(Path::new("flusso.lock")))
-                .contains("line endings")
-        );
+        assert_eq!(state, LockState::Respelled);
+        assert!(!state.is_error());
+        assert_eq!(state.as_str(), "same_config");
     }
 
     /// A lock that fails to parse names where (line and column) and why, never
