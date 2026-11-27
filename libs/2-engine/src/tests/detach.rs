@@ -118,6 +118,14 @@ struct Gate {
     /// Reads of the records that fail once `forget_detachment` landed then
     /// failed.
     reads_fail_after_forget: Mutex<usize>,
+    /// The seed lands but its best-effort delete of a finished
+    /// rebuild's record fails (the adapter's `forget_finished_rebuild` only
+    /// warns): `Ok`, the record kept.
+    seed_keeps_record: Mutex<bool>,
+    /// `begin_rebuild` lands, then its call fails (a timeout).
+    rebuild_lands_then_fails: Mutex<bool>,
+    /// A read takes its answer, then waits on `read_gate`.
+    read_first: Mutex<bool>,
 }
 
 impl Gate {
@@ -248,6 +256,27 @@ impl Sink for Gate {
     }
 
     async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
+        if *self.read_first.lock().unwrap() {
+            let mut kept = self
+                .kept
+                .lock()
+                .unwrap()
+                .get(mapping.index.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            kept.gaps = self
+                .marker_gaps
+                .lock()
+                .unwrap()
+                .get(mapping.index.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            let gate = self.read_gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.acquire().await.unwrap().forget();
+            }
+            return Ok(kept);
+        }
         let gate = self.read_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.acquire().await.unwrap().forget();
@@ -385,6 +414,11 @@ impl Sink for Gate {
             .lock()
             .unwrap()
             .push(mapping.index.to_string());
+        if std::mem::take(&mut *self.rebuild_lands_then_fails.lock().unwrap()) {
+            return Err(SinkError::Write(
+                "the rebuild's record write timed out".to_owned(),
+            ));
+        }
         Ok(attempts)
     }
 
@@ -446,7 +480,13 @@ impl Sink for Gate {
             });
         }
         // r4: the seed deletes a finished rebuild's record.
-        self.kept.lock().unwrap().remove(index.as_ref());
+        if *self.seed_keeps_record.lock().unwrap() {
+            if let Some(kept) = self.kept.lock().unwrap().get_mut(index.as_ref()) {
+                kept.marker = Some(MarkerAt::Newer { seeded: true });
+            }
+        } else {
+            self.kept.lock().unwrap().remove(index.as_ref());
+        }
         self.seeded.lock().unwrap().push(index.to_string());
         Ok(())
     }
@@ -2994,38 +3034,55 @@ async fn a_corrupt_gap_kept_before_a_reattach_is_settled_after_it() {
     task.abort();
 }
 
-/// The eighth re-check, B-2: the record's delete landed though its call
-/// failed, and reading it again failed too. Asked again under a later
-/// opening, the reattach reads no record and can't tell its own lost delete
-/// from another process's reattach: the deployment stops, and the next
-/// start decides from the records (the gap is kept with the marker).
+/// The review of the cut, B-2: a reattach whose delete failed, then asked
+/// again under a later opening, never stops a lone process, whichever way
+/// the delete went. Landed (unseen, the read after it failing too), the
+/// record is gone with this reattach's open gap: the reattach goes on to
+/// the attach. Not landed, the record stays: the reattach deletes it.
 #[tokio::test(start_paused = true)]
-async fn a_reattach_after_a_delete_that_landed_unseen_stops_the_deployment() {
-    let rig = Rig::new(64);
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    let (_engine, task, control) = detached_live_only(&rig).await;
-    *rig.sink.forget_lands_then_fails.lock().unwrap() = true;
-    // The reattach's own read succeeds; the read after the failed delete
-    // doesn't.
-    *rig.sink.reads_fail_after_forget.lock().unwrap() = 1;
-    let crate::ReattachVerdict::Failed(why) = verdict(&control).await else {
-        panic!("both failed: Failed");
-    };
-    assert!(why.contains("reading it again failed too"), "{why}");
-    assert!(
-        rig.sink.kept.lock().unwrap().get("users").is_none(),
-        "the delete landed"
-    );
-    *rig.sink.forget_lands_then_fails.lock().unwrap() = false;
-    rig.rereads.closed();
-    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
-    let _ = control
-        .send(SinkControl::Reattach {
-            index: users(),
-            reply: crate::Reply::ignored(),
+async fn a_reattach_whose_delete_failed_finishes_either_way_without_a_stop() {
+    for landed in [true, false] {
+        let rig = Rig::new(64);
+        rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+        let (engine, task, control) = detached_live_only(&rig).await;
+        if landed {
+            *rig.sink.forget_lands_then_fails.lock().unwrap() = true;
+            // The reattach's own read succeeds; the reads after the failed
+            // delete (the read back, the reattach's own) don't.
+            *rig.sink.reads_fail_after_forget.lock().unwrap() = 2;
+        } else {
+            rig.sink.dead.lock().unwrap().insert("forget_detachment");
+        }
+        let crate::ReattachVerdict::Failed(_) = verdict(&control).await else {
+            panic!("landed {landed}: the delete failed: Failed");
+        };
+        assert_eq!(
+            rig.sink.kept.lock().unwrap().get("users").is_none(),
+            landed,
+            "landed {landed}"
+        );
+        *rig.sink.forget_lands_then_fails.lock().unwrap() = false;
+        rig.sink.dead.lock().unwrap().clear();
+        rig.rereads.closed();
+        rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+        assert_eq!(
+            verdict(&control).await,
+            crate::ReattachVerdict::Started,
+            "landed {landed}"
+        );
+        assert!(rig.sink.kept.lock().unwrap().get("users").is_none());
+        let stream::Request::Attach { attempt, .. } = next_request(&rig).await else {
+            panic!("landed {landed}: the attach is asked");
+        };
+        publish(&rig, LaneItem::Attached { attempt }).await;
+        eventually("the lane is attached", || {
+            engine.lane_health(&lane(users())).is_open()
         })
         .await;
-    stops(task).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!task.is_finished(), "landed {landed}: {:?}", task.await);
+        task.abort();
+    }
 }
 
 /// The third re-check, item 2: an unread lane vouches for nothing, so after
@@ -4861,5 +4918,207 @@ async fn a_stop_drains_a_lane_parked_on_a_blocked_owed_seed() {
     stop.request();
     eventually("drained", || rig.stream.is_idle()).await;
     assert!(written(&rig).contains(&"users/7".to_owned()));
+    task.abort();
+}
+
+/// The review of the cut, B-1: a rebuild's seed lands but the adapter's
+/// best-effort delete of the finished record fails (`mark_seeded` returns
+/// `Ok`, as the OpenSearch sink does). The seed's read back finds the
+/// record and deletes it at once, as a staging would; a lone process's next
+/// opening doesn't stop it.
+#[tokio::test(start_paused = true)]
+async fn a_seed_whose_record_delete_failed_deletes_it_and_never_stops_one_process() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
+    *rig.sink.seed_keeps_record.lock().unwrap() = true;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let stream::Request::Backfill { ticket, .. } = next_request(&rig).await else {
+        panic!("backfill");
+    };
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    eventually("the lane is current", || {
+        engine.lane_state(&lane(users())).rebuilding.is_none()
+    })
+    .await;
+    eventually("the finished record is deleted", || {
+        rig.sink.kept.lock().unwrap().get("users").is_none()
+    })
+    .await;
+    // A routine reconnect of the replication stream.
+    rig.rereads.closed();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(!task.is_finished(), "one process stopped: {:?}", task.await);
+    task.abort();
+}
+
+/// The review of the cut, B-2: `begin_rebuild` lands, its call fails (the
+/// response lost, e.g. this host's network dropped, which also ends the
+/// replication stream). A lone process's next opening doesn't stop it.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_that_landed_unseen_never_stops_one_process() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task) = detached_on_a_block(&rig).await;
+    rig.sink.block(&users(), false);
+    task.abort();
+    let _ = task.await;
+    *rig.sink.rebuild_lands_then_fails.lock().unwrap() = true;
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    eventually("the rebuild landed", || {
+        !rig.sink.rebuilds.lock().unwrap().is_empty()
+    })
+    .await;
+    // The stream ends with the same network drop, and comes back.
+    rig.rereads.closed();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(!task.is_finished(), "one process stopped: {:?}", task.await);
+    task.abort();
+}
+
+/// The review of the cut, S-2 (the eighth re-check's B-1). An owed seed
+/// of `orders`; an opening returns and the read again of `orders` takes its
+/// answer, then is slow to return; the stream ends, another process keeps a
+/// gap, the next opening returns; the read returns the old answer (counted
+/// for the earlier opening). The seed must not land over the gap.
+#[tokio::test(start_paused = true)]
+async fn an_owed_seed_never_lands_on_a_read_answered_under_an_earlier_stream() {
+    let rig = Rig::new(64);
+    let engine = rig.engine();
+    rig.sink
+        .unseeded
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    engine.stage(Continuity::Resumed).await.unwrap();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    let stream::Request::Backfill { ticket, index, .. } = next_request(&rig).await else {
+        panic!("a backfill is asked at staging");
+    };
+    assert_eq!(index, orders());
+    eventually("read under the stream", || read_all(&rig)).await;
+    rig.rereads.closed();
+    assert!(rig.rereads.open(async { Err::<(), ()>(()) }).await.is_err());
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: orders(),
+            ticket,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(rig.sink.seeded.lock().unwrap().is_empty(), "owed");
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *rig.sink.read_first.lock().unwrap() = true;
+    *rig.sink.read_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    rig.rereads.closed();
+    rig.sink
+        .marker_gaps
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned(), vec![gap(Some("1"), Some("2"))]);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    *rig.sink.read_first.lock().unwrap() = false;
+    *rig.sink.read_gate.lock().unwrap() = None;
+    gate.add_permits(1000);
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(
+        rig.sink.seeded.lock().unwrap().is_empty(),
+        "the owed seed landed over the gap another process kept"
+    );
+    task.abort();
+}
+
+/// The review of the cut: a fresh process (empty `known`) stages over what
+/// B-1's and B-2's lost outcomes leave and doesn't stop.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_process_converges_over_lost_outcomes() {
+    // B-1's leftover: a finished rebuild's record with the marker seeded on the newer generation.
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
+    *rig.sink.seed_keeps_record.lock().unwrap() = true;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let stream::Request::Backfill { ticket, .. } = next_request(&rig).await else {
+        panic!()
+    };
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    eventually("current", || {
+        engine.lane_state(&lane(users())).rebuilding.is_none()
+    })
+    .await;
+    task.abort();
+    let _ = task.await;
+    let fresh = rig.engine();
+    fresh
+        .stage(Continuity::Resumed)
+        .await
+        .expect("a fresh process stages");
+    let (task, _c) = spawn(&fresh);
+    rig.rereads.closed();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(!task.is_finished(), "{:?}", task.await);
+    assert!(
+        rig.sink.kept.lock().unwrap().get("users").is_none(),
+        "the finished record deleted"
+    );
+    assert!(fresh.lane_health(&lane(users())).is_open());
+    task.abort();
+
+    // B-2's leftover: a rebuild record written, its call lost.
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task) = detached_on_a_block(&rig).await;
+    rig.sink.block(&users(), false);
+    task.abort();
+    let _ = task.await;
+    *rig.sink.rebuild_lands_then_fails.lock().unwrap() = true;
+    let (task, control) = spawn(&engine);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    eventually("landed", || !rig.sink.rebuilds.lock().unwrap().is_empty()).await;
+    task.abort();
+    let _ = task.await;
+    let fresh = rig.engine();
+    fresh
+        .stage(Continuity::Resumed)
+        .await
+        .expect("a fresh process stages");
+    let (task, _c) = spawn(&fresh);
+    rig.rereads.closed();
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(!task.is_finished(), "{:?}", task.await);
     task.abort();
 }

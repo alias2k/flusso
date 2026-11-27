@@ -726,9 +726,24 @@ impl SinkEngine {
         mapping: &IndexMapping,
     ) -> sink::Result<std::result::Result<Vec<sink::Gap>, String>> {
         let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
-        // Another process's reattach (the record gone) is foreign here: a
-        // read never finishes it (the eighth re-check, B-2).
+        // Another process's reattach (the record gone) is foreign here: the
+        // read stops the deployment (the eighth re-check, B-2).
         let found = self.read_records(mapping).await?;
+        // The record gone, and the read the same: only this process's own
+        // earlier try of this reattach, whose delete landed unseen, removes
+        // it (`known` keeps that outcome). Its gap is the open one starting
+        // where this lane was detached: the reattach goes on to the attach
+        // (the review of the cut, B-2).
+        if found.record.is_none()
+            && let LaneHealth::Detached { through, .. } = self.lane_health(&lane)
+            && found
+                .gaps
+                .last()
+                .is_some_and(|last| last.to.is_none() && last.from == through)
+        {
+            tracing::warn!(%lane, "the record is gone: this process's own earlier reattach deleted it, unseen; the attach goes on");
+            return Ok(Ok(found.gaps));
+        }
         let restart = "restart flusso: a start on this backfill = false sink puts the \
                        records back to detached, live only, on the generation reads see; \
                        then reattach again";
@@ -1403,7 +1418,7 @@ impl SinkEngine {
     /// The sink's requests that may erase or loosen a record, each checked
     /// against the slot right before it is sent (`slot`).
     fn erasing(&self) -> slot::Erasing<'_> {
-        self.sink.erasing(&self.rereads)
+        self.sink.erasing(&self.rereads, &self.mappings)
     }
 
     /// `gaps` were just kept with an end still unknown or unreadable (a
