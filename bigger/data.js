@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795700853528,
+  "lastUpdate": 1795818329178,
   "repoUrl": "https://github.com/alias2k/flusso",
   "entries": {
     "flusso (bigger is better)": [
@@ -6860,6 +6860,54 @@ window.BENCHMARK_DATA = {
             "value": 533.7889118072321,
             "unit": "changes/s",
             "extra": "{\"images\": {\"drain\": \"every-lane-landed\", \"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.209, \"disk_write_ms\": 136.548, \"memory_copy_ms\": 218.157}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "89390131+JakubWasilczyk-Alias2k@users.noreply.github.com",
+            "name": "Jakub Wasilczyk",
+            "username": "JakubWasilczyk-Alias2k"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "419db280ea612061f8b579e572310834984ec69d",
+          "message": "Merge pull request #491 from alias2k/fix/crlf-lock-hash-488\n\nfix(config): a lock with CRLF line endings keeps its indexes' names",
+          "timestamp": "2026-11-27T22:57:52+01:00",
+          "tree_id": "539b4c3e16e773c506531a0964fc1f22023b150f",
+          "url": "https://github.com/alias2k/flusso/commit/419db280ea612061f8b579e572310834984ec69d"
+        },
+        "date": 1795818328713,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "complex/ci/backfill_docs_per_s",
+            "value": 920.1870147416496,
+            "unit": "docs/s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 46.58, \"disk_write_ms\": 335.855, \"memory_copy_ms\": 195.841}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V74 80-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/drain_changes_per_s",
+            "value": 717.5040543331714,
+            "unit": "changes/s",
+            "extra": "{\"images\": {\"drain\": \"every-lane-landed\", \"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 46.58, \"disk_write_ms\": 335.855, \"memory_copy_ms\": 195.841}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V74 80-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/backfill_docs_per_s",
+            "value": 5394.399723811189,
+            "unit": "docs/s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 46.58, \"disk_write_ms\": 335.855, \"memory_copy_ms\": 195.841}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V74 80-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/drain_changes_per_s",
+            "value": 770.6410123406437,
+            "unit": "changes/s",
+            "extra": "{\"images\": {\"drain\": \"every-lane-landed\", \"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 46.58, \"disk_write_ms\": 335.855, \"memory_copy_ms\": 195.841}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V74 80-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
           }
         ]
       }
