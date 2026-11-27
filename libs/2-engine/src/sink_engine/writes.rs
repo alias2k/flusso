@@ -1101,6 +1101,11 @@ impl<'a> Run<'a> {
             _ => {}
         }
         let result = result.map(|_| ());
+        if run.health.rebuilding.is_some() && self.engine.lane_state(&run.key).rebuilding.is_none()
+        {
+            run.health.rebuilding = None;
+            run.health.rebuild_target = None;
+        }
         if !run.health.unensured {
             run.walked.reset();
         }
@@ -3237,6 +3242,7 @@ impl<'a> Run<'a> {
                 continue;
             };
             let failed = |error| super::staging_failed(&index, error);
+            let was_cut = self.engine.is_cut(&index);
             let found = match self.engine.sink.detachment(mapping).await {
                 Ok(found) => found,
                 // A detached lane writes nothing: its read failing leaves it
@@ -3291,11 +3297,35 @@ impl<'a> Run<'a> {
             if awaiting {
                 self.release_awaiting(lane);
             }
+            self.sync_rebuild(lane);
+            // A gap the read found new cut the backfill outstanding: it is
+            // asked for again from the first key, its walk after the drop.
+            if !was_cut && self.engine.is_cut(&index) {
+                let target = self.engine.asked_target(&index);
+                self.engine.ask_again(vec![(index.clone(), target)]).await?;
+            }
             // The lane's state now follows its records: its read counts.
             self.engine.rereads.read(&key, read_at);
         }
         self.engine.records_read(read_at);
         Ok(())
+    }
+
+    /// The records read showed no rebuild where the run keeps one: the
+    /// engine dropped it (`act_on_records`), and so does the run's copy, or
+    /// the next store would bring it back.
+    fn sync_rebuild(&mut self, lane: usize) {
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        if run.health.rebuilding.is_some()
+            && !run.health.health.is_detached()
+            && self.engine.lane_state(&run.key).rebuilding.is_none()
+        {
+            run.health.rebuilding = None;
+            run.health.rebuild_target = None;
+            self.engine.store_lane(&run.key, &run.health, false);
+        }
     }
 
     /// `lane` stands in for what the records ask, which waits for the slot

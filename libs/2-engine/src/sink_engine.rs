@@ -354,8 +354,9 @@ pub struct SinkEngine {
     /// re-check, S-1). Kept whatever the lane does meanwhile; dropped when the
     /// lane detaches or a new backfill of the index is asked for.
     owed_seeds: Mutex<BTreeMap<IndexName, OwedSeed>>,
-    /// The indexes whose last read of the records kept gaps.
-    gapped: Mutex<BTreeSet<IndexName>>,
+    /// The indexes whose last read of the records kept gaps, with where
+    /// each gap starts: a gap not there before is another process's drop.
+    gapped: Mutex<BTreeMap<IndexName, Vec<Option<String>>>>,
     /// Each lane's health (open, parked, restaging) and its probe backoff.
     /// Outlives a run: a run failing for another reason leaves a parked lane
     /// parked, on its schedule. A lane not in it is open.
@@ -406,7 +407,7 @@ impl SinkEngine {
             attempts: AtomicU64::new(0),
             detachments: Mutex::new(BTreeMap::new()),
             owed_seeds: Mutex::new(BTreeMap::new()),
-            gapped: Mutex::new(BTreeSet::new()),
+            gapped: Mutex::new(BTreeMap::new()),
             fences: Mutex::new(Fences::default()),
             progress,
             stop: Stop::new(),
@@ -479,12 +480,33 @@ impl SinkEngine {
         if let Some(reason) = &detachment.unreadable_marker {
             tracing::error!(%index, %sink, %reason, "the seed marker carries a detach this version can't read; nothing was put back and the index is staged as before, as its seed marker says");
         }
-        {
+        let fresh_gap = {
             let mut gapped = self.gapped.lock().unwrap_or_else(PoisonError::into_inner);
-            if detachment.gaps.is_empty() {
+            let starts: Vec<Option<String>> =
+                detachment.gaps.iter().map(|gap| gap.from.clone()).collect();
+            let before = gapped.get(index);
+            let fresh = starts
+                .iter()
+                .any(|start| before.is_none_or(|before| !before.contains(start)));
+            if starts.is_empty() {
                 gapped.remove(index);
             } else {
-                gapped.insert(index.clone());
+                gapped.insert(index.clone(), starts);
+            }
+            fresh
+        };
+        // A gap not there at the last read is a drop another process kept
+        // meanwhile: a backfill outstanding since walked before it, so its
+        // seed (whose marker drops the gaps) would claim what the drop
+        // misses. It is cut, and asked again by the caller (the seventh
+        // re-check, found by the world: a seed granted after the reopen).
+        if fresh_gap {
+            let mut outstanding = self.lock_outstanding();
+            if let Some(asked) = outstanding.get_mut(index)
+                && !asked.cut
+            {
+                asked.cut = true;
+                tracing::warn!(%index, sink = %self.name, ticket = %asked.ticket, "the records keep a gap written since the backfill was asked: it walked before that drop, so it can't seed; asking for a fresh backfill");
             }
         }
         let mut detachments = self
@@ -573,7 +595,22 @@ impl SinkEngine {
                 found.record,
                 Some(sink::DetachRecord::Detached { live_only: false })
             );
-            let state = self.lane_state(&lane);
+            let mut state = self.lane_state(&lane);
+            // The records show no rebuild where this process keeps one (its
+            // record removed by another process's reattach or finished
+            // rebuild): it is over. Kept, a rebuild another process begins
+            // later under the same attempt count, which restarts with no
+            // record, would read as this one's (found by the world, the
+            // seventh re-check).
+            if state.rebuilding.is_some()
+                && !state.health.is_detached()
+                && !matches!(found.record, Some(sink::DetachRecord::Rebuilding { .. }))
+            {
+                tracing::warn!(%lane, attempts = ?state.rebuilding, "the records no longer show the rebuild this process began or took over: it is over here");
+                state.rebuilding = None;
+                state.rebuild_target = None;
+                self.store_lane(&lane, &state, true);
+            }
             let decided = decide(
                 &AtStaging::of(&found),
                 written_rebuildable,
@@ -1408,7 +1445,7 @@ impl SinkEngine {
                 .gapped
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .contains(index)
+                .contains_key(index)
     }
 
     /// The target `index`'s outstanding backfill was asked for.
