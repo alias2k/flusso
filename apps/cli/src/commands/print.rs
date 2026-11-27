@@ -197,6 +197,29 @@ pub(crate) fn server(out: &mut impl Write, pen: Pen, problem: Option<&str>) -> R
     }
 }
 
+/// The OpenSearch sinks' clusters (`adapters::cluster_findings`): nothing
+/// when no finding, else a section with each pair on one cluster (an error)
+/// and each sink not checked (a warning).
+pub(crate) fn clusters(
+    out: &mut impl Write,
+    pen: Pen,
+    findings: &[crate::adapters::ClusterFinding],
+) -> Result<()> {
+    if findings.is_empty() {
+        return Ok(());
+    }
+    section(out, pen, "Sinks")?;
+    for finding in findings {
+        let mark = if finding.is_error() {
+            pen.paint("1;31", "✗")
+        } else {
+            pen.paint("1;33", "!")
+        };
+        writeln!(out, "  {mark} {}", finding.message())?;
+    }
+    Ok(())
+}
+
 /// How a section of `flusso check` came out: one line, or in full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {
@@ -741,12 +764,13 @@ pub(crate) struct Summary {
 }
 
 impl Summary {
-    /// The summary of `diagnostics` and `others` (gaps and a lock `check`
-    /// fails on, each an error), `offline` or not, with the server refused or
-    /// not.
+    /// The summary of `diagnostics`, `others` (gaps, a lock `check` fails on
+    /// and sinks sharing a cluster, each an error) and `other_warnings` (a
+    /// sink not checked), `offline` or not, with the server refused or not.
     pub(crate) fn of(
         diagnostics: &[Diagnostic],
         others: usize,
+        other_warnings: usize,
         offline: bool,
         server_refused: bool,
     ) -> Self {
@@ -758,7 +782,7 @@ impl Summary {
         };
         Self {
             errors: count(Severity::Error) + others,
-            warnings: count(Severity::Warning),
+            warnings: count(Severity::Warning) + other_warnings,
             offline,
             server_refused,
         }

@@ -132,35 +132,127 @@ pub(crate) fn index_sink_config(
     }
 }
 
-/// Refuse two OpenSearch sinks on one cluster (the review of the cut,
-/// m-3): every index, alias and seed marker flusso owns there is named by
-/// the deployment's `prefix` alone, never by the sink, so both would share
-/// them, each taking the other's records for another process's. A URL that
-/// can't be resolved here is left to the sink's own start.
-pub(crate) fn distinct_clusters(config: &Config) -> anyhow::Result<()> {
-    let mut seen: std::collections::BTreeMap<String, &SinkName> = std::collections::BTreeMap::new();
-    for (name, entry) in &config.sinks {
-        let Ok(SinkConfig::Opensearch(sink)) = sink_config(name, entry) else {
-            continue;
-        };
-        let Some(cluster) = sink
-            .resolve_url(name)
-            .ok()
-            .and_then(|url| cluster_of(url.as_ref()))
-        else {
-            continue;
-        };
-        if let Some(first) = seen.insert(cluster.clone(), name) {
-            return Err(anyhow!(
-                "[sinks.{first}] and [sinks.{name}] write to the same OpenSearch cluster \
+/// What `check` finds of the OpenSearch sinks' clusters (the review of the
+/// cut, m-3; of round 10, m-5 and m-6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClusterFinding {
+    /// Two sinks write to one cluster: every index, alias and seed marker
+    /// flusso owns there is named by the deployment's `prefix` alone, never
+    /// by the sink, so both would share them, each taking the other's
+    /// records for another process's. An error; `run` refuses it.
+    Shared {
+        first: SinkName,
+        second: SinkName,
+        cluster: String,
+    },
+    /// A sink's URL can't be resolved here (an unset environment variable),
+    /// so it was not compared with the other sinks: `check_skipped`.
+    Skipped { sink: SinkName, why: String },
+}
+
+impl ClusterFinding {
+    /// Whether the finding fails `check`.
+    pub(crate) fn is_error(&self) -> bool {
+        matches!(self, Self::Shared { .. })
+    }
+
+    /// The finding's kind, as the JSON report names it.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Shared { .. } => "shared_cluster",
+            Self::Skipped { .. } => "check_skipped",
+        }
+    }
+
+    /// The sinks it is about.
+    pub(crate) fn sinks(&self) -> Vec<&SinkName> {
+        match self {
+            Self::Shared { first, second, .. } => vec![first, second],
+            Self::Skipped { sink, .. } => vec![sink],
+        }
+    }
+
+    /// What was found, and what to do.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Shared {
+                first,
+                second,
+                cluster,
+            } => format!(
+                "[sinks.{first}] and [sinks.{second}] write to the same OpenSearch cluster \
                  ({cluster}): every index, alias and seed marker flusso keeps there is named by \
                  the deployment's `prefix`, never by the sink, so the two would share them. Give \
                  each sink its own cluster, or run each in its own deployment with its own \
                  `prefix`"
-            ));
+            ),
+            Self::Skipped { sink, why } => format!(
+                "[sinks.{sink}]'s URL can't be resolved here ({why}): not checked against the \
+                 other OpenSearch sinks for a shared cluster; `flusso run` checks it where the \
+                 URL resolves"
+            ),
         }
     }
-    Ok(())
+}
+
+/// The OpenSearch sinks' clusters, compared: each pair on one cluster, and
+/// each sink whose URL can't be resolved here. Nothing with fewer than two
+/// OpenSearch sinks. A sink on another cluster (a backup, an audit copy) is
+/// no finding.
+pub(crate) fn cluster_findings(config: &Config) -> Vec<ClusterFinding> {
+    let opensearch: Vec<(&SinkName, Box<OpensearchConfig>)> = config
+        .sinks
+        .iter()
+        .filter_map(|(name, entry)| match sink_config(name, entry) {
+            Ok(SinkConfig::Opensearch(sink)) => Some((name, sink)),
+            _ => None,
+        })
+        .collect();
+    if opensearch.len() < 2 {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    let mut seen: std::collections::BTreeMap<String, &SinkName> = std::collections::BTreeMap::new();
+    for (name, sink) in &opensearch {
+        let url = match sink.resolve_url(name) {
+            Ok(url) => url,
+            Err(error) => {
+                findings.push(ClusterFinding::Skipped {
+                    sink: (*name).clone(),
+                    why: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let Some(cluster) = cluster_of(url.as_ref()) else {
+            findings.push(ClusterFinding::Skipped {
+                sink: (*name).clone(),
+                why: "not a URL this check reads".to_owned(),
+            });
+            continue;
+        };
+        if let Some(first) = seen.insert(cluster.clone(), name) {
+            findings.push(ClusterFinding::Shared {
+                first: first.clone(),
+                second: (*name).clone(),
+                cluster,
+            });
+        }
+    }
+    findings
+}
+
+/// Refuse two OpenSearch sinks on one cluster ([`ClusterFinding::Shared`]),
+/// as `run` does before anything starts. A URL that can't be resolved here
+/// is left to the sink's own start.
+pub(crate) fn distinct_clusters(config: &Config) -> anyhow::Result<()> {
+    match cluster_findings(config)
+        .into_iter()
+        .find(ClusterFinding::is_error)
+    {
+        Some(shared) => Err(anyhow!(shared.message())),
+        None => Ok(()),
+    }
 }
 
 /// The cluster `url` names, however it is spelled: scheme and host in lower
@@ -352,14 +444,6 @@ mod tests {
                 "{primary} and {audit}: {error}"
             );
         }
-        for (primary, audit) in [
-            ("https://search:9200", "https://audit:9200"),
-            ("https://search:9200", "https://search:9201"),
-            ("http://search:9200", "https://search:9200"),
-            ("https://proxy/a", "https://proxy/b"),
-        ] {
-            distinct_clusters(&two_opensearch_sinks(primary, audit)).unwrap();
-        }
         let one_and_stdout = config(
             r#"
             [source]
@@ -374,6 +458,54 @@ mod tests {
             "#,
         );
         distinct_clusters(&one_and_stdout).unwrap();
+        assert!(cluster_findings(&one_and_stdout).is_empty());
+    }
+
+    /// The owner's decision on the review of round 10: a second OpenSearch
+    /// sink on another cluster (a backup, an audit copy) keeps working.
+    #[test]
+    fn two_opensearch_sinks_on_different_clusters_are_accepted() {
+        for (primary, audit) in [
+            ("https://search:9200", "https://backup:9200"),
+            ("https://search:9200", "https://search:9201"),
+            ("http://search:9200", "https://search:9200"),
+            ("https://proxy/a", "https://proxy/b"),
+        ] {
+            let config = two_opensearch_sinks(primary, audit);
+            distinct_clusters(&config).unwrap();
+            assert_eq!(cluster_findings(&config), [], "{primary} and {audit}");
+        }
+    }
+
+    /// The review of round 10, m-5: a sink whose URL names an environment
+    /// variable that isn't set is not compared, and says so; `run` leaves it
+    /// to the sink's own start.
+    #[test]
+    fn a_sink_url_that_cannot_be_resolved_is_a_skipped_check() {
+        let unresolved = config(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "https://search:9200"
+
+            [sinks.audit]
+            type = "opensearch"
+            url = { env = "FLUSSO_TEST_UNSET_AUDIT_URL" }
+            "#,
+        );
+        let findings = cluster_findings(&unresolved);
+        assert!(
+            matches!(
+                findings.as_slice(),
+                [ClusterFinding::Skipped { sink, why }]
+                    if sink.as_ref() == "audit" && why.contains("FLUSSO_TEST_UNSET_AUDIT_URL")
+            ),
+            "{findings:?}"
+        );
+        distinct_clusters(&unresolved).unwrap();
     }
 
     #[test]
