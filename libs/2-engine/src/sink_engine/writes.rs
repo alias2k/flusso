@@ -2094,7 +2094,9 @@ impl<'a> Run<'a> {
         };
         let (_, lane, index, ticket) = self.owed_flying.swap_remove(at);
         match result {
-            Err(super::slot::NotHeld) => {}
+            Err(refused) => {
+                tracing::debug!(%index, %refused, "the owed seed waits");
+            }
             Ok(Ok(())) => {
                 self.engine.drop_owed_seed(&index);
                 self.engine.seeded(&index, ticket, took);
@@ -2165,7 +2167,8 @@ impl<'a> Run<'a> {
         // written, and it lands once the slot is held (`land_owed_seeds`).
         let result = match result {
             Ok(result) => result,
-            Err(super::slot::NotHeld) => {
+            Err(refused) => {
+                tracing::debug!(index = %seeding.index, %refused, "the seed waits");
                 let lane = seeding.lane;
                 if !self.lane_open(lane) {
                     self.put_back_complete(seeding);
@@ -3262,11 +3265,6 @@ impl<'a> Run<'a> {
             }
             let key = run.key.clone();
             let detached = run.health.health.is_detached();
-            // A detach of this lane failed: a detach record found now is that
-            // detach's own (`known` admits it), which the clear decides
-            // before the lane writes anything; taking the lane as detached
-            // under it would leave it detached once the clear deletes it.
-            let clearing = run.health.detach_unsure && !detached;
             let index = run.key.index.clone();
             let Some(mapping) = self.engine.mappings.iter().find(|m| m.index == index) else {
                 continue;
@@ -3306,10 +3304,15 @@ impl<'a> Run<'a> {
                             .map_err(failed)?;
                     }
                 }
-                super::Acted::Detached { .. } if clearing => {
-                    tracing::info!(%index, sink = %self.engine.name, "read again once the slot is held, the records say detached: the lane's own failed detach, left to its clear");
-                }
                 super::Acted::Detached { why, through } => {
+                    // A detach of this lane whose outcome was unknown is
+                    // settled by this read, as staging settles it: a record
+                    // found is that detach having landed (another process's
+                    // would have stopped the deployment), so its clear has
+                    // nothing left to do (the review of round 10, m-8).
+                    if let Some(run) = self.lanes.get_mut(lane) {
+                        run.health.detach_unsure = false;
+                    }
                     tracing::warn!(%index, sink = %self.engine.name, %why, "read again once the slot is held, the records say the index is detached: taken as detached before anything of it is written (O29)");
                     self.detached(lane, why, through).await?;
                 }
@@ -3815,8 +3818,8 @@ impl<'a> Run<'a> {
             let why = "a reindex restarts the rebuild, which was parked or restaging (O20)";
             let detach = sink::Detach::new(why).live_only(!self.engine.options.backfill);
             match self.engine.erasing().detach(mapping, &detach).await {
-                Err(super::slot::NotHeld) => {
-                    tracing::warn!(%index, "this process holds no slot: the rebuild is not restarted; it goes on as it was");
+                Err(refused) => {
+                    tracing::warn!(%index, %refused, "the rebuild is not restarted; it goes on as it was");
                     continue;
                 }
                 Ok(Ok(sink::Recorded::Kept)) => self.detached(lane, why.to_owned(), None).await?,

@@ -4021,12 +4021,12 @@ async fn a_detach_that_landed_unseen_is_taken_as_done_from_its_read_back() {
 
 /// Found by the world at 50,000 cases: a lane whose detach landed but
 /// failed, read again at the next opening before its clear ran. The record
-/// is its own failed detach's, which the clear deletes: the read again
-/// leaves it to the clear instead of taking the lane as detached (which,
-/// with the record then deleted, kept it detached for good). The lane opens
-/// once its block lifts, and the record is gone.
+/// carries this process's own stamp: its detach landed, and the read again
+/// takes the lane as detached, as staging does (the review of round 10,
+/// m-8). The clear then has nothing left to do: the record stays, the lane
+/// stays detached once its block lifts.
 #[tokio::test(start_paused = true)]
-async fn a_failed_detach_read_again_before_its_clear_is_left_to_the_clear() {
+async fn a_failed_detach_read_again_before_its_clear_is_taken_as_landed() {
     let rig = Rig::new(64);
     rig.sink
         .records
@@ -4055,9 +4055,10 @@ async fn a_failed_detach_read_again_before_its_clear_is_left_to_the_clear() {
     assert!(!task.is_finished(), "{:?}", task.await);
     task.abort();
     assert!(
-        health.is_open() && kept.is_none(),
+        health.is_detached() && kept.is_some(),
         "health {health:?}, record {kept:?}"
     );
+    assert!(rig.sink.forgotten.lock().unwrap().is_empty());
 }
 
 /// The fifth re-check (second report), B-2: a parked lane's clear deletes a

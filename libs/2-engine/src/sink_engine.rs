@@ -575,8 +575,9 @@ impl SinkEngine {
         found: sink::Detachment,
         why: &str,
         through: Option<String>,
+        refused: &slot::NotHeld,
     ) -> Acted {
-        tracing::warn!(%lane, %why, "this process holds no slot: what the records ask waits for it");
+        tracing::warn!(%lane, %why, %refused, "what the records ask waits");
         self.read_detachment(&lane.index, found);
         Acted::Unheld {
             why: why.to_owned(),
@@ -613,14 +614,18 @@ impl SinkEngine {
             );
             match decided {
                 Decision::Demote { live_only } if round == 0 => {
-                    let Ok(demoted) = self.erasing().demote(mapping, live_only).await else {
-                        return Ok(self.unheld(
-                            &lane,
-                            found,
-                            "the records say a rebuild is under way; put back to detached once \
-                             this process holds the slot",
-                            through,
-                        ));
+                    let demoted = match self.erasing().demote(mapping, live_only).await {
+                        Ok(demoted) => demoted,
+                        Err(refused) => {
+                            return Ok(self.unheld(
+                                &lane,
+                                found,
+                                "the records say a rebuild is under way; put back to detached \
+                                 once this process holds the slot",
+                                through,
+                                &refused,
+                            ));
+                        }
                     };
                     demoted?;
                     tracing::warn!(%lane, skip_backfill = self.skip_backfill, "the records say another process began a rebuild: put back to detached before anything of the lane is dropped (O29)");
@@ -648,8 +653,11 @@ impl SinkEngine {
                     live_only_first,
                 } => {
                     if live_only_first {
-                        let Ok(demoted) = self.erasing().demote(mapping, true).await else {
-                            return Ok(self.unheld(&lane, found, &why, through));
+                        let demoted = match self.erasing().demote(mapping, true).await {
+                            Ok(demoted) => demoted,
+                            Err(refused) => {
+                                return Ok(self.unheld(&lane, found, &why, through, &refused));
+                            }
                         };
                         demoted?;
                         tracing::warn!(%lane, "a detach record written while this sink could rebuild is put back to detached, live only: flusso reattach --accept-gap applies");
@@ -697,8 +705,9 @@ impl SinkEngine {
         let detach = sink::Detach::new(why)
             .live_only(!self.options.backfill)
             .through(through.clone());
-        let Ok(recorded) = self.erasing().detach(mapping, &detach).await else {
-            return Ok(self.unheld(lane, found, why, through));
+        let recorded = match self.erasing().detach(mapping, &detach).await {
+            Ok(recorded) => recorded,
+            Err(refused) => return Ok(self.unheld(lane, found, why, through, &refused)),
         };
         if recorded? != sink::Recorded::Kept {
             return Err(sink::SinkError::Write(format!(
@@ -802,11 +811,9 @@ impl SinkEngine {
         // this one stopped holding the slot, checked right before it is sent
         // (`slot`). Refused, the gap just written stays open: the lane stays
         // detached, and a reattach asked again reuses that gap (S-b).
-        let Ok(deleted) = self.erasing().forget_detachment(mapping, &version).await else {
-            return Ok(Err(format!(
-                "{}; ask again once it holds the slot",
-                slot::NotHeld
-            )));
+        let deleted = match self.erasing().forget_detachment(mapping, &version).await {
+            Ok(deleted) => deleted,
+            Err(refused) => return Ok(Err(refused.to_string())),
         };
         if let Err(error) = deleted {
             // The delete may have landed although its call failed (S-b):

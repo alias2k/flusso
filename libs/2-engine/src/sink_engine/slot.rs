@@ -182,16 +182,37 @@ impl Plain {
     }
 }
 
-/// This process may not erase or loosen a record now: it holds no slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NotHeld;
+/// Why a gated write was not sent: this process may not erase or loosen a
+/// record now (the review of round 10, m-2: each reason told apart).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NotHeld {
+    /// It holds no slot.
+    Slot,
+    /// It holds the slot, but the records it read under an earlier stream
+    /// could not be read again: why.
+    Unread(String),
+    /// Read again, the records show another process's change: the
+    /// deployment stops.
+    Changed,
+}
 
 impl std::fmt::Display for NotHeld {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            "this process doesn't hold the slot (its stream ended or its opening failed), so the \
-             record may be another process's",
-        )
+        match self {
+            Self::Slot => f.write_str(
+                "this process doesn't hold the slot (its stream ended or its opening failed), so \
+                 the record may be another process's; ask again once it holds the slot",
+            ),
+            Self::Unread(why) => write!(
+                f,
+                "the records, read under an earlier stream, could not be read again before the \
+                 write ({why}); ask again"
+            ),
+            Self::Changed => f.write_str(
+                "another process changed the records: the deployment stops, and its next start \
+                 decides from them",
+            ),
+        }
     }
 }
 
@@ -268,7 +289,7 @@ impl Erasing<'_> {
         if self.rereads.may_erase_records() {
             Ok(())
         } else {
-            Err(NotHeld)
+            Err(NotHeld::Slot)
         }
     }
 
@@ -293,20 +314,20 @@ impl Erasing<'_> {
             .mappings
             .iter()
             .find(|mapping| &mapping.index == index)
-            .ok_or(NotHeld)?;
+            .ok_or(NotHeld::Unread(format!("{index} names no mapping")))?;
         let found = self
             .sink
             .detachment(mapping, &self.known.stamp())
             .await
-            .map_err(|_| NotHeld)?;
+            .map_err(|error| NotHeld::Unread(error.to_string()))?;
         if !(self.rereads.held_or_alone() && self.rereads.read_begins() == now) {
-            return Err(NotHeld);
+            return Err(NotHeld::Slot);
         }
         match self.known.judge(index, &found, now, false) {
             Change::Same => self.held(),
             Change::Foreign(what) => {
                 tracing::error!(%index, %what, "another flusso process changed the index's detach records while this one didn't hold the slot: stopping the deployment; no change of this index confirmed past what its records cover");
-                Err(NotHeld)
+                Err(NotHeld::Changed)
             }
         }
     }
@@ -450,6 +471,8 @@ mod tests {
     struct Records {
         found: Mutex<Detachment>,
         sent: Mutex<Vec<&'static str>>,
+        /// Reads of the records fail.
+        unreadable: Mutex<bool>,
     }
 
     impl Records {
@@ -469,6 +492,11 @@ mod tests {
         }
 
         async fn detachment(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<Detachment> {
+            if *self.unreadable.lock().unwrap() {
+                return Err(sink::SinkError::Write(
+                    "the meta index timed out".to_owned(),
+                ));
+            }
             Ok(self.found.lock().unwrap().clone())
         }
 
@@ -586,5 +614,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The review of round 10, m-2: a gated write refused because the
+    /// records could not be read again says so, not that the slot isn't
+    /// held; with no slot held it says that; another's change says the
+    /// deployment stops.
+    #[tokio::test]
+    async fn a_refused_gated_write_names_why() {
+        let mapping = mapping();
+        let sink = Arc::new(Records::default());
+        *sink.found.lock().unwrap() = detached("another process", "1:1");
+        let known = Arc::new(KnownRecords::default());
+        let plain = Plain::new(Arc::clone(&sink) as Arc<dyn Sink>, Arc::clone(&known));
+        let rereads = Rereads::default();
+        rereads.will_open();
+        rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+        let at = rereads.read_begins();
+        let found = plain.detachment(&mapping).await.unwrap();
+        known.judge(&mapping.index, &found, at, true);
+        rereads.closed();
+        let mappings = std::slice::from_ref(&mapping);
+        let refused = plain.erasing(&rereads, mappings).reindex(&mapping).await;
+        assert_eq!(refused.as_ref().err(), Some(&NotHeld::Slot));
+        assert!(
+            refused
+                .unwrap_err()
+                .to_string()
+                .contains("doesn't hold the slot")
+        );
+
+        rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+        *sink.unreadable.lock().unwrap() = true;
+        let refused = plain.erasing(&rereads, mappings).reindex(&mapping).await;
+        let Err(NotHeld::Unread(why)) = &refused else {
+            panic!("{refused:?}");
+        };
+        assert!(why.contains("timed out"), "{why}");
+        assert!(!refused.unwrap_err().to_string().contains("slot"));
+
+        *sink.unreadable.lock().unwrap() = false;
+        *sink.found.lock().unwrap() = detached("yet another process", "2:1");
+        let refused = plain.erasing(&rereads, mappings).reindex(&mapping).await;
+        assert_eq!(refused.err(), Some(NotHeld::Changed));
+        assert!(sink.sent.lock().unwrap().is_empty());
     }
 }
