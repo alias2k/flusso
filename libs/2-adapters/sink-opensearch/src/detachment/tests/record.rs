@@ -41,6 +41,9 @@ struct Store {
     /// Runs before an `_update` of this id is answered, once: another writer
     /// replaces the document first.
     before_update: Option<(String, Value)>,
+    /// Every body written to a meta document: whole (`PUT`), or the `doc`
+    /// of an `_update`.
+    bodies: Vec<(String, Value)>,
 }
 
 impl Store {
@@ -74,6 +77,16 @@ impl Store {
             }
         }
         let condition = query_seq(query);
+        if let Some(id) = path
+            .strip_prefix("/flusso_meta/_doc/")
+            .or_else(|| path.strip_prefix("/flusso_meta/_create/"))
+            .or_else(|| path.strip_prefix("/flusso_meta/_update/"))
+            && method != "DELETE"
+        {
+            let body: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+            let written = body.get("doc").cloned().unwrap_or(body);
+            self.bodies.push((id.to_owned(), written));
+        }
         match (method, path) {
             ("POST", "/flusso_meta/_mget") => {
                 let ids: Value = serde_json::from_str(body).unwrap();
@@ -339,7 +352,7 @@ async fn a_detach_moves_the_marker_first_then_records_serving() {
         store.doc(ALIAS).unwrap(),
         json!({
             "active_generation": 5, "seeded": false, "walked": null, "uuid": null,
-            "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3", "walked": { "generation": 3, "mark": "k" } },
+            "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3", "walked": { "generation": 3, "mark": "k" }, "gaps": [] },
             "stamp": { "writer": "w", "seq": 3 },
         })
     );
@@ -976,4 +989,211 @@ async fn a_gap_entry_that_cannot_be_read_is_a_gap_with_unknown_ends() {
             },
         ]
     );
+}
+
+/// The review of round 11, S-1: a seeded marker keeps a reattach's gap
+/// (written while the sink was `backfill = false`). The sink, now able to
+/// rebuild, detaches: d2b moves the marker whole, keeping its gaps in
+/// `detaching_from`. When the marker comes back on the serving generation,
+/// which still lacks the gap's changes, the gap comes back with it: (a) the
+/// detach died before its record and a read puts the marker back; (b) a
+/// start on `backfill = false` demotes the record live only (R14).
+#[tokio::test]
+async fn a_gap_survives_a_detach_whose_marker_comes_back_on_serving() {
+    let gaps = json!([{ "from": "0/10", "to": "0/20" }]);
+    let with_gap = || {
+        let mut store = Store::seeded();
+        let mut kept = marker();
+        kept["gaps"] = gaps.clone();
+        store.put(ALIAS, kept);
+        store
+    };
+
+    let store = Arc::new(Mutex::new(with_gap()));
+    store.lock().unwrap().killed_at = Some(2);
+    let dying = serve(&store).await;
+    let _ = dying.sink().detach(&mapping(), &blocked()).await;
+    store.lock().unwrap().killed_at = None;
+    let next = serve(&store).await;
+    next.sink().detachment(&mapping(), &stamp()).await.unwrap();
+    let after_put_back = next.sink().detachment(&mapping(), &stamp()).await.unwrap();
+
+    let store_b = Arc::new(Mutex::new(with_gap()));
+    let stub = serve(&store_b).await;
+    stub.sink().detach(&mapping(), &blocked()).await.unwrap();
+    stub.sink()
+        .demote(&mapping(), true, &stamp())
+        .await
+        .unwrap();
+    let after_demotion = stub.sink().detachment(&mapping(), &stamp()).await.unwrap();
+
+    let gap = sink::Gap {
+        from: Some("0/10".to_owned()),
+        to: Some("0/20".to_owned()),
+    };
+    assert_eq!(after_put_back.gaps, [gap.clone()]);
+    assert_eq!(after_demotion.gaps, [gap]);
+    assert_eq!(store.lock().unwrap().doc(ALIAS).unwrap()["gaps"], gaps);
+    assert_eq!(store_b.lock().unwrap().doc(ALIAS).unwrap()["gaps"], gaps);
+    assert_eq!(
+        (after_put_back.gaps.len(), after_demotion.gaps.len()),
+        (1, 1),
+        "the gap is lost: put back {:?}, demoted {:?}",
+        store.lock().unwrap().doc(ALIAS),
+        store_b.lock().unwrap().doc(ALIAS),
+    );
+}
+
+/// Item 7 of round 12's brief: every body the adapter writes to a record or
+/// a marker, whole or as an `_update` of the gaps, carries the stamp of the
+/// call that wrote it. Each record-keeping call is driven with a stamp of its
+/// own; the stand-in keeps every body written.
+#[tokio::test]
+async fn every_record_or_marker_body_carries_the_callers_stamp() {
+    async fn written_by(
+        store: Store,
+        call: impl AsyncFnOnce(&crate::OpensearchSink, &sink::Stamp),
+    ) -> Vec<(String, Value)> {
+        let store = Arc::new(Mutex::new(store));
+        let stub = serve(&store).await;
+        let stamp = sink::Stamp::new("caller", 17);
+        call(&stub.sink(), &stamp).await;
+        let bodies = std::mem::take(&mut store.lock().unwrap().bodies);
+        assert!(!bodies.is_empty(), "nothing written");
+        for (id, body) in &bodies {
+            assert_eq!(
+                body["stamp"],
+                json!({ "writer": "caller", "seq": 17 }),
+                "{id}: {body}"
+            );
+        }
+        bodies
+    }
+    let mut half_moved = Store::seeded();
+    half_moved.put(
+        ALIAS,
+        json!({ "active_generation": 4, "seeded": false,
+                "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3" } }),
+    );
+    let with_gap = || {
+        let mut store = Store::seeded();
+        let mut kept = marker();
+        kept["gaps"] = json!([{ "from": "0/1", "to": "0/2" }]);
+        store.put(ALIAS, kept);
+        store
+    };
+    let detached = |store: Store| async move {
+        let store = Arc::new(Mutex::new(store));
+        let stub = serve(&store).await;
+        stub.sink().detach(&mapping(), &blocked()).await.unwrap();
+        let mut taken = std::mem::take(&mut *store.lock().unwrap());
+        taken.bodies.clear();
+        taken
+    };
+    let calls: Vec<(&str, Vec<(String, Value)>)> = vec![
+        (
+            "detach",
+            written_by(with_gap(), async |sink, stamp| {
+                sink.detach(&mapping(), &blocked().stamp(stamp.clone()))
+                    .await
+                    .unwrap();
+            })
+            .await,
+        ),
+        (
+            "live-only detach",
+            written_by(with_gap(), async |sink, stamp| {
+                sink.detach(&mapping(), &blocked().live_only(true).stamp(stamp.clone()))
+                    .await
+                    .unwrap();
+            })
+            .await,
+        ),
+        (
+            "the read's put-back",
+            written_by(half_moved, async |sink, stamp| {
+                assert!(
+                    sink.detachment(&mapping(), stamp)
+                        .await
+                        .unwrap()
+                        .restored
+                        .is_some()
+                );
+            })
+            .await,
+        ),
+        (
+            "rebuild",
+            written_by(detached_store(), async |sink, stamp| {
+                sink.begin_rebuild(&mapping(), stamp).await.unwrap();
+            })
+            .await,
+        ),
+        (
+            "demotion",
+            written_by(detached_store(), async |sink, stamp| {
+                sink.demote(&mapping(), false, stamp).await.unwrap();
+            })
+            .await,
+        ),
+        (
+            "live-only demotion",
+            written_by(detached(with_gap()).await, async |sink, stamp| {
+                sink.demote(&mapping(), true, stamp).await.unwrap();
+            })
+            .await,
+        ),
+        (
+            "forget",
+            written_by(detached_store(), async |sink, stamp| {
+                let read = sink.detachment(&mapping(), stamp).await.unwrap();
+                sink.forget_detachment(&mapping(), read.version.as_ref().unwrap(), stamp)
+                    .await
+                    .unwrap();
+            })
+            .await,
+        ),
+        (
+            "the seed's forget",
+            written_by(detached_store(), async |sink, stamp| {
+                sink.forget_finished_rebuild(ALIAS, Some(stamp))
+                    .await
+                    .unwrap();
+            })
+            .await,
+        ),
+        (
+            "gaps",
+            written_by(Store::seeded(), async |sink, stamp| {
+                sink.record_gaps(
+                    &mapping(),
+                    &|_| {
+                        Some(vec![sink::Gap {
+                            from: None,
+                            to: None,
+                        }])
+                    },
+                    stamp,
+                )
+                .await
+                .unwrap();
+            })
+            .await,
+        ),
+        (
+            "a marker written whole",
+            written_by(Store::seeded(), async |sink, stamp| {
+                sink.write_index_meta(ALIAS, 4, false, None, Some(stamp))
+                    .await
+                    .unwrap();
+            })
+            .await,
+        ),
+    ];
+    for (call, bodies) in calls {
+        assert!(
+            bodies.iter().any(|(id, _)| id == ALIAS || id == DETACH),
+            "{call}: {bodies:?}"
+        );
+    }
 }

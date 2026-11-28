@@ -142,7 +142,12 @@ impl OpensearchSink {
         Ok(())
     }
 
-    async fn put_meta(&self, id: &str, doc: Value) -> Result<()> {
+    /// Write `doc` whole as `id`, stamped `stamp` (`null` for a caller that
+    /// keeps no records): the one unconditional whole write of a marker.
+    async fn put_meta(&self, id: &str, mut doc: Value, stamp: Option<&sink::Stamp>) -> Result<()> {
+        if let Some(fields) = doc.as_object_mut() {
+            fields.insert("stamp".to_owned(), crate::detachment::stamp_value(stamp));
+        }
         let url = format!("{}/{}/_doc/{id}", self.base_url, self.meta_index());
         let req = self
             .client
@@ -226,15 +231,11 @@ impl OpensearchSink {
         uuid: Option<&str>,
         stamp: Option<&sink::Stamp>,
     ) -> Result<()> {
-        let mut doc = json!({
-            "active_generation": generation,
-            "seeded": seeded,
-            "stamp": crate::detachment::stamp_value(stamp),
-        });
+        let mut doc = json!({ "active_generation": generation, "seeded": seeded });
         if let (Some(uuid), Some(fields)) = (uuid, doc.as_object_mut()) {
             fields.insert("uuid".to_owned(), Value::from(uuid));
         }
-        self.put_meta(hash_alias, doc).await
+        self.put_meta(hash_alias, doc, stamp).await
     }
 
     /// Record the `index.uuid` of the active generation in its meta doc,

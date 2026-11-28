@@ -1189,8 +1189,8 @@ async fn a_record_written_by_hand_is_read_and_left_as_it_is() {
 ///   forget as a tombstone that reads as no record, with its own version;
 /// - a forget at a version the tombstone replaced conflicts, never deletes;
 /// - a detach over the tombstone replaces it on its version;
-/// - the checkpoint's and the uuid's partial `_update`s keep the marker's
-///   stamp, and the gaps' `_update` replaces it.
+/// - the checkpoint's partial `_update` keeps the marker's stamp, and the
+///   gaps' `_update` replaces it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
 async fn who_wrote_each_record_survives_every_write_as_opensearch_answers_it() {
@@ -1276,6 +1276,48 @@ async fn who_wrote_each_record_survives_every_write_as_opensearch_answers_it() {
         Some(sink::DetachRecord::Detached { live_only: true })
     );
     assert_eq!(again.record_stamp, Some(mine.clone()));
+}
+
+/// The review of round 11, S-1, on a real cluster: a gap kept with a seeded
+/// marker comes back when a rebuildable detach's marker comes back on the
+/// serving generation, by a live-only demotion (R14) or by a read's put-back
+/// of a marker a detach left half moved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_gap_comes_back_with_the_marker_onto_the_serving_generation() {
+    let (_container, base) = start_opensearch().await;
+    let proxy = FaultProxy::start(&base).await;
+    let stamp = sink::Stamp::new("mine", 1);
+    let gap = sink::Gap {
+        from: Some("0/10".to_owned()),
+        to: Some("0/20".to_owned()),
+    };
+    for (logical, by_put_back) in [("demoted", false), ("put_back", true)] {
+        let mapping = mapping(logical, 1);
+        let index = mapping.index.clone();
+        let first = sink(&base);
+        first.ensure_index_as(&mapping, &stamp).await.unwrap();
+        write(&first, &index, &[1]).await;
+        first.mark_seeded_as(&index, &stamp).await.unwrap();
+        first
+            .record_gaps(&mapping, &|_| Some(vec![gap.clone()]), &stamp)
+            .await
+            .unwrap();
+        let detach = sink::Detach::new("blocked").stamp(stamp.clone());
+        if by_put_back {
+            // The detach dies between its marker move and its record.
+            proxy.refuse(|seen, _| seen.path.contains("detach:"));
+            assert!(sink(&proxy.url).detach(&mapping, &detach).await.is_err());
+            proxy.heal();
+            let read = sink(&base).detachment(&mapping, &stamp).await.unwrap();
+            assert!(read.restored.is_some(), "{logical}: {read:?}");
+        } else {
+            first.detach(&mapping, &detach).await.unwrap();
+            first.demote(&mapping, true, &stamp).await.unwrap();
+        }
+        let read = sink(&base).detachment(&mapping, &stamp).await.unwrap();
+        assert_eq!(read.gaps, [gap.clone()], "{logical}: {read:?}");
+    }
 }
 
 /// Each of `ids` in the meta index: its sequence number and source.

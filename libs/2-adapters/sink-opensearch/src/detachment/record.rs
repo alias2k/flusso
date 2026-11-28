@@ -3,7 +3,10 @@
 //!
 //! - **d2b.** The marker moves to a generation past every existing one,
 //!   unseeded, with no `walked` and no `uuid`, keeping the marker as it was in
-//!   `detaching_from`, checkpoint included. A marker that already carries `detaching_from` is left
+//!   `detaching_from`, checkpoint and gaps included: a put-back or a live-only
+//!   demotion brings them back with the marker onto the serving generation,
+//!   which still lacks the gaps' changes (the review of round 11, S-1). Only a
+//!   write that rebuilds the index (a seed, a reindex) drops them. A marker that already carries `detaching_from` is left
 //!   exactly as it is, so a detach run again never moves it again. Skipped
 //!   for a `live_only` detach: its marker stays on the serving generation.
 //! - **d2a.** The record, `detach:{hash_alias}`: created when none was read,
@@ -32,7 +35,7 @@ use kernel::IndexMapping;
 use serde_json::{Value, json};
 use sink::{Detach, RecordVersion, Recorded, Result, SinkError, Stamp};
 
-use super::{FORGOTTEN, Found, Kept, stamp_value};
+use super::{FORGOTTEN, Found, Kept, carried_gaps, gaps_value, read_gaps, stamp_value};
 use crate::OpensearchSink;
 use crate::generations::{next_generation, parse_generation};
 use crate::transport::request_error;
@@ -41,7 +44,7 @@ use crate::transport::request_error;
 const CONFLICT_ROUNDS: usize = 5;
 
 /// What a conditional write found.
-enum Written {
+pub(super) enum Written {
     Done,
     Conflict,
 }
@@ -57,7 +60,6 @@ impl OpensearchSink {
         let record_id = format!("detach:{hash_alias}");
         for _ in 0..CONFLICT_ROUNDS {
             let Kept { marker, record, .. } = self.read_kept(&hash_alias).await?;
-            let stamp = stamp_value(detach.stamp.as_ref());
             let serving = self
                 .alias_holders(&hash_alias)
                 .await?
@@ -82,15 +84,21 @@ impl OpensearchSink {
                         "seeded": marker.source.get("seeded").and_then(Value::as_bool).unwrap_or(false),
                         "uuid": marker.source.get("uuid"),
                         "walked": marker.source.get("walked"),
+                        "gaps": gaps_value(&read_gaps(&marker.source)),
                     },
-                    "stamp": stamp,
                 });
-                if let Written::Conflict = self.put_if(&hash_alias, &moved, Some(marker)).await? {
+                if let Written::Conflict = self
+                    .put_if(&hash_alias, &moved, Some(marker), detach.stamp.as_ref())
+                    .await?
+                {
                     continue;
                 }
             }
             let body = record_body(detach, serving, record.as_ref())?;
-            if let Written::Conflict = self.put_if(&record_id, &body, record.as_ref()).await? {
+            if let Written::Conflict = self
+                .put_if(&record_id, &body, record.as_ref(), detach.stamp.as_ref())
+                .await?
+            {
                 continue;
             }
             if let Some(serving) = serving {
@@ -149,16 +157,30 @@ impl OpensearchSink {
         };
         self.put_if(
             &format!("detach:{hash_alias}"),
-            &tombstone(stamp),
+            &json!({ "state": FORGOTTEN }),
             Some(&read),
+            stamp,
         )
         .await
     }
 
-    /// Write `doc` as `id`, conditional on `read`: replaced on its version,
-    /// or created when nothing was read. `Conflict` when another write came
-    /// first.
-    async fn put_if(&self, id: &str, doc: &Value, read: Option<&Found>) -> Result<Written> {
+    /// Write `doc` as `id`, stamped `stamp` (`null` for a caller that keeps
+    /// no records), conditional on `read`: replaced on its version, or
+    /// created when nothing was read. `Conflict` when another write came
+    /// first. The one way a record or marker is written whole here, so no
+    /// whole write goes out without its writer's stamp.
+    pub(super) async fn put_if(
+        &self,
+        id: &str,
+        doc: &Value,
+        read: Option<&Found>,
+        stamp: Option<&Stamp>,
+    ) -> Result<Written> {
+        let mut doc = doc.clone();
+        if let Some(fields) = doc.as_object_mut() {
+            fields.insert("stamp".to_owned(), stamp_value(stamp));
+        }
+        let doc = &doc;
         let meta = self.meta_index();
         let url = match read {
             None => format!("{}/{meta}/_create/{id}", self.base_url),
@@ -214,11 +236,6 @@ impl OpensearchSink {
     }
 }
 
-/// A record's tombstone, stamped `stamp`.
-pub(crate) fn tombstone(stamp: Option<&Stamp>) -> Value {
-    json!({ "state": FORGOTTEN, "stamp": stamp_value(stamp) })
-}
-
 /// The detach record to write: a fresh one, or `read` brought to `detached`,
 /// keeping its attempts, and its `since` when it was already detached. A
 /// tombstone read keeps nothing.
@@ -257,7 +274,6 @@ pub(crate) fn record_body(
             Some(through) => Value::from(through.as_str()),
             None => kept("through"),
         },
-        "stamp": stamp_value(detach.stamp.as_ref()),
     }))
 }
 
@@ -307,9 +323,11 @@ impl OpensearchSink {
                 fields.insert("state".to_owned(), Value::from("rebuilding"));
                 fields.insert("attempts".to_owned(), Value::from(attempts));
                 fields.insert("last_attempt".to_owned(), Value::from(now()));
-                fields.insert("stamp".to_owned(), stamp_value(Some(stamp)));
             }
-            if let Written::Conflict = self.put_if(&record_id, &body, Some(&record)).await? {
+            if let Written::Conflict = self
+                .put_if(&record_id, &body, Some(&record), Some(stamp))
+                .await?
+            {
                 continue;
             }
             tracing::info!(
@@ -362,9 +380,11 @@ impl OpensearchSink {
                 if live_only {
                     fields.insert("live_only".to_owned(), Value::from(true));
                 }
-                fields.insert("stamp".to_owned(), stamp_value(Some(stamp)));
             }
-            if let Written::Conflict = self.put_if(&record_id, &body, Some(&record)).await? {
+            if let Written::Conflict = self
+                .put_if(&record_id, &body, Some(&record), Some(stamp))
+                .await?
+            {
                 continue;
             }
             tracing::warn!(
@@ -439,9 +459,8 @@ impl OpensearchSink {
             "walked": null,
             "uuid": null,
             "detaching_from": detaching_from,
-            "stamp": stamp_value(Some(stamp)),
         });
-        self.put_if(hash_alias, &moved, marker).await
+        self.put_if(hash_alias, &moved, marker, Some(stamp)).await
     }
 
     /// The marker back on `serving` as `detaching_from` says it was (R14).
@@ -459,16 +478,20 @@ impl OpensearchSink {
         let mut restored = json!({
             "active_generation": generation,
             "seeded": from.and_then(|from| from.get("seeded")).and_then(Value::as_bool).unwrap_or(true),
-            "stamp": stamp_value(Some(stamp)),
         });
-        if let (Some(uuid), Some(fields)) = (
-            from.and_then(|from| from.get("uuid"))
-                .and_then(Value::as_str),
-            restored.as_object_mut(),
-        ) {
-            fields.insert("uuid".to_owned(), Value::from(uuid));
+        if let Some(fields) = restored.as_object_mut() {
+            if let Some(uuid) = from
+                .and_then(|from| from.get("uuid"))
+                .and_then(Value::as_str)
+            {
+                fields.insert("uuid".to_owned(), Value::from(uuid));
+            }
+            if let Some(gaps) = carried_gaps(from) {
+                fields.insert("gaps".to_owned(), gaps);
+            }
         }
-        self.put_if(hash_alias, &restored, marker).await
+        self.put_if(hash_alias, &restored, marker, Some(stamp))
+            .await
     }
 }
 
@@ -508,10 +531,7 @@ impl OpensearchSink {
                 self.meta_index()
             );
             let body = json!({ "doc": {
-                "gaps": gaps
-                    .iter()
-                    .map(|gap| json!({ "from": gap.from, "to": gap.to }))
-                    .collect::<Vec<_>>(),
+                "gaps": gaps_value(&gaps),
                 "gap": null,
                 "stamp": stamp_value(Some(stamp)),
             } });

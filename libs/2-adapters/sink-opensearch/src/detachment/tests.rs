@@ -441,7 +441,7 @@ async fn a_put_back_that_conflicts_fails_the_read() {
     })
     .await;
     let error = read.unwrap_err().to_string();
-    assert!(error.contains("409"), "{error}");
+    assert!(error.contains("changed since it was read"), "{error}");
 }
 
 /// Beside a record, the marker is the record's business (slice 2): nothing is

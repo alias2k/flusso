@@ -16,7 +16,8 @@
 //!   `detaching_from`), then writes its record. A marker carrying
 //!   `detaching_from` with no record beside it means the detach died between
 //!   the two: the marker is put back on the generation it came from, as it
-//!   was, conditionally on the marker read, so a write meanwhile wins. A
+//!   was, gaps included, conditionally on the marker read, so a write
+//!   meanwhile wins. A
 //!   `detaching_from` this version can't read is reported and put back
 //!   nowhere: the index is staged as before, never failed for it (O24).
 //! - **Every document answers for the id asked**, found or not found; an
@@ -77,6 +78,21 @@ pub(crate) fn stamp_value(stamp: Option<&Stamp>) -> Value {
         Value::Null,
         |stamp| json!({ "writer": stamp.writer, "seq": stamp.seq }),
     )
+}
+
+/// Gaps as a marker keeps them: a list of `{from, to}`.
+pub(crate) fn gaps_value(gaps: &[sink::Gap]) -> Value {
+    gaps.iter()
+        .map(|gap| json!({ "from": gap.from, "to": gap.to }))
+        .collect()
+}
+
+/// The gaps a moved marker's `detaching_from` carries, to restore when the
+/// marker comes back on the serving generation (the review of round 11,
+/// S-1). `None` for none.
+pub(crate) fn carried_gaps(from: Option<&Value>) -> Option<Value> {
+    let gaps = read_gaps(from?);
+    (!gaps.is_empty()).then(|| gaps_value(&gaps))
 }
 
 /// The stamp a document keeps, when it keeps one this version reads.
@@ -150,6 +166,7 @@ impl OpensearchSink {
                             .await?,
                     );
                     kept.marker_stamp = Some(stamp.clone());
+                    kept.gaps = read_gaps(from);
                 }
                 Err(why) => kept.unreadable_marker = Some(why),
             }
@@ -221,15 +238,9 @@ impl OpensearchSink {
         generation: u64,
         stamp: &Stamp,
     ) -> Result<u64> {
-        let (Some(seq_no), Some(primary_term)) = (marker.seq_no, marker.primary_term) else {
-            return Err(SinkError::Write(format!(
-                "the seed marker of {hash_alias} was read without its sequence number"
-            )));
-        };
         let mut doc = json!({
             "active_generation": generation,
             "seeded": from.get("seeded").and_then(Value::as_bool).unwrap_or(false),
-            "stamp": stamp_value(Some(stamp)),
         });
         if let Some(fields) = doc.as_object_mut() {
             if let Some(uuid) = from.get("uuid").and_then(Value::as_str) {
@@ -238,17 +249,18 @@ impl OpensearchSink {
             if let Some(walked) = from.get("walked").filter(|walked| !walked.is_null()) {
                 fields.insert("walked".to_owned(), walked.clone());
             }
+            if let Some(gaps) = carried_gaps(Some(from)) {
+                fields.insert("gaps".to_owned(), gaps);
+            }
         }
-        let url = format!(
-            "{}/{}/_doc/{hash_alias}?if_seq_no={seq_no}&if_primary_term={primary_term}",
-            self.base_url,
-            self.meta_index()
-        );
-        self.send_ok(
-            self.client.put(&url).json(&doc),
-            "putting the seed marker back failed",
-        )
-        .await?;
+        if let record::Written::Conflict = self
+            .put_if(hash_alias, &doc, Some(marker), Some(stamp))
+            .await?
+        {
+            return Err(SinkError::Write(format!(
+                "putting the seed marker of {hash_alias} back failed: it changed since it was read"
+            )));
+        }
         tracing::warn!(
             hash_alias,
             generation,
