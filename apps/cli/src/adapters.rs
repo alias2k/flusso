@@ -292,22 +292,40 @@ pub(crate) async fn cluster_findings_online(config: &Config) -> Vec<ClusterFindi
     if opensearch.len() < 2 {
         return findings;
     }
-    let mut answers: Vec<(&SinkName, String)> = Vec::new();
-    for (name, sink) in &opensearch {
-        let skipped = |findings: &[ClusterFinding]| {
-            findings.iter().any(
-                |finding| matches!(finding, ClusterFinding::Skipped { sink, .. } if sink == *name),
-            )
-        };
-        if skipped(&findings) {
+    // Every cluster at once, each for at most `CLUSTER_ASK_TIMEOUT`: a slow
+    // one delays the start by that, not by the sum of the sinks' timeouts
+    // (the review of the closing round, C).
+    let mut asks = tokio::task::JoinSet::new();
+    for (order, (name, sink)) in opensearch.iter().enumerate() {
+        let skipped = findings.iter().any(
+            |finding| matches!(finding, ClusterFinding::Skipped { sink, .. } if sink == *name),
+        );
+        if skipped {
             continue;
         }
-        let asked = match sink_opensearch::OpensearchSink::from_config(name, sink) {
-            Ok(built) => built
-                .cluster_uuid()
-                .await
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
+        let built = sink_opensearch::OpensearchSink::from_config(name, sink);
+        asks.spawn(async move {
+            let asked = match built {
+                Ok(built) => {
+                    match tokio::time::timeout(CLUSTER_ASK_TIMEOUT, built.cluster_uuid()).await {
+                        Ok(asked) => asked.map_err(|error| error.to_string()),
+                        Err(_) => Err(format!(
+                            "no answer within {} s",
+                            CLUSTER_ASK_TIMEOUT.as_secs()
+                        )),
+                    }
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            (order, asked)
+        });
+    }
+    let mut asked: Vec<(usize, std::result::Result<String, String>)> = asks.join_all().await;
+    asked.sort_by_key(|(order, _)| *order);
+    let mut answers: Vec<(&SinkName, String)> = Vec::new();
+    for (order, asked) in asked {
+        let Some((name, _)) = opensearch.get(order) else {
+            continue;
         };
         match asked {
             Ok(uuid) => answers.push((name, uuid)),
@@ -325,6 +343,10 @@ pub(crate) async fn cluster_findings_online(config: &Config) -> Vec<ClusterFindi
     findings.extend(by_uuid);
     findings
 }
+
+/// How long `run` and `check` wait for a cluster to answer its
+/// `cluster_uuid`, all clusters at once.
+const CLUSTER_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The pairs of `answers` (each sink and the `cluster_uuid` its cluster
 /// answered) on one cluster, but for those `found` names already.
@@ -368,7 +390,14 @@ pub(crate) async fn distinct_clusters_online(config: &Config) -> anyhow::Result<
         return Err(anyhow!(shared.message()));
     }
     for skipped in &findings {
-        tracing::warn!("{}", skipped.message());
+        if let ClusterFinding::Skipped { sink, why } = skipped {
+            tracing::warn!(
+                "[sinks.{sink}] was not compared with the other OpenSearch sinks for a shared \
+                 cluster ({why}); starting anyway. If two of them write to one cluster, they \
+                 share every index, alias and seed marker, and the deployment stops at the \
+                 first read that finds the other's record writes"
+            );
+        }
     }
     Ok(())
 }
@@ -525,6 +554,107 @@ mod tests {
         validate(&cfg).unwrap();
         assert_eq!(source_config(&cfg).unwrap().slot, "flusso");
         assert_eq!(stream_config(&cfg).unwrap().capacity, None);
+    }
+
+    /// A local stub answering `GET /` with `body`, after holding every
+    /// request `hold`.
+    async fn root_stub(body: &'static str, hold: std::time::Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    tokio::time::sleep(hold).await;
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        url
+    }
+
+    /// The review of the closing round, B: two clusters that have not formed
+    /// yet both answer `cluster_uuid: "_na_"` (OpenSearch's
+    /// `Metadata.UNKNOWN_CLUSTER_UUID`), or an empty one: no cluster is
+    /// named, so the two are not compared, never refused.
+    #[tokio::test]
+    async fn two_unformed_clusters_are_not_one_cluster() {
+        for body in [
+            r#"{"name":"n","cluster_name":"c","cluster_uuid":"_na_"}"#,
+            r#"{"name":"n","cluster_name":"c","cluster_uuid":""}"#,
+        ] {
+            let a = root_stub(body, std::time::Duration::ZERO).await;
+            let b = root_stub(body, std::time::Duration::ZERO).await;
+            let config = two_opensearch_sinks(&a, &b);
+            let refused = distinct_clusters_online(&config).await;
+            assert!(refused.is_ok(), "{body}: refused: {refused:?}");
+            let findings = cluster_findings_online(&config).await;
+            assert_eq!(findings.len(), 2, "{body}: {findings:?}");
+            assert!(
+                findings
+                    .iter()
+                    .all(|finding| matches!(finding, ClusterFinding::Skipped { .. })),
+                "{body}: {findings:?}"
+            );
+        }
+    }
+
+    /// The review of the closing round, a test gap: two URLs answering one
+    /// uuid are refused through the online path `run` calls; another uuid
+    /// starts.
+    #[tokio::test]
+    async fn one_uuid_through_the_online_path_is_refused() {
+        let body = r#"{"name":"n","cluster_name":"c","cluster_uuid":"Xy1"}"#;
+        let a = root_stub(body, std::time::Duration::ZERO).await;
+        let b = root_stub(body, std::time::Duration::ZERO).await;
+        assert!(
+            distinct_clusters_online(&two_opensearch_sinks(&a, &b))
+                .await
+                .is_err()
+        );
+        let other = root_stub(r#"{"cluster_uuid":"Zz9"}"#, std::time::Duration::ZERO).await;
+        distinct_clusters_online(&two_opensearch_sinks(&a, &other))
+            .await
+            .unwrap();
+    }
+
+    /// The review of the closing round, C: slow clusters are asked at once,
+    /// so they delay the check by one timeout (the sinks' 2 s here), not by
+    /// their sum.
+    #[tokio::test]
+    async fn slow_clusters_delay_the_check_by_one_timeout() {
+        let body = r#"{"cluster_uuid":"never"}"#;
+        let a = root_stub(body, std::time::Duration::from_secs(60)).await;
+        let b = root_stub(body, std::time::Duration::from_secs(60)).await;
+        let config = config(&format!(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "{a}"
+            timeout_secs = 2
+
+            [sinks.audit]
+            type = "opensearch"
+            url = "{b}"
+            timeout_secs = 2
+            "#
+        ));
+        let began = std::time::Instant::now();
+        distinct_clusters_online(&config).await.unwrap();
+        let took = began.elapsed();
+        assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
     }
 
     fn two_opensearch_sinks(primary: &str, audit: &str) -> Config {

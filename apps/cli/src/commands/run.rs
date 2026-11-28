@@ -321,7 +321,6 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         },
     );
     adapters::validate(&config)?;
-    adapters::distinct_clusters_online(&config).await?;
     crate::backends::compile_scripts(&config).context("compiling the scripts")?;
     if let Some(warning) =
         crate::memory::over_budget(daemon::max_built_bytes(&config), crate::memory::ceiling())
@@ -342,6 +341,10 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     // so a bad address fails fast.
     let public_listener = http::bind("public", public_addr, Some(public_addr)).await?;
     let private_listener = http::bind("private", private_addr, None).await?;
+    // After the listeners: nothing bound depends on the answer, and a slow
+    // cluster must not hold `/healthz` back (the review of the closing
+    // round, C).
+    adapters::distinct_clusters_online(&config).await?;
 
     let basic_auth = Arc::new(BasicAuth::new(args.admin_user, args.admin_password));
     if basic_auth.uses_default_password() {

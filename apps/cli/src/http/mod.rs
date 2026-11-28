@@ -568,9 +568,10 @@ async fn index_status(State(state): State<PublicState>, Path(name): Path<String>
 /// sink or, without `sink`, on every sink. Validates the names, then hands
 /// the operation to the daemon; the targeted sink engines stage a fresh
 /// generation and request their snapshot, no restart involved. `202`
-/// `{"index", "sink" (null: every sink), "queued": true}`, with `skipped`
-/// naming each sink whose rebuild of the index is starting or running (ADR
-/// 0012 stage 10, O20) when no sink is named; `409` when the named sink's (or
+/// `{"index", "sink" (null: every sink), "queued": true, "queued_on": [the
+/// sinks queued]}`, with `skipped` (`{"sink", "reason"}` each) naming each
+/// sink left out when no sink is named: its rebuild of the index is starting
+/// or running (ADR 0012 stage 10, O20), or it can't rebuild a detached one; `409` when the named sink's (or
 /// every sink's) is; `400` an invalid index or sink name; `404` an unknown
 /// index or sink; `503` while stopping or with the engine not running.
 async fn reindex(
@@ -647,6 +648,11 @@ async fn reindex(
     {
         return refuse(reason);
     }
+    let queued_on: Vec<&str> = targets
+        .iter()
+        .filter(|target| !skipped.iter().any(|(sink, _)| sink == *target))
+        .map(|target| target.as_ref())
+        .collect();
     let queued = if skipped.is_empty() {
         state.control.reindex(index.clone(), sink.as_ref())
     } else {
@@ -661,6 +667,7 @@ async fn reindex(
                 "index": index.as_ref(),
                 "sink": sink.as_ref().map(|sink| sink.as_ref()),
                 "queued": true,
+                "queued_on": queued_on,
             });
             if !skipped.is_empty()
                 && let Some(fields) = body.as_object_mut()

@@ -80,6 +80,22 @@ fn a_queued_reindex_is_printed_from_its_json() {
         queued_message(r#"{"index":"users","sink":null,"queued":true}"#),
         "reindex of users on every sink queued"
     );
+    assert_eq!(
+        queued_message(
+            r#"{"index":"users","sink":null,"queued":true,"queued_on":["audit","primary"]}"#
+        ),
+        "reindex of users queued on audit, primary"
+    );
+    // The docs pass of the closing round: the sinks left out are named, each
+    // with its reason.
+    assert_eq!(
+        queued_message(
+            r#"{"index":"users","sink":null,"queued":true,"queued_on":["primary"],
+                "skipped":[{"sink":"audit","reason":"this sink can't rebuild the index"}]}"#
+        ),
+        "reindex of users queued on primary\n\
+         skipped on audit: this sink can't rebuild the index"
+    );
     assert_eq!(queued_message("plain text\n"), "plain text");
 }
 

@@ -556,13 +556,13 @@ async fn a_reindex_is_queued_on_the_index_path() {
     assert_eq!(code, 202, "{body}");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&body).unwrap(),
-        serde_json::json!({"index": "users", "sink": "primary", "queued": true})
+        serde_json::json!({"index": "users", "sink": "primary", "queued": true, "queued_on": ["primary"]})
     );
     let (code, body) = post_reindex(&base, "/indexes/orders/reindex").await;
     assert_eq!(code, 202);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&body).unwrap(),
-        serde_json::json!({"index": "orders", "sink": null, "queued": true})
+        serde_json::json!({"index": "orders", "sink": null, "queued": true, "queued_on": ["primary"]})
     );
     let primary = receivers
         .get_mut(&SinkName::try_new("primary").unwrap())
@@ -839,8 +839,7 @@ async fn a_reattach_is_refused_unless_it_applies_and_queued_when_it_does() {
         for does in [
             Does::Answers(daemon::ReattachVerdict::Started),
             Does::Answers(daemon::ReattachVerdict::Refused(
-                "the seed marker is not on the seeded generation reads see; restart flusso"
-                    .to_owned(),
+                "the seed marker is not on the generation reads see; restart flusso".to_owned(),
             )),
             Does::Drops,
             Does::Answers(daemon::ReattachVerdict::Failed(

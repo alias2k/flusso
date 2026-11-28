@@ -164,17 +164,52 @@ pub(crate) async fn reindex(args: ReindexArgs) -> anyhow::Result<()> {
 }
 
 /// What `flusso reindex` prints for the server's `202` body
-/// (`{"index", "sink", "queued"}`); a body it can't read is printed as is.
+/// (`{"index", "sink", "queued", "queued_on", "skipped"}`): the sinks the
+/// reindex was queued on, then each sink skipped with its reason, one a line.
+/// A body it can't read is printed as is.
 fn queued_message(body: &str) -> String {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return body.trim().to_owned();
     };
     let field = |name: &str| value.get(name).and_then(serde_json::Value::as_str);
-    match (field("index"), field("sink")) {
-        (Some(index), Some(sink)) => format!("reindex of {index} on {sink} queued"),
-        (Some(index), None) => format!("reindex of {index} on every sink queued"),
-        _ => body.trim().to_owned(),
-    }
+    let names = |name: &str| -> Option<Vec<&str>> {
+        value
+            .get(name)?
+            .as_array()
+            .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect())
+    };
+    let skipped: Vec<String> = value
+        .get("skipped")
+        .and_then(serde_json::Value::as_array)
+        .map(|skipped| {
+            skipped
+                .iter()
+                .map(|skip| {
+                    let text = |key: &str| {
+                        skip.get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("?")
+                    };
+                    format!("skipped on {}: {}", text("sink"), text("reason"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let queued = match (field("index"), field("sink"), names("queued_on")) {
+        (Some(index), Some(sink), _) => format!("reindex of {index} on {sink} queued"),
+        (Some(index), None, Some(on)) => {
+            format!("reindex of {index} queued on {}", on.join(", "))
+        }
+        (Some(index), None, None) if skipped.is_empty() => {
+            format!("reindex of {index} on every sink queued")
+        }
+        (Some(index), None, None) => format!("reindex of {index} queued on the other sinks"),
+        _ => return body.trim().to_owned(),
+    };
+    std::iter::once(queued)
+        .chain(skipped)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `flusso reattach <index> --sink <name> --accept-gap` — reattach a
