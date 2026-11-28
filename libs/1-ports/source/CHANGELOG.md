@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-source-v0.18.0...flusso-source-v0.19.0) - 2026-11-28
+
+### Added
+
+- *(source)* a stream opened past Rereads::open vouches for nothing (m-1)
+- *(engine)* a builder serves a parked lane's fresh build on a substitute lane
+
+### Fixed
+
+- *(cli)* a lock that can't be read is never headlined as missing
+- *(source)* a date field over a timestamp column says its format refuses it
+- *(source)* a time-of-day format over a date or timestamp is an error
+- *(source)* a script that names root can read a level, said as such
+- *(source)* a script namesake under an input-only parent is not said to run
+- *(source)* [**breaking**] drop the timestamp_format error; show mapping notes the appended pattern
+- *(source)* [**breaking**] a namesake pair stored unchecked or read by a script is judged by what holds it
+- *(source)* [**breaking**] namesakes whose documents differ from the mapping are an error
+- *(source)* required over a view's column is a warning that says why
+- *(source)* [**breaking**] a timestamp format OpenSearch refuses is an error
+- *(source)* [**breaking**] an index that differs from its schema is an error
+
+### Other
+
+- *(source)* readable_wait keeps its doc; streams_opened says it fails open (fifth re-check m-1, m-2)
+- *(daemon)* one capture per process in the world, and its write oracle on the world's own state (fifth re-check, CI red)
+- *(source-postgres)* spike S5, the source confirms what no lane needs
+- *(cli)* the rewritten line names the lock once; rename a stale test helper
+- *(source)* ask whether a table tracks nullability once per table
+- *(engine)* a lane item carries its build's own ids, not a key per envelope
+- *(source)* state the position contract the engine relies on
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-source-v0.17.0...flusso-source-v0.18.0) - 2026-11-19
 
 ### Added

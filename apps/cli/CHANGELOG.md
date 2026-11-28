@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.18.0...flusso-cli-v0.19.0) - 2026-11-28
+
+### Added
+
+- *(cli)* [**breaking**] two OpenSearch sinks on one cluster are refused
+- *(daemon)* every reattach's gap is kept exactly as a list, and a gap end the source can't read is settled at a start (gap list, m4)
+- *(daemon)* reattach --accept-gap keeps its gap and the fence refuses inside it; records read again once the slot is held (O16, S3, O29)
+- *(daemon)* /status shows rebuilds and detached lanes, and a reindex of a rebuild starting or running answers 409 (O20)
+- *(engine)* detach a lane at its next refused probe, discard what it holds, and stage it detached
+- *(cli)* check --fix rewrites a lock the config can repair
+- *(cli)* [**breaking**] check compares flusso.lock with what the config compiles to
+- *(cli)* [**breaking**] check --format json is the human report's content and nothing more
+- *(cli)* [**breaking**] check only checks; flusso show config|mapping holds the detail
+- *(cli)* run --strict refuses every schema error; the others are logged and counted
+- *(cli)* check prints errors last, with a summary line, coloured
+- *(engine)* a builder serves a parked lane's fresh build on a substitute lane
+- *(daemon)* [**breaking**] keep an index's last error per kind
+- *(cli)* export flusso.index.down, backfill_retrying and restarts{kind}
+- *(cli)* flusso.index.* per index and flusso.reader.waits{bound}
+- *(cli)* [**breaking**] GET /indexes/<name>/status and POST /indexes/<name>/reindex; POST /reindex is gone
+- *(cli)* a stop cut short by its deadline names each index left with documents read and not built
+- *(config)* [concurrency] max_pending_documents, --max-pending-documents, FLUSSO_MAX_PENDING_DOCUMENTS
+- *(cli)* [concurrency] max_waiting_per_index and max_waiting, with flags and FLUSSO_* variables
+- *(engine)* share the memory budget per index, for many reservers
+- *(engine)* changes_committed counts what every lane of a sink landed
+- *(engine)* [**breaking**] keep each index's pending documents in the progress
+- *(config)* a [backoff] table sets the engines' retry schedule
+- *(alerts)* FlussoLaneParked, and a lane stuck restaging in flusso.lane.parked
+- *(daemon)* /status names each lane's health; flusso.lane.parked and flusso.lane.probes
+
+### Fixed
+
+- *(cli)* pin that run binds its listeners before asking any cluster
+- *(sink-opensearch)* reading the cluster uuid fails as a read
+- *(cli)* ask the clusters at once after binding, and name the sinks a reindex skipped
+- *(cli)* find two OpenSearch sinks on one cluster by the cluster's uuid
+- *(cli)* two OpenSearch sinks on one cluster are a finding of check's report
+- *(daemon)* /status and the log say an unknown gap end settles by itself at the next read while the slot is held, and what an operator can do meanwhile (m-g)
+- *(engine)* a gap end is settled only in a read while this process holds the slot, the marker's gap write is conditional, and a reattach reuses the open gap a failed delete left and reads the record again before answering (S-a, S-b)
+- *(daemon)* a reattach answers the engine's verdict, a detached record on a sink switched to backfill = false is put back live only, and refusals name what works (S4, m5, m6)
+- *(engine)* a reindex of a rebuild waiting on its seed's retire block is refused with 409, naming the block (S2, O28)
+- *(config)* a lock with CRLF line endings keeps its indexes' names
+- *(cli)* a stale CRLF lock names its line endings as the cause
+- *(cli)* show writes every flusso value as plain JSON
+- *(cli)* a lock that can't be read is never headlined as missing
+- *(source)* a time-of-day format over a date or timestamp is an error
+- *(config)* a lock's decode error quotes no value from the lock
+- *(cli)* the lock advice names the config and --offline, so it runs as printed
+- *(cli)* a failure after check --fix says the lock was rewritten
+- *(kernel)* append the ISO pattern only where a format can't read what flusso writes there
+- *(source-postgres)* prepare is quiet only about the publication gaps the start reported
+- *(cli)* the lock advice names the path check compared
+- *(config)* a lock that fails to parse names the line, never its text
+- *(cli)* a lock holding the same config in other bytes is no error
+- *(source)* [**breaking**] drop the timestamp_format error; show mapping notes the appended pattern
+- *(cli)* check's exit follows its summary, and offline gaps are null
+- *(cli)* judge schema errors and capture gaps in one verdict, reported once
+- *(source)* [**breaking**] a namesake pair stored unchecked or read by a script is judged by what holds it
+- *(cli)* [**breaking**] a gap in capture flusso run won't close is an error
+- *(source)* [**breaking**] namesakes whose documents differ from the mapping are an error
+- *(source)* required over a view's column is a warning that says why
+- *(source)* [**breaking**] a timestamp format OpenSearch refuses is an error
+- *(cli)* each schema error a start goes on with is read once, by whoever reads stderr
+- *(cli)* the publication line reads well for one table and for none
+- *(cli)* an offline check that passes says the database checks did not run
+- *(cli)* show mapping names a disabled index as disabled and still shows it
+- *(cli)* show config masks every literal secret whole
+- *(source)* [**breaking**] an index that differs from its schema is an error
+- *(engine)* name the index pacing the reader, track enabled indexes only
+- *(engine,daemon,cli)* working is about progress, the backlog age is a lag, a run's end clears its state
+- *(cli)* an unset max_waiting rises to max_waiting_per_index, and the other way round
+- *(engine)* the share bounds an index's live bytes, and nothing per index passes the limit
+- *(engine)* a backfill whose target was created anew no longer seeds it
+- *(cli)* the stop message says a refused lane is refused, from the one name /status gives
+- *(cli)* one judge for [backoff], and an unset cap rises with the first wait
+- *(daemon)* /status names a refused lane `refused`, as the metric's `why` does
+
+### Other
+
+- *(cli)* say what the cluster check can't tell apart
+- *(cli)* the reattach's Failed and timed-out verdicts answer 503 at the edge (m-b)
+- *(config)* a CRLF flusso.toml compiles to the config of its LF twin
+- *(config)* a CRLF lock holds the config of its LF twin
+- *(cli)* the rewritten line names the lock once; rename a stale test helper
+- *(cli)* check --fix writes nothing when the config fails to validate
+- *(cli)* a stale lock differing by a value of the same length
+- *(cli)* a plain start over a capture gap reports it once and sets the gauge
+- *(cli)* each check_report test writes its own project
+- *(cli)* drop the coverage branch the one-line section made unreachable
+- *(cli)* a strict refusal creates no slot or publication and leaves the replica identity
+- check only checks; show holds the mapping; wrong-index errors and --strict
+- *(cli)* each stretch of a reader wait under one bound is one observation
+- *(cli)* the index gauges' descriptions say what they measure
+- *(engine)* drop the change counts nothing reads
+- *(engine)* [**breaking**] key lane items per index, not by their position
+- *(cli)* an open lane has no flusso_lane_parked series
+- *(cli)* a stop with a write-blocked lane exits 1 at the deadline naming the lane, and a restart converges
+- rustfmt
+- FlussoLaneParked fires for a parked lane, a refused backfill page and a lane stuck restaging; restaging is exported in flusso.lane.parked
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.17.0...flusso-cli-v0.18.0) - 2026-11-19
 
 ### Added

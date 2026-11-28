@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-config-v0.18.0...flusso-config-v0.19.0) - 2026-11-28
+
+### Added
+
+- *(cli)* [**breaking**] GET /indexes/<name>/status and POST /indexes/<name>/reindex; POST /reindex is gone
+- *(config)* [concurrency] max_pending_documents, --max-pending-documents, FLUSSO_MAX_PENDING_DOCUMENTS
+- *(cli)* [concurrency] max_waiting_per_index and max_waiting, with flags and FLUSSO_* variables
+- *(engine)* share the memory budget per index, for many reservers
+- *(config)* a [backoff] table sets the engines' retry schedule
+
+### Fixed
+
+- *(config)* a CRLF flusso.toml reads as its LF twin
+- *(config)* a lock with CRLF line endings keeps its indexes' names
+- *(config)* scrub only the value serde names, never a syntax message
+- *(config)* a lock's decode error quotes no value from the lock
+- *(config)* a lock that fails to parse names the line, never its text
+- *(cli)* an unset max_waiting rises to max_waiting_per_index, and the other way round
+- *(engine)* the share bounds an index's live bytes, and nothing per index passes the limit
+- *(cli)* one judge for [backoff], and an unset cap rises with the first wait
+
+### Other
+
+- *(config)* a CRLF flusso.toml compiles to the config of its LF twin
+- *(config)* a CRLF lock holds the config of its LF twin
+- *(config)* regenerate the editor schema for the [backoff] doc comments
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-config-v0.17.0...flusso-config-v0.18.0) - 2026-11-19
 
 ### Added

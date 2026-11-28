@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-kernel-v0.18.0...flusso-kernel-v0.19.0) - 2026-11-28
+
+### Added
+
+- *(kernel)* [**breaking**] a date format that can't read flusso's dates gets strict_date_optional_time appended
+- *(engine)* a refused lane writes a fresh build of its item in the item's place
+- *(engine)* a builder serves a parked lane's fresh build on a substitute lane
+
+### Fixed
+
+- *(cli)* a lock that can't be read is never headlined as missing
+- *(source)* a date field over a timestamp column says its format refuses it
+- *(source)* a time-of-day format over a date or timestamp is an error
+- *(kernel)* append the ISO pattern only where a format can't read what flusso writes there
+- *(engine)* held items stay until acknowledged, as a list, released at a stop, and a reindex that cannot stage fails alone
+
+### Other
+
+- *(kernel)* pin what the date-format walk and classifier decide
+- *(kernel)* a custom over a domain or another type keeps its format
+- *(kernel)* link the completed date formats walk
+- *(kernel)* a date format that can't read flusso's dates gets the ISO pattern last
+- *(engine)* a lane item carries its build's own ids, not a key per envelope
+- *(engine)* a document's key rides in its envelope, not in a vector of its own
+- *(source)* state the position contract the engine relies on
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-kernel-v0.17.0...flusso-kernel-v0.18.0) - 2026-11-19
 
 ### Added
