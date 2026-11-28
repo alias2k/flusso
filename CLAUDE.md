@@ -1987,9 +1987,9 @@ is the one concrete piece.
   `detaching_from` reads as moved, never on serving, whatever its number (a generation deleted from
   under it lets the next take the same number). No plan deletes the generation the alias serves (E).
   **The marker's `uuid` always names the generation in its `active_generation`, or is absent**, and
-  `seeded` and `walked` too (the review of round 13, F): a live-only demotion takes `seeded` from
-  `detaching_from` only when it names the serving generation and a uuid only from the marker itself
-  standing there, else goes back unseeded with no uuid; a uuid naming another generation makes the next
+  `seeded` and `walked` too (the review of round 13, F): a live-only demotion takes `seeded` and `uuid`
+  from `detaching_from` only when it names the serving generation, else from the marker itself standing
+  there, else goes back unseeded with no uuid; a uuid naming another generation makes the next
   `ensure_index` delete the generation as "not the one flusso created". `rewrite_marker` waits for the
   meta index's primary (cluster health `yellow`, 30 s) when its read finds the shard not ready (H). A
   live-only detach tolerates a failed generation listing (its deletes are best effort; m-4). A detach over a record already detached or rebuilding keeps its `through` (and a detached
