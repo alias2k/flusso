@@ -1346,6 +1346,133 @@ async fn a_gap_comes_back_with_the_marker_onto_the_serving_generation() {
     }
 }
 
+/// The review of round 13, F, on a real cluster: a reindex staged (its
+/// generation created, its uuid recorded), a rebuildable detach during it,
+/// then the start of a `backfill = false` sink demotes live only and a
+/// reattach ensures the index. The generation reads see keeps serving, with
+/// its documents.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_detach_during_a_reindex_then_a_live_only_start_keeps_the_generation_reads_see() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let hash_alias = format!("users_{}", mapping.hash);
+    let first = sink(&base);
+    first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    write(&first, &index, &[1, 2]).await;
+    first.mark_seeded_as(&index, &stamp()).await.unwrap();
+    let served = alias_targets(&client, &base, &hash_alias).await;
+    first.reindex_as(&mapping, &stamp()).await.unwrap();
+    first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    first
+        .detach(&mapping, &sink::Detach::new("blocked").stamp(stamp()))
+        .await
+        .unwrap();
+    let restart = sink(&base);
+    restart.demote(&mapping, true, &stamp()).await.unwrap();
+    restart.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    assert_eq!(alias_targets(&client, &base, &hash_alias).await, served);
+    assert_eq!(searchable(&client, &base, &hash_alias).await, ["1", "2"]);
+}
+
+/// The review of the closing round, D, on a real cluster: a live-only detach
+/// over a marker a rebuildable detach moved leaves the marker moved, so it
+/// reads beside the record as off serving; the live-only demotion a start
+/// makes puts it back on the generation reads see, which keeps serving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_live_only_record_beside_a_moved_marker_is_put_back_on_serving() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let hash_alias = format!("users_{}", mapping.hash);
+    let first = sink(&base);
+    first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    write(&first, &index, &[1, 2]).await;
+    first.mark_seeded_as(&index, &stamp()).await.unwrap();
+    let served = alias_targets(&client, &base, &hash_alias).await;
+    first
+        .detach(&mapping, &sink::Detach::new("blocked").stamp(stamp()))
+        .await
+        .unwrap();
+    first
+        .detach(
+            &mapping,
+            &sink::Detach::new("blocked").live_only(true).stamp(stamp()),
+        )
+        .await
+        .unwrap();
+    let read = first.detachment(&mapping, &stamp()).await.unwrap();
+    assert_eq!(
+        read.record,
+        Some(sink::DetachRecord::Detached { live_only: true })
+    );
+    assert!(
+        !matches!(read.marker, Some(sink::MarkerAt::Serving { .. })),
+        "{read:?}"
+    );
+    first.demote(&mapping, true, &stamp()).await.unwrap();
+    let read = first.detachment(&mapping, &stamp()).await.unwrap();
+    assert!(
+        matches!(read.marker, Some(sink::MarkerAt::Serving { .. })),
+        "{read:?}"
+    );
+    assert_eq!(alias_targets(&client, &base, &hash_alias).await, served);
+    assert_eq!(searchable(&client, &base, &hash_alias).await, ["1", "2"]);
+}
+
+/// The review of the closing round, E, on a real cluster: a rebuild begun
+/// from a live-only record is not live only; its seed's forget of the record
+/// fails (best effort); the record then reads beside a seeded newer marker
+/// (finished, whatever `live_only`), and a live-only demotion over it keeps
+/// the seeded generation the alias now serves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_rebuild_from_a_live_only_record_finishes_and_keeps_what_its_seed_serves() {
+    let (_container, base) = start_opensearch().await;
+    let proxy = FaultProxy::start(&base).await;
+    let client = reqwest::Client::new();
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let hash_alias = format!("users_{}", mapping.hash);
+    let first = sink(&base);
+    first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    write(&first, &index, &[1]).await;
+    first.mark_seeded_as(&index, &stamp()).await.unwrap();
+    first
+        .detach(
+            &mapping,
+            &sink::Detach::new("blocked").live_only(true).stamp(stamp()),
+        )
+        .await
+        .unwrap();
+    first.begin_rebuild(&mapping, &stamp()).await.unwrap();
+    let read = first.detachment(&mapping, &stamp()).await.unwrap();
+    assert_eq!(
+        read.record,
+        Some(sink::DetachRecord::Rebuilding { live_only: false })
+    );
+    let seeding = sink(&proxy.url);
+    seeding.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    write(&seeding, &index, &[1, 2, 3]).await;
+    proxy.refuse(|seen, _| seen.path.contains("detach:"));
+    seeding.mark_seeded_as(&index, &stamp()).await.unwrap();
+    proxy.heal();
+    let served = alias_targets(&client, &base, &hash_alias).await;
+    let read = sink(&base).detachment(&mapping, &stamp()).await.unwrap();
+    assert!(read.record.is_some(), "the forget failed: {read:?}");
+    assert_eq!(read.marker, Some(sink::MarkerAt::Newer { seeded: true }));
+    sink(&base).demote(&mapping, true, &stamp()).await.unwrap();
+    assert_eq!(alias_targets(&client, &base, &hash_alias).await, served);
+    assert_eq!(
+        searchable(&client, &base, &hash_alias).await,
+        ["1", "2", "3"]
+    );
+}
+
 /// The review of round 11, S-4, on a real cluster: two URLs reaching one
 /// cluster (`127.0.0.1` and `localhost`) answer the same `cluster_uuid`,
 /// which is how `run` and an online `check` find two sinks on one cluster.
