@@ -699,12 +699,18 @@ impl sink::Records for Store {
         if fails == Some(false) {
             return Err(Self::failed(false));
         }
-        let earlier = self
+        let (earlier, was_detached) = self
             .kept
             .lock()
             .unwrap()
             .get(mapping.index.as_ref())
-            .and_then(|kept| kept.detachment.through.clone());
+            .map(|kept| {
+                (
+                    kept.detachment.through.clone(),
+                    matches!(kept.detachment.record, Some(DetachRecord::Detached { .. })),
+                )
+            })
+            .unwrap_or_default();
         let Some(stamp) = detach.stamp.clone() else {
             return Err(sink::SinkError::Write("an unstamped detach".to_owned()));
         };
@@ -735,9 +741,14 @@ impl sink::Records for Store {
             &stamp,
         );
         // As OpenSearch keeps it (`record_body`): where reads stood at the
-        // detach, or, given none, the record's own.
+        // detach, or, given none or over a record already detached, the
+        // record's own.
         if let Some(kept) = self.kept.lock().unwrap().get_mut(mapping.index.as_ref()) {
-            kept.detachment.through = detach.through.clone().or(earlier);
+            kept.detachment.through = if was_detached {
+                earlier
+            } else {
+                detach.through.clone().or(earlier)
+            };
         }
         if fails == Some(true)
             || self
@@ -2878,6 +2889,35 @@ fn a_gap_survives_a_failed_detach_s_clear_and_the_put_back() {
     for lane in 0..2 {
         assert_eq!(replay_solo(vec![Event::PutBackAfterFlip { lane }]), 0);
     }
+}
+
+/// Round 12's sweep, seed `5729423447252134060` of `gate_world` at 50,000
+/// cases, shrunk: another process detached `orders/audit` live only from
+/// 10; this process, its staging failing on unreadable records, detached
+/// the lane again from 39 when asked. The record must keep 10, or the
+/// reattach's gap misses what was dropped from 10 to 39.
+#[test]
+fn a_detach_over_a_detached_record_keeps_where_the_drop_began() {
+    replay(vec![
+        Event::GapOverSlowRead { lane: 2 },
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+        Event::RebuildLost { lane: 2 },
+        Event::Unheld {
+            lane: 1,
+            rebuild: false,
+            then: 0,
+        },
+        Event::Restart {
+            sink: 0,
+            unreadable: 1,
+        },
+        Event::Readable { sink: 0 },
+        Event::BackfillFlips { lane: 0 },
+    ]);
 }
 
 /// The review of round 10, S-3: seed `14283768201718162447` of

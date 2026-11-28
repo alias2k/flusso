@@ -1197,3 +1197,32 @@ async fn every_record_or_marker_body_carries_the_callers_stamp() {
         );
     }
 }
+
+/// The review of round 12's sweep: a detach recorded over a record that
+/// already says detached keeps where that detach began (its `through`), as
+/// it keeps its `since`: the lane has dropped changes from there, and a
+/// reattach's gap must start there, not where reads stand at the later
+/// detach. A detach over a record of another state takes its own.
+#[tokio::test]
+async fn a_detach_over_a_detached_record_keeps_where_it_began() {
+    for (state, kept_through) in [("detached", true), ("rebuilding", false)] {
+        let mut seeded = Store::seeded();
+        seeded.put(
+            DETACH,
+            json!({ "state": state, "live_only": true, "serving": 3, "attempts": 0,
+                    "since": "then", "through": "0/10" }),
+        );
+        let store = Arc::new(Mutex::new(seeded));
+        let stub = serve(&store).await;
+        stub.sink()
+            .detach(
+                &mapping(),
+                &blocked().live_only(true).through(Some("0/39".to_owned())),
+            )
+            .await
+            .unwrap();
+        let record = store.lock().unwrap().doc(DETACH).unwrap();
+        let expected = if kept_through { "0/10" } else { "0/39" };
+        assert_eq!(record["through"], expected, "{state}: {record}");
+    }
+}

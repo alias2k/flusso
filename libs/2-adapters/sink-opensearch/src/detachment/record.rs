@@ -237,8 +237,8 @@ impl OpensearchSink {
 }
 
 /// The detach record to write: a fresh one, or `read` brought to `detached`,
-/// keeping its attempts, and its `since` when it was already detached. A
-/// tombstone read keeps nothing.
+/// keeping its attempts, and its `since` and `through` when it was already
+/// detached. A tombstone read keeps nothing.
 pub(crate) fn record_body(
     detach: &Detach,
     serving: Option<u64>,
@@ -270,9 +270,12 @@ pub(crate) fn record_body(
         "attempts": kept("attempts").as_u64().unwrap_or(0),
         "last_attempt": kept("last_attempt"),
         "since": since,
+        // A record already detached keeps where its detach began, as it keeps
+        // its `since`: the lane has dropped changes from there, so a
+        // reattach's gap starts there (round 12's sweep).
         "through": match &detach.through {
-            Some(through) => Value::from(through.as_str()),
-            None => kept("through"),
+            Some(through) if !was_detached => Value::from(through.as_str()),
+            _ => kept("through"),
         },
     }))
 }

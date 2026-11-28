@@ -510,9 +510,16 @@ impl sink::Records for Gate {
                 let earlier = kept
                     .get(mapping.index.as_ref())
                     .and_then(|kept| kept.through.clone());
-                // As the adapter's `record_body`: a detach with no `through`
-                // keeps the record's.
-                record.through = detach.through.clone().or(earlier);
+                // As the adapter's `record_body`: a detach with no `through`,
+                // or over a record already detached, keeps the record's.
+                let was_detached = kept
+                    .get(mapping.index.as_ref())
+                    .is_some_and(|kept| matches!(kept.record, Some(DetachRecord::Detached { .. })));
+                record.through = if was_detached {
+                    earlier
+                } else {
+                    detach.through.clone().or(earlier)
+                };
                 if !detach.live_only
                     && !self
                         .detaching
