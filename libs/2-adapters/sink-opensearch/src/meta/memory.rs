@@ -251,6 +251,18 @@ impl MemoryMeta {
     /// a generation that's gone loses `seeded`. The hash alias moves to the
     /// generation when the marker says seeded, or when nothing serves yet.
     pub fn ensure(&mut self, alias: &str, stamp: &Stamp) -> Ensured {
+        self.ensure_with(alias, stamp, |_| {})
+    }
+
+    /// [`ensure`](Self::ensure), with `between` run after the generation is
+    /// created and before its uuid is recorded: another writer's write landing
+    /// in that window, as it can on OpenSearch.
+    pub fn ensure_with(
+        &mut self,
+        alias: &str,
+        stamp: &Stamp,
+        between: impl FnOnce(&mut Self),
+    ) -> Ensured {
         let marker = self.doc(alias).cloned();
         let generations = self.generations_of(alias);
         let (generation, mut seeded, recorded) = match &marker {
@@ -300,6 +312,7 @@ impl MemoryMeta {
             if first {
                 self.serving.insert(alias.to_owned(), generation);
             }
+            between(self);
             self.update_marker(alias, "uuid", Value::from(uuid.as_str()));
             live = Some(uuid);
         } else if marker.is_none() {
@@ -516,6 +529,36 @@ mod tests {
         assert_eq!(meta.serving("users"), Some(1));
         let gaps = meta::read(meta.documents("users").0, None, None).gaps;
         assert_eq!(gaps.len(), 1, "the gap stays until the seed");
+    }
+
+    /// The review of round 14, m-B: another process's live-only demotion
+    /// lands between this one creating a generation and recording its uuid.
+    /// The uuid must not land on the marker the demotion wrote (on the
+    /// serving generation), or the next ensure reads that generation as not
+    /// the one flusso created and deletes it.
+    #[test]
+    fn a_uuid_is_recorded_only_on_the_marker_naming_its_generation() {
+        let mut meta = MemoryMeta::default();
+        meta.ensure("users", &stamp());
+        meta.seed("users", &stamp(), true).unwrap();
+        let serving = meta.read_by("users").unwrap();
+        meta.detach("users", &sink::Detach::new("blocked").stamp(stamp()), "now")
+            .unwrap();
+        let other = Stamp::new("another process", 1);
+        meta.ensure_with("users", &stamp(), |meta| {
+            meta.demote("users", true, &other, "now").unwrap();
+        });
+        let (marker, _) = meta.documents("users");
+        let marker = marker.unwrap();
+        assert_eq!(marker["active_generation"], 1, "{marker}");
+        assert!(
+            marker
+                .get("uuid")
+                .is_none_or(|uuid| uuid == serving.1.as_str()),
+            "the created generation's uuid landed on the demoted marker: {marker}"
+        );
+        meta.ensure("users", &other);
+        assert_eq!(meta.read_by("users"), Some(serving));
     }
 
     /// B-1: a seed of the generation the alias already served keeps the

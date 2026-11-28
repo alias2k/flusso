@@ -1513,3 +1513,85 @@ async fn a_failed_listing_fails_only_a_detach_that_moves_the_marker() {
         );
     }
 }
+
+/// The review of round 14, m-B, through the real requests: between staging
+/// reading the marker and recording the generation's uuid (after creating
+/// generation 4, or finding it with no uuid recorded), another process's
+/// live-only demotion lands: the marker back on serving generation 3,
+/// unseeded, no uuid. Generation 4's uuid must not be recorded on that
+/// marker: the next `ensure_index` would read generation 3 as not the one
+/// flusso created.
+#[tokio::test]
+async fn a_uuid_is_recorded_only_on_the_marker_naming_its_generation() {
+    for created in [true, false] {
+        let mut store = Store::seeded();
+        store.put(ALIAS, json!({ "active_generation": 4, "seeded": false }));
+        if created {
+            store.generations.remove("users_00000001_4");
+        }
+        let store = Arc::new(Mutex::new(store));
+        let routed = Arc::clone(&store);
+        let demoted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let once = Arc::clone(&demoted);
+        let demote = move |store: &mut Store| {
+            if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                store.put(ALIAS, json!({ "active_generation": 3, "seeded": false }));
+            }
+        };
+        let stub = Stub::start(move |line, body| {
+            let (method, target) = line.split_once(' ').unwrap();
+            let path = target.split_once('?').map_or(target, |(path, _)| path);
+            let mut store = routed.lock().unwrap();
+            if method == "GET" && path.starts_with("/flusso_meta/_doc/") {
+                let id = path.trim_start_matches("/flusso_meta/_doc/");
+                return match store.doc(id) {
+                    Some(source) => (
+                        200,
+                        json!({ "_id": id, "found": true, "_source": source }).to_string(),
+                    ),
+                    None => (404, json!({ "found": false }).to_string()),
+                };
+            }
+            if method == "GET" && path.ends_with("/_settings/index.uuid") {
+                let index = path.trim_start_matches('/').split('/').next().unwrap();
+                let uuid = format!("u{}", index.rsplit('_').next().unwrap());
+                if !store.generations.contains(index) {
+                    return (404, "{}".to_owned());
+                }
+                if !created && index.ends_with("_4") {
+                    demote(&mut store);
+                }
+                return (
+                    200,
+                    json!({ index: { "settings": { "index": { "uuid": uuid } } } }).to_string(),
+                );
+            }
+            if method == "PUT" && path == "/users_00000001_4" {
+                store.generations.insert("users_00000001_4".to_owned());
+                demote(&mut store);
+                return (200, json!({ "acknowledged": true }).to_string());
+            }
+            if method == "GET" && path.ends_with("/_settings/index.number_of_shards") {
+                return (404, "{}".to_owned());
+            }
+            if path.starts_with("/_aliases") {
+                return (200, json!({ "acknowledged": true }).to_string());
+            }
+            store.answer(line, body)
+        })
+        .await;
+        let ensured = sink::Records::ensure_index_as(&stub.sink(), &mapping(), &stamp()).await;
+        let marker = store.lock().unwrap().doc(ALIAS).unwrap();
+        assert_eq!(
+            marker["active_generation"],
+            3,
+            "created {created}: {marker}; {ensured:?}; {:?}",
+            stub.lines()
+        );
+        assert_ne!(
+            marker.get("uuid"),
+            Some(&json!("u4")),
+            "created {created}: generation 4's uuid landed on the marker naming 3: {marker}"
+        );
+    }
+}
