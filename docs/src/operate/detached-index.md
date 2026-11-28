@@ -61,8 +61,19 @@ A **gap** is the run of changes a reattach accepted as missing: from where reads
 - **Rows deleted in the gap** keep their documents: no later change names them.
 - **A fence inside a gap fails at once.** A `/wait` for a position in it answers `409` with the reason `gap` and the gap; waiting can't help. A position after the reattach is vouched for as usual.
 - **Several detaches, several gaps.** Each reattach adds its own to the list kept with the seed marker.
-- **Only a completed seed ends them.** A rebuild or reindex that hasn't seeded yet, a recreated generation, or `backfill` turned on and off again keeps every gap. A `backfill = false` sink never seeds, so there the gaps stay.
+- **Only a rebuild ends them**, once seeded: [Ending a gap](#ending-a-gap).
 - **`settling: true`** on a gap means its end isn't known yet (a reattach cut short). flusso settles it at its next read of the records while it holds the slot; meanwhile every position after `from` is refused.
+
+## Ending a gap
+
+A gap ends only when the index is seeded into a **new generation**. A backfill writes only the rows that still exist, so a backfill into the generation reads see would leave the documents of rows deleted in the gap in place.
+
+- **On a `backfill = false` sink** nothing seeds, so the gaps stay for good.
+- **`backfill` turned back on, the index unseeded** (a sink that was live only from the start): flusso doesn't backfill in place. It rebuilds the index into a new generation, as `flusso reindex` does, and logs a `WARN`: `the index keeps a gap on the generation reads see, where rows deleted in the gap keep their documents: it is rebuilt into a new generation, and the gap stays until that rebuild is seeded`. Until that seed, `/status` shows the index `backfilling`, and a `/wait` answers `409` with the reason `gap` inside the gap and `rebuilding` outside it. While the rebuild waits for the slot, the lane is `restaging` with the reason `the index keeps a gap on the generation reads see, …; it could not stage: <error>`.
+- **`backfill` turned back on, the index seeded** (it was seeded before a live-only detach): nothing rebuilds it on its own. The gaps keep answering `409` until you run `flusso reindex <index> --sink <sink>`.
+- **At the seed** the gaps are gone, and so are the documents of rows deleted in them.
+
+A rebuild or reindex that hasn't seeded yet, a recreated generation, or `backfill` turned on and off again keeps every gap.
 
 ## Options and variations
 
@@ -73,9 +84,11 @@ A **gap** is the run of changes a reattach accepted as missing: from where reads
 - **A reattach that is refused** answers `409` with the reason and what works instead: [the cases](../reference/http.md#a-reattach-that-is-refused). Where the reason says to restart flusso, a start on the `backfill = false` sink puts the record back so the reattach applies, and logs `a detach record written while this sink could rebuild, or beside a seed marker moved off the generation reads see, is put back to detached, live only, on that generation: flusso reattach --accept-gap applies`.
 - **While flusso doesn't hold the slot** (a reconnect), a reattach is refused and a rebuild waits: see [Run one flusso per slot](one-process-per-slot.md#while-flusso-doesnt-hold-the-slot).
 
-## A known limit
+## Known limits
 
-After a generation index of a detached or rebuilding index is deleted by hand, its lane may not reattach or rebuild: the records can name a generation that is gone, or one whose number was taken again. A rebuild is then never taken as finished, so every start takes it over again, and a live-only lane is never reattached; restarting flusso doesn't change that. There is no way out from flusso yet: see [issue #492](https://github.com/alias2k/flusso/issues/492). Don't delete a generation index of a detached or rebuilding index by hand.
+**A generation deleted by hand.** After a generation index of a detached or rebuilding index is deleted by hand, its lane may not reattach or rebuild: the records can name a generation that is gone, or one whose number was taken again. A rebuild is then never taken as finished, so every start takes it over again, and a live-only lane is never reattached; restarting flusso doesn't change that. There is no way out from flusso yet: see [issue #492](https://github.com/alias2k/flusso/issues/492). Don't delete a generation index of a detached or rebuilding index by hand.
+
+**A start that can't backfill, during a rebuild.** A start with `--skip-backfill`, or with the sink switched to `backfill = false`, in the middle of a rebuild lets `/wait` answer for writes that reads can't see yet: see [issue #493](https://github.com/alias2k/flusso/issues/493). Don't start with `--skip-backfill`, or switch a sink to `backfill = false`, while an index is being rebuilt.
 
 ## Related
 
