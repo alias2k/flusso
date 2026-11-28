@@ -494,7 +494,14 @@ impl sink::Records for Gate {
                 let attempts = kept
                     .get(mapping.index.as_ref())
                     .and_then(|kept| kept.attempts);
-                let marker = if detach.live_only {
+                // A live-only detach leaves the marker where it is: on serving,
+                // unless a detach before it moved it.
+                let moved = self
+                    .detaching
+                    .lock()
+                    .unwrap()
+                    .contains_key(mapping.index.as_ref());
+                let marker = if detach.live_only && !moved {
                     MarkerAt::Serving { seeded: true }
                 } else {
                     MarkerAt::Newer { seeded: false }

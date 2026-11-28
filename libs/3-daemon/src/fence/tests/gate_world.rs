@@ -332,6 +332,12 @@ impl Store {
         self.live_only.load(Ordering::SeqCst)
     }
 
+    /// Whether `of`'s marker is off the serving generation, moved by a
+    /// detach (its `detaching_from`).
+    fn marker_moved(&self, of: &str) -> bool {
+        self.detaching.lock().unwrap().contains_key(of)
+    }
+
     /// `of`'s marker moved off the serving generation by `stamp`, as
     /// OpenSearch's d2b and its rebuild or demotion move it: the gaps go
     /// into `detaching_from`, unless a detach moved it already.
@@ -458,23 +464,20 @@ impl Store {
     /// Another process detached `of` from `through` (where its reads stood,
     /// as the adapter records it) and dropped its changes.
     fn dropped(&self, of: &str, through: Option<String>) {
-        let (record, marker) = if self.live_only() {
-            (
-                DetachRecord::Detached { live_only: true },
-                MarkerAt::Serving { seeded: true },
-            )
-        } else {
-            (
-                DetachRecord::Detached { live_only: false },
-                MarkerAt::Newer { seeded: false },
-            )
-        };
         // As OpenSearch: a detach that can rebuild moves the marker, its
-        // gaps into `detaching_from`.
+        // gaps into `detaching_from`; a live-only one leaves it where it is.
         let stamp = self.anothers();
-        if !self.live_only() {
+        if !self.live_only() && !self.marker_moved(of) {
             self.move_marker(of, &stamp);
         }
+        let record = DetachRecord::Detached {
+            live_only: self.live_only(),
+        };
+        let marker = if self.marker_moved(of) {
+            MarkerAt::Newer { seeded: false }
+        } else {
+            MarkerAt::Serving { seeded: true }
+        };
         self.keep(of, record, marker, false, &stamp);
         if let Some(kept) = self.kept.lock().unwrap().get_mut(of) {
             kept.detachment.through = through;
@@ -726,10 +729,12 @@ impl sink::Records for Store {
         {
             self.move_marker(mapping.index.as_ref(), &stamp);
         }
-        let marker = if self.live_only() {
-            MarkerAt::Serving { seeded: true }
-        } else {
+        // Where the marker is: moved off serving by this detach or one before
+        // it, else still on serving (a live-only detach moves nothing).
+        let marker = if self.marker_moved(mapping.index.as_ref()) {
             MarkerAt::Newer { seeded: false }
+        } else {
+            MarkerAt::Serving { seeded: true }
         };
         self.keep(
             mapping.index.as_ref(),
@@ -2917,6 +2922,25 @@ fn a_detach_over_a_detached_record_keeps_where_the_drop_began() {
         },
         Event::Readable { sink: 0 },
         Event::BackfillFlips { lane: 0 },
+    ]);
+}
+
+/// Round 12's sweep, seed `935851008211566009` of `gate_world` at 50,000
+/// cases, shrunk: a model error. A live-only detach over a marker another
+/// detach had moved took the marker as on serving, so a reattach the real
+/// one refuses went through, and the read's put-back dropped its gap. The
+/// world now keeps the marker where it is.
+#[test]
+fn a_live_only_detach_over_a_moved_marker_leaves_it_moved() {
+    replay(vec![
+        Event::PutBackAfterFlip { lane: 0 },
+        Event::SameDetachElsewhere { lane: 1 },
+        Event::Restart {
+            sink: 0,
+            unreadable: 2,
+        },
+        Event::PutBackAfterFlip { lane: 1 },
+        Event::BackfillFlips { lane: 1 },
     ]);
 }
 
