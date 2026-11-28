@@ -315,7 +315,7 @@ impl MemoryMeta {
         if !exists {
             seeded = false;
         }
-        let first = self.serving.get(alias).is_none();
+        let first = !self.serving.contains_key(alias);
         if !exists {
             self.put(
                 alias,
