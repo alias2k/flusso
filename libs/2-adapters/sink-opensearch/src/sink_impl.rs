@@ -592,15 +592,6 @@ impl OpensearchSink {
         let exists = live.is_some();
         if exists {
             debug!(index, "generation exists; leaving its mapping untouched");
-            // What an earlier run wrote without a refresh is remembered
-            // nowhere. One refresh per start makes it searchable, so a run can
-            // begin from "everything written so far is searchable". A closed
-            // generation is skipped, not a failure: staging it must not stop
-            // the sink, and its lane parks as blocked at its first write
-            // (stage 9 slice 3, C2).
-            if seeded {
-                self.refresh_index_if_open(&index).await?;
-            }
         } else if seeded {
             warn!(
                 index,
@@ -621,6 +612,17 @@ impl OpensearchSink {
         // already-served index leaves them on the old generation until
         // mark_seeded swaps them, so reads never hit a half-built index.
         let first = held(&holders, &hash_alias).is_empty();
+        // What an earlier run wrote without a refresh is remembered nowhere.
+        // One refresh per start makes it searchable, so a run can begin from
+        // "everything written so far is searchable": for a seeded generation,
+        // and for the one reads see whatever its flag (a live-only demotion
+        // leaves it unseeded; the review of round 14, m-C). A closed
+        // generation is skipped, not a failure: staging it must not stop the
+        // sink, and its lane parks as blocked at its first write (stage 9
+        // slice 3, C2).
+        if exists && (seeded || held(&holders, &hash_alias).contains(&index)) {
+            self.refresh_index_if_open(&index).await?;
+        }
 
         if !exists {
             // Before the create: from here on the doc says unseeded and names
