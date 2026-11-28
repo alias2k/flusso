@@ -1478,9 +1478,12 @@ async fn a_marker_rewrite_fails_when_the_meta_index_never_gets_its_primary() {
         .sink()
         .rewrite_marker(ALIAS, 4, None, Some(&stamp()))
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("primary shard"), "{error}");
+        .unwrap_err();
+    assert!(
+        matches!(error, sink::SinkError::Read(_)),
+        "a read: {error:?}"
+    );
+    assert!(error.to_string().contains("primary shard"), "{error}");
 }
 
 /// The review of round 13, m-4: a live-only detach moves no marker, so the
@@ -1666,5 +1669,55 @@ async fn a_start_refreshes_the_generation_reads_see_whatever_its_seeded_flag() {
             .iter()
             .any(|line| line.starts_with(&format!("POST /users_00000001_{generation}/_refresh")));
         assert_eq!(sent, refreshed, "{marker}: {:?}", stub.lines());
+    }
+}
+
+/// The review of round 14, m-D: only a shard not ready yet makes a marker
+/// rewrite wait; any other refused read fails it at once, with no cluster
+/// health asked.
+#[tokio::test]
+async fn a_marker_rewrite_waits_only_for_a_shard_not_ready() {
+    let stub = Stub::start(move |line, _| {
+        if line.contains("/_mget") {
+            return (
+                500,
+                json!({ "error": { "type": "illegal_argument_exception" }, "status": 500 })
+                    .to_string(),
+            );
+        }
+        (
+            200,
+            json!({ "status": "yellow", "timed_out": false }).to_string(),
+        )
+    })
+    .await;
+    let refused = stub
+        .sink()
+        .rewrite_marker(ALIAS, 4, None, Some(&stamp()))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(
+        !stub
+            .lines()
+            .iter()
+            .any(|line| line.contains("/_cluster/health")),
+        "{:?}",
+        stub.lines()
+    );
+}
+
+/// m-D: the wait OpenSearch is asked for stays under the client's timeout,
+/// so OpenSearch answers first.
+#[test]
+fn the_meta_primary_wait_stays_under_the_client_timeout() {
+    use crate::detachment::record::meta_primary_wait;
+    use std::time::Duration;
+    for (timeout, wait) in [
+        (Duration::from_secs(30), Duration::from_secs(24)),
+        (Duration::from_secs(2), Duration::from_secs(1)),
+        (Duration::from_secs(1), Duration::from_millis(500)),
+        (Duration::from_secs(300), Duration::from_secs(30)),
+    ] {
+        assert_eq!(meta_primary_wait(timeout), wait, "{timeout:?}");
     }
 }

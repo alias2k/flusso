@@ -290,8 +290,6 @@ impl OpensearchSink {
     /// what tells two URLs reaching one cluster apart from two clusters
     /// (the review of round 11, S-4). An answer without one is an error.
     pub async fn cluster_uuid(&self) -> Result<String> {
-        // A read: its errors say what was asked and what came back, never
-        // "write failed" (the review of round 13).
         let read = |error: SinkError| match error {
             SinkError::Write(text) => SinkError::Read(text),
             other => other,

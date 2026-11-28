@@ -46,9 +46,17 @@ use crate::transport::request_error;
 /// How many times a detach reads again after a conflict before it gives up.
 const CONFLICT_ROUNDS: usize = 5;
 
-/// How long a marker rewrite waits for the meta index's primary shard when a
-/// read finds it not ready yet.
-const META_PRIMARY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a marker rewrite asks OpenSearch to wait for the meta index's
+/// primary shard: under the client's `timeout` (by a fifth, at least a
+/// second), so OpenSearch answers before the client gives up, never under
+/// half a second, and at most 30 s.
+pub(crate) fn meta_primary_wait(timeout: std::time::Duration) -> std::time::Duration {
+    let margin = (timeout / 5).max(std::time::Duration::from_secs(1));
+    timeout.saturating_sub(margin).clamp(
+        std::time::Duration::from_millis(500),
+        std::time::Duration::from_secs(30),
+    )
+}
 
 /// Whether `refused` says the meta index's shard is not ready yet: it is
 /// still being created or recovering.
@@ -377,9 +385,6 @@ impl OpensearchSink {
         )))
     }
 
-    /// The record of a rebuild the seed just finished, forgotten on the
-    /// version read by a tombstone stamped `stamp`; none (or a tombstone) is
-    /// fine.
     /// Write the marker whole on `generation`, unseeded, for a write that is
     /// not a seed (a generation created, a reindex): it keeps the gaps and
     /// the `detaching_from` of the marker read, conditional on it, read
@@ -520,37 +525,43 @@ impl OpensearchSink {
     }
 
     /// Wait until the meta index's primary shard is active, at most
-    /// [`META_PRIMARY_WAIT`]: OpenSearch's cluster health at `yellow` for it.
+    /// [`meta_primary_wait`]: OpenSearch's cluster health at `yellow` for it.
+    /// A read: its failure is [`SinkError::Read`].
     async fn wait_for_meta_primary(&self) -> Result<()> {
         let context = "waiting for the meta index's primary shard failed";
+        let read = |error: SinkError| match error {
+            SinkError::Write(text) => SinkError::Read(text),
+            other => other,
+        };
         let url = format!(
-            "{}/_cluster/health/{}?wait_for_status=yellow&timeout={}s",
+            "{}/_cluster/health/{}?wait_for_status=yellow&timeout={}ms",
             self.base_url,
             self.meta_index(),
-            META_PRIMARY_WAIT.as_secs()
+            meta_primary_wait(self.timeout).as_millis()
         );
         let response = self
             .maybe_auth(self.client.get(&url))
             .send()
             .await
-            .map_err(|e| request_error(context, e))?;
+            .map_err(|e| read(request_error(context, e)))?;
         let status = response.status();
         let text = response
             .text()
             .await
-            .map_err(|e| request_error(context, e))?;
+            .map_err(|e| read(request_error(context, e)))?;
         let timed_out = serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|body| body.get("timed_out").and_then(Value::as_bool))
             .unwrap_or(false);
         if !status.is_success() || timed_out {
-            return Err(SinkError::Write(format!(
-                "{context}: HTTP {status}: {text}"
-            )));
+            return Err(SinkError::Read(format!("{context}: HTTP {status}: {text}")));
         }
         Ok(())
     }
 
+    /// The record of a rebuild the seed just finished, forgotten on the
+    /// version read by a tombstone stamped `stamp`; none (or a tombstone) is
+    /// fine.
     pub(crate) async fn forget_finished_rebuild(
         &self,
         hash_alias: &str,
