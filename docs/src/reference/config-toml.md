@@ -23,6 +23,8 @@ Unknown keys are rejected. Schema paths in `[[index]]` resolve relative to the c
 
 Every document is built once and delivered to **every** configured sink, each over its own lane with its own engine. Sinks are independent: each decides its own backfill (`is_seeded` per index), a [reindex](../operate/reindex.md) targets one sink or all, and one sink's outage stops only that sink while the others keep writing. The slowest sink paces the replication slot, since the source is confirmed only what every sink has made durable.
 
+Any number of sinks is fine, of any type, OpenSearch ones included: a second cluster as a backup, a stdout sink feeding a bus. **Two OpenSearch sinks on one cluster are refused** by `check` and `run`: every name flusso keeps there (generations, aliases, seed markers) comes from the deployment's [`prefix`](#prefix), never the sink, so the two would share them. Give each sink its own cluster, or run each in its own deployment with its own `prefix` and slot. How it's detected: [Two OpenSearch sinks on one cluster](checks.md#two-opensearch-sinks-on-one-cluster).
+
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `backfill` | bool | `true` | Whether this sink is ever backfilled. `false` makes it receive live changes only, never a snapshot: the opt-out for a stateless sink (stdout, a message bus) beside a stateful one, which would otherwise seed it on every start. |
