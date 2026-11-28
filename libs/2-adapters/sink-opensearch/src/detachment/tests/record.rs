@@ -1403,3 +1403,79 @@ async fn a_live_only_demotion_after_a_detach_during_a_reindex_keeps_the_serving_
         store.lock().unwrap().generations
     );
 }
+
+/// The review of round 13, H: a marker rewrite (before a generation create
+/// or a reindex) reads the meta index; just created by a write elsewhere,
+/// its shard may still be recovering, and the read is refused. The rewrite
+/// waits for the meta index's primary, then reads again and writes.
+#[tokio::test]
+async fn a_marker_rewrite_waits_for_a_meta_index_still_recovering() {
+    let store = Arc::new(Mutex::new(Store::seeded()));
+    let routed = Arc::clone(&store);
+    let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let once = Arc::clone(&refused);
+    let stub = Stub::start(move |line, body| {
+        if line.contains("/_mget") && !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let error = json!({ "type": "no_shard_available_action_exception", "reason": "No shard available for [MultiGetShardRequest]" });
+            return (
+                200,
+                json!({ "docs": [
+                    { "_id": ALIAS, "error": error },
+                    { "_id": DETACH, "error": error },
+                    { "_id": "stuck:users_00000001", "error": error },
+                ] })
+                .to_string(),
+            );
+        }
+        if line.starts_with("GET /_cluster/health/flusso_meta") {
+            return (200, json!({ "status": "yellow", "timed_out": false }).to_string());
+        }
+        routed.lock().unwrap().answer(line, body)
+    })
+    .await;
+    stub.sink()
+        .rewrite_marker(ALIAS, 4, None, Some(&stamp()))
+        .await
+        .unwrap();
+    assert!(
+        stub.lines()
+            .iter()
+            .any(|line| line.starts_with("GET /_cluster/health/flusso_meta")),
+        "{:?}",
+        stub.lines()
+    );
+    assert_eq!(
+        store.lock().unwrap().doc(ALIAS).unwrap()["active_generation"],
+        4
+    );
+}
+
+/// H's wait is bounded: a meta index whose primary doesn't come up in time
+/// fails the rewrite, which the sink engine stages again on its backoff.
+#[tokio::test]
+async fn a_marker_rewrite_fails_when_the_meta_index_never_gets_its_primary() {
+    let stub = Stub::start(move |line, _| {
+        if line.contains("/_mget") {
+            return (
+                503,
+                json!({ "error": { "type": "no_shard_available_action_exception" }, "status": 503 })
+                    .to_string(),
+            );
+        }
+        if line.starts_with("GET /_cluster/health/flusso_meta") {
+            return (
+                408,
+                json!({ "status": "red", "timed_out": true }).to_string(),
+            );
+        }
+        (500, "{}".to_owned())
+    })
+    .await;
+    let error = stub
+        .sink()
+        .rewrite_marker(ALIAS, 4, None, Some(&stamp()))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("primary shard"), "{error}");
+}

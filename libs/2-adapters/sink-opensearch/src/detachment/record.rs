@@ -46,6 +46,18 @@ use crate::transport::request_error;
 /// How many times a detach reads again after a conflict before it gives up.
 const CONFLICT_ROUNDS: usize = 5;
 
+/// How long a marker rewrite waits for the meta index's primary shard when a
+/// read finds it not ready yet.
+const META_PRIMARY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether `refused` says the meta index's shard is not ready yet: it is
+/// still being created or recovering.
+fn shard_not_ready(refused: &SinkError) -> bool {
+    let text = refused.to_string();
+    text.contains("no_shard_available_action_exception")
+        || text.contains("illegal_index_shard_state_exception")
+}
+
 /// What a conditional write found.
 pub(super) enum Written {
     Done,
@@ -351,7 +363,18 @@ impl OpensearchSink {
         stamp: Option<&Stamp>,
     ) -> Result<()> {
         for _ in 0..CONFLICT_ROUNDS {
-            let Kept { marker, .. } = self.read_kept(hash_alias).await?;
+            let read = match self.read_kept(hash_alias).await {
+                // The meta index was just created by a write elsewhere (a
+                // write waits for its primary, a read is refused at once):
+                // wait for its primary, then read again (the review of
+                // round 13, H).
+                Err(refused) if shard_not_ready(&refused) => {
+                    self.wait_for_meta_primary().await?;
+                    self.read_kept(hash_alias).await
+                }
+                read => read,
+            };
+            let Kept { marker, .. } = read?;
             let doc = plan::rewritten(marker.as_ref().map(|found| &found.source), generation, uuid);
             if let Written::Done = self
                 .put_if(hash_alias, &doc, marker.as_ref(), stamp)
@@ -363,6 +386,38 @@ impl OpensearchSink {
         Err(SinkError::Write(format!(
             "the seed marker of {hash_alias} kept changing while it was rewritten"
         )))
+    }
+
+    /// Wait until the meta index's primary shard is active, at most
+    /// [`META_PRIMARY_WAIT`]: OpenSearch's cluster health at `yellow` for it.
+    async fn wait_for_meta_primary(&self) -> Result<()> {
+        let context = "waiting for the meta index's primary shard failed";
+        let url = format!(
+            "{}/_cluster/health/{}?wait_for_status=yellow&timeout={}s",
+            self.base_url,
+            self.meta_index(),
+            META_PRIMARY_WAIT.as_secs()
+        );
+        let response = self
+            .maybe_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| request_error(context, e))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| request_error(context, e))?;
+        let timed_out = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|body| body.get("timed_out").and_then(Value::as_bool))
+            .unwrap_or(false);
+        if !status.is_success() || timed_out {
+            return Err(SinkError::Write(format!(
+                "{context}: HTTP {status}: {text}"
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) async fn forget_finished_rebuild(
