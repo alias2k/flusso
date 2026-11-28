@@ -1598,3 +1598,73 @@ async fn a_uuid_is_recorded_only_on_the_marker_naming_its_generation() {
         );
     }
 }
+
+/// The review of round 14, m-C: a generation the alias serves is refreshed
+/// once at a start whatever its seeded flag: a live-only demotion leaves the
+/// serving generation unseeded, and with `refresh_interval = "-1"` what an
+/// earlier run wrote there stays unsearchable until the next caught-up flush
+/// without it. An unseeded generation the alias doesn't serve (a rebuild's)
+/// isn't.
+#[tokio::test]
+async fn a_start_refreshes_the_generation_reads_see_whatever_its_seeded_flag() {
+    for (marker, refreshed) in [
+        (
+            json!({ "active_generation": 3, "seeded": false, "uuid": "u3" }),
+            true,
+        ),
+        (
+            json!({ "active_generation": 4, "seeded": false, "uuid": "u4" }),
+            false,
+        ),
+    ] {
+        let mut store = Store::seeded();
+        store.generations.insert("users_00000001_4".to_owned());
+        store.put(ALIAS, marker.clone());
+        let store = Arc::new(Mutex::new(store));
+        let routed = Arc::clone(&store);
+        let stub = Stub::start(move |line, body| {
+            let (method, target) = line.split_once(' ').unwrap();
+            let path = target.split_once('?').map_or(target, |(path, _)| path);
+            let store = routed.lock().unwrap();
+            if method == "GET" && path.starts_with("/flusso_meta/_doc/") {
+                let id = path.trim_start_matches("/flusso_meta/_doc/");
+                return match store.doc(id) {
+                    Some(source) => (
+                        200,
+                        json!({ "_id": id, "found": true, "_source": source }).to_string(),
+                    ),
+                    None => (404, json!({ "found": false }).to_string()),
+                };
+            }
+            if method == "GET" && path.ends_with("/_settings/index.uuid") {
+                let index = path.trim_start_matches('/').split('/').next().unwrap();
+                let uuid = format!("u{}", index.rsplit('_').next().unwrap());
+                return (
+                    200,
+                    json!({ index: { "settings": { "index": { "uuid": uuid } } } }).to_string(),
+                );
+            }
+            if method == "POST" && path.ends_with("/_refresh") {
+                return (200, json!({ "_shards": { "failed": 0 } }).to_string());
+            }
+            if method == "GET" && path.ends_with("/_settings/index.number_of_shards") {
+                return (404, "{}".to_owned());
+            }
+            if path.starts_with("/_aliases") {
+                return (200, json!({ "acknowledged": true }).to_string());
+            }
+            drop(store);
+            routed.lock().unwrap().answer(line, body)
+        })
+        .await;
+        sink::Records::ensure_index_as(&stub.sink(), &mapping(), &stamp())
+            .await
+            .unwrap();
+        let generation = marker["active_generation"].as_u64().unwrap();
+        let sent = stub
+            .lines()
+            .iter()
+            .any(|line| line.starts_with(&format!("POST /users_00000001_{generation}/_refresh")));
+        assert_eq!(sent, refreshed, "{marker}: {:?}", stub.lines());
+    }
+}
