@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use kernel::{ContentHash, IndexMapping, IndexName, SinkName};
 use serde_json::{Value, json};
-use sink::{DetachRecord, Detachment, Sink, Stamp, StuckClock};
+use sink::{DetachRecord, Detachment, Records, Stamp, StuckClock};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::{OpensearchConfig, OpensearchSink, TextAnalysis};

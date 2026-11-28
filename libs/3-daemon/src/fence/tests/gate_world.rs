@@ -504,6 +504,60 @@ impl Store {
 
 #[async_trait]
 impl Sink for Store {
+    async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        let mut report = WriteReport::clean();
+        for envelope in envelopes {
+            let of = envelope.index.as_ref();
+            if self.missing.lock().unwrap().contains(of) {
+                report =
+                    report.missing_target(envelope.index.clone(), format!("no such index [{of}]"));
+                continue;
+            }
+            if self.blocked.lock().unwrap().contains(of) {
+                report = report.blocking(
+                    envelope.index.clone(),
+                    format!("index [{of}] blocked by: [FORBIDDEN/8/index write (api)]"),
+                );
+                continue;
+            }
+            let at: u64 = envelope.id.parse().unwrap();
+            self.judge(of, Some(at));
+            self.written.lock().unwrap().insert((of.to_owned(), at));
+        }
+        Ok(report)
+    }
+
+    async fn is_seeded(&self, of: &IndexName) -> sink::Result<bool> {
+        Ok(!self.unseeded.lock().unwrap().contains(of.as_ref()))
+    }
+
+    async fn seeding(&self, of: &IndexName) -> sink::Result<sink::Seeding> {
+        Ok(if self.unseeded.lock().unwrap().contains(of.as_ref()) {
+            sink::Seeding::Unseeded {
+                walked: self
+                    .walked
+                    .lock()
+                    .unwrap()
+                    .get(of.as_ref())
+                    .map(|(mark, _)| mark.clone()),
+            }
+        } else {
+            sink::Seeding::Seeded
+        })
+    }
+
+    async fn forget_walked(&self, of: &IndexName) -> sink::Result<()> {
+        self.walked.lock().unwrap().remove(of.as_ref());
+        Ok(())
+    }
+
+    fn records(&self) -> Option<&dyn sink::Records> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl sink::Records for Store {
     async fn ensure_index_as(
         &self,
         mapping: &IndexMapping,
@@ -546,48 +600,6 @@ impl Sink for Store {
             sink::Ensured::created(target)
         } else {
             sink::Ensured::existing(target)
-        })
-    }
-
-    async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {
-        let mut report = WriteReport::clean();
-        for envelope in envelopes {
-            let of = envelope.index.as_ref();
-            if self.missing.lock().unwrap().contains(of) {
-                report =
-                    report.missing_target(envelope.index.clone(), format!("no such index [{of}]"));
-                continue;
-            }
-            if self.blocked.lock().unwrap().contains(of) {
-                report = report.blocking(
-                    envelope.index.clone(),
-                    format!("index [{of}] blocked by: [FORBIDDEN/8/index write (api)]"),
-                );
-                continue;
-            }
-            let at: u64 = envelope.id.parse().unwrap();
-            self.judge(of, Some(at));
-            self.written.lock().unwrap().insert((of.to_owned(), at));
-        }
-        Ok(report)
-    }
-
-    async fn is_seeded(&self, of: &IndexName) -> sink::Result<bool> {
-        Ok(!self.unseeded.lock().unwrap().contains(of.as_ref()))
-    }
-
-    async fn seeding(&self, of: &IndexName) -> sink::Result<sink::Seeding> {
-        Ok(if self.unseeded.lock().unwrap().contains(of.as_ref()) {
-            sink::Seeding::Unseeded {
-                walked: self
-                    .walked
-                    .lock()
-                    .unwrap()
-                    .get(of.as_ref())
-                    .map(|(mark, _)| mark.clone()),
-            }
-        } else {
-            sink::Seeding::Seeded
         })
     }
 
@@ -823,31 +835,6 @@ impl Sink for Store {
         }
     }
 
-    async fn forget_walked(&self, of: &IndexName) -> sink::Result<()> {
-        self.walked.lock().unwrap().remove(of.as_ref());
-        Ok(())
-    }
-
-    async fn reindex_as(&self, mapping: &IndexMapping, stamp: &sink::Stamp) -> sink::Result<()> {
-        let of = mapping.index.as_ref();
-        self.touch(of, "a reindex");
-        let fails = self.failing();
-        if fails == Some(false) {
-            return Err(Self::failed(false));
-        }
-        // As OpenSearch: the marker moves, written whole, to a generation
-        // the next ensure creates.
-        self.missing.lock().unwrap().insert(of.to_owned());
-        self.unseeded.lock().unwrap().insert(of.to_owned());
-        self.walked.lock().unwrap().remove(of);
-        self.gaps.lock().unwrap().remove(of);
-        self.stamp_marker(of, stamp);
-        match fails {
-            Some(landed) => Err(Self::failed(landed)),
-            None => Ok(()),
-        }
-    }
-
     async fn mark_seeded_as(&self, of: &IndexName, stamp: &sink::Stamp) -> sink::Result<()> {
         // The seed writes the marker whole: the record and the gaps go, which
         // stands for a read of them under the stream it was made in.
@@ -881,6 +868,26 @@ impl Sink for Store {
         self.seeds.lock().unwrap().push((name.to_owned(), began));
         let held = self.held();
         self.reads.lock().unwrap().push((name.to_owned(), held));
+        match fails {
+            Some(landed) => Err(Self::failed(landed)),
+            None => Ok(()),
+        }
+    }
+
+    async fn reindex_as(&self, mapping: &IndexMapping, stamp: &sink::Stamp) -> sink::Result<()> {
+        let of = mapping.index.as_ref();
+        self.touch(of, "a reindex");
+        let fails = self.failing();
+        if fails == Some(false) {
+            return Err(Self::failed(false));
+        }
+        // As OpenSearch: the marker moves, written whole, to a generation
+        // the next ensure creates.
+        self.missing.lock().unwrap().insert(of.to_owned());
+        self.unseeded.lock().unwrap().insert(of.to_owned());
+        self.walked.lock().unwrap().remove(of);
+        self.gaps.lock().unwrap().remove(of);
+        self.stamp_marker(of, stamp);
         match fails {
             Some(landed) => Err(Self::failed(landed)),
             None => Ok(()),

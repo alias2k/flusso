@@ -25,9 +25,9 @@
 //! - **Nothing known yet** (no read here): adopted. **A read under the same
 //!   held opening**: adopted, since no other process writes while this one
 //!   holds the slot (the narrowed O29 rule, `slot`).
-//! - **An own write of the record with nothing read yet** makes the record
-//!   known as only this process's: the next read is the same only when the
-//!   record carries this writer. The marker is still unknown, so adopted.
+//! - **No gated write goes out with nothing read**: `slot`'s gate reads the
+//!   records first (the review of round 11, m-3), so every own write stands
+//!   on a read, and "nothing known" never follows a write.
 //!
 //! ```text
 //! known                              found (a read)                    →
@@ -35,7 +35,6 @@
 //! anything                           read under the same held opening   Same
 //! a read                             each document: this writer's, or   Same
 //!                                    exactly as last read
-//! the record only this process's     record: this writer's              Same
 //! anything else                                                         Foreign
 //! ```
 //!
@@ -91,21 +90,13 @@ struct MarkerRead {
     gaps: Vec<Gap>,
 }
 
-/// What this process knows of one lane's record.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RecordKnown {
-    /// As last read.
-    Read(RecordRead),
-    /// Written by this process before any read here: only this process's.
-    OnlyMine,
-}
-
 /// What this process knows of one lane's detach records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Known {
-    record: RecordKnown,
-    /// `None`: nothing read yet, so any marker is adopted.
-    marker: Option<MarkerRead>,
+    /// The record as last read.
+    record: RecordRead,
+    /// The marker as last read.
+    marker: MarkerRead,
     /// The opening ([`Rereads::read_begins`](crate::Rereads::read_begins))
     /// this was learnt under.
     at: u64,
@@ -117,11 +108,11 @@ struct Known {
 impl Known {
     fn read(found: &Detachment, at: u64) -> Self {
         Self {
-            record: RecordKnown::Read(RecordRead::of(found)),
-            marker: Some(MarkerRead {
+            record: RecordRead::of(found),
+            marker: MarkerRead {
                 stamp: found.marker_stamp.clone(),
                 gaps: found.gaps.clone(),
-            }),
+            },
             at,
             may_keep_gaps: !found.gaps.is_empty(),
         }
@@ -226,32 +217,22 @@ impl KnownRecords {
     /// Why `found` isn't this process's or as last read, if it isn't.
     fn differs(&self, was: &Known, found: &Detachment) -> Option<String> {
         if !self.is_mine(found.record_stamp.as_ref()) {
-            match &was.record {
-                RecordKnown::OnlyMine => {
-                    return Some(format!(
-                        "the record is {:?}, written by {}, where this process wrote it",
-                        found.record,
-                        writer(found.record_stamp.as_ref())
-                    ));
-                }
-                RecordKnown::Read(read) => {
-                    let now = RecordRead::of(found);
-                    if *read != now {
-                        return Some(format!(
-                            "the record was {:?} (version {}, by {}), now {:?} (version {}, by {})",
-                            read.record,
-                            version(read.version.as_ref()),
-                            writer(read.stamp.as_ref()),
-                            now.record,
-                            version(now.version.as_ref()),
-                            writer(now.stamp.as_ref()),
-                        ));
-                    }
-                }
+            let read = &was.record;
+            let now = RecordRead::of(found);
+            if *read != now {
+                return Some(format!(
+                    "the record was {:?} (version {}, by {}), now {:?} (version {}, by {})",
+                    read.record,
+                    version(read.version.as_ref()),
+                    writer(read.stamp.as_ref()),
+                    now.record,
+                    version(now.version.as_ref()),
+                    writer(now.stamp.as_ref()),
+                ));
             }
         }
+        let read = &was.marker;
         if !self.is_mine(found.marker_stamp.as_ref())
-            && let Some(read) = &was.marker
             && (read.stamp != found.marker_stamp || read.gaps != found.gaps)
         {
             return Some(format!(
@@ -263,19 +244,6 @@ impl KnownRecords {
             ));
         }
         None
-    }
-
-    /// An own write of `index`'s record was sent under opening `at`. With
-    /// nothing read here yet, the record is known as only this process's
-    /// from now on; otherwise nothing changes: the next read shows the
-    /// write's stamp, or what was last read.
-    pub(crate) fn wrote_record(&self, index: &IndexName, at: u64) {
-        self.lock().entry(index.clone()).or_insert(Known {
-            record: RecordKnown::OnlyMine,
-            marker: None,
-            at,
-            may_keep_gaps: false,
-        });
     }
 
     /// An own write of `index`'s gaps may have left `gaps`: `landed` when its
@@ -484,50 +452,6 @@ mod tests {
             known.judge(&index(), &detached(Some(landed), "2:1"), 2, false),
             Change::Same
         );
-    }
-
-    /// Found by the world at 50,000 cases: a lane this process detached
-    /// before any read of its records succeeded. Its own record is what it
-    /// knows, so another process's reattach or detach is foreign; its own
-    /// record read back is the same, and the marker is adopted.
-    #[test]
-    fn an_own_record_write_with_nothing_read_before_is_only_this_processs() {
-        let known = KnownRecords::default();
-        known.wrote_record(&index(), 1);
-        let reattached = with(Detachment::default(), |f| {
-            f.gaps = vec![gap("14")];
-            f.record_stamp = Some(other(3));
-        });
-        assert!(matches!(
-            known.judge(&index(), &reattached, 2, false),
-            Change::Foreign(_)
-        ));
-
-        let known = KnownRecords::default();
-        known.wrote_record(&index(), 1);
-        assert!(matches!(
-            known.judge(&index(), &detached(Some(other(3)), "1:1"), 2, false),
-            Change::Foreign(_)
-        ));
-
-        let known = KnownRecords::default();
-        known.wrote_record(&index(), 1);
-        let ours = with(detached(Some(known.stamp()), "3:1"), |f| {
-            f.marker_stamp = Some(other(9));
-            f.gaps = vec![gap("2")];
-        });
-        assert_eq!(known.judge(&index(), &ours, 2, false), Change::Same);
-    }
-
-    /// An own record write over records already read changes nothing known.
-    #[test]
-    fn an_own_record_write_after_a_read_keeps_the_read() {
-        let known = KnownRecords::default();
-        let before = detached(Some(other(1)), "1:1");
-        known.judge(&index(), &before, 1, false);
-        known.wrote_record(&index(), 2);
-        assert_eq!(known.learnt_at(&index()), Some(1));
-        assert_eq!(known.judge(&index(), &before, 2, false), Change::Same);
     }
 
     #[test]

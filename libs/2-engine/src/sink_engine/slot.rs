@@ -108,7 +108,10 @@ impl Plain {
 
     /// Ensure `mapping`'s index; a marker it writes is stamped.
     pub(super) async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<Ensured> {
-        self.0.ensure_index_as(mapping, &self.1.stamp()).await
+        match self.0.records() {
+            Some(records) => records.ensure_index_as(mapping, &self.1.stamp()).await,
+            None => self.0.ensure_index(mapping).await,
+        }
     }
 
     pub(super) async fn write_parts(
@@ -138,7 +141,7 @@ impl Plain {
     /// The records' read; it may put a half-moved marker back, on the
     /// version read, stamped (the table above: safe).
     pub(super) async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
-        self.0.detachment(mapping, &self.1.stamp()).await
+        read(self.0.as_ref(), mapping, &self.1).await
     }
 
     /// The gaps kept with the marker as `decide` says, stamped. A failed
@@ -156,8 +159,10 @@ impl Plain {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = new.clone();
             new
         };
-        let gaps = self
-            .0
+        let Some(records) = self.0.records() else {
+            return Ok(Vec::new());
+        };
+        let gaps = records
             .record_gaps(mapping, &deciding, &self.1.stamp())
             .await;
         match &gaps {
@@ -232,7 +237,42 @@ impl std::fmt::Debug for Erasing<'_> {
     }
 }
 
+/// `mapping`'s records as `sink` keeps them, a put-back stamped by `known`:
+/// nothing kept for a sink that keeps none.
+async fn read(
+    sink: &dyn Sink,
+    mapping: &IndexMapping,
+    known: &KnownRecords,
+) -> sink::Result<Detachment> {
+    match sink.records() {
+        Some(records) => records.detachment(mapping, &known.stamp()).await,
+        None => Ok(Detachment::default()),
+    }
+}
+
 impl Erasing<'_> {
+    /// Forget the record read at `version`, stamped `stamp`: nothing to
+    /// forget for a sink that keeps no records.
+    async fn forget(
+        &self,
+        mapping: &IndexMapping,
+        version: &RecordVersion,
+        stamp: &Stamp,
+    ) -> sink::Result<()> {
+        match self.sink.records() {
+            Some(records) => records.forget_detachment(mapping, version, stamp).await,
+            None => Ok(()),
+        }
+    }
+
+    /// The reindex, its marker stamped where the sink keeps records.
+    async fn reindex_stamped(&self, mapping: &IndexMapping) -> sink::Result<()> {
+        match self.sink.records() {
+            Some(records) => records.reindex_as(mapping, &self.known.stamp()).await,
+            None => self.sink.reindex(mapping).await,
+        }
+    }
+
     /// `result`, of an own write of `mapping`'s record stamped `stamp`, read
     /// back while the slot is still held. A failed call counts as landed
     /// exactly when the record read back carries `stamp` (no other process
@@ -246,8 +286,6 @@ impl Erasing<'_> {
         result: sink::Result<T>,
         landed: impl FnOnce(&Detachment) -> Option<T>,
     ) -> sink::Result<T> {
-        self.known
-            .wrote_record(&mapping.index, self.rereads.read_begins());
         let found = self.read_back(mapping).await;
         match (result, found) {
             (Err(error), Some(found)) if found.record_stamp.as_ref() == Some(stamp) => {
@@ -272,11 +310,7 @@ impl Erasing<'_> {
     async fn read_back(&self, mapping: &IndexMapping) -> Option<Detachment> {
         let at = self.rereads.read_begins();
         self.held().ok()?;
-        let found = self
-            .sink
-            .detachment(mapping, &self.known.stamp())
-            .await
-            .ok()?;
+        let found = read(self.sink, mapping, self.known).await.ok()?;
         let held_throughout = self.rereads.held_or_alone() && self.rereads.read_begins() == at;
         if !held_throughout {
             return None;
@@ -305,7 +339,10 @@ impl Erasing<'_> {
         let now = self.rereads.read_begins();
         let fresh = match self.known.learnt_at(index) {
             Some(at) => at == now,
-            None => self.rereads.opened() == 0,
+            // Nothing read yet: read first, so no write goes out with
+            // nothing known of what it writes over (the review of round 11,
+            // m-3).
+            None => false,
         };
         if fresh {
             return Ok(());
@@ -315,9 +352,7 @@ impl Erasing<'_> {
             .iter()
             .find(|mapping| &mapping.index == index)
             .ok_or(NotHeld::Unread(format!("{index} names no mapping")))?;
-        let found = self
-            .sink
-            .detachment(mapping, &self.known.stamp())
+        let found = read(self.sink, mapping, self.known)
             .await
             .map_err(|error| NotHeld::Unread(error.to_string()))?;
         if !(self.rereads.held_or_alone() && self.rereads.read_begins() == now) {
@@ -338,11 +373,13 @@ impl Erasing<'_> {
     /// would (the review of the cut, B-1).
     pub(super) async fn mark_seeded(&self, index: &IndexName) -> Result<sink::Result<()>, NotHeld> {
         self.held_fresh(index).await?;
-        let seeded = self.sink.mark_seeded_as(index, &self.known.stamp()).await;
+        let seeded = match self.sink.records() {
+            Some(records) => records.mark_seeded_as(index, &self.known.stamp()).await,
+            None => self.sink.mark_seeded(index).await,
+        };
         let Some(mapping) = self.mappings.iter().find(|mapping| &mapping.index == index) else {
             return Ok(seeded);
         };
-        self.known.wrote_record(index, self.rereads.read_begins());
         if let Some(found) = self.read_back(mapping).await
             && seeded.is_ok()
             && let (
@@ -365,7 +402,7 @@ impl Erasing<'_> {
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held_fresh(&mapping.index).await?;
         let stamp = self.known.stamp();
-        let forgotten = self.sink.forget_detachment(mapping, version, &stamp).await;
+        let forgotten = self.forget(mapping, version, &stamp).await;
         Ok(self.settled(mapping, &stamp, forgotten, |_| Some(())).await)
     }
 
@@ -378,7 +415,7 @@ impl Erasing<'_> {
         version: &RecordVersion,
     ) -> sink::Result<()> {
         let stamp = self.known.stamp();
-        let forgotten = self.sink.forget_detachment(mapping, version, &stamp).await;
+        let forgotten = self.forget(mapping, version, &stamp).await;
         self.settled(mapping, &stamp, forgotten, |_| Some(())).await
     }
 
@@ -389,7 +426,7 @@ impl Erasing<'_> {
         mapping: &IndexMapping,
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held_fresh(&mapping.index).await?;
-        Ok(self.sink.reindex_as(mapping, &self.known.stamp()).await)
+        Ok(self.reindex_stamped(mapping).await)
     }
 
     /// [`reindex`](Self::reindex) at a `Fresh` source's staging, ungated by
@@ -399,7 +436,7 @@ impl Erasing<'_> {
         &self,
         mapping: &IndexMapping,
     ) -> sink::Result<()> {
-        self.sink.reindex_as(mapping, &self.known.stamp()).await
+        self.reindex_stamped(mapping).await
     }
 
     /// Begin a rebuild: other generations deleted, the marker moved, the
@@ -410,7 +447,13 @@ impl Erasing<'_> {
     ) -> Result<sink::Result<u64>, NotHeld> {
         self.held_fresh(&mapping.index).await?;
         let stamp = self.known.stamp();
-        let begun = self.sink.begin_rebuild(mapping, &stamp).await;
+        let begun = match self.sink.records() {
+            Some(records) => records.begin_rebuild(mapping, &stamp).await,
+            None => Err(sink::SinkError::Write(format!(
+                "{} keeps no detach records to rebuild from",
+                mapping.index
+            ))),
+        };
         Ok(self
             .settled(mapping, &stamp, begun, |found| found.attempts)
             .await)
@@ -427,7 +470,10 @@ impl Erasing<'_> {
     ) -> Result<sink::Result<()>, NotHeld> {
         self.held_fresh(&mapping.index).await?;
         let stamp = self.known.stamp();
-        let demoted = self.sink.demote(mapping, live_only, &stamp).await;
+        let demoted = match self.sink.records() {
+            Some(records) => records.demote(mapping, live_only, &stamp).await,
+            None => Ok(()),
+        };
         Ok(self.settled(mapping, &stamp, demoted, |_| Some(())).await)
     }
 
@@ -441,10 +487,14 @@ impl Erasing<'_> {
     ) -> Result<sink::Result<Recorded>, NotHeld> {
         self.held_fresh(&mapping.index).await?;
         let stamp = self.known.stamp();
-        let recorded = self
-            .sink
-            .detach(mapping, &detach.clone().stamp(stamp.clone()))
-            .await;
+        let recorded = match self.sink.records() {
+            Some(records) => {
+                records
+                    .detach(mapping, &detach.clone().stamp(stamp.clone()))
+                    .await
+            }
+            None => Ok(Recorded::NotKept),
+        };
         let recorded = match recorded {
             // The sink keeps no records: nothing was written.
             Ok(Recorded::NotKept) => Ok(Recorded::NotKept),
@@ -466,23 +516,30 @@ mod tests {
 
     use super::*;
 
-    /// Records every read answers with, and every gated write sent.
+    /// Held every read answers with, and every gated write sent.
     #[derive(Debug, Default)]
-    struct Records {
+    struct Held {
         found: Mutex<Detachment>,
         sent: Mutex<Vec<&'static str>>,
         /// Reads of the records fail.
         unreadable: Mutex<bool>,
+        /// The next detach fails before it writes anything.
+        detach_fails: Mutex<bool>,
+        /// Reads answered before every read fails (`None`: no limit).
+        reads_left: Mutex<Option<usize>>,
+        /// Every read and gated write, in order.
+        log: Mutex<Vec<&'static str>>,
     }
 
-    impl Records {
+    impl Held {
         fn sent(&self, request: &'static str) {
+            self.log.lock().unwrap().push(request);
             self.sent.lock().unwrap().push(request);
         }
     }
 
     #[async_trait]
-    impl Sink for Records {
+    impl Sink for Held {
         async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {
             Ok(WriteReport::clean())
         }
@@ -491,17 +548,40 @@ mod tests {
             Ok(true)
         }
 
+        fn records(&self) -> Option<&dyn sink::Records> {
+            Some(self)
+        }
+    }
+
+    #[async_trait]
+    impl sink::Records for Held {
+        async fn ensure_index_as(
+            &self,
+            mapping: &IndexMapping,
+            _: &sink::Stamp,
+        ) -> sink::Result<sink::Ensured> {
+            sink::Sink::ensure_index(self, mapping).await
+        }
+
         async fn detachment(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<Detachment> {
-            if *self.unreadable.lock().unwrap() {
+            self.log.lock().unwrap().push("read");
+            let mut left = self.reads_left.lock().unwrap();
+            if *self.unreadable.lock().unwrap() || *left == Some(0) {
                 return Err(sink::SinkError::Write(
                     "the meta index timed out".to_owned(),
                 ));
+            }
+            if let Some(left) = left.as_mut() {
+                *left -= 1;
             }
             Ok(self.found.lock().unwrap().clone())
         }
 
         async fn detach(&self, _: &IndexMapping, _: &Detach) -> sink::Result<Recorded> {
             self.sent("detach");
+            if std::mem::take(&mut *self.detach_fails.lock().unwrap()) {
+                return Err(sink::SinkError::Write("the detach timed out".to_owned()));
+            }
             Ok(Recorded::Kept)
         }
 
@@ -515,6 +595,15 @@ mod tests {
             Ok(())
         }
 
+        async fn record_gaps(
+            &self,
+            _: &IndexMapping,
+            _: &sink::DecideGaps<'_>,
+            _: &sink::Stamp,
+        ) -> sink::Result<Vec<sink::Gap>> {
+            Ok(Vec::new())
+        }
+
         async fn begin_rebuild(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<u64> {
             self.sent("begin_rebuild");
             Ok(1)
@@ -525,13 +614,13 @@ mod tests {
             Ok(())
         }
 
-        async fn reindex_as(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<()> {
-            self.sent("reindex");
+        async fn mark_seeded_as(&self, _: &IndexName, _: &Stamp) -> sink::Result<()> {
+            self.sent("mark_seeded");
             Ok(())
         }
 
-        async fn mark_seeded_as(&self, _: &IndexName, _: &Stamp) -> sink::Result<()> {
-            self.sent("mark_seeded");
+        async fn reindex_as(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<()> {
+            self.sent("reindex");
             Ok(())
         }
     }
@@ -584,7 +673,7 @@ mod tests {
     async fn every_gated_write_reads_records_from_an_earlier_stream_first() {
         for changed in [true, false] {
             for request in GATED {
-                let sink = Arc::new(Records::default());
+                let sink = Arc::new(Held::default());
                 *sink.found.lock().unwrap() = detached("another process", "1:1");
                 let known = Arc::new(KnownRecords::default());
                 let plain = Plain::new(Arc::clone(&sink) as Arc<dyn Sink>, Arc::clone(&known));
@@ -623,7 +712,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_gated_write_names_why() {
         let mapping = mapping();
-        let sink = Arc::new(Records::default());
+        let sink = Arc::new(Held::default());
         *sink.found.lock().unwrap() = detached("another process", "1:1");
         let known = Arc::new(KnownRecords::default());
         let plain = Plain::new(Arc::clone(&sink) as Arc<dyn Sink>, Arc::clone(&known));
@@ -658,5 +747,148 @@ mod tests {
         let refused = plain.erasing(&rereads, mappings).reindex(&mapping).await;
         assert_eq!(refused.err(), Some(NotHeld::Changed));
         assert!(sink.sent.lock().unwrap().is_empty());
+    }
+
+    /// A sink that keeps records, whose unstamped `ensure_index` would write
+    /// its marker unstamped: the engine must never call it on such a sink.
+    #[derive(Debug, Default)]
+    struct Unstamped {
+        found: Mutex<Detachment>,
+    }
+
+    #[async_trait]
+    impl Sink for Unstamped {
+        async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+            Ok(WriteReport::clean())
+        }
+
+        async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+            Ok(true)
+        }
+
+        async fn ensure_index(&self, _: &IndexMapping) -> sink::Result<Ensured> {
+            self.found.lock().unwrap().marker_stamp = None;
+            Ok(Ensured::default())
+        }
+
+        fn records(&self) -> Option<&dyn sink::Records> {
+            Some(self)
+        }
+    }
+
+    #[async_trait]
+    impl sink::Records for Unstamped {
+        async fn ensure_index_as(&self, _: &IndexMapping, stamp: &Stamp) -> sink::Result<Ensured> {
+            self.found.lock().unwrap().marker_stamp = Some(stamp.clone());
+            Ok(Ensured::default())
+        }
+
+        async fn detachment(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<Detachment> {
+            Ok(self.found.lock().unwrap().clone())
+        }
+
+        async fn detach(&self, _: &IndexMapping, _: &Detach) -> sink::Result<Recorded> {
+            Ok(Recorded::NotKept)
+        }
+
+        async fn forget_detachment(
+            &self,
+            _: &IndexMapping,
+            _: &RecordVersion,
+            _: &Stamp,
+        ) -> sink::Result<()> {
+            Ok(())
+        }
+
+        async fn begin_rebuild(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<u64> {
+            Ok(1)
+        }
+
+        async fn record_gaps(
+            &self,
+            _: &IndexMapping,
+            _: &DecideGaps<'_>,
+            _: &Stamp,
+        ) -> sink::Result<Vec<Gap>> {
+            Ok(Vec::new())
+        }
+
+        async fn demote(&self, _: &IndexMapping, _: bool, _: &Stamp) -> sink::Result<()> {
+            Ok(())
+        }
+
+        async fn mark_seeded_as(&self, _: &IndexName, _: &Stamp) -> sink::Result<()> {
+            Ok(())
+        }
+
+        async fn reindex_as(&self, _: &IndexMapping, _: &Stamp) -> sink::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The review of round 11, m-2: a sink that keeps records has every
+    /// marker write stamped. The engine writes through [`sink::Records`]
+    /// alone on such a sink, which has no unstamped `ensure_index_as`, so
+    /// its own marker write is read back as its own at a later opening.
+    #[tokio::test]
+    async fn a_record_keeping_sink_has_its_marker_writes_stamped() {
+        let sink = Arc::new(Unstamped::default());
+        sink.found.lock().unwrap().marker_stamp = Some(Stamp::new("an earlier start", 4));
+        let known = Arc::new(KnownRecords::default());
+        let plain = Plain::new(Arc::clone(&sink) as Arc<dyn Sink>, Arc::clone(&known));
+        let rereads = Rereads::default();
+        rereads.will_open();
+        rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+        let mapping = mapping();
+        let at = rereads.read_begins();
+        let found = plain.detachment(&mapping).await.unwrap();
+        assert_eq!(known.judge(&mapping.index, &found, at, true), Change::Same);
+        plain.ensure_index(&mapping).await.unwrap();
+        rereads.closed();
+        rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+        let at = rereads.read_begins();
+        let found = plain.detachment(&mapping).await.unwrap();
+        assert_eq!(
+            known.judge(&mapping.index, &found, at, false),
+            Change::Same,
+            "this process's own unstamped marker write is taken for another process's"
+        );
+    }
+
+    /// The review of round 11, m-3: a gated write with nothing read of its
+    /// index yet reads the records first, so this process always knows what
+    /// it wrote over. Its write failing before it landed, with its read back
+    /// lost, never stops one process: the next read finds the records as the
+    /// first read found them.
+    #[tokio::test]
+    async fn a_gated_write_with_nothing_read_reads_first_and_never_stops_one_process() {
+        let mapping = mapping();
+        let sink = Arc::new(Held::default());
+        *sink.found.lock().unwrap() = detached("an earlier start", "1:1");
+        *sink.detach_fails.lock().unwrap() = true;
+        let known = Arc::new(KnownRecords::default());
+        let plain = Plain::new(Arc::clone(&sink) as Arc<dyn Sink>, Arc::clone(&known));
+        // Before any opening, on its own: the one place a gated write could
+        // go out with nothing read. One read answers; the read back fails.
+        let rereads = Rereads::default();
+        *sink.reads_left.lock().unwrap() = Some(1);
+        sink.log.lock().unwrap().clear();
+        let mappings = std::slice::from_ref(&mapping);
+        let detached_now = plain
+            .erasing(&rereads, mappings)
+            .detach(&mapping, &Detach::new("asked"))
+            .await;
+        assert!(matches!(detached_now, Ok(Err(_))), "{detached_now:?}");
+        assert_eq!(
+            *sink.log.lock().unwrap(),
+            ["read", "detach", "read"],
+            "read before the write"
+        );
+        *sink.reads_left.lock().unwrap() = None;
+        rereads.will_open();
+        rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+        let at = rereads.read_begins();
+        let found = plain.detachment(&mapping).await.unwrap();
+        assert_eq!(known.judge(&mapping.index, &found, at, false), Change::Same);
     }
 }

@@ -56,7 +56,7 @@ use kernel::{
 };
 use reqwest::StatusCode;
 use serde_json::Value;
-use sink::Sink;
+use sink::{Records, Sink};
 use sink_opensearch::OpensearchSink;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};

@@ -337,7 +337,7 @@ impl Stamp {
 }
 
 /// What a sink keeps about detaching an index from the slot's minimum (ADR
-/// 0012 stage 10), as [`Sink::detachment`] read it at staging, before
+/// 0012 stage 10), as [`Records::detachment`] read it at staging, before
 /// anything else touches the index.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -357,7 +357,7 @@ pub struct Detachment {
     /// beside a record: `None` with no record, or no marker.
     pub marker: Option<MarkerAt>,
     /// The record's version as read, for a write conditional on it
-    /// ([`Sink::forget_detachment`]): the record's, or the tombstone's a
+    /// ([`Records::forget_detachment`]): the record's, or the tombstone's a
     /// forget left; `None` with neither.
     pub version: Option<RecordVersion>,
     /// Who wrote the record, or the tombstone a forget left in its place
@@ -380,7 +380,7 @@ pub struct Detachment {
     pub gaps: Vec<Gap>,
 }
 
-/// How [`Sink::record_gaps`] decides: the list kept now in, the list to
+/// How [`Records::record_gaps`] decides: the list kept now in, the list to
 /// keep (or `None`: as it is) out.
 pub type DecideGaps<'a> = dyn Fn(&[Gap]) -> Option<Vec<Gap>> + Send + Sync + 'a;
 
@@ -452,7 +452,7 @@ impl RecordVersion {
     }
 }
 
-/// What [`Sink::detach`] records about the lane it detaches (ADR 0012 stage
+/// What [`Records::detach`] records about the lane it detaches (ADR 0012 stage
 /// 10, R4).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -506,7 +506,7 @@ impl Detach {
     }
 }
 
-/// Whether [`Sink::detach`] recorded the detach.
+/// Whether [`Records::detach`] recorded the detach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Recorded {
@@ -557,7 +557,7 @@ impl StuckClock {
 /// and its position.
 ///
 /// **Staging is concurrent across indexes.** The sink engine stages a sink's
-/// indexes several at a time: [`detachment`](Self::detachment) (which may
+/// indexes several at a time: [`detachment`](Records::detachment) (which may
 /// write: it puts a half-moved seed marker back),
 /// [`ensure_index`](Self::ensure_index), [`is_seeded`](Self::is_seeded) and
 /// [`reindex`](Self::reindex) may run at once for *different* indexes, never
@@ -574,7 +574,7 @@ impl StuckClock {
 /// index, and never beside staging. State a sink shares between indexes, such
 /// as one metadata store, must take concurrent calls for different indexes.
 ///
-/// **A detach** ([`detach`](Self::detach)) runs beside writes, seeds and
+/// **A detach** ([`Records::detach`]) runs beside writes, seeds and
 /// staging of other indexes, never beside any call holding the same index.
 #[async_trait]
 pub trait Sink: std::fmt::Debug + Send + Sync {
@@ -605,13 +605,6 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// The default names none and creates nothing.
     async fn ensure_index(&self, _mapping: &IndexMapping) -> Result<Ensured> {
         Ok(Ensured::default())
-    }
-
-    /// [`ensure_index`](Self::ensure_index), a seed marker it writes stamped
-    /// `stamp`. The default, for a sink that keeps no detach records, is
-    /// `ensure_index`.
-    async fn ensure_index_as(&self, mapping: &IndexMapping, _stamp: &Stamp) -> Result<Ensured> {
-        self.ensure_index(mapping).await
     }
 
     /// Write `envelopes`: index each upserted document, remove each deleted
@@ -734,85 +727,6 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         Ok(false)
     }
 
-    /// What this sink keeps about detaching `mapping`'s index, read at the
-    /// start of every staging step, before anything else touches the index.
-    /// A seed marker a detach left half moved, with no record beside it, is
-    /// put back first, stamped `stamp`. Only "nothing kept" reads as empty:
-    /// any other failure to read is an `Err`, so a record is never missed.
-    /// The default keeps nothing.
-    async fn detachment(&self, _: &IndexMapping, _stamp: &Stamp) -> Result<Detachment> {
-        Ok(Detachment::default())
-    }
-
-    /// Record that `mapping`'s index is detached from the slot's minimum
-    /// (ADR 0012 stage 10, R4), in this order: the seed marker moves to a
-    /// copy that doesn't exist yet, keeping where it was (skipped when
-    /// `live_only`); then the detach record is written; then unserved copies
-    /// are deleted, best effort. Each write is conditional on what was read
-    /// first, and a conflict reads again and decides again. A marker a detach
-    /// already moved stays where it is. Called once nothing of the index is
-    /// in flight. `Kept` only once the marker and the record are durable;
-    /// the default keeps nothing, so a sink without records never detaches.
-    async fn detach(&self, _: &IndexMapping, _: &Detach) -> Result<Recorded> {
-        Ok(Recorded::NotKept)
-    }
-
-    /// Forget `mapping`'s detach record, if it is still the one read at
-    /// `version`: a tombstone stamped `stamp` takes its place, so who forgot
-    /// it can be read back. A later write wins, and the call fails so the
-    /// caller reads again. A record already gone is not an error. The
-    /// default has nothing to forget.
-    async fn forget_detachment(
-        &self,
-        _: &IndexMapping,
-        _: &RecordVersion,
-        _stamp: &Stamp,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    /// Begin a rebuild of `mapping`'s detached index (ADR 0012 stage 10,
-    /// r1): delete every copy but the one serving reads (a refused delete
-    /// fails the attempt), move the seed marker past every existing copy,
-    /// unseeded, and record the rebuild as started, counting one more
-    /// attempt, each write conditional on what was read. Returns the
-    /// attempt, the one the attach names. The marker and the record are
-    /// stamped `stamp`. The default keeps no records and refuses: a sink
-    /// without records never detaches.
-    async fn begin_rebuild(&self, mapping: &IndexMapping, _stamp: &Stamp) -> Result<u64> {
-        Err(crate::SinkError::Write(format!(
-            "{} keeps no detach records to rebuild from",
-            mapping.index
-        )))
-    }
-
-    /// Change the gaps kept with `mapping`'s seed marker (ADR 0012 stage 10,
-    /// O16): `decide` is handed the list kept now and answers the list to
-    /// keep, or `None` to keep it as it is. The write is conditional on what
-    /// was read: another writer meanwhile makes the sink read again and ask
-    /// `decide` again. Returns the list kept after. So a fence never vouches
-    /// inside any gap, after a restart too. A seed or a reindex drops them:
-    /// the index then holds every change. The gaps written are stamped
-    /// `stamp`. The default keeps nothing.
-    async fn record_gaps(
-        &self,
-        _: &IndexMapping,
-        _: &DecideGaps<'_>,
-        _stamp: &Stamp,
-    ) -> Result<Vec<Gap>> {
-        Ok(Vec::new())
-    }
-
-    /// Put a rebuild of `mapping`'s index back to detached (ADR 0012 stage
-    /// 10, O26, R14): the record says `detached` again, the partial copy and
-    /// its checkpoint go. `live_only`: the sink can't rebuild any more, so
-    /// the marker goes back on the serving copy as it was; otherwise it
-    /// moves past every existing copy. The marker and the record are stamped
-    /// `stamp`. The default keeps nothing to change.
-    async fn demote(&self, _: &IndexMapping, _live_only: bool, _stamp: &Stamp) -> Result<()> {
-        Ok(())
-    }
-
     /// What staging needs of `index`: seeded, or, when not, where its last
     /// backfill durably got, if this sink recorded it
     /// ([`record_walked`](Self::record_walked)). The default reads
@@ -877,13 +791,6 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         Ok(())
     }
 
-    /// [`mark_seeded`](Self::mark_seeded), the marker it writes and the
-    /// tombstone of a finished rebuild's record stamped `stamp`. The
-    /// default, for a sink that keeps no detach records, is `mark_seeded`.
-    async fn mark_seeded_as(&self, index: &IndexName, _stamp: &Stamp) -> Result<()> {
-        self.mark_seeded(index).await
-    }
-
     /// Request a from-scratch rebuild of `index` on the next backfill: mark it
     /// unseeded so [`is_seeded`](Self::is_seeded) reports `false` again, *without*
     /// disturbing what currently serves reads. A sink that builds into a fresh,
@@ -905,12 +812,6 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         Ok(())
     }
 
-    /// [`reindex`](Self::reindex), the marker it writes stamped `stamp`. The
-    /// default, for a sink that keeps no detach records, is `reindex`.
-    async fn reindex_as(&self, mapping: &IndexMapping, _stamp: &Stamp) -> Result<()> {
-        self.reindex(mapping).await
-    }
-
     /// Whether the destination is a stream its readers consume in order (an
     /// emitting sink, such as stdout): the engine then hands it lane items in
     /// exact lane order, one write at a time, whatever `[concurrency] writes`
@@ -926,4 +827,95 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     fn ordered(&self) -> bool {
         false
     }
+
+    /// The detach records this sink keeps ([`Records`]): `None` for a
+    /// sink that keeps none, whose staging reads nothing kept and whose
+    /// detach keeps nothing. A sink that keeps records answers itself, and
+    /// so writes every record and marker through `Records`, stamped: it has
+    /// no unstamped way to write one (the review of round 11, m-2).
+    fn records(&self) -> Option<&dyn Records> {
+        None
+    }
+}
+
+/// The detach records a sink keeps (ADR 0012 stage 10), reached through
+/// [`Sink::records`]. Every method that writes a record or the seed marker
+/// takes the writer's [`Stamp`] and has no default, so a sink that keeps
+/// records can't write one unstamped by leaving a method out: the engine
+/// calls these, never [`Sink::ensure_index`], [`Sink::mark_seeded`] or
+/// [`Sink::reindex`], on such a sink. The concurrency rules are
+/// [`Sink`]'s.
+#[async_trait]
+pub trait Records: Send + Sync {
+    /// [`Sink::ensure_index`], a seed marker it writes stamped `stamp`.
+    async fn ensure_index_as(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<Ensured>;
+
+    /// What this sink keeps about detaching `mapping`'s index, read at the
+    /// start of every staging step, before anything else touches the index.
+    /// A seed marker a detach left half moved, with no record beside it, is
+    /// put back first, stamped `stamp`, its gaps with it. Only "nothing kept"
+    /// reads as empty: any other failure to read is an `Err`, so a record is
+    /// never missed.
+    async fn detachment(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<Detachment>;
+
+    /// Record that `mapping`'s index is detached from the slot's minimum
+    /// (ADR 0012 stage 10, R4), in this order: the seed marker moves to a
+    /// copy that doesn't exist yet, keeping where it was, gaps included
+    /// (skipped when `live_only`); then the detach record is written; then
+    /// unserved copies are deleted, best effort. Each write is conditional on
+    /// what was read first, stamped `detach.stamp`, and a conflict reads again
+    /// and decides again. A marker a detach already moved stays where it is.
+    /// Called once nothing of the index is in flight. `Kept` only once the
+    /// marker and the record are durable.
+    async fn detach(&self, mapping: &IndexMapping, detach: &Detach) -> Result<Recorded>;
+
+    /// Forget `mapping`'s detach record, if it is still the one read at
+    /// `version`: a tombstone stamped `stamp` takes its place, so who forgot
+    /// it can be read back. A later write wins, and the call fails so the
+    /// caller reads again.
+    async fn forget_detachment(
+        &self,
+        mapping: &IndexMapping,
+        version: &RecordVersion,
+        stamp: &Stamp,
+    ) -> Result<()>;
+
+    /// Begin a rebuild of `mapping`'s detached index (ADR 0012 stage 10,
+    /// r1): delete every copy but the one serving reads (a refused delete
+    /// fails the attempt), move the seed marker past every existing copy,
+    /// unseeded, and record the rebuild as started, counting one more
+    /// attempt, each write conditional on what was read. Returns the
+    /// attempt, the one the attach names. The marker and the record are
+    /// stamped `stamp`.
+    async fn begin_rebuild(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<u64>;
+
+    /// Change the gaps kept with `mapping`'s seed marker (ADR 0012 stage 10,
+    /// O16): `decide` is handed the list kept now and answers the list to
+    /// keep, or `None` to keep it as it is. The write is conditional on what
+    /// was read: another writer meanwhile makes the sink read again and ask
+    /// `decide` again. Returns the list kept after. So a fence never vouches
+    /// inside any gap, after a restart too. A seed or a reindex drops them:
+    /// the index then holds every change. The gaps written are stamped
+    /// `stamp`.
+    async fn record_gaps(
+        &self,
+        mapping: &IndexMapping,
+        decide: &DecideGaps<'_>,
+        stamp: &Stamp,
+    ) -> Result<Vec<Gap>>;
+
+    /// Put a rebuild of `mapping`'s index back to detached (ADR 0012 stage
+    /// 10, O26, R14): the record says `detached` again, the partial copy and
+    /// its checkpoint go. `live_only`: the sink can't rebuild any more, so
+    /// the marker goes back on the serving copy as it was, gaps included;
+    /// otherwise it moves past every existing copy. The marker and the record
+    /// are stamped `stamp`.
+    async fn demote(&self, mapping: &IndexMapping, live_only: bool, stamp: &Stamp) -> Result<()>;
+
+    /// [`Sink::mark_seeded`], the marker it writes and the tombstone of a
+    /// finished rebuild's record stamped `stamp`.
+    async fn mark_seeded_as(&self, index: &IndexName, stamp: &Stamp) -> Result<()>;
+
+    /// [`Sink::reindex`], the marker it writes stamped `stamp`.
+    async fn reindex_as(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<()>;
 }

@@ -1655,6 +1655,21 @@ impl Sink for ChangedAfterTheFirstRead {
         Ok(true)
     }
 
+    fn records(&self) -> Option<&dyn sink::Records> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl sink::Records for ChangedAfterTheFirstRead {
+    async fn ensure_index_as(
+        &self,
+        mapping: &IndexMapping,
+        _: &sink::Stamp,
+    ) -> sink::Result<sink::Ensured> {
+        sink::Sink::ensure_index(self, mapping).await
+    }
+
     async fn detachment(
         &self,
         _: &IndexMapping,
@@ -1668,6 +1683,47 @@ impl Sink for ChangedAfterTheFirstRead {
             Some(sink::MarkerAt::Newer { seeded: false }),
             Some(sink::RecordVersion::new("1:1")),
         ))
+    }
+
+    async fn detach(&self, _: &IndexMapping, _: &sink::Detach) -> sink::Result<sink::Recorded> {
+        Ok(sink::Recorded::NotKept)
+    }
+
+    async fn forget_detachment(
+        &self,
+        _: &IndexMapping,
+        _: &sink::RecordVersion,
+        _: &sink::Stamp,
+    ) -> sink::Result<()> {
+        Ok(())
+    }
+
+    async fn record_gaps(
+        &self,
+        _: &IndexMapping,
+        _: &sink::DecideGaps<'_>,
+        _: &sink::Stamp,
+    ) -> sink::Result<Vec<sink::Gap>> {
+        Ok(Vec::new())
+    }
+
+    async fn begin_rebuild(&self, mapping: &IndexMapping, _: &sink::Stamp) -> sink::Result<u64> {
+        Err(sink::SinkError::Write(format!(
+            "{}: no records to rebuild from",
+            mapping.index
+        )))
+    }
+
+    async fn demote(&self, _: &IndexMapping, _: bool, _: &sink::Stamp) -> sink::Result<()> {
+        Ok(())
+    }
+
+    async fn mark_seeded_as(&self, index: &IndexName, _: &sink::Stamp) -> sink::Result<()> {
+        sink::Sink::mark_seeded(self, index).await
+    }
+
+    async fn reindex_as(&self, mapping: &IndexMapping, _: &sink::Stamp) -> sink::Result<()> {
+        sink::Sink::reindex(self, mapping).await
     }
 }
 

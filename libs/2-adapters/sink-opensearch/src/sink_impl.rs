@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
 use serde_json::{Value, json};
 use sink::{
-    CaughtUp, Ensured, RejectedDocument, Result, Seeding, Sink, SinkError, Stamp, TargetId,
-    Visibility, WriteReport,
+    CaughtUp, Ensured, Records, RejectedDocument, Result, Seeding, Sink, SinkError, Stamp,
+    TargetId, Visibility, WriteReport,
 };
 use tracing::{debug, info, warn};
 
@@ -25,10 +25,6 @@ use crate::{IndexTarget, OpensearchSink};
 impl Sink for OpensearchSink {
     async fn ensure_index(&self, mapping: &IndexMapping) -> Result<Ensured> {
         self.ensure_generation(mapping, None).await
-    }
-
-    async fn ensure_index_as(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<Ensured> {
-        self.ensure_generation(mapping, Some(stamp)).await
     }
 
     /// Write `envelopes` as one or more bulk requests.
@@ -229,44 +225,6 @@ impl Sink for OpensearchSink {
         Ok(!serving.is_empty() && !serving.contains(&target.generation))
     }
 
-    async fn detachment(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<sink::Detachment> {
-        self.read_detachment(mapping, stamp).await
-    }
-
-    async fn detach(
-        &self,
-        mapping: &IndexMapping,
-        detach: &sink::Detach,
-    ) -> Result<sink::Recorded> {
-        self.write_detach(mapping, detach).await
-    }
-
-    async fn forget_detachment(
-        &self,
-        mapping: &IndexMapping,
-        version: &sink::RecordVersion,
-        stamp: &Stamp,
-    ) -> Result<()> {
-        self.forget_detach(mapping, version, stamp).await
-    }
-
-    async fn record_gaps(
-        &self,
-        mapping: &IndexMapping,
-        decide: &sink::DecideGaps<'_>,
-        stamp: &Stamp,
-    ) -> Result<Vec<sink::Gap>> {
-        self.write_gaps(mapping, decide, stamp).await
-    }
-
-    async fn begin_rebuild(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<u64> {
-        self.write_rebuild(mapping, stamp).await
-    }
-
-    async fn demote(&self, mapping: &IndexMapping, live_only: bool, stamp: &Stamp) -> Result<()> {
-        self.write_demotion(mapping, live_only, stamp).await
-    }
-
     async fn seeding(&self, index: &IndexName) -> Result<Seeding> {
         let Some(target) = self.target(index.as_ref()) else {
             return Ok(Seeding::Unseeded { walked: None });
@@ -312,12 +270,61 @@ impl Sink for OpensearchSink {
         self.seed(index, None).await
     }
 
-    async fn mark_seeded_as(&self, index: &IndexName, stamp: &Stamp) -> Result<()> {
-        self.seed(index, Some(stamp)).await
-    }
-
     async fn reindex(&self, mapping: &IndexMapping) -> Result<()> {
         self.stage_reindex(mapping, None).await
+    }
+
+    fn records(&self) -> Option<&dyn Records> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl Records for OpensearchSink {
+    async fn ensure_index_as(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<Ensured> {
+        self.ensure_generation(mapping, Some(stamp)).await
+    }
+
+    async fn detachment(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<sink::Detachment> {
+        self.read_detachment(mapping, stamp).await
+    }
+
+    async fn detach(
+        &self,
+        mapping: &IndexMapping,
+        detach: &sink::Detach,
+    ) -> Result<sink::Recorded> {
+        self.write_detach(mapping, detach).await
+    }
+
+    async fn forget_detachment(
+        &self,
+        mapping: &IndexMapping,
+        version: &sink::RecordVersion,
+        stamp: &Stamp,
+    ) -> Result<()> {
+        self.forget_detach(mapping, version, stamp).await
+    }
+
+    async fn record_gaps(
+        &self,
+        mapping: &IndexMapping,
+        decide: &sink::DecideGaps<'_>,
+        stamp: &Stamp,
+    ) -> Result<Vec<sink::Gap>> {
+        self.write_gaps(mapping, decide, stamp).await
+    }
+
+    async fn begin_rebuild(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<u64> {
+        self.write_rebuild(mapping, stamp).await
+    }
+
+    async fn demote(&self, mapping: &IndexMapping, live_only: bool, stamp: &Stamp) -> Result<()> {
+        self.write_demotion(mapping, live_only, stamp).await
+    }
+
+    async fn mark_seeded_as(&self, index: &IndexName, stamp: &Stamp) -> Result<()> {
+        self.seed(index, Some(stamp)).await
     }
 
     async fn reindex_as(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<()> {

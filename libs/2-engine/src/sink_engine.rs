@@ -968,7 +968,7 @@ impl SinkEngine {
         Ok(())
     }
 
-    /// Forget the detach record a failed `Sink::detach` of `index` may have
+    /// Forget the detach record a failed `Records::detach` of `index` may have
     /// left, on the version read, then read again, which puts the moved
     /// marker back (§5). Only a record this process wrote is forgotten
     /// (its stamp, the review of round 10, B-2); any other is left as it is.
@@ -1911,12 +1911,8 @@ impl SinkEngine {
                 } else {
                     // O29: owed while this process holds no slot (`slot`),
                     // retried on the restage backoff.
-                    self.erasing().reindex(mapping).await.map_err(|_| {
-                        sink::SinkError::Write(
-                            "the reindex waits until this process holds the slot (its stream \
-                             ended or its opening failed)"
-                                .to_owned(),
-                        )
+                    self.erasing().reindex(mapping).await.map_err(|refused| {
+                        sink::SinkError::Write(format!("the reindex waits: {refused}"))
                     })??;
                 }
                 (ask_seeded, false)
@@ -2246,13 +2242,11 @@ impl SinkEngine {
     ) -> sink::Result<(u64, Option<TargetId>)> {
         // O29: refused while this process holds no slot (`slot`), the rebuild
         // is owed and tried again once the slot is held.
-        let attempts = self.erasing().begin_rebuild(mapping).await.map_err(|_| {
-            sink::SinkError::Write(
-                "the rebuild waits until this process holds the slot (its stream ended or \
-                     its opening failed)"
-                    .to_owned(),
-            )
-        })??;
+        let attempts = self
+            .erasing()
+            .begin_rebuild(mapping)
+            .await
+            .map_err(|refused| sink::SinkError::Write(format!("the rebuild waits: {refused}")))??;
         let ensured = self.sink.ensure_index(mapping).await?;
         self.observer
             .on_index_rebuilding(&self.name, &mapping.index);

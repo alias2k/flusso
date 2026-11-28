@@ -1,5 +1,5 @@
 //! Reading the detach records at staging (ADR 0012 stage 10, slice 1): the
-//! sink's [`Sink::detachment`] is read at the top of every staging step,
+//! sink's [`Records::detachment`](sink::Records::detachment) is read at the top of every staging step,
 //! before anything else touches the index. A record found is logged and kept
 //! for its lane, and the index is staged as before (O24). A read that fails
 //! fails that index's step alone under `Resumed` (#471) and the staging under
@@ -109,6 +109,37 @@ struct Kept {
 
 #[async_trait]
 impl Sink for Kept {
+    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
+        self.plain.ensure_index(mapping).await
+    }
+
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
+        self.plain.write(envelopes, caught_up).await
+    }
+
+    async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {
+        self.plain.is_seeded(index).await
+    }
+
+    async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
+        self.plain.reindex(mapping).await
+    }
+
+    fn records(&self) -> Option<&dyn sink::Records> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl sink::Records for Kept {
+    async fn ensure_index_as(
+        &self,
+        mapping: &IndexMapping,
+        _: &sink::Stamp,
+    ) -> sink::Result<sink::Ensured> {
+        sink::Sink::ensure_index(self, mapping).await
+    }
+
     async fn detachment(
         &self,
         mapping: &IndexMapping,
@@ -126,20 +157,45 @@ impl Sink for Kept {
         }
     }
 
-    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
-        self.plain.ensure_index(mapping).await
+    async fn detach(&self, _: &IndexMapping, _: &sink::Detach) -> sink::Result<sink::Recorded> {
+        Ok(sink::Recorded::NotKept)
     }
 
-    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
-        self.plain.write(envelopes, caught_up).await
+    async fn forget_detachment(
+        &self,
+        _: &IndexMapping,
+        _: &sink::RecordVersion,
+        _: &sink::Stamp,
+    ) -> sink::Result<()> {
+        Ok(())
     }
 
-    async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {
-        self.plain.is_seeded(index).await
+    async fn record_gaps(
+        &self,
+        _: &IndexMapping,
+        _: &sink::DecideGaps<'_>,
+        _: &sink::Stamp,
+    ) -> sink::Result<Vec<sink::Gap>> {
+        Ok(Vec::new())
     }
 
-    async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
-        self.plain.reindex(mapping).await
+    async fn begin_rebuild(&self, mapping: &IndexMapping, _: &sink::Stamp) -> sink::Result<u64> {
+        Err(sink::SinkError::Write(format!(
+            "{}: no records to rebuild from",
+            mapping.index
+        )))
+    }
+
+    async fn demote(&self, _: &IndexMapping, _: bool, _: &sink::Stamp) -> sink::Result<()> {
+        Ok(())
+    }
+
+    async fn mark_seeded_as(&self, index: &IndexName, _: &sink::Stamp) -> sink::Result<()> {
+        sink::Sink::mark_seeded(self, index).await
+    }
+
+    async fn reindex_as(&self, mapping: &IndexMapping, _: &sink::Stamp) -> sink::Result<()> {
+        sink::Sink::reindex(self, mapping).await
     }
 }
 

@@ -3308,11 +3308,10 @@ impl<'a> Run<'a> {
                     // A detach of this lane whose outcome was unknown is
                     // settled by this read, as staging settles it: a record
                     // found is that detach having landed (another process's
-                    // would have stopped the deployment), so its clear has
-                    // nothing left to do (the review of round 10, m-8).
-                    if let Some(run) = self.lanes.get_mut(lane) {
-                        run.health.detach_unsure = false;
-                    }
+                    // would have stopped the deployment). Taking the lane
+                    // detached starts its state anew (`LaneState::detach`),
+                    // so its clear has nothing left to do (the review of
+                    // round 10, m-8).
                     tracing::warn!(%index, sink = %self.engine.name, %why, "read again once the slot is held, the records say the index is detached: taken as detached before anything of it is written (O29)");
                     self.detached(lane, why, through).await?;
                 }

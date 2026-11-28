@@ -289,7 +289,7 @@ fn now() -> String {
 }
 
 impl OpensearchSink {
-    /// r1 of a rebuild (see [`Sink::begin_rebuild`](sink::Sink::begin_rebuild)):
+    /// r1 of a rebuild (see [`Records::begin_rebuild`](sink::Records::begin_rebuild)):
     /// delete every generation but the record's `serving`, move the marker
     /// past every existing generation (keeping `detaching_from`), and write
     /// the record `rebuilding` with one more attempt, both stamped `stamp`.

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use kernel::{ColumnName, GenericValue, RowKey};
 use serde_json::{Value, json};
-use sink::{Detach, DetachRecord, MarkerAt, Recorded, Sink};
+use sink::{Detach, DetachRecord, MarkerAt, Recorded, Records};
 
 use super::{ALIAS, DETACH, Stub, mapping, stamp};
 
