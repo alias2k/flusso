@@ -162,7 +162,7 @@ With fewer than two OpenSearch sinks nothing is compared. Otherwise:
 | Where | Compared |
 | --- | --- |
 | `check --offline` | The URLs, normalized: scheme, host in lowercase, port (the scheme's default when none is written), path without a trailing `/`. Credentials aren't compared. |
-| `check`, and every `flusso run` | The URLs, then each cluster's `cluster_uuid`, read from `GET /`, so two URLs that reach one cluster (a load balancer and a node, say) are caught too. `run` compares right after it validates the config, before it connects to anything else. |
+| `check`, and every `flusso run` | The URLs, then each cluster's `cluster_uuid`, read from `GET /`, so two URLs that reach one cluster (a load balancer and a node, say) are caught too. Every cluster is asked at once, each for at most 10 s. `run` asks once it has bound its HTTP listeners, before it connects to Postgres. |
 
 A shared pair is an error:
 
@@ -180,7 +180,17 @@ A sink that can't be compared is `check_skipped`, a warning, and the run goes on
   ! [sinks.backup] was not compared with the other OpenSearch sinks for a shared cluster (<why>); `flusso run` checks it where it can reach the cluster
 ```
 
-`<why>` is why the `url` couldn't be resolved (`environment variable '<VAR>' is not set`, `invalid HTTP URL: …`), `not a URL this check reads`, or `its cluster could not be asked its cluster_uuid: <error>` (a cluster down, or a role that can't read `GET /`). At `run` it's a `WARN` log line.
+`<why>` is one of:
+
+- why the `url` couldn't be resolved: `environment variable '<VAR>' is not set`, `invalid HTTP URL: …`;
+- `not a URL this check reads`;
+- `its cluster could not be asked its cluster_uuid: <error>`: a cluster down, a role that can't read `GET /`, `no answer within 10 s`, or a cluster not formed yet, `… the cluster answers cluster_uuid "_na_", which names no cluster (no cluster manager elected yet)`. Such a cluster is never compared, so it never matches another.
+
+At `run` it's a `WARN` log line, and the start goes on:
+
+```text
+[sinks.backup] was not compared with the other OpenSearch sinks for a shared cluster (<why>); starting anyway. If two of them write to one cluster, they share every index, alias and seed marker, and the deployment stops at the first read that finds the other's record writes
+```
 
 ## Validation at start
 

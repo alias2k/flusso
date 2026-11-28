@@ -26,7 +26,7 @@ Runs the full load and validation, then writes the whole configuration, every sc
 
 ## run
 
-Like `cargo run`, it compiles first. With a `flusso.toml` present (the default path or `--config`) it recompiles, **rewrites `flusso.lock`** when the bytes changed, and runs that. With no config it loads the existing lock. Connection and credentials resolve here, in the running environment. With two or more OpenSearch sinks it first refuses [two on one cluster](checks.md#two-opensearch-sinks-on-one-cluster). Then: [validate against the database](checks.md#validation-at-start), continuity check, ensure indexes, backfill unseeded ones, follow live changes, serve the two HTTP surfaces until a signal or an error.
+Like `cargo run`, it compiles first. With a `flusso.toml` present (the default path or `--config`) it recompiles, **rewrites `flusso.lock`** when the bytes changed, and runs that. With no config it loads the existing lock. Connection and credentials resolve here, in the running environment. With two or more OpenSearch sinks it refuses [two on one cluster](checks.md#two-opensearch-sinks-on-one-cluster), once it has bound its HTTP listeners. Then: [validate against the database](checks.md#validation-at-start), continuity check, ensure indexes, backfill unseeded ones, follow live changes, serve the two HTTP surfaces until a signal or an error.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -239,14 +239,21 @@ Both schemas are also published per release at `https://alias2k.github.io/flusso
 
 ## reindex
 
-[`POST /indexes/<name>/reindex[?sink=<name>]`](http.md#post-indexesnamereindexsinkname) on a running server. Returns immediately with `202` and prints `reindex of users on every sink queued` (or `on primary`); each targeted sink engine stages a fresh generation and requests its own snapshot while the current generation keeps serving. Nothing restarts. Watch `/status` for the index returning to `seeded` under that sink. See [Reindex without downtime](../operate/reindex.md).
+[`POST /indexes/<name>/reindex[?sink=<name>]`](http.md#post-indexesnamereindexsinkname) on a running server. Returns immediately with `202` and prints `reindex of users queued on primary, audit` (with `--sink primary`, `reindex of users on primary queued`); each targeted sink engine stages a fresh generation and requests its own snapshot while the current generation keeps serving. Nothing restarts. Watch `/status` for the index returning to `seeded` under that sink. See [Reindex without downtime](../operate/reindex.md).
 
 ```sh
 flusso reindex users --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
 flusso reindex users --sink primary --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
 ```
 
-Same connection flags as `indexes`; the index name is positional, and one that isn't a valid index name is refused before anything is sent (`"<name>" is not an index name`). `--sink` (`FLUSSO_SINK`) limits the rebuild to one sink; omitted, every sink rebuilds, sharing one pass over the table. On a detached index it begins a rebuild ([Bring back a detached index](../operate/detached-index.md)). A refusal fails the command, exit `1`, with `server returned <status>: <body>`: a `409` when the rebuild is [skipped](http.md#a-reindex-that-is-skipped), a `503` while flusso stops. A `202` that skipped some sinks prints the queued line alone; the skipped sinks are in the server's body.
+Same connection flags as `indexes`; the index name is positional, and one that isn't a valid index name is refused before anything is sent (`"<name>" is not an index name`). `--sink` (`FLUSSO_SINK`) limits the rebuild to one sink; omitted, every sink rebuilds, sharing one pass over the table. On a detached index it begins a rebuild ([Bring back a detached index](../operate/detached-index.md)). Without `--sink`, each sink the reindex [skipped](http.md#a-reindex-that-is-skipped) gets a line of its own after the queued one, exit `0`:
+
+```text
+reindex of users queued on primary
+skipped on audit: this sink can't rebuild the index (backfill = false): flusso reattach users --sink audit --accept-gap
+```
+
+A refusal fails the command, exit `1`, with `server returned <status>: <body>`: a `409` when the sink named, or every sink, is skipped, a `503` while flusso stops.
 
 ## reattach
 

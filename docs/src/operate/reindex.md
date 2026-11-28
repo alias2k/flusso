@@ -20,7 +20,7 @@ Data in the index has drifted from the source (a bug, a manual edit, rows import
    flusso reindex users --server 10.0.0.5:9465 --admin-password "$FLUSSO_ADMIN_PASSWORD"
    ```
 
-   The server answers `202` and the command prints `reindex of users on every sink queued`. Each sink engine stages generation `n+1` behind the same hash alias between two batches and requests a snapshot; the ingest engine serves it alongside live changes. Reads keep hitting generation `n` through the alias the whole time, nothing restarts, and the other sinks are untouched. Add `--sink primary` to rebuild on one sink only.
+   The server answers `202` and the command prints `reindex of users queued on primary, audit` (the sinks it was queued on), then a `skipped on <sink>: <reason>` line for each sink it [left out](../reference/http.md#a-reindex-that-is-skipped). Each sink engine stages generation `n+1` behind the same hash alias between two batches and requests a snapshot; the ingest engine serves it alongside live changes. Reads keep hitting generation `n` through the alias the whole time, nothing restarts, and the other sinks are untouched. Add `--sink primary` to rebuild on one sink only.
 
 3. **Watch it land.** In `/status`, `users` goes `backfilling`, then `seeded` under the sink. At that moment the alias flips to `n+1` and `n` is dropped. If `n` carries `index.blocks.read_only` or `read_only_allow_delete`, the swap can't drop it: the lane parks `blocked` and `users` stays `backfilling` until `n` is freed ([A seed that can't retire the old generation](stalled-lane.md#a-seed-that-cant-retire-the-old-generation)).
 

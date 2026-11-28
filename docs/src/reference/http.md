@@ -19,7 +19,7 @@ Bind addresses: `--public-address` / `--private-address`, then `FLUSSO_PUBLIC_AD
 
 `200` when the phase is `backfilling` or `live` and so is every sink's; `503` otherwise: while `starting`, while a sink is `failed` and waits to restart, from `stopping` on. A stopping or stopped pipeline is deliberately not ready.
 
-A [parked lane](#lane-health) leaves `/readyz` at `200`: the other indexes are written and served, and a restart would not unpark it. Watch the lane instead: its `health` in `/status`, the `flusso_lane_parked` series, and the `FlussoLaneParked` alert ([A lane is stalled](../operate/stalled-lane.md)).
+A [parked lane](#lane-health) leaves `/readyz` at `200`: the other indexes are written and served, and a restart would not unpark it. Watch the lane instead: its `health` in `/status`, the `flusso_lane_parked` series, and the `FlussoLaneParked` alert ([A lane is stalled](../operate/stalled-lane.md)). So does a `detached` lane, or one with a [gap](#a-wait-inside-a-gap): `/status` shows them (`detached`, `gaps`) and [`/wait`](#get-waitpositionposition) refuses what they can't vouch for.
 
 ## GET /status
 
@@ -326,7 +326,7 @@ curl -u admin:… -X POST 'http://10.0.0.5:9465/indexes/users/reindex?sink=prima
 
 | Response | When |
 | --- | --- |
-| `202 Accepted` | Queued: `{"index": "users", "sink": "primary", "queued": true}`, with `"sink": null` for every sink. Each targeted sink engine stages the new generation between two batches and requests its own snapshot; nothing restarts, reads stay on the old generation until the swap, and untargeted sinks are untouched. A sink with `backfill = false` logs and ignores it. Without `sink`, `skipped` lists the sinks it [didn't queue on](#a-reindex-that-is-skipped), when any. Watch `/status` for the index leaving and returning to `seeded` under that sink. On a [detached](#lane-health) index it begins a rebuild: [Bring back a detached index](../operate/detached-index.md). |
+| `202 Accepted` | Queued: `{"index": "users", "sink": "primary", "queued": true, "queued_on": ["primary"]}`, with `"sink": null` for every sink; `queued_on` lists the sinks it was queued on. Each targeted sink engine stages the new generation between two batches and requests its own snapshot; nothing restarts, reads stay on the old generation until the swap, and untargeted sinks are untouched. A sink with `backfill = false` logs and ignores it. Without `sink`, `skipped` lists the sinks it [didn't queue on](#a-reindex-that-is-skipped), when any. Watch `/status` for the index leaving and returning to `seeded` under that sink. On a [detached](#lane-health) index it begins a rebuild: [Bring back a detached index](../operate/detached-index.md). |
 | `400` | `{"error": "invalid index name \"…\""}` or `{"error": "invalid sink name \"…\""}`. |
 | `401` | Credentials missing or wrong. |
 | `404` | `{"error": "unknown index <name>", "indexes": [...]}`: not an enabled index. `{"error": "unknown sink <name>"}`: not a configured sink. |
@@ -424,7 +424,7 @@ The answer waits for the sink engine's verdict, given between two batches, for a
 | `the lane is not detached` | Nothing to reattach. |
 | `the lane is being attached already` | A reattach or rebuild is under way. |
 | `the sink keeps no detach record of the index: it is not detached` | The records say otherwise than the lane. |
-| `the seed marker is not on the seeded generation reads see (a demotion not finished); restart flusso: …` | Restart flusso, which puts the records back to detached on the generation reads see, then reattach again. |
+| `the seed marker is not on the generation reads see (a demotion not finished); restart flusso: …` | Restart flusso, which puts the record back to detached, live only, on the generation reads see; then reattach again. |
 | `the record was written while this sink could rebuild; restart flusso: …` | The same. |
 | `the record says <record>, not detached; restart flusso: …` | The same. |
 | `the record was read without its version` | Ask again. |

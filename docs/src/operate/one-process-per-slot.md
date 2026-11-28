@@ -4,7 +4,7 @@ One replication slot, one flusso process. A second process on the same slot can 
 
 ## When to use this
 
-- `flusso run` exited `1` with `another flusso process changed the index's detach records …`.
+- `flusso run` exited `1` with `another flusso process changed the index's detach record or seed marker …`.
 - A deploy could run two processes on one slot at once: a rolling update, a second host, a 0.18 process left running beside 0.19.
 - During a reconnect, a seed, a reindex or a reattach waits instead of going through.
 
@@ -23,13 +23,13 @@ flusso keeps a few records per index in each OpenSearch sink's [meta documents](
 The log has an `ERROR` with `index`, `sink` and `what`:
 
 ```text
-another flusso process changed the index's detach records while this one didn't hold the slot: stopping the deployment; no change of this index confirmed past what its records cover
+another flusso process changed the index's detach record or seed marker while this one didn't hold the slot: stopping the deployment; no change of this index confirmed past what they cover
 ```
 
 and the process exits `1` with:
 
 ```text
-Error: sink `primary`, index `users`: another flusso process changed the index's detach records while this one didn't hold the replication slot (<what changed>). Stopping: flusso doesn't carry on over another process's record changes. No change of this index was confirmed past what its records cover; start flusso again (one process per slot) and its start decides from the records
+Error: sink `primary`, index `users`: another flusso process changed the index's detach record or seed marker while this one didn't hold the replication slot (<what changed>). Stopping: flusso doesn't carry on over another process's changes to them. No change of this index was confirmed past what they cover; start flusso again (one process per slot) and its start decides from them
 ```
 
 `<what changed>` names the record or the seed marker before and after, and who wrote each: `writer <16 hex digits> (write <n>)`, one writer per sink engine per process start, or `nobody known (no stamp)` for a write with no stamp (an older flusso's).
@@ -45,7 +45,7 @@ Error: sink `primary`, index `users`: another flusso process changed the index's
 2. **Stop it**, or give it its own `--slot` (and, for a separate deployment, its own [`prefix`](../reference/config-toml.md#prefix)).
 3. **Start flusso again.** Its start reads the records and decides from them.
 
-**Nothing is lost.** No change of the index was confirmed to the slot past what its records cover, so the next start reads the rest again.
+**Nothing is lost.** No change of the index was confirmed to the slot past what its detach record and seed marker cover, so the next start reads the rest again.
 
 ## While flusso doesn't hold the slot
 

@@ -10,7 +10,7 @@ A detached index stays readable but frozen. A reindex rebuilds it on a sink that
 - **Nothing reaches it.** Changes made since aren't applied to that index on that sink. Its other sinks, and the sink's other indexes, carry on.
 - **Fences stop at the detach.** A [`/wait`](../reference/http.md#get-waitpositionposition) for a position the index had reached passes; one past it is answered at once with `503` and the reason `detached`.
 - **It lasts.** The detach is recorded in the sink's [meta documents](../reference/sink-opensearch.md#the-meta-documents), and every start brings the index back detached.
-- **Alerts.** A detached lane is not parked: `flusso_lane_parked` has no series for it, so `FlussoLaneParked` doesn't fire. Watch `/status`'s `detached` list.
+- **Alerts and readiness.** A detached lane is not parked: `flusso_lane_parked` has no series for it, so `FlussoLaneParked` doesn't fire, and [`/readyz`](../reference/http.md#get-readyz) stays `200`. Watch `/status`'s `detached` list.
 
 > ℹ️ **Info** — Nothing in 0.19 detaches an index on its own. A lane is detached only when the sink's `{prefix}flusso_meta` already holds a detach record for its index. This page is what to do then.
 
@@ -61,7 +61,7 @@ A **gap** is the run of changes a reattach accepted as missing: from where reads
 - **Rows deleted in the gap** keep their documents: no later change names them.
 - **A fence inside a gap fails at once.** A `/wait` for a position in it answers `409` with the reason `gap` and the gap; waiting can't help. A position after the reattach is vouched for as usual.
 - **Several detaches, several gaps.** Each reattach adds its own to the list kept with the seed marker.
-- **Only a rebuild ends them.** A seed of the index clears every gap. A `backfill = false` sink never seeds, so there the gaps stay.
+- **Only a completed seed ends them.** A rebuild or reindex that hasn't seeded yet, a recreated generation, or `backfill` turned on and off again keeps every gap. A `backfill = false` sink never seeds, so there the gaps stay.
 - **`settling: true`** on a gap means its end isn't known yet (a reattach cut short). flusso settles it at its next read of the records while it holds the slot; meanwhile every position after `from` is refused.
 
 ## Options and variations
@@ -70,8 +70,12 @@ A **gap** is the run of changes a reattach accepted as missing: from where reads
 - **A reindex that is refused.** A rebuild that is starting, running, or waiting on a block on the serving generation takes no second reindex: `409` with the reason ([details](../reference/http.md#post-indexesnamereindexsinkname)). A rebuild parked for another reason starts again.
 - **A rebuild that can't begin** leaves the lane detached, its reason `the rebuild could not begin: <why>; tried again in <d>`, and is tried again on the [`[backoff]`](../reference/config-toml.md#backoff) schedule.
 - **A restart during a rebuild** resumes it. A start that can't backfill (a `backfill = false` sink, or `--skip-backfill`) puts the index back to detached instead: reattach it, or reindex it again on a start that backfills.
-- **A reattach that is refused** answers `409` with the reason and what works instead: [the cases](../reference/http.md#post-indexesnamereattachsinknameaccept_gaptrue).
+- **A reattach that is refused** answers `409` with the reason and what works instead: [the cases](../reference/http.md#a-reattach-that-is-refused). Where the reason says to restart flusso, a start on the `backfill = false` sink puts the record back so the reattach applies, and logs `a detach record written while this sink could rebuild, or beside a seed marker moved off the generation reads see, is put back to detached, live only, on that generation: flusso reattach --accept-gap applies`.
 - **While flusso doesn't hold the slot** (a reconnect), a reattach is refused and a rebuild waits: see [Run one flusso per slot](one-process-per-slot.md#while-flusso-doesnt-hold-the-slot).
+
+## A known limit
+
+A detach recorded while no generation served the index (its serving generation deleted by hand) leaves a record that names no generation. flusso can't act on it: a rebuild from it is never taken as finished, so every start takes it over again, and a live-only one is never reattached; restarting flusso doesn't change that. There is no way out from flusso yet; it is tracked as a follow-up issue. Don't delete a detached index's serving generation by hand.
 
 ## Related
 

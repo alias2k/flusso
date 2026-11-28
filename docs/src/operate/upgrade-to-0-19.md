@@ -450,7 +450,7 @@ Every other failure with one index restarts the ingest engine, as in 0.18. The w
 
 ## One process per slot
 
-**What changed.** flusso stamps every write of an index's records in `{prefix}flusso_meta` with the process that made it, and reads them again after each opening of the replication stream. A process that finds another changed them while it didn't hold the slot stops with exit `1`: ``Error: sink `<sink>`, index `<index>`: another flusso process changed the index's detach records while this one didn't hold the replication slot (…)``.
+**What changed.** flusso stamps every write of an index's records in `{prefix}flusso_meta` with the process that made it, and reads them again after each opening of the replication stream. A process that finds another changed them while it didn't hold the slot stops with exit `1`: ``Error: sink `<sink>`, index `<index>`: another flusso process changed the index's detach record or seed marker while this one didn't hold the replication slot (…)``.
 
 **Who is affected.** Deployments that can run two processes on one slot at once: a rolling update, a 0.18 process left running beside 0.19, a second host. A single process never stops this way. The Helm chart's `Recreate` strategy never overlaps.
 
@@ -483,7 +483,7 @@ Every other failure with one index restarts the ingest engine, as in 0.18. The w
 **What changed.** `POST /indexes/<name>/reindex` ([the route](../reference/http.md#post-indexesnamereindexsinkname)):
 
 - **`409`** `{"error", "reason", "index", "skipped"}` when the sink named, or every sink, is skipped: the index is being rebuilt after a detach, or a detached index sits on a `backfill = false` sink ([the reasons](../reference/http.md#a-reindex-that-is-skipped)).
-- **`202`** gains `skipped` when some sinks were left out.
+- **`202`** gains `queued_on`, the sinks it was queued on, and `skipped` when some sinks were left out; `flusso reindex` prints each skipped sink as `skipped on <sink>: <reason>`.
 - **Stopping** answers `503` with `Retry-After: 1` and `{"error": "flusso is stopping and takes no operation; ask the next process", "reason": "stopping"}`.
 
 **Who is affected.** Scripts that read the reindex answers. `flusso reindex` exits `1` on a `409`.
@@ -518,11 +518,11 @@ Every other failure with one index restarts the ingest engine, as in 0.18. The w
 | | 0.18 | 0.19 |
 | --- | --- | --- |
 | The request | `POST /reindex?index=users&sink=primary` | `POST /indexes/users/reindex?sink=primary` |
-| `202` | text: `reindex of users on primary queued` | `{"index": "users", "sink": "primary", "queued": true}`, `sink` null for every sink |
+| `202` | text: `reindex of users on primary queued` | `{"index": "users", "sink": "primary", "queued": true, "queued_on": ["primary"]}`, `sink` null for every sink |
 | Refusals (`400`, `404`, `503`) | text | `{"error": "…"}`; an unknown index adds `"indexes"`, the enabled ones |
 | A disabled index | accepted | `404` |
 
-**Who is affected.** Scripts and tools that call `POST /reindex` themselves. `flusso reindex` is updated and prints what it printed before; use it at the same version as the server.
+**Who is affected.** Scripts and tools that call `POST /reindex` themselves. `flusso reindex` is updated; with `--sink` it prints what it printed before, without it the sinks it was queued on (`reindex of users queued on primary, audit`) and a line per sink [skipped](#a-reindex-can-be-refused). Use it at the same version as the server.
 
 **What to do.** Move each call to the new path: the index goes into the path, `sink` stays a query parameter. Read the `202`'s JSON instead of its text, if the script reads it.
 
@@ -650,7 +650,8 @@ To tell: `file flusso.lock` says `with CRLF line terminators`, and the lock hold
 - **Checks (`source`).** `DiagnosticKind` gains `DuplicateFieldNameWrong`, `NullabilityUntracked` and `TimeOfDayFormat`, and loses `TimestampFormat`: an exhaustive match must handle them. `Nullability`, `UndeclaredArrayColumn` and `IdsElementLossy` are now `Severity::Error`. `source::reads_iso_timestamps` is removed. `Catalog::tracks_nullability(schema, table)` is new, defaulting to `true` (the column is judged as a table's). New: `source::Reach`, `source::duplicate_is_wrong`, and `DuplicateOutcome::Stored`.
 - **Date formats (`kernel`).** New: `IndexSchema::completed_date_formats`, `kernel::ISO_DATE_PATTERN`, `DateValues`, `reads`, `reads_time_of_day_only`, `with_iso`, `iso_date_format`, `date_format`, `date_values` and `maps_children`. `IndexSchema::resolve` applies the completed format, and the content hash follows it.
 - **Capture gaps (`source-postgres`).** New `ReportedGaps` and `WalChangeCapture::with_reported_gaps`: `prepare` doesn't warn again about a gap the caller already reported.
-- **New: the `sink::Records` trait**, reached through `Sink::records()` (default `None`: a sink that keeps no records, which never detaches). A sink that keeps records writes every record and seed marker through it, stamped (`sink::Stamp`): `ensure_index_as`, `detachment` (read at the start of every staging step, before anything else; an `Err` fails the step), `detach`, `forget_detachment`, `begin_rebuild`, `record_gaps`, `demote`, `mark_seeded_as`, `reindex_as`. It returns a `sink::Detachment` (`record: Option<DetachRecord>`, with `Detached`, `Rebuilding` and `Unreadable`, `stuck: Option<StuckClock>`, `restored`, `unreadable_marker`, and the new `marker`, `version`, `record_stamp`, `marker_stamp`, `attempts`, `through` and `gaps`), with `sink::Detach`, `Recorded`, `Gap`, `MarkerAt` and `RecordVersion`, all new. `SinkEngine::detachment(index)` returns what the last staging of the index read.
+- **New: the `sink::Records` trait**, reached through `Sink::records()` (default `None`: a sink that keeps no records, which never detaches). A sink that keeps records writes every record and seed marker through it, stamped (`sink::Stamp`); none of its methods has a default: `ensure_index_as`, `detachment` (read at the start of every staging step, before anything else; an `Err` fails the step), `detach`, `forget_detachment`, `begin_rebuild`, `record_gaps`, `demote`, `mark_seeded_as`, `reindex_as`. It returns a `sink::Detachment` (`record: Option<DetachRecord>`, with `Detached`, `Rebuilding` and `Unreadable`, `stuck: Option<StuckClock>`, `restored`, `unreadable_marker`, and the new `marker`, `version`, `record_stamp`, `marker_stamp`, `attempts`, `through` and `gaps`), with `sink::Detach`, `Recorded`, `Gap`, `MarkerAt` and `RecordVersion`, all new. `SinkEngine::detachment(index)` returns what the last staging of the index read.
+- **OpenSearch sink.** `OpensearchSink::cluster_uuid` (`GET /`) is new, and so is the public `sink_opensearch::meta` module: the sink's decisions over its meta documents as plain values (`Plan`, `Step`, `Kept` and the functions that make them), with an in-memory meta index, `meta::memory`, behind the new `testing` feature.
 - **Detach and attach in the engine.** `SinkControl` gains `Detach`, `Attach` and `Reattach` (with a `Reply<ReattachVerdict>`), `Request` gains `Attach`, `LaneItem` gains `Attached`, `LaneHealth` gains `Detached`, `ParkReason` gains `SeedBlocked`, and `source::cdc::Landed` gains `Free`: an exhaustive match must handle them. `EngineError::ForeignChange` stops the deployment (`EngineError::stops_the_deployment`). New `engine::Rereads` and `SourcePositions`; `ChangeCapture::streams_opened` (default `None`); `Observer::on_lane_rebuild` and `on_lane_gaps`, no-op by default. In `daemon`: `DaemonControl::reattach`, `is_stopping`, `is_live_only` and `with_live_only`, `ControlError::CanRebuild`, `Fence::with_rereads`, `FenceOutcome::InGap` and `FenceGap`, `Unserved::Detached`, `LaneHealthState::Detached`, `Status::reattach_refusal`, `reindex_refusal` and `detached_lanes`; `StatusSnapshot.detached`, `SinkSnapshot.detached_lanes`, and `LaneSnapshot`'s `rebuilding`, `attaching` and `gaps` (`LaneGap`), so struct literals must set them.
 
 ## Related

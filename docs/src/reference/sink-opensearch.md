@@ -109,7 +109,7 @@ Writes to a **seeded** index go through the hash alias, each bulk item flagged `
 | `stuck:{prefix}{logical}_{hash}` | Reserved. Read, never written. |
 
 - **`stamp`**, on the marker and the record, names the process that last wrote it: `{"writer", "seq"}`, one writer per sink engine per process start, so a process tells its own writes from [another's](../operate/one-process-per-slot.md). A marker an older flusso wrote has none until it is next written.
-- **`gaps`** lists the changes each [reattach](../operate/detached-index.md#what-a-gap-means) accepted as missing, `{"from", "to"}` in the source's text. A seed or a reindex drops them.
+- **`gaps`** lists the changes each [reattach](../operate/detached-index.md#what-a-gap-means) accepted as missing, `{"from", "to"}` in the source's text. Only a seed that completes drops them: a rebuild, a reindex or a recreated generation carries them.
 - **`detaching_from`**: a detach moves the marker to a new, unseeded generation past every existing one and keeps where it was in `detaching_from` (its generation, seeded state, `uuid`, `walked`, `gaps`), writes the record, then deletes every generation but the one serving. Every write is conditional on the version read.
 
 These documents are flusso's own bookkeeping, not an interface: their fields can change between releases.
