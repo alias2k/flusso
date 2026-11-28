@@ -1479,3 +1479,37 @@ async fn a_marker_rewrite_fails_when_the_meta_index_never_gets_its_primary() {
         .to_string();
     assert!(error.contains("primary shard"), "{error}");
 }
+
+/// The review of round 13, m-4: a live-only detach moves no marker, so the
+/// generations are only its best-effort deletes: a failed listing doesn't
+/// fail it. A rebuildable detach moves the marker past every generation and
+/// still needs the listing.
+#[tokio::test]
+async fn a_failed_listing_fails_only_a_detach_that_moves_the_marker() {
+    for live_only in [true, false] {
+        let store = Arc::new(Mutex::new(Store::seeded()));
+        let routed = Arc::clone(&store);
+        let stub = Stub::start(move |line, body| {
+            if line.contains("/_cat/indices/") {
+                return (500, json!({ "error": "listing refused" }).to_string());
+            }
+            routed.lock().unwrap().answer(line, body)
+        })
+        .await;
+        let detached = stub
+            .sink()
+            .detach(&mapping(), &blocked().live_only(live_only).stamp(stamp()))
+            .await;
+        assert_eq!(
+            detached.is_ok(),
+            live_only,
+            "live only {live_only}: {detached:?}"
+        );
+        let record = store.lock().unwrap().doc(DETACH);
+        assert_eq!(
+            record.is_some(),
+            live_only,
+            "live only {live_only}: {record:?}"
+        );
+    }
+}

@@ -77,7 +77,11 @@ pub enum Step {
 /// best effort (one left behind is deleted by a later rebuild, R9).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Plan {
+    /// The writes, in order: a failed one stops the plan, and the writes
+    /// before it stay.
     pub steps: Vec<Step>,
+    /// The generations deleted once every step is done, each failure only
+    /// warned about.
     pub best_effort: Vec<u64>,
 }
 
@@ -90,18 +94,11 @@ impl Kept<'_> {
     /// Every generation but `keep` and the one the alias serves: what a
     /// rebuild or a demotion deletes.
     fn unserved_but(&self, keep: Option<u64>) -> Vec<u64> {
-        let deleted: Vec<u64> = self
-            .generations
+        self.generations
             .iter()
             .copied()
             .filter(|generation| Some(*generation) != keep && Some(*generation) != self.serving)
-            .collect();
-        debug_assert!(
-            self.serving
-                .is_none_or(|serving| !deleted.contains(&serving)),
-            "a plan deletes the generation the alias serves"
-        );
-        deleted
+            .collect()
     }
 
     /// One past every generation left once `deleted` are gone.
@@ -332,7 +329,15 @@ pub fn gaps_update(gaps: &[sink::Gap]) -> Value {
 fn moved_past(kept: &Kept<'_>, deleted: &[u64]) -> Value {
     let detaching_from = match kept.marker {
         Some(marker) => match marker.get("detaching_from").filter(|from| !from.is_null()) {
-            Some(from) => from.clone(),
+            // Kept, with every gap the marker keeps in either place (m-1).
+            Some(from) => {
+                let mut from = from.clone();
+                if let (Some(fields), Some(gaps)) = (from.as_object_mut(), gaps_to_restore(marker))
+                {
+                    fields.insert("gaps".to_owned(), gaps);
+                }
+                from
+            }
             None => detaching_from(marker),
         },
         None => Value::Null,
@@ -384,7 +389,12 @@ fn restored(kept: &Kept<'_>, serving: u64) -> Value {
 }
 
 /// Every gap a marker keeps, in `detaching_from` and its own, each once.
-/// `None` for none.
+/// One drop kept in both places, open in one (`to` unknown) and settled in
+/// the other, is kept open (m-2): an open gap refuses everything from its
+/// start, a superset of the settled one, and the next read while the slot is
+/// held settles it again at where the lane stands, which still covers what
+/// was dropped. Two settled ends of one start are both kept: positions are
+/// the source's text, which a plan can't order. `None` for none.
 fn gaps_to_restore(marker: &Value) -> Option<Value> {
     let mut gaps = marker
         .get("detaching_from")
@@ -392,8 +402,17 @@ fn gaps_to_restore(marker: &Value) -> Option<Value> {
         .map(read_gaps)
         .unwrap_or_default();
     for gap in read_gaps(marker) {
-        if !gaps.contains(&gap) {
-            gaps.push(gap);
+        let same_start = gaps
+            .iter()
+            .position(|kept| kept.from == gap.from && (kept.to.is_none() || gap.to.is_none()));
+        match same_start {
+            Some(at) => {
+                if let Some(kept) = gaps.get_mut(at) {
+                    kept.to = None;
+                }
+            }
+            None if !gaps.contains(&gap) => gaps.push(gap),
+            None => {}
         }
     }
     (!gaps.is_empty()).then(|| gaps_value(&gaps))
@@ -664,6 +683,45 @@ mod tests {
                 assert_eq!(markers(&demoted)[0]["active_generation"], 4);
             }
         }
+    }
+
+    /// The review of round 13, m-1: a rebuild over a marker carrying both
+    /// `detaching_from` and gaps of its own keeps all of them.
+    #[test]
+    fn moving_a_moved_marker_keeps_the_gaps_of_both_places() {
+        let marker = json!({
+            "active_generation": 4, "seeded": false,
+            "detaching_from": { "generation": 3, "seeded": true, "gaps": gaps() },
+            "gaps": [{ "from": "0/30", "to": "0/40" }],
+        });
+        let detached = record("detached", false, 3);
+        let (plan, _) = begin_rebuild(&kept(&marker, Some(&detached), 3, &[3, 4])).unwrap();
+        assert_eq!(kept_gaps(markers(&plan)[0]).len(), 2, "{plan:?}");
+    }
+
+    /// The review of round 13, m-2: one drop kept settled in one place and
+    /// open in the other comes back once, open; two distinct gaps both.
+    #[test]
+    fn a_gap_kept_settled_and_open_comes_back_once_open() {
+        let marker = json!({
+            "active_generation": 4, "seeded": false,
+            "detaching_from": { "generation": 3, "seeded": true, "gaps": [{ "from": "0/10", "to": "0/20" }] },
+            "gaps": [{ "from": "0/10", "to": null }, { "from": "0/30", "to": "0/40" }],
+        });
+        let (put, _) = put_back(&kept(&marker, None, 3, &[3, 4])).unwrap().unwrap();
+        assert_eq!(
+            read_gaps(&put),
+            [
+                sink::Gap {
+                    from: Some("0/10".to_owned()),
+                    to: None
+                },
+                sink::Gap {
+                    from: Some("0/30".to_owned()),
+                    to: Some("0/40".to_owned())
+                },
+            ]
+        );
     }
 
     /// The review of round 13, F: a detach during a reindex keeps the

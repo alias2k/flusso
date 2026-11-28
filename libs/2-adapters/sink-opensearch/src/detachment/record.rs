@@ -58,6 +58,14 @@ fn shard_not_ready(refused: &SinkError) -> bool {
         || text.contains("illegal_index_shard_state_exception")
 }
 
+/// Whether a plan needs the generations listed, or deletes from the list
+/// best effort only.
+#[derive(Debug, Clone, Copy)]
+enum Listing {
+    Needed,
+    BestEffort,
+}
+
 /// What a conditional write found.
 pub(super) enum Written {
     Done,
@@ -88,6 +96,14 @@ impl Read {
 impl OpensearchSink {
     /// The documents and generations a plan for `hash_alias` reads.
     async fn read_for_plan(&self, hash_alias: &str) -> Result<Read> {
+        self.read_for_plan_listing(hash_alias, Listing::Needed)
+            .await
+    }
+
+    /// [`read_for_plan`](Self::read_for_plan), where a failed listing of the
+    /// generations reads as none when `listing` says the plan only deletes
+    /// from it best effort.
+    async fn read_for_plan_listing(&self, hash_alias: &str, listing: Listing) -> Result<Read> {
         let Kept { marker, record, .. } = self.read_kept(hash_alias).await?;
         let serving = self
             .alias_holders(hash_alias)
@@ -95,12 +111,17 @@ impl OpensearchSink {
             .iter()
             .filter_map(|holder| parse_generation(hash_alias, holder))
             .max();
-        let generations = self
-            .list_generations(hash_alias)
-            .await?
-            .iter()
-            .filter_map(|name| parse_generation(hash_alias, name))
-            .collect();
+        let generations = match (self.list_generations(hash_alias).await, listing) {
+            (Ok(names), _) => names
+                .iter()
+                .filter_map(|name| parse_generation(hash_alias, name))
+                .collect(),
+            (Err(error), Listing::BestEffort) => {
+                tracing::warn!(hash_alias, %error, "could not list the generations; a live-only detach deletes none of them, the next rebuild does");
+                Vec::new()
+            }
+            (Err(error), Listing::Needed) => return Err(error),
+        };
         Ok(Read {
             marker,
             record,
@@ -156,8 +177,17 @@ impl OpensearchSink {
         detach: &Detach,
     ) -> Result<Recorded> {
         let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
+        // A live-only detach moves no marker: the generations are only its
+        // best-effort deletes, so a failed listing doesn't fail it (m-4). A
+        // rebuildable one moves the marker past every generation and needs
+        // them all.
+        let listing = if detach.live_only {
+            Listing::BestEffort
+        } else {
+            Listing::Needed
+        };
         for _ in 0..CONFLICT_ROUNDS {
-            let read = self.read_for_plan(&hash_alias).await?;
+            let read = self.read_for_plan_listing(&hash_alias, listing).await?;
             let now = now();
             let plan = plan::detach(&read.kept(&now), detach).map_err(SinkError::Write)?;
             if let Written::Conflict = self

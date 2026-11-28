@@ -9,6 +9,7 @@ mod config;
 mod detachment;
 mod generations;
 mod mapping;
+#[doc(hidden)]
 pub mod meta;
 mod refresh;
 mod settings;
