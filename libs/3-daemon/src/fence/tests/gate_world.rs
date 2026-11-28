@@ -812,8 +812,12 @@ impl sink::Records for Store {
         // A finished rebuild's record (its marker seeded on the newer
         // generation) is obsolete: deleting it needs no slot (`slot.rs`).
         let found = self.peek(of);
-        let finished = matches!(found.record, Some(DetachRecord::Rebuilding { .. }))
-            && found.marker == Some(MarkerAt::Newer { seeded: true });
+        // Finished by the marker alone, whatever the record's state (the
+        // review of the closing round, E).
+        let finished = matches!(
+            found.record,
+            Some(DetachRecord::Rebuilding { .. } | DetachRecord::Detached { .. })
+        ) && found.marker == Some(MarkerAt::Newer { seeded: true });
         if !finished {
             self.touch(of, "a delete");
         }
@@ -2143,6 +2147,16 @@ impl World {
                 })
                 .collect();
             let read_from = unwritten.iter().map(|at| at - 1).min().unwrap_or(from);
+            // A record a seed outlived is finished (E): the other process
+            // forgets it, as a staging does, and the lane is attached.
+            let found = store.peek(of);
+            if found.record.is_some()
+                && found.marker == Some(MarkerAt::Newer { seeded: true })
+                && let Some(version) = found.version
+            {
+                let stamp = store.anothers();
+                store.write(of, false, |meta| meta.forget(of, &version, &stamp).unwrap());
+            }
             let kept = store.kept(of);
             let applies = drop != Some(lane)
                 && kept
@@ -3141,6 +3155,51 @@ fn a_detach_over_a_rebuilding_record_keeps_where_the_drop_began() {
         ]),
         0
     );
+}
+
+/// Round 15's final sweep, seeds `12095008603050522105` and
+/// `1530149881736458195` of `gate_world` at 50,000 cases, shrunk: model
+/// errors. The world's other process demoted a rebuild its seed had finished
+/// (the record left beside the seeded newer marker), where a real one takes
+/// it for finished and forgets it (E); and the world held a finished
+/// record's forget with no slot to the `rebuilding` state alone.
+#[test]
+fn another_process_forgets_a_record_a_seed_outlived() {
+    replay(vec![
+        Event::Readable { sink: 0 },
+        Event::Unheld {
+            lane: 3,
+            rebuild: true,
+            then: 0,
+        },
+        Event::Fails {
+            sink: 1,
+            lands: true,
+        },
+        Event::SeedLeavesRecord { lane: 3 },
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+        Event::ReindexThenDetach { lane: 2 },
+    ]);
+    replay(vec![
+        Event::Fails {
+            sink: 1,
+            lands: true,
+        },
+        Event::Open {
+            ok: false,
+            jump: 10,
+            drop: Some(3),
+            rebuild: true,
+        },
+        Event::SeedLeavesRecord { lane: 3 },
+        Event::HoldReadsAnswered { sink: 1 },
+        Event::ReindexThenDetach { lane: 2 },
+        Event::GapOverSlowRead { lane: 2 },
+    ]);
 }
 
 /// The review of round 14, B-1: a reattach keeps a gap on the generation
