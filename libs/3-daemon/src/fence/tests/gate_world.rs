@@ -170,6 +170,15 @@ struct Store {
     writers: Mutex<BTreeMap<String, (bool, u64)>>,
     /// Where each index's writes go.
     targets: Mutex<BTreeMap<String, Target>>,
+    /// The world's own ledger of what reads see, per index: the generation
+    /// the alias served and its uuid when this world last saw it change by a
+    /// seed (which holds everything) or a creation after a hand deletion;
+    /// `None` once a hand deletion took it (the review of round 13, F).
+    read_by: Mutex<BTreeMap<String, Option<(u64, String)>>>,
+    /// Each generation number a hand deletion freed, per index. A later
+    /// generation of that number is another index under a reused number, a
+    /// known dead end (#492): replacing it is not judged.
+    hand_deleted: Mutex<BTreeSet<(String, u64)>>,
     /// The next record or marker write this process makes fails: `true`,
     /// after it landed (its response lost); `false`, before.
     fails: Mutex<Option<bool>>,
@@ -217,11 +226,17 @@ impl Store {
             meta.ensure(of, &before);
             meta.seed(of, &before, true).unwrap();
         }
+        let read_by = INDEXES
+            .iter()
+            .map(|of| ((*of).to_owned(), meta.read_by(of)))
+            .collect();
         Self {
             holding,
             live_only: std::sync::atomic::AtomicBool::new(live_only),
             meta: Mutex::new(meta),
             writers: Mutex::default(),
+            read_by: Mutex::new(read_by),
+            hand_deleted: Mutex::default(),
             targets: Mutex::new(
                 INDEXES
                     .iter()
@@ -320,27 +335,55 @@ impl Store {
     /// Run `write` on the meta index, made by this process (`ours`) or by
     /// another: a record it writes is accounted to that writer, under the
     /// stream held now; one it forgets to nobody.
-    ///
-    /// Readers see the generation the alias serves: no write may leave it
-    /// serving nothing (the review of the closing round, E).
     fn write<T>(&self, of: &str, ours: bool, write: impl FnOnce(&mut MemoryMeta) -> T) -> T {
+        self.write_as(of, ours, false, write)
+    }
+
+    /// [`write`](Self::write), for a seed when `seed`.
+    ///
+    /// Reads see the generation the alias serves: only a seed may move them
+    /// to another (it holds everything), and nothing may delete, empty or
+    /// replace the one they see, judged against the world's own ledger
+    /// (`read_by`): the alias serving nothing, or a generation of another
+    /// number or another uuid (deleted and created again empty), is a
+    /// failure (the review of the closing round, E; of round 13, F).
+    fn write_as<T>(
+        &self,
+        of: &str,
+        ours: bool,
+        seed: bool,
+        write: impl FnOnce(&mut MemoryMeta) -> T,
+    ) -> T {
         let mut meta = self.meta();
         let before = record_in(&meta, of);
-        let served = meta.serving(of);
         let out = write(&mut meta);
         let after = record_in(&meta, of);
-        let serves = meta.serving(of);
+        let now = meta.read_by(of);
         drop(meta);
-        if served.is_some() && serves.is_none() {
-            self.violations.lock().unwrap().push(format!(
-                "{of}: a write by {} deleted generation {served:?}, which the alias served",
-                if ours {
-                    "this process"
-                } else {
-                    "another process"
-                }
-            ));
+        let mut ledger = self.read_by.lock().unwrap();
+        let was = ledger.get(of).cloned().flatten();
+        let reused = was.as_ref().is_some_and(|(generation, _)| {
+            self.hand_deleted
+                .lock()
+                .unwrap()
+                .contains(&(of.to_owned(), *generation))
+        });
+        match was {
+            Some(was) if !seed && !reused && now.as_ref() != Some(&was) => {
+                self.violations.lock().unwrap().push(format!(
+                    "{of}: a write by {} left reads on {now:?}, not on {was:?}, the generation they saw",
+                    if ours {
+                        "this process"
+                    } else {
+                        "another process"
+                    }
+                ));
+            }
+            _ => {
+                ledger.insert(of.to_owned(), now);
+            }
         }
+        drop(ledger);
         if before != after {
             let mut writers = self.writers.lock().unwrap();
             match after.0.filter(|record| !os_meta::is_tombstone(record)) {
@@ -389,6 +432,15 @@ impl Store {
         };
         if let Some(generation) = generation {
             meta.delete_generation(of, generation);
+            self.hand_deleted
+                .lock()
+                .unwrap()
+                .insert((of.to_owned(), generation));
+        }
+        // Deleted by hand: what reads saw is gone, and the next generation
+        // created takes the alias.
+        if meta.serving(of).is_none() {
+            self.read_by.lock().unwrap().insert(of.to_owned(), None);
         }
     }
 
@@ -746,7 +798,7 @@ impl sink::Records for Store {
         // As OpenSearch: the record's delete is best effort; a failed one
         // leaves it beside the seeded marker, and the seed returns `Ok`.
         let forget = !std::mem::take(&mut *self.seed_keeps_record.lock().unwrap());
-        self.write(name, true, |meta| meta.seed(name, stamp, forget))
+        self.write_as(name, true, true, |meta| meta.seed(name, stamp, forget))
             .map_err(sink::SinkError::Write)?;
         self.targets
             .lock()
@@ -970,6 +1022,15 @@ enum Event {
     /// its sibling. The liveness phase's way out must reattach it.
     /// Expanded before the run.
     LiveOnlyBesideMoved {
+        lane: usize,
+    },
+    /// The review of round 13, F: a reindex of `lane` (a `primary` lane) is
+    /// staged, its generation created; the lane detaches before the
+    /// backfill completes, moving the marker off the reindex's generation;
+    /// `backfill` is turned off, and the start's live-only demotion and a
+    /// reattach follow. Nothing may delete the generation reads see.
+    /// Expanded before the run.
+    ReindexThenDetach {
         lane: usize,
     },
     /// The seventh re-check's B-1, drawn often: this process's stream ends,
@@ -1259,6 +1320,29 @@ impl Event {
                 ]);
                 return events;
             }
+            Event::ReindexThenDetach { lane } => {
+                let index = lane % 2;
+                let sink = lane / 2;
+                return vec![
+                    opens.clone(),
+                    Event::Reindex { sink, index },
+                    Event::Elapse,
+                    Event::Detach { lane, fails: false },
+                    Event::Apply { index },
+                    Event::Elapse,
+                    Event::Elapse,
+                    Event::Unblock { lane },
+                    Event::FlipBackfill { sink },
+                    Event::NewProcess,
+                    opens,
+                    Event::Elapse,
+                    Event::Reattach { sink, index },
+                    Event::Elapse,
+                    Event::Apply { index },
+                    Event::Elapse,
+                    Event::WaitNewest { lane },
+                ];
+            }
             Event::LiveOnlyBesideMoved { lane } => {
                 let other = 1 - lane % 2;
                 return [
@@ -1494,6 +1578,7 @@ fn event() -> impl Strategy<Value = Event> {
         2 => (0usize..2, any::<bool>()).prop_map(|(lane, moved)| Event::GapThroughRebuild { lane, moved }),
         2 => (0usize..2, any::<bool>()).prop_map(|(lane, flip_back)| Event::RebuildFromLiveOnly { lane, flip_back }),
         2 => (0usize..2).prop_map(|lane| Event::LiveOnlyBesideMoved { lane }),
+        2 => (2usize..4).prop_map(|lane| Event::ReindexThenDetach { lane }),
         2 => (0usize..4).prop_map(|lane| Event::SameDetachElsewhere { lane }),
     ]
 }
@@ -2019,10 +2104,10 @@ impl World {
         // Its own staging ensured the generation, its backfill walked it,
         // its seed moved the alias there and forgot the record.
         let stamp = store.anothers();
-        let seeded = store.write(of, false, |meta| {
+        store.write(of, false, |meta| {
             meta.ensure(of, &stamp);
-            meta.seed(of, &stamp, true)
         });
+        let seeded = store.write_as(of, false, true, |meta| meta.seed(of, &stamp, true));
         if seeded.is_err() {
             return;
         }
@@ -2465,7 +2550,8 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
             | Event::PutBackAfterFlip { .. }
             | Event::GapThroughRebuild { .. }
             | Event::RebuildFromLiveOnly { .. }
-            | Event::LiveOnlyBesideMoved { .. } => {
+            | Event::LiveOnlyBesideMoved { .. }
+            | Event::ReindexThenDetach { .. } => {
                 unreachable!("expanded before the run")
             }
             Event::WaitNewest { .. } | Event::WaitDropped { .. } | Event::WaitUnwritten { .. } => {
@@ -2761,6 +2847,7 @@ fn solo_event() -> impl Strategy<Value = Event> {
         1 => (0usize..2).prop_map(|lane| Event::PutBackAfterFlip { lane }),
         2 => (0usize..2, any::<bool>()).prop_map(|(lane, moved)| Event::GapThroughRebuild { lane, moved }),
         2 => (0usize..2, any::<bool>()).prop_map(|(lane, flip_back)| Event::RebuildFromLiveOnly { lane, flip_back }),
+        2 => (2usize..4).prop_map(|lane| Event::ReindexThenDetach { lane }),
     ]
 }
 
@@ -2914,6 +3001,16 @@ fn a_detach_over_a_rebuilding_record_keeps_where_the_drop_began() {
         ]),
         0
     );
+}
+
+/// The review of round 13, F: a detach during a reindex, then `backfill`
+/// turned off: the start's live-only demotion and the reattach keep the
+/// generation reads see.
+#[test]
+fn a_detach_during_a_reindex_never_deletes_the_generation_reads_see() {
+    for lane in [2, 3] {
+        assert_eq!(replay_solo(vec![Event::ReindexThenDetach { lane }]), 0);
+    }
 }
 
 /// The review of the closing round, D: a live-only record beside a marker
