@@ -32,12 +32,9 @@
 //! ```
 
 use serde_json::{Value, json};
-use sink::{Detach, Detachment, RecordVersion};
+use sink::{Detach, Detachment, MarkerAt, RecordVersion};
 
-use super::{
-    FORGOTTEN, carried_gaps, gaps_value, generation_of, marker_at, read_gaps, read_record,
-    read_stamp,
-};
+use super::{FORGOTTEN, gaps_value, generation_of, marker_at, read_gaps, read_record, read_stamp};
 
 /// What a plan reads: the documents kept and the generations behind the hash
 /// alias.
@@ -125,7 +122,18 @@ pub fn read(marker: Option<&Value>, record: Option<&Value>, version: Option<&str
     kept.marker_stamp = marker.and_then(read_stamp);
     if let Some(record) = record.filter(|record| !is_tombstone(record)) {
         let serving = record.get("serving").and_then(Value::as_u64);
-        kept.marker = marker.and_then(|marker| marker_at(marker, serving));
+        kept.marker = marker
+            .and_then(|marker| marker_at(marker, serving))
+            .map(|at| {
+                // A marker carrying `detaching_from` was moved off what reads
+                // saw, whatever its number: a generation deleted from under it
+                // lets the next one take the same number (the closing round's
+                // sweep). Never on serving, so no reattach adds a gap beside it.
+                match (at, marker.is_some_and(is_moved)) {
+                    (MarkerAt::Serving { seeded }, true) => MarkerAt::Newer { seeded },
+                    _ => at,
+                }
+            });
         kept.attempts = record.get("attempts").and_then(Value::as_u64);
         kept.through = record
             .get("through")
@@ -360,11 +368,27 @@ fn restored(kept: &Kept<'_>, serving: u64) -> Value {
     doc
 }
 
-/// The gaps a marker keeps, wherever it keeps them: in `detaching_from` when
-/// a detach moved it, else its own. `None` for none.
+/// Every gap a marker keeps, in `detaching_from` and its own, each once.
+/// `None` for none.
 fn gaps_to_restore(marker: &Value) -> Option<Value> {
-    carried_gaps(marker.get("detaching_from").filter(|from| !from.is_null()))
-        .or_else(|| carried_gaps(Some(marker)))
+    let mut gaps = marker
+        .get("detaching_from")
+        .filter(|from| !from.is_null())
+        .map(read_gaps)
+        .unwrap_or_default();
+    for gap in read_gaps(marker) {
+        if !gaps.contains(&gap) {
+            gaps.push(gap);
+        }
+    }
+    (!gaps.is_empty()).then(|| gaps_value(&gaps))
+}
+
+/// Whether `marker` carries a `detaching_from`: a detach moved it.
+fn is_moved(marker: &Value) -> bool {
+    marker
+        .get("detaching_from")
+        .is_some_and(|from| !from.is_null())
 }
 
 /// What a marker moved off the serving generation keeps of itself, to come
@@ -562,6 +586,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(records(&fresh)[0]["through"], "34");
+    }
+
+    /// The closing round's sweep (seed `17611438872220405175`): the serving
+    /// generation deleted from under a moved marker, the rebuild's generation
+    /// takes its number. The marker still carries `detaching_from`, so it
+    /// reads as moved, never on serving; and gaps kept beside
+    /// `detaching_from` come back with it.
+    #[test]
+    fn a_marker_carrying_detaching_from_is_never_on_serving() {
+        let marker = json!({
+            "active_generation": 1, "seeded": false,
+            "detaching_from": { "generation": 1, "seeded": true, "gaps": gaps() },
+            "gaps": [{ "from": "0/30", "to": "0/40" }],
+        });
+        let detached = record("detached", true, 1);
+        let found = read(Some(&marker), Some(&detached), Some("1:1"));
+        assert_eq!(found.marker, Some(MarkerAt::Newer { seeded: false }));
+        let (put, _) = put_back(&kept(&marker, None, 1, &[1])).unwrap().unwrap();
+        assert_eq!(read_gaps(&put).len(), 2, "{put}");
+        let demoted = demote(&kept(&marker, Some(&detached), 1, &[1]), true).unwrap();
+        assert_eq!(read_gaps(markers(&demoted)[0]).len(), 2, "{demoted:?}");
     }
 
     /// The review of the closing round, E: a rebuild begun from a live-only

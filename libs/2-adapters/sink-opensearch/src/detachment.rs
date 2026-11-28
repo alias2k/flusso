@@ -79,14 +79,6 @@ pub(crate) fn gaps_value(gaps: &[sink::Gap]) -> Value {
         .collect()
 }
 
-/// The gaps a moved marker's `detaching_from` carries, to restore when the
-/// marker comes back on the serving generation (the review of round 11,
-/// S-1). `None` for none.
-pub(crate) fn carried_gaps(from: Option<&Value>) -> Option<Value> {
-    let gaps = read_gaps(from?);
-    (!gaps.is_empty()).then(|| gaps_value(&gaps))
-}
-
 /// The stamp a document keeps, when it keeps one this version reads.
 fn read_stamp(source: &Value) -> Option<Stamp> {
     let stamp = source.get("stamp")?;

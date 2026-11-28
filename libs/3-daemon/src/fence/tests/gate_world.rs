@@ -2794,6 +2794,50 @@ proptest! {
 }
 
 /// Replay `events`, judged; answers how many times this process stopped.
+/// The closing round's final sweep, seed `17611438872220405175` of
+/// `gate_world` at 50,000 cases, shrunk: a hole. The serving generation was
+/// deleted from under a detached lane, and the rebuild's generation took its
+/// number. The marker, still carrying `detaching_from`, read as on serving.
+/// A reattach added its gap beside it, and the next read's put-back wrote the
+/// marker back from `detaching_from` without that gap. A moved marker now
+/// never reads as on serving, and every gap comes back with it.
+#[test]
+fn a_gap_kept_beside_a_moved_marker_on_a_reused_generation_survives() {
+    replay(vec![
+        Event::Unreadable { lane: 0 },
+        Event::Open {
+            ok: false,
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::Open {
+            ok: false,
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::LiveOnlyBesideMoved { lane: 0 },
+        Event::Open {
+            ok: false,
+            jump: 0,
+            drop: None,
+            rebuild: false,
+        },
+        Event::HolderFinishes {
+            lane: 1,
+            reattach: false,
+        },
+        Event::Missing { lane: 1 },
+        Event::Release { sink: 0 },
+        Event::SameDetachElsewhere { lane: 0 },
+        Event::GapThroughRebuild {
+            lane: 1,
+            moved: false,
+        },
+    ]);
+}
+
 fn replay(events: Vec<Event>) -> usize {
     replay_as(events, false)
 }
