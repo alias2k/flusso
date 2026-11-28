@@ -310,15 +310,28 @@ impl Store {
         })
     }
 
-    /// Whether `of`'s record was written while nothing served the index (its
-    /// generation deleted from under the sink): it names no generation to
-    /// judge the marker against, so it is never taken for finished, and a
-    /// live-only one is never reattached. A dead end found by this round's
-    /// world, reported with it and left out of the liveness checks.
+    /// Whether `of`'s record names no generation that still serves: written
+    /// while nothing served the index, or naming one a hand deletion freed
+    /// (the alias then went to another, or the number was taken again). The
+    /// marker can't be judged against it, so it is never taken for finished,
+    /// and a live-only one is never reattached: the dead end of issue #492,
+    /// left out of the liveness checks.
     fn names_no_serving(&self, of: &str) -> bool {
         let found = self.peek(of);
+        let named = self
+            .meta()
+            .documents(of)
+            .1
+            .and_then(|record| record.get("serving"))
+            .and_then(serde_json::Value::as_u64);
+        let freed = named.is_some_and(|generation| {
+            self.hand_deleted
+                .lock()
+                .unwrap()
+                .contains(&(of.to_owned(), generation))
+        });
         found.record.is_some()
-            && matches!(found.marker, Some(sink::MarkerAt::Elsewhere { .. }) | None)
+            && (freed || matches!(found.marker, Some(sink::MarkerAt::Elsewhere { .. }) | None))
     }
 
     /// Whether `of`'s marker says seeded on a generation that exists.
