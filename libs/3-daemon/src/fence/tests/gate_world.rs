@@ -2147,6 +2147,17 @@ impl World {
                 })
                 .collect();
             let read_from = unwritten.iter().map(|at| at - 1).min().unwrap_or(from);
+            // Under a record already there it loses only what the lane still
+            // held: a change a reattach since gave up is in a gap already.
+            let attached = &self.attached[lane];
+            let lost_from = self.changes[lane % 2]
+                .iter()
+                .filter(|(at, when)| {
+                    unwritten.contains(at) && !attached.iter().any(|attach| attach > when)
+                })
+                .map(|(at, _)| at - 1)
+                .min()
+                .unwrap_or(from);
             // A record a seed outlived is finished (E): the other process
             // forgets it, as a staging does, and the lane is attached.
             let found = store.peek(of);
@@ -2195,9 +2206,11 @@ impl World {
                 // before anything is dropped (B-2).
                 Some(DetachRecord::Rebuilding { .. }) => {
                     store.demoted_by_another(of);
-                    self.dropped[lane].push((from, to, now));
+                    self.dropped[lane].push((lost_from, to, now));
                 }
-                Some(DetachRecord::Detached { .. }) => self.dropped[lane].push((from, to, now)),
+                Some(DetachRecord::Detached { .. }) => {
+                    self.dropped[lane].push((lost_from, to, now))
+                }
                 _ => {}
             }
         }
@@ -4208,4 +4221,53 @@ fn a_rebuild_restart_whose_read_back_is_lost_never_stops_a_single_process() {
 fn anothers_detach_from_the_same_place_ends_in_a_stop() {
     let stops = replay(vec![Event::SameDetachElsewhere { lane: 2 }]);
     assert_ne!(stops, 0, "ends in a stop");
+}
+
+/// Round 15's final sweep, seed `3160628139778553297` of `gate_world` at
+/// 50,000 cases, shrunk: a model error. Another process staging a lane this
+/// one had detached at 134 dropped under that record; the world dated the
+/// drop from the slot's confirmed position, 124, counting the change at 125
+/// a reattach had already given up (the marker's gap) as lost again, and
+/// refused a wait at 126 the lane holds.
+#[test]
+fn a_drop_under_a_kept_record_loses_only_what_the_lane_still_held() {
+    replay(vec![
+        Event::RestartLost { lane: 2 },
+        Event::StreamEnds {
+            jump: 20,
+            drop: Some(3),
+            rebuild: false,
+        },
+        Event::RebuildBegunAgain { lane: 2 },
+        Event::HolderFinishes {
+            lane: 0,
+            reattach: false,
+        },
+        Event::HolderFinishes {
+            lane: 0,
+            reattach: false,
+        },
+        Event::RebuildFromLiveOnly {
+            lane: 0,
+            flip_back: false,
+        },
+        Event::Restart {
+            sink: 0,
+            unreadable: 2,
+        },
+        Event::GapOverSlowRead { lane: 2 },
+        Event::ReindexThenDetach { lane: 3 },
+        Event::RestartLost { lane: 3 },
+        Event::Unheld {
+            lane: 0,
+            rebuild: false,
+            then: 0,
+        },
+        Event::Wait {
+            lane: 3,
+            whole_sink: false,
+            searchable: false,
+            at: 126,
+        },
+    ]);
 }
