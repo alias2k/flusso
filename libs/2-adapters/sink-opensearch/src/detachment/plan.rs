@@ -12,7 +12,8 @@
 //! Stamps are not part of a plan: the writer of each document adds the
 //! caller's, so no whole write can go out without one.
 //!
-//! Two rules hold for every plan (the review of the closing round, A and E):
+//! Three rules hold for every plan (the review of the closing round, A and E;
+//! of round 13, F):
 //!
 //! - **A gap is dropped only by a seed that completed** (the index then holds
 //!   everything): a marker on serving keeps its gaps; a marker moved off it
@@ -20,6 +21,14 @@
 //!   whole carries them, and only [`whole_marker`], the seed's, has none.
 //! - **No plan deletes the generation the hash alias serves**, whatever the
 //!   record says it served: a seed since may have moved the alias.
+//! - **The marker's `uuid` always names the generation in its
+//!   `active_generation`, or is absent**, and so do its `seeded` and `walked`:
+//!   they describe that generation alone. A marker put on another generation
+//!   than the one they were read for (a put-back, a live-only demotion) takes
+//!   them only from a place that names that generation. A uuid naming another
+//!   generation reads as "not the one flusso created" at the next
+//!   `ensure_index`, which deletes the generation: the one reads see, for a
+//!   demotion.
 //!
 //! ```
 //! use serde_json::json;
@@ -337,22 +346,28 @@ fn moved_past(kept: &Kept<'_>, deleted: &[u64]) -> Value {
     })
 }
 
-/// The marker back on `serving` as `detaching_from` says it was (R14); with
-/// none, as the marker itself is when it stands there already (its uuid kept,
-/// m-d). The gaps come back with it, from either (A).
+/// The marker back on `serving` as `detaching_from` says it was (R14), when
+/// it names `serving`; else as the marker itself is when it stands there
+/// already (its uuid kept, m-d); else with no uuid and unseeded, since
+/// nothing read describes `serving` (F: a detach during a reindex keeps the
+/// reindex's generation in `detaching_from`). The next `ensure_index` records
+/// the live uuid; unseeded costs a `backfill = false` sink nothing, and a sink
+/// turned back to `backfill = true` backfills the generation the gaps hole.
+/// The gaps come back with it, from both places (A).
 fn restored(kept: &Kept<'_>, serving: u64) -> Value {
+    let names = |doc: &&Value, key: &str| doc.get(key).and_then(Value::as_u64) == Some(serving);
     let from = kept
         .marker
         .and_then(|marker| marker.get("detaching_from"))
         .filter(|from| !from.is_null())
+        .filter(|from| names(from, "generation"))
         .or_else(|| {
-            kept.marker.filter(|marker| {
-                marker.get("active_generation").and_then(Value::as_u64) == Some(serving)
-            })
+            kept.marker
+                .filter(|marker| names(marker, "active_generation"))
         });
     let mut doc = json!({
         "active_generation": serving,
-        "seeded": from.and_then(|from| from.get("seeded")).and_then(Value::as_bool).unwrap_or(true),
+        "seeded": from.and_then(|from| from.get("seeded")).and_then(Value::as_bool).unwrap_or(false),
     });
     if let Some(fields) = doc.as_object_mut() {
         if let Some(uuid) = from
@@ -649,6 +664,33 @@ mod tests {
                 assert_eq!(markers(&demoted)[0]["active_generation"], 4);
             }
         }
+    }
+
+    /// The review of round 13, F: a detach during a reindex keeps the
+    /// reindex's generation (4, its uuid) in `detaching_from`; the live-only
+    /// demotion puts the marker back on the alias's generation (3) with no
+    /// uuid and unseeded, never generation 4's details.
+    #[test]
+    fn a_demotion_carries_no_details_of_another_generation() {
+        let marker = json!({
+            "active_generation": 5, "seeded": false,
+            "detaching_from": { "generation": 4, "seeded": false, "uuid": "u4", "walked": { "mark": "9", "generation": 4 } },
+        });
+        let detached = record("detached", false, 3);
+        let plan = demote(&kept(&marker, Some(&detached), 3, &[3, 5]), true).unwrap();
+        let written = markers(&plan);
+        assert_eq!(written[0]["active_generation"], 3);
+        assert!(written[0].get("uuid").is_none(), "{}", written[0]);
+        assert!(written[0].get("walked").is_none(), "{}", written[0]);
+        assert_eq!(written[0]["seeded"], false);
+        // Named the serving generation, `detaching_from` is taken as it was.
+        let from_serving = json!({
+            "active_generation": 5, "seeded": false,
+            "detaching_from": { "generation": 3, "seeded": true, "uuid": "u3" },
+        });
+        let plan = demote(&kept(&from_serving, Some(&detached), 3, &[3, 5]), true).unwrap();
+        assert_eq!(markers(&plan)[0]["uuid"], "u3");
+        assert_eq!(markers(&plan)[0]["seeded"], true);
     }
 
     /// The review of the closing round, m-d: a live-only demotion over a

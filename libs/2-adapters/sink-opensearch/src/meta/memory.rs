@@ -17,7 +17,7 @@
 //! assert!(meta.is_seeded("users"));
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 use sink::{Detach, Detachment, Ensured, Gap, RecordVersion, Recorded, Stamp, TargetId};
@@ -31,7 +31,11 @@ use crate::meta::{self, Kept, Plan, Step};
 pub struct MemoryMeta {
     docs: BTreeMap<String, (Value, u64)>,
     seq: u64,
-    generations: BTreeMap<String, BTreeSet<u64>>,
+    /// Each index's generations, each with the `index.uuid` OpenSearch gave
+    /// it at its creation.
+    generations: BTreeMap<String, BTreeMap<u64, String>>,
+    /// The uuids made so far: each creation takes the next.
+    made: u64,
     serving: BTreeMap<String, u64>,
     /// The next plan stops after this many of its steps, then fails: a
     /// process that died part way.
@@ -58,15 +62,39 @@ impl MemoryMeta {
     fn generations_of(&self, alias: &str) -> Vec<u64> {
         self.generations
             .get(alias)
-            .map(|set| set.iter().copied().collect())
+            .map(|made| made.keys().copied().collect())
             .unwrap_or_default()
+    }
+
+    /// `generation` of `alias` created, under a uuid no index had before.
+    fn create(&mut self, alias: &str, generation: u64) -> String {
+        self.made += 1;
+        let uuid = format!("uuid-{}", self.made);
+        self.generations
+            .entry(alias.to_owned())
+            .or_default()
+            .insert(generation, uuid.clone());
+        uuid
+    }
+
+    /// A partial `_update` of one field of the marker: a new version, the
+    /// stamp kept.
+    fn update_marker(&mut self, alias: &str, key: &str, value: Value) {
+        if let Some((doc, _)) = self.docs.get(alias).cloned() {
+            let mut doc = doc;
+            if let Some(fields) = doc.as_object_mut() {
+                fields.insert(key.to_owned(), value);
+            }
+            self.seq += 1;
+            self.docs.insert(alias.to_owned(), (doc, self.seq));
+        }
     }
 
     /// Delete `generation` of `alias`; the hash alias goes with the
     /// generation it was on, as OpenSearch drops an index's aliases with it.
     fn remove(&mut self, alias: &str, generation: u64) {
-        if let Some(set) = self.generations.get_mut(alias) {
-            set.remove(&generation);
+        if let Some(made) = self.generations.get_mut(alias) {
+            made.remove(&generation);
         }
         if self.serving.get(alias) == Some(&generation) {
             self.serving.remove(alias);
@@ -213,40 +241,82 @@ impl MemoryMeta {
         Ok(gaps)
     }
 
-    /// `ensure_index` as the sink stages it: the generation the marker
-    /// names, created (with its marker written whole) when it doesn't exist;
-    /// the first generation takes the hash alias.
+    /// `ensure_index` as the sink stages it (`ensure_generation`): the
+    /// generation the marker names, or with no marker the one the alias holds,
+    /// else one past every generation. An unseeded generation whose uuid is
+    /// not the one the marker recorded is not the one flusso created: it is
+    /// deleted and created again (a seeded one is kept). A generation that
+    /// doesn't exist is created, its marker rewritten first (gaps and
+    /// `detaching_from` carried) and its uuid recorded after; a marker naming
+    /// a generation that's gone loses `seeded`. The hash alias moves to the
+    /// generation when the marker says seeded, or when nothing serves yet.
     pub fn ensure(&mut self, alias: &str, stamp: &Stamp) -> Ensured {
         let marker = self.doc(alias).cloned();
         let generations = self.generations_of(alias);
-        let generation = match marker
-            .as_ref()
-            .and_then(|marker| marker.get("active_generation"))
-            .and_then(Value::as_u64)
-        {
-            Some(generation) => generation,
-            None => self
-                .serving
-                .get(alias)
-                .copied()
-                .unwrap_or_else(|| generations.iter().max().map_or(1, |highest| highest + 1)),
+        let (generation, mut seeded, recorded) = match &marker {
+            Some(marker) => (
+                marker
+                    .get("active_generation")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1),
+                marker
+                    .get("seeded")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                marker
+                    .get("uuid")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            ),
+            None => (
+                self.serving
+                    .get(alias)
+                    .copied()
+                    .unwrap_or_else(|| generations.iter().max().map_or(1, |highest| highest + 1)),
+                false,
+                None,
+            ),
         };
-        let exists = generations.contains(&generation);
-        if !exists || marker.is_none() {
+        let mut live = self.uuid(alias, generation).map(str::to_owned);
+        if let (Some(found), Some(made)) = (&live, &recorded)
+            && found != made
+            && !seeded
+        {
+            self.remove(alias, generation);
+            live = None;
+        }
+        let exists = live.is_some();
+        if !exists {
+            seeded = false;
+        }
+        let first = self.serving.get(alias).is_none();
+        if !exists {
             self.put(
                 alias,
                 meta::rewritten(marker.as_ref(), generation, None),
                 Some(stamp),
             );
+            let uuid = self.create(alias, generation);
+            if first {
+                self.serving.insert(alias.to_owned(), generation);
+            }
+            self.update_marker(alias, "uuid", Value::from(uuid.as_str()));
+            live = Some(uuid);
+        } else if marker.is_none() {
+            self.put(
+                alias,
+                meta::rewritten(None, generation, live.as_deref()),
+                Some(stamp),
+            );
+        } else if recorded.is_none()
+            && let Some(uuid) = live.clone()
+        {
+            self.update_marker(alias, "uuid", Value::from(uuid));
         }
-        if !exists {
-            self.generations
-                .entry(alias.to_owned())
-                .or_default()
-                .insert(generation);
-            self.serving.entry(alias.to_owned()).or_insert(generation);
+        if seeded || first {
+            self.serving.insert(alias.to_owned(), generation);
         }
-        let target = Some(TargetId::new(format!("{alias}_{generation}")));
+        let target = live.map(TargetId::new);
         if exists {
             Ensured::existing(target)
         } else {
@@ -265,10 +335,16 @@ impl MemoryMeta {
         if !self.generations_of(alias).contains(&active) {
             return Err(format!("{alias}'s active generation {active} is gone"));
         }
+        let uuid = self.uuid(alias, active).map(str::to_owned);
         self.serving.insert(alias.to_owned(), active);
-        self.generations
-            .insert(alias.to_owned(), BTreeSet::from([active]));
-        self.put(alias, meta::whole_marker(active, true, None), Some(stamp));
+        if let Some(made) = self.generations.get_mut(alias) {
+            made.retain(|generation, _| *generation == active);
+        }
+        self.put(
+            alias,
+            meta::whole_marker(active, true, uuid.as_deref()),
+            Some(stamp),
+        );
         let record = record_id(alias);
         if forget
             && self
@@ -352,9 +428,21 @@ impl MemoryMeta {
 
     /// Whether `generation` of `alias` exists.
     pub fn exists(&self, alias: &str, generation: u64) -> bool {
+        self.uuid(alias, generation).is_some()
+    }
+
+    /// The `index.uuid` of `generation` of `alias`, if it exists.
+    pub fn uuid(&self, alias: &str, generation: u64) -> Option<&str> {
         self.generations
-            .get(alias)
-            .is_some_and(|set| set.contains(&generation))
+            .get(alias)?
+            .get(&generation)
+            .map(String::as_str)
+    }
+
+    /// The generation the hash alias serves, with its uuid: what reads see.
+    pub fn read_by(&self, alias: &str) -> Option<(u64, String)> {
+        let generation = self.serving(alias)?;
+        Some((generation, self.uuid(alias, generation)?.to_owned()))
     }
 
     /// The generation the hash alias serves.
