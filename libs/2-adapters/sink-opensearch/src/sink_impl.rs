@@ -675,7 +675,8 @@ impl OpensearchSink {
                     "{index} was created but is gone again"
                 )));
             };
-            self.record_uuid(&hash_alias, uuid).await?;
+            self.record_uuid(&hash_alias, generation, uuid, stamp)
+                .await?;
         }
 
         // Persist the active generation and its uuid, so a resumed run
@@ -693,7 +694,8 @@ impl OpensearchSink {
             } else if recorded.is_none()
                 && let Some(uuid) = &live
             {
-                self.record_uuid(&hash_alias, uuid).await?;
+                self.record_uuid(&hash_alias, generation, uuid, stamp)
+                    .await?;
             }
         }
 

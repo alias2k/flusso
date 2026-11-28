@@ -238,23 +238,6 @@ impl OpensearchSink {
         self.put_meta(hash_alias, doc, stamp).await
     }
 
-    /// Record the `index.uuid` of the active generation in its meta doc,
-    /// touching nothing else: for a doc an older flusso wrote without one.
-    pub(crate) async fn record_uuid(&self, hash_alias: &str, uuid: &str) -> Result<()> {
-        let url = format!(
-            "{}/{}/_update/{hash_alias}",
-            self.base_url,
-            self.meta_index()
-        );
-        let req = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&json!({ "doc": { "uuid": uuid } }));
-        self.send_ok(req, "meta update failed").await?;
-        Ok(())
-    }
-
     /// The existing generation indexes of a hash alias (`{hash_alias}_{n}`).
     pub(crate) async fn list_generations(&self, hash_alias: &str) -> Result<Vec<String>> {
         self.list_indices(&format!("{hash_alias}_*")).await

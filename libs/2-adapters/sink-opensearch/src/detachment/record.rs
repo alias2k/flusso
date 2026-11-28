@@ -418,6 +418,55 @@ impl OpensearchSink {
         )))
     }
 
+    /// Record `uuid`, the `index.uuid` of `generation`, on the marker, only
+    /// while the marker still names `generation` and records no uuid,
+    /// conditional on the marker read and decided again on a conflict (the
+    /// review of round 14, m-B: another process's demotion landing in
+    /// between would otherwise get another generation's uuid, and the next
+    /// `ensure_index` would delete the generation it names). A marker that
+    /// moved meanwhile is left as it is: the next ensure records the uuid of
+    /// what it names.
+    pub(crate) async fn record_uuid(
+        &self,
+        hash_alias: &str,
+        generation: u64,
+        uuid: &str,
+        stamp: Option<&Stamp>,
+    ) -> Result<()> {
+        for _ in 0..CONFLICT_ROUNDS {
+            let Kept { marker, .. } = self.read_kept(hash_alias).await?;
+            let Some(found) = marker.as_ref() else {
+                return Ok(());
+            };
+            let names = found
+                .source
+                .get("active_generation")
+                .and_then(Value::as_u64)
+                == Some(generation);
+            let recorded = found
+                .source
+                .get("uuid")
+                .is_some_and(|recorded| !recorded.is_null());
+            if !names || recorded {
+                return Ok(());
+            }
+            let mut doc = found.source.clone();
+            if let Some(fields) = doc.as_object_mut() {
+                fields.remove("stamp");
+                fields.insert("uuid".to_owned(), Value::from(uuid));
+            }
+            if let Written::Done = self
+                .put_if(hash_alias, &doc, marker.as_ref(), stamp)
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Err(SinkError::Write(format!(
+            "the seed marker of {hash_alias} kept changing while its uuid was recorded"
+        )))
+    }
+
     /// The seed's marker write (see [`plan::seeded`]): whole and seeded;
     /// `in_place`, keeping the gaps of the marker read, conditional on it.
     pub(crate) async fn write_seeded_marker(

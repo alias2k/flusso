@@ -77,6 +77,20 @@ impl MemoryMeta {
         uuid
     }
 
+    /// The adapter's `record_uuid`: `uuid` recorded on the marker only while
+    /// it still names `generation` and records no uuid (m-B); else nothing,
+    /// and the next ensure records the live uuid of what the marker names.
+    fn record_uuid(&mut self, alias: &str, generation: u64, uuid: &str) {
+        let names = self.active(alias) == Some(generation);
+        let recorded = self
+            .doc(alias)
+            .and_then(|marker| marker.get("uuid"))
+            .is_some_and(|uuid| !uuid.is_null());
+        if names && !recorded {
+            self.update_marker(alias, "uuid", Value::from(uuid));
+        }
+    }
+
     /// A partial `_update` of one field of the marker: a new version, the
     /// stamp kept.
     fn update_marker(&mut self, alias: &str, key: &str, value: Value) {
@@ -313,7 +327,7 @@ impl MemoryMeta {
                 self.serving.insert(alias.to_owned(), generation);
             }
             between(self);
-            self.update_marker(alias, "uuid", Value::from(uuid.as_str()));
+            self.record_uuid(alias, generation, &uuid);
             live = Some(uuid);
         } else if marker.is_none() {
             self.put(
@@ -324,7 +338,7 @@ impl MemoryMeta {
         } else if recorded.is_none()
             && let Some(uuid) = live.clone()
         {
-            self.update_marker(alias, "uuid", Value::from(uuid));
+            self.record_uuid(alias, generation, &uuid);
         }
         if seeded || first {
             self.serving.insert(alias.to_owned(), generation);
@@ -454,12 +468,6 @@ impl MemoryMeta {
             .get(alias)?
             .get(&generation)
             .map(String::as_str)
-    }
-
-    /// The version of the last document write, across the index: a write
-    /// after another has a higher one.
-    pub fn seq(&self) -> u64 {
-        self.seq
     }
 
     /// The uuid of every generation of `alias` that exists now.

@@ -622,8 +622,9 @@ async fn a_tombstone_is_no_record_to_rebuild_demote_or_forget() {
 }
 
 /// Every whole write of the seed marker carries the stamp it is given, and
-/// `null` for a caller that keeps no records; the checkpoint's and the
-/// uuid's partial updates name no stamp, so `_update` keeps the one there.
+/// `null` for a caller that keeps no records; the checkpoint's partial
+/// update names no stamp, so `_update` keeps the one there; the uuid's
+/// record is a conditional whole write carrying the caller's (m-B).
 #[tokio::test]
 async fn whole_marker_writes_carry_their_stamp_and_partial_ones_keep_it() {
     let store = Arc::new(Mutex::new(Store::seeded()));
@@ -639,7 +640,9 @@ async fn whole_marker_writes_carry_their_stamp_and_partial_ones_keep_it() {
     sink.update_walked(ALIAS, json!({ "mark": "k", "generation": 4 }))
         .await
         .unwrap();
-    sink.record_uuid(ALIAS, "u4").await.unwrap();
+    sink.record_uuid(ALIAS, 4, "u4", Some(&stamp()))
+        .await
+        .unwrap();
     assert_eq!(
         store.lock().unwrap().doc(ALIAS).unwrap()["stamp"],
         json!({ "writer": "w", "seq": 3 })
