@@ -78,8 +78,9 @@ pub enum EngineError {
     )]
     UnkeyedLiveItem(String),
 
-    /// Another process changed an index's detach records while this one
-    /// didn't hold the slot (ADR 0012 stage 10, the cut of 2026-11-27):
+    /// Another process changed an index's detach record or seed marker while
+    /// this one didn't hold the slot (ADR 0012 stage 10, the cut of
+    /// 2026-11-27; `found` says which):
     /// flusso doesn't reconcile with it, the deployment stops. No change of
     /// the index was confirmed past what its records cover (an unread
     /// detached lane holds confirmation; an attached one wrote what was
@@ -87,10 +88,10 @@ pub enum EngineError {
     /// nothing.
     #[error(
         "sink `{sink}`, index `{index}`: another flusso process changed the index's detach \
-         records while this one didn't hold the replication slot ({found}). Stopping: flusso \
-         doesn't carry on over another process's record changes. No change of this index was \
-         confirmed past what its records cover; start flusso again (one process per slot) and \
-         its start decides from the records"
+         record or seed marker while this one didn't hold the replication slot ({found}). \
+         Stopping: flusso doesn't carry on over another process's changes to them. No change \
+         of this index was confirmed past what they cover; start flusso again (one process per \
+         slot) and its start decides from them"
     )]
     ForeignChange {
         sink: String,
@@ -101,7 +102,8 @@ pub enum EngineError {
 
 impl EngineError {
     /// Whether this stops the deployment rather than one engine: another
-    /// process changed the records ([`EngineError::ForeignChange`]), which
+    /// process changed the detach record or seed marker
+    /// ([`EngineError::ForeignChange`]), which
     /// no restart of an engine in this process may carry on over.
     pub fn stops_the_deployment(&self) -> bool {
         matches!(self, EngineError::ForeignChange { .. })

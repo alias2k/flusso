@@ -159,12 +159,16 @@ impl Plain {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = new.clone();
             new
         };
-        let Some(records) = self.0.records() else {
-            return Ok(Vec::new());
+        // A sink that keeps no records keeps no gaps: told so like any write
+        // that returned none (the review of the closing round, m-b).
+        let gaps = match self.0.records() {
+            Some(records) => {
+                records
+                    .record_gaps(mapping, &deciding, &self.1.stamp())
+                    .await
+            }
+            None => Ok(Vec::new()),
         };
-        let gaps = records
-            .record_gaps(mapping, &deciding, &self.1.stamp())
-            .await;
         match &gaps {
             Ok(gaps) => self.1.wrote_gaps(&mapping.index, gaps, true),
             Err(_) => {
@@ -361,7 +365,7 @@ impl Erasing<'_> {
         match self.known.judge(index, &found, now, false) {
             Change::Same => self.held(),
             Change::Foreign(what) => {
-                tracing::error!(%index, %what, "another flusso process changed the index's detach records while this one didn't hold the slot: stopping the deployment; no change of this index confirmed past what its records cover");
+                tracing::error!(%index, %what, "another flusso process changed the index's detach record or seed marker while this one didn't hold the slot: stopping the deployment; no change of this index confirmed past what they cover");
                 Err(NotHeld::Changed)
             }
         }
@@ -383,7 +387,7 @@ impl Erasing<'_> {
         if let Some(found) = self.read_back(mapping).await
             && seeded.is_ok()
             && let (
-                Some(DetachRecord::Rebuilding { live_only: false }),
+                Some(DetachRecord::Rebuilding { .. } | DetachRecord::Detached { .. }),
                 Some(MarkerAt::Newer { seeded: true }),
                 Some(version),
             ) = (&found.record, found.marker, &found.version)

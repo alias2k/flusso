@@ -526,7 +526,7 @@ impl SinkEngine {
     /// first such stops this engine's stagings and runs, which stop the
     /// deployment. The error a step that met it fails with.
     fn foreign_change(&self, index: &IndexName, what: String) -> sink::SinkError {
-        tracing::error!(%index, sink = %self.name, %what, "another flusso process changed the index's detach records while this one didn't hold the slot: stopping the deployment; no change of this index confirmed past what its records cover");
+        tracing::error!(%index, sink = %self.name, %what, "another flusso process changed the index's detach record or seed marker while this one didn't hold the slot: stopping the deployment; no change of this index confirmed past what they cover");
         let mut foreign = self.foreign.lock().unwrap_or_else(PoisonError::into_inner);
         if foreign.is_none() {
             *foreign = Some((index.clone(), what.clone()));
@@ -599,10 +599,15 @@ impl SinkEngine {
         let lane = LaneKey::new(mapping.index.clone(), self.name.clone());
         for round in 0..2 {
             let through = found.through.clone();
-            let written_rebuildable = matches!(
-                found.record,
-                Some(sink::DetachRecord::Detached { live_only: false })
-            );
+            // Put back live only first on a sink that can't rebuild: a record
+            // written while it could, or one beside a marker a detach moved off
+            // the generation reads see (the review of the closing round, D).
+            let written_rebuildable =
+                matches!(
+                    found.record,
+                    Some(sink::DetachRecord::Detached { live_only: false })
+                ) || (matches!(found.record, Some(sink::DetachRecord::Detached { .. }))
+                    && !matches!(found.marker, Some(sink::MarkerAt::Serving { .. })));
             let state = self.lane_state(&lane);
             let decided = decide(
                 &AtStaging::of(&found),
@@ -660,7 +665,7 @@ impl SinkEngine {
                             }
                         };
                         demoted?;
-                        tracing::warn!(%lane, "a detach record written while this sink could rebuild is put back to detached, live only: flusso reattach --accept-gap applies");
+                        tracing::warn!(%lane, "a detach record written while this sink could rebuild, or beside a seed marker moved off the generation reads see, is put back to detached, live only, on that generation: flusso reattach --accept-gap applies");
                     }
                     self.read_detachment(&mapping.index, found);
                     return Ok(Acted::Detached { why, through });
@@ -756,17 +761,19 @@ impl SinkEngine {
         let restart = "restart flusso: a start on this backfill = false sink puts the \
                        records back to detached, live only, on the generation reads see; \
                        then reattach again";
+        // On the generation reads see, seeded or not: a `backfill = false`
+        // sink never seeds its index (the review of the closing round).
         let refusal = match (&found.record, found.marker, &found.version) {
             (
                 Some(sink::DetachRecord::Detached { live_only: true }),
-                Some(sink::MarkerAt::Serving { seeded: true }),
+                Some(sink::MarkerAt::Serving { .. }),
                 Some(_),
             ) => None,
             (None, _, _) => {
                 Some("the sink keeps no detach record of the index: it is not detached".to_owned())
             }
             (Some(sink::DetachRecord::Detached { live_only: true }), _, _) => Some(format!(
-                "the seed marker is not on the seeded generation reads see (a demotion not \
+                "the seed marker is not on the generation reads see (a demotion not \
                  finished); {restart}"
             )),
             (Some(sink::DetachRecord::Detached { live_only: false }), _, _) => Some(format!(
@@ -2450,8 +2457,9 @@ enum AtStaging {
     Detached(String),
     /// A rebuild seeded a generation newer than the serving one since (an
     /// older flusso's, or one that died before deleting the record): the
-    /// record is deleted and the index staged as before. Never for a
-    /// live-only record.
+    /// record is deleted and the index staged as before. Decided by the
+    /// marker alone, whatever `live_only` the record says (the review of the
+    /// closing round, E): a seed holds everything.
     Finished(sink::RecordVersion),
     /// A rebuild under way, its marker moved, with the attempts its record
     /// counts: staged as a rebuild (the process-start attach), or demoted
@@ -2483,12 +2491,11 @@ impl AtStaging {
                 };
             }
         };
-        // Finished only when a newer copy than the serving one was seeded: a
-        // live-only index is never rebuilt, so its record stays until an
-        // operator reattaches it (O16).
-        if !live_only
-            && let (Some(MarkerAt::Newer { seeded: true }), Some(version)) =
-                (detachment.marker, &detachment.version)
+        // Finished when a newer copy than the serving one was seeded, by the
+        // marker alone: a record a live-only detach wrote is finished too
+        // once `backfill` was turned on and a rebuild seeded the index (E).
+        if let (Some(MarkerAt::Newer { seeded: true }), Some(version)) =
+            (detachment.marker, &detachment.version)
         {
             return Self::Finished(version.clone());
         }
@@ -2517,8 +2524,9 @@ enum Decision {
     /// deleted, on the version read.
     Forget(sink::RecordVersion),
     /// Detached by the records. `live_only_first`: written while the sink
-    /// could rebuild, found on one that can't, put back live only first
-    /// (R14).
+    /// could rebuild, or beside a marker a detach moved, found on one that
+    /// can't, put back live only first (R14; the review of the closing
+    /// round, D).
     Detach { why: String, live_only_first: bool },
     /// The lane is held detached here and stays so.
     KeepDetached,
