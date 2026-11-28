@@ -186,6 +186,9 @@ struct Store {
     /// generation of that number is another index under a reused number, a
     /// known dead end (#492): replacing it is not judged.
     hand_deleted: Mutex<BTreeSet<(String, u64, String, u64)>>,
+    /// Every generation (uuid) a seed completed on: it holds every row, so
+    /// a delete dropped while reads see it leaves the row's document there.
+    seeded_ever: Mutex<BTreeSet<String>>,
     /// The next record or marker write this process makes fails: `true`,
     /// after it landed (its response lost); `false`, before.
     fails: Mutex<Option<bool>>,
@@ -233,9 +236,14 @@ impl Store {
             meta.ensure(of, &before);
             meta.seed(of, &before, true).unwrap();
         }
-        let read_by = INDEXES
+        let read_by: BTreeMap<String, Option<(u64, String)>> = INDEXES
             .iter()
             .map(|of| ((*of).to_owned(), meta.read_by(of)))
+            .collect();
+        let seeded_ever = read_by
+            .values()
+            .flatten()
+            .map(|(_, uuid)| uuid.clone())
             .collect();
         Self {
             holding,
@@ -244,6 +252,7 @@ impl Store {
             writers: Mutex::default(),
             read_by: Mutex::new(read_by),
             hand_deleted: Mutex::default(),
+            seeded_ever: Mutex::new(seeded_ever),
             targets: Mutex::new(
                 INDEXES
                     .iter()
@@ -393,6 +402,9 @@ impl Store {
         let now = meta.read_by(of);
         let gaps_after = os_meta::read(meta.documents(of).0, None, None).gaps;
         drop(meta);
+        if seed && let Some((_, uuid)) = &now {
+            self.seeded_ever.lock().unwrap().insert(uuid.clone());
+        }
         let mut ledger = self.read_by.lock().unwrap();
         let was = ledger.get(of).cloned().flatten();
         // A uuid deleted by hand carried in the marker before the write: a
@@ -673,6 +685,14 @@ impl Sink for Store {
 
     async fn is_seeded(&self, of: &IndexName) -> sink::Result<bool> {
         Ok(self.seeded(of.as_ref()))
+    }
+
+    /// As the adapter's: the generation the marker names (where writes and a
+    /// backfill go) is not the one the alias serves.
+    async fn is_rebuilding(&self, of: &IndexName) -> sink::Result<bool> {
+        let meta = self.meta();
+        let serving = meta.serving(of.as_ref());
+        Ok(serving.is_some() && meta.active(of.as_ref()) != serving)
     }
 
     async fn seeding(&self, of: &IndexName) -> sink::Result<sink::Seeding> {
@@ -1694,10 +1714,11 @@ struct World {
     attached: Vec<Vec<u64>>,
     /// Per lane, each reattach's tick and the position its gap ended at.
     attached_at: Vec<Vec<(u64, u64)>>,
-    /// Per sink and index, at each delete published, the uuids of the
-    /// generations that existed then: a backfill into one of them leaves
-    /// the deleted row's document there.
-    existing: BTreeMap<(usize, usize, u64), BTreeSet<String>>,
+    /// Per sink and index, at each delete published, the uuid of the
+    /// generation reads saw then, which holds the row's document: dropped,
+    /// the delete leaves it there, and a backfill into that generation
+    /// doesn't remove it.
+    existing: BTreeMap<(usize, usize, u64), Option<String>>,
     /// Per lane, the backfill asked and not yet completed: its ticket and
     /// where its walk began.
     asked: Vec<Option<(stream::Ticket, u64)>>,
@@ -2284,9 +2305,13 @@ impl World {
         self.changes[at].push((self.horizon, self.tick));
         if is_delete(self.horizon) {
             for sink_at in 0..2 {
-                let uuids = self.stores[sink_at].meta().uuids(INDEXES[at]);
-                self.existing
-                    .insert((sink_at, at, self.horizon), uuids.into_iter().collect());
+                let store = &self.stores[sink_at];
+                let read_by = store
+                    .meta()
+                    .read_by(INDEXES[at])
+                    .map(|(_, uuid)| uuid)
+                    .filter(|uuid| store.seeded_ever.lock().unwrap().contains(uuid));
+                self.existing.insert((sink_at, at, self.horizon), read_by);
             }
         }
         self.publish(at, self.horizon);
@@ -2390,12 +2415,12 @@ impl World {
                 continue;
             }
             if is_delete(*at) {
-                let born_after = reads_see.as_ref().is_some_and(|uuid| {
-                    !self
-                        .existing
-                        .get(&(Self::sink_of(lane), lane % 2, *at))
-                        .is_some_and(|existed| existed.contains(uuid))
-                });
+                // No seeded generation served at the delete: none held
+                // the row's document then (a first backfill covers it).
+                let born_after = self
+                    .existing
+                    .get(&(Self::sink_of(lane), lane % 2, *at))
+                    .is_none_or(|saw| saw.is_none() || *saw != reads_see);
                 // A reattach accepted the drop for positions past its gap.
                 let accepted = self.attached_at[lane]
                     .iter()
