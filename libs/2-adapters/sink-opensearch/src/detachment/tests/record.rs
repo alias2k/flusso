@@ -1710,7 +1710,7 @@ async fn a_marker_rewrite_waits_only_for_a_shard_not_ready() {
 /// so OpenSearch answers first.
 #[test]
 fn the_meta_primary_wait_stays_under_the_client_timeout() {
-    use crate::detachment::record::meta_primary_wait;
+    use crate::generations::meta_primary_wait;
     use std::time::Duration;
     for (timeout, wait) in [
         (Duration::from_secs(30), Duration::from_secs(24)),

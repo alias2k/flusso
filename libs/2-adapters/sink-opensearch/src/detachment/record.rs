@@ -46,26 +46,6 @@ use crate::transport::request_error;
 /// How many times a detach reads again after a conflict before it gives up.
 const CONFLICT_ROUNDS: usize = 5;
 
-/// How long a marker rewrite asks OpenSearch to wait for the meta index's
-/// primary shard: under the client's `timeout` (by a fifth, at least a
-/// second), so OpenSearch answers before the client gives up, never under
-/// half a second, and at most 30 s.
-pub(crate) fn meta_primary_wait(timeout: std::time::Duration) -> std::time::Duration {
-    let margin = (timeout / 5).max(std::time::Duration::from_secs(1));
-    timeout.saturating_sub(margin).clamp(
-        std::time::Duration::from_millis(500),
-        std::time::Duration::from_secs(30),
-    )
-}
-
-/// Whether `refused` says the meta index's shard is not ready yet: it is
-/// still being created or recovering.
-fn shard_not_ready(refused: &SinkError) -> bool {
-    let text = refused.to_string();
-    text.contains("no_shard_available_action_exception")
-        || text.contains("illegal_index_shard_state_exception")
-}
-
 /// Whether a plan needs the generations listed, or deletes from the list
 /// best effort only.
 #[derive(Debug, Clone, Copy)]
@@ -398,18 +378,7 @@ impl OpensearchSink {
         stamp: Option<&Stamp>,
     ) -> Result<()> {
         for _ in 0..CONFLICT_ROUNDS {
-            let read = match self.read_kept(hash_alias).await {
-                // The meta index was just created by a write elsewhere (a
-                // write waits for its primary, a read is refused at once):
-                // wait for its primary, then read again (the review of
-                // round 13, H).
-                Err(refused) if shard_not_ready(&refused) => {
-                    self.wait_for_meta_primary().await?;
-                    self.read_kept(hash_alias).await
-                }
-                read => read,
-            };
-            let Kept { marker, .. } = read?;
+            let Kept { marker, .. } = self.read_kept(hash_alias).await?;
             let doc = plan::rewritten(marker.as_ref().map(|found| &found.source), generation, uuid);
             if let Written::Done = self
                 .put_if(hash_alias, &doc, marker.as_ref(), stamp)
@@ -522,41 +491,6 @@ impl OpensearchSink {
             marker.as_ref().map(|found| &found.source),
             serving,
         ))
-    }
-
-    /// Wait until the meta index's primary shard is active, at most
-    /// [`meta_primary_wait`]: OpenSearch's cluster health at `yellow` for it.
-    /// A read: its failure is [`SinkError::Read`].
-    async fn wait_for_meta_primary(&self) -> Result<()> {
-        let context = "waiting for the meta index's primary shard failed";
-        let read = |error: SinkError| match error {
-            SinkError::Write(text) => SinkError::Read(text),
-            other => other,
-        };
-        let url = format!(
-            "{}/_cluster/health/{}?wait_for_status=yellow&timeout={}ms",
-            self.base_url,
-            self.meta_index(),
-            meta_primary_wait(self.timeout).as_millis()
-        );
-        let response = self
-            .maybe_auth(self.client.get(&url))
-            .send()
-            .await
-            .map_err(|e| read(request_error(context, e)))?;
-        let status = response.status();
-        let text = response
-            .text()
-            .await
-            .map_err(|e| read(request_error(context, e)))?;
-        let timed_out = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|body| body.get("timed_out").and_then(Value::as_bool))
-            .unwrap_or(false);
-        if !status.is_success() || timed_out {
-            return Err(SinkError::Read(format!("{context}: HTTP {status}: {text}")));
-        }
-        Ok(())
     }
 
     /// The record of a rebuild the seed just finished, forgotten on the

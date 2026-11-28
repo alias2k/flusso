@@ -160,7 +160,67 @@ impl OpensearchSink {
     }
 
     /// Fetch a document from the meta index by id. Returns `None` on 404.
+    /// A read ([`meta_read`](Self::meta_read)).
     async fn get_meta(&self, id: &str) -> Result<Option<Value>> {
+        self.meta_read(|| self.get_meta_once(id)).await
+    }
+
+    /// Run `read`, a read of the meta index, once more after waiting for
+    /// its primary when the shard is not ready yet (just created by a write
+    /// elsewhere, or recovering: a write waits for the primary, a read is
+    /// refused at once). Its failure is [`SinkError::Read`], never a write
+    /// (the reviews of round 13, H, and of round 15's CI). Every read of the
+    /// meta index goes through it.
+    pub(crate) async fn meta_read<T, F, Fut>(&self, read: F) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        match read().await.map_err(as_read) {
+            Err(refused) if shard_not_ready(&refused) => {
+                self.wait_for_meta_primary().await?;
+                read().await.map_err(as_read)
+            }
+            read => read,
+        }
+    }
+
+    /// Wait until the meta index's primary shard is active, at most
+    /// [`meta_primary_wait`]: OpenSearch's cluster health at `yellow` for it.
+    /// A read: its failure is [`SinkError::Read`].
+    async fn wait_for_meta_primary(&self) -> Result<()> {
+        let context = "waiting for the meta index's primary shard failed";
+        let read = |error: SinkError| match error {
+            SinkError::Write(text) => SinkError::Read(text),
+            other => other,
+        };
+        let url = format!(
+            "{}/_cluster/health/{}?wait_for_status=yellow&timeout={}ms",
+            self.base_url,
+            self.meta_index(),
+            meta_primary_wait(self.timeout).as_millis()
+        );
+        let response = self
+            .maybe_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| read(request_error(context, e)))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| read(request_error(context, e)))?;
+        let timed_out = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|body| body.get("timed_out").and_then(Value::as_bool))
+            .unwrap_or(false);
+        if !status.is_success() || timed_out {
+            return Err(SinkError::Read(format!("{context}: HTTP {status}: {text}")));
+        }
+        Ok(())
+    }
+
+    async fn get_meta_once(&self, id: &str) -> Result<Option<Value>> {
         let url = format!("{}/{}/_doc/{id}", self.base_url, self.meta_index());
         let resp = self
             .maybe_auth(self.client.get(&url))
@@ -461,3 +521,31 @@ pub(crate) fn next_generation(existing: &[String], hash_alias: &str) -> u64 {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests;
+
+/// How long a meta read asks OpenSearch to wait for the meta index's
+/// primary shard: under the client's `timeout` (by a fifth, at least a
+/// second), so OpenSearch answers before the client gives up, never under
+/// half a second, and at most 30 s.
+pub(crate) fn meta_primary_wait(timeout: std::time::Duration) -> std::time::Duration {
+    let margin = (timeout / 5).max(std::time::Duration::from_secs(1));
+    timeout.saturating_sub(margin).clamp(
+        std::time::Duration::from_millis(500),
+        std::time::Duration::from_secs(30),
+    )
+}
+
+/// Whether `refused` says the meta index's shard is not ready yet: it is
+/// still being created or recovering.
+fn shard_not_ready(refused: &SinkError) -> bool {
+    let text = refused.to_string();
+    text.contains("no_shard_available_action_exception")
+        || text.contains("illegal_index_shard_state_exception")
+}
+
+/// A failure of a read as [`SinkError::Read`]: nothing was written.
+fn as_read(error: SinkError) -> SinkError {
+    match error {
+        SinkError::Write(text) => SinkError::Read(text),
+        other => other,
+    }
+}

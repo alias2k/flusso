@@ -147,6 +147,10 @@ impl OpensearchSink {
     /// The seed marker, the detach record and the stuck clock of
     /// `hash_alias`, in one `_mget`, each with its version.
     async fn read_kept(&self, hash_alias: &str) -> Result<Kept> {
+        self.meta_read(|| self.read_kept_once(hash_alias)).await
+    }
+
+    async fn read_kept_once(&self, hash_alias: &str) -> Result<Kept> {
         let ids = [
             hash_alias.to_owned(),
             format!("detach:{hash_alias}"),
