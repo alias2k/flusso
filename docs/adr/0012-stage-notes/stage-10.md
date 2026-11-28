@@ -1855,6 +1855,83 @@ No blocking finding (`target/review-482-round-11/`). A closing round: no new mec
   - S-3's `Gate` put-back removed: `a_rebuild_restart_whose_read_back_failed_once_is_cleared_and_goes_on` fails;
   - S-5: "every read is mine" fails `anothers_detach_from_the_same_place_is_never_taken_for_ours`; the clear's own-stamp check removed fails `the_clear_forgets_no_record_another_writer_stamped`.
 
+### After the review of the closing round
+
+The closing review (`target/review-482-closing/`) found the stand-ins drifting from the adapter: three holes (A, D, E) were reachable only by reading the code. This round gives the tests one copy of the adapter's document logic, then fixes what the world then shows.
+
+**Item 1: one copy of the adapter's document logic.**
+- **The plans.** The OpenSearch sink's decisions over its meta documents are pure functions (`sink-opensearch/src/detachment/plan.rs`, re-exported as `sink_opensearch::meta`).
+  - In: the documents read (the marker; the record or its tombstone), the generation the alias serves, the generations that exist.
+  - Out: a `Plan`, the writes in order (marker, record, generation deletes), then the best-effort deletes.
+  - The HTTP code reads, asks for the plan and sends it, each write conditional on the version read. The writer adds the stamp, so no plan sends a write unstamped.
+- **The in-memory meta index.** `meta::memory::MemoryMeta` (feature `testing`) runs the same plans. It models, once:
+  - a version per write;
+  - tombstones;
+  - the gaps' partial `_update` against whole writes;
+  - the alias dropped with its generation.
+- **The world.** The daemon's world keeps its stand-in's documents there, for this process and the other alike.
+  - Its hand-written copies are deleted: marker moves, the put-back, the `through` rule, gap carrying, tombstones, versions.
+  - It keeps only the oracle's bookkeeping: who wrote a record under which stream, reads, writes, seeds.
+- **Layering and publishing.** The world is layer 3 over the adapter (layer 2), so the layering holds. The daemon already dev-depended on `flusso-sink-opensearch` for the fence e2e, with its version.
+  - With `features = ["testing"]` added to that versioned entry, `cargo package -p flusso-daemon` failed: it resolves the dev-dependency against crates.io, whose `flusso-sink-opensearch` has no `testing` feature until the libs train publishes it.
+  - So the entry is now path only, as `flusso-test-postgres` is. `cargo package` then passes and strips it from the published manifest (checked: neither appears in the packaged `Cargo.toml`). The fence e2e uses the same entry in the repository.
+- **The engine.** It is the adapter's layer, so it can't depend on it.
+  - Its `Gate` keeps what it is asked to (records as written, a marker stamp, gaps from `record_gaps` until a seed) and nothing more.
+  - The one test that leaned on the adapter's put-back moved to the world: `a_rebuild_restart_whose_read_back_failed_once_is_cleared_and_goes_on`. The world's `a_rebuild_restart_whose_read_back_is_lost_never_stops_a_single_process` and `a_gap_survives_a_failed_detach_s_clear_and_the_put_back` cover it.
+- **What the world now reaches.**
+  - a reindex and a reattach of either sink;
+  - `backfill` flips between starts;
+  - a rebuild begun from a live-only record (`RebuildFromLiveOnly`);
+  - a failed best-effort forget at a seed (`SeedKeepsRecord`);
+  - a live-only record beside a moved marker (`LiveOnlyBesideMoved`);
+  - a target deleted with its alias (`Missing`).
+- **Two new oracle rules.**
+  - No write leaves the alias serving nothing (E).
+  - On a sink that can't rebuild, a detached lane comes back by a reattach, or by a start and a reattach (D's way out).
+- **Before the fixes.**
+  - A failed 6 of 6 fresh seeds: both properties, 5,000 cases, three seeds each, each shrunk to `GapThroughRebuild { lane: 0, moved: false }`.
+  - D and E failed their pinned replays.
+
+| Finding | Outcome | Guard |
+| --- | --- | --- |
+| A a gap dropped by writes other than a completed seed | **A gap is dropped only by a seed that completed.** Rebuild and non-live-only demotion over a marker no detach moved: they make its `detaching_from`, gaps included. A created generation and a reindex: they rewrite the marker carrying `gaps` and `detaching_from` (`rewrite_marker`, conditional on the marker read). Live-only demotion and the put-back: they restore the gaps from either place. The seed's `write_index_meta` is the one write without them. `reindex` checked: it moved the marker whole, dropping both, and now carries them. | plan `only_the_seed_drops_the_gaps`; adapter `a_gap_survives_a_rebuild_begun_over_a_live_only_detach`, `a_gap_survives_a_begun_rebuild_put_back_live_only`; Docker `a_gap_comes_back_with_the_marker_onto_the_serving_generation` (two more cases); world `a_gap_survives_a_rebuild_put_back_live_only` |
+| D a live-only record beside a moved marker never demoted | A start on a sink that can't rebuild puts a `detached` record back live only on the generation reads see. It does so when the record was written while the sink could rebuild, or when the marker is off that generation. The refusal's "restart flusso" is then true. | engine `a_live_only_record_beside_a_moved_marker_reattaches_after_a_start`; world `a_live_only_record_beside_a_moved_marker_reattaches_after_a_start` and the way-out rule |
+| E a rebuild from a live-only record never finished | A rebuild is begun with `live_only: false`. `Finished` is decided by the marker alone: a seeded newer marker finishes any record. The seed's read back forgets any record left there. No rebuild or demotion deletes the generation the alias serves (a `debug_assert!` in the plan). A live-only demotion goes back on the alias's generation. | plan `a_rebuild_begun_from_a_live_only_record_is_not_live_only`, `no_plan_deletes_the_generation_the_alias_serves`; engine `staging_classifies_every_record_and_marker_pair` (two cases); world `a_rebuild_from_a_live_only_record_finishes_at_its_seed` and the alias rule |
+| B `_na_` taken for a cluster | A `cluster_uuid` of `_na_` or empty names no cluster: the sink is not compared (`check_skipped`, logged by `run`). | CLI `two_unformed_clusters_are_not_one_cluster` |
+| C the clusters asked one after the other before the listeners | `run` binds its listeners, then asks every cluster at once, each for at most 10 s (`CLUSTER_ASK_TIMEOUT`). | CLI `slow_clusters_delay_the_check_by_one_timeout` |
+| m-e the run-side warning | It says what is at stake (see the user-visible list). | — |
+| test gap: the online uuid path | Driven end to end with two stubs. | CLI `one_uuid_through_the_online_path_is_refused` |
+| test gap: the put-back read's own gaps | Asserted on the read that puts the marker back. | adapter `a_gap_survives_a_detach_whose_marker_comes_back_on_serving` |
+| m-a the stand-ins' `begin_rebuild` | Gone with item 1: the world runs the adapter's plan; the `Gate` stores what it is asked. | — |
+| m-b `Plain::record_gaps` on a sink with no records | It tells `known` of the empty list, as any write that returned none. | — |
+| m-c the PR body's item 16 | Corrected: no provided methods; the record methods are `sink::Records`'. | — |
+| m-d `restored` dropped the uuid | With no `detaching_from`, a live-only demotion over a marker on serving keeps its uuid and seeded state. | plan `a_live_only_demotion_keeps_the_uuid_of_a_marker_on_serving` |
+| Found by the world's way-out rule: a fresh `backfill = false` sink could never reattach | Such a sink never seeds its index, so its marker on serving is unseeded, and the reattach demanded it seeded. The reattach now takes the marker on the generation reads see, seeded or not. | engine `a_live_only_record_beside_an_unseeded_marker_on_serving_reattaches` |
+| Found by this round's sweep (seed `2409886620174256796`, a hole): a detach over a `rebuilding` record took the later `through` | Round 12 kept `through` only over a `detached` record. A rebuild given up seeded nothing, so the serving generation lacks every change from the first drop. The record's `through` is now kept over any record. | plan `a_detach_over_a_rebuilding_record_keeps_where_the_first_began`; adapter `a_detach_over_a_detached_record_keeps_where_it_began` (both states); world `a_detach_over_a_rebuilding_record_keeps_where_the_drop_began` |
+| Found by the final sweep (seed `17611438872220405175` of `gate_world` at 50,000 cases, a hole): a moved marker read as on serving once the generation it left was deleted | The rebuild moves the marker past every generation that exists, so with the serving generation gone it took that number again. The marker, still carrying `detaching_from`, read as on serving. A reattach added its gap at the top level, and the next read's put-back wrote the marker back from `detaching_from` without it. A marker carrying `detaching_from` now reads as moved (`Newer`), never on serving. The put-back and a live-only demotion bring back every gap from both places. | plan `a_marker_carrying_detaching_from_is_never_on_serving`; world `a_gap_kept_beside_a_moved_marker_on_a_reused_generation_survives` (both fail without the fix) |
+| Found by the world, not fixed: a record written while nothing served (the generation deleted from under the sink) names no generation | `marker_at` reads every marker as `Elsewhere` against it. A rebuild from it is never taken for finished: each start takes it over again. A live-only one is never reattached. The refusal's "restart flusso" doesn't help there. Reached only with a generation deleted by hand under a detach. The world leaves such a record out of its liveness and way-out checks (`Store::names_no_serving`). | follow-up |
+| Docs pass: `flusso reindex` said "on every sink queued" when sinks were skipped | The `202` carries `queued_on`. The CLI prints the sinks queued, then each skipped sink with its reason, one per line. The exit code is as before. | CLI `a_queued_reindex_is_printed_from_its_json`, `http::tests::a_reindex_is_queued_on_the_index_path` |
+| Docs pass: `/readyz` with a detached lane or a gap | Unchanged: readiness is the deployment's and each sink engine's phase alone. A detached lane, or a gap, stays ready, is shown on `/status` and is refused by the fence. | daemon `a_detached_lane_or_a_gap_leaves_the_deployment_ready` |
+| Docs pass: the stop said "detach records" when a seed marker changed | Error and log name "the index's detach record or seed marker" (texts in the user-visible list). | daemon `a_change_by_another_process_stops_the_deployment` |
+| Docs pass: `contribute/pipeline.md` | Brought to what is built: `Records`, stamps, the stop, the plans and the world. | — |
+
+**Runs** (fresh seeds, the regression files set aside, one test binary of the final code commit `731915a0`).
+- **The sweeps stopped three times before they passed**, each case pinned above:
+  - on `2de1a554`, seed `2409886620174256796` of `a_single_process_never_stops` at 10,000 cases: the `through` hole;
+  - on `2de1a554`, seed `10183128751732460969` of `gate_world` at 10,000 cases: no longer failing once the `through` fix landed;
+  - on `eb661278`, seed `17611438872220405175` of `gate_world` at 50,000 cases: the moved marker on a reused generation number.
+  - Earlier, the world's first runs found two model errors of the new store: the alias kept on a deleted generation, and a lane left without its gap past a way-out reattach. Both are fixed in the world.
+- **On `731915a0`, everything passes:**
+  - `gate_world` at 50,000 cases, 5 seeds: `5314952944604234503`, `15376243376204117371`, `1813758078143670455`, `11802617948610117132`, `9137624259147426461`;
+  - `a_single_process_never_stops` at 50,000 cases, 5 seeds: `11548598505017312669`, `2580746782486355148`, `102763830326267967`, `14673866775106845812`, `235507850227250249`;
+  - `gate_property` at 20,000 cases, 3 seeds: `3456071603121051413`, `17654448588881445174`, `16261749963614158946`.
+- **Each fix reverted on `731915a0`** (both properties, 5,000 cases, three fresh seeds each, plus the pinned cases and the unit tests). Each is caught 3 of 3 by both properties:
+  - A, reverted in the plans (`moved_past` keeps no gaps, `rewritten` carries nothing): `gate_world` and the solo property both shrink to `GapThroughRebuild { lane: 0, moved: false }`; caught by plan `only_the_seed_drops_the_gaps` and adapter `a_gap_survives_a_rebuild_begun_over_a_live_only_detach` and `a_gap_survives_a_begun_rebuild_put_back_live_only`;
+  - D, reverted in the engine: `gate_world` shrinks to `LiveOnlyBesideMoved { lane: 0 }`; the pinned D cases fail; caught by engine `a_live_only_record_beside_a_moved_marker_reattaches_after_a_start`. D has no adapter part, so its unit test is the engine's;
+  - E, reverted in the plan, `AtStaging` and the seed's read back: both properties shrink to `RebuildFromLiveOnly { lane: 0, flip_back: false }`; the pinned E case fails; caught by plan `a_rebuild_begun_from_a_live_only_record_is_not_live_only` and `no_plan_deletes_the_generation_the_alias_serves`.
+- **Each smaller fix removed fails its test:** m-d, the put-back read's gaps, `through` over `rebuilding`, the unseeded reattach, the moved-marker rule.
+- **m-b has no test.** Nothing reaches it: a sink with no records never reattaches.
+
 ### Decided by the owner on 2026-11-26, from the review of step 2
 
 **O29: can a process that staged before another one's detach keep the lane attached? (S3)**

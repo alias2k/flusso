@@ -1851,7 +1851,7 @@ is the one concrete piece.
   `docs/adr/0012-stage-notes/stage-10.md`; slice 1 and slice 2 (§10a: the detach, the attach, the
   rebuild and `reattach`) are built. No threshold detaches yet (slice 4): only tests send
   `SinkControl::Detach`, while a reindex of a detached index and `flusso reattach` are operator-reachable. Every staging step reads
-  the detach records first (`Sink::detachment`, before `reindex` and `ensure_index`; OpenSearch:
+  the detach records first (`Records::detachment`, before `reindex` and `ensure_index`; OpenSearch:
   `detachment.rs`, one `_mget` of the seed marker, `detach:{alias}` and `stuck:{alias}`). Only a
   missing meta index or document reads as nothing kept; any other answer fails the step (the index
   restaging alone under `Resumed`, the staging under `Fresh`). A marker carrying `detaching_from` with
@@ -1859,13 +1859,13 @@ is the one concrete piece.
   before. Each `_mget` entry must answer for the id asked, found or not found. What a record means
   is `sink_engine.rs`'s `AtStaging`: `detached` → `Staged::Detached` (not ensured, not backfilled,
   the lane detached); a seeded marker on a generation newer than the record's `serving`
-  (`MarkerAt::Newer`), on a record that isn't live only → the record is deleted (`forget_detachment`,
-  on the version read) and staged as before; `detached` with the marker on serving → `Sink::detach`
+  (`MarkerAt::Newer`), whatever the record's `live_only` (the review of the closing round, E) → the
+  record is deleted (`forget_detachment`, on the version read) and staged as before; `detached` with the marker on serving → `Records::detach`
   again (one the sink keeps no record of fails the step), and so is a `rebuilding` record beside a
   marker on serving, and an unreadable record beside any marker but a newer unseeded one (O30);
   `rebuilding` with its marker moved → `AtStaging::Rebuilding(attempts)`, the process-start attach (the
   lane `rebuilding`, its backfill asked, its walk resuming from its mark), or under `--skip-backfill` /
-  `backfill = false` `Sink::demote` and staged detached (O26); a `rebuilding` record beside a marker
+  `backfill = false` `Records::demote` and staged detached (O26); a `rebuilding` record beside a marker
   seeded on a newer generation is a finished rebuild (`Finished`: record deleted); unreadable beside a
   newer unseeded marker → staged as before. A lane the process holds detached stays so at any later
   staging; a staging during a run says itself it found the index detached (`Outcome::Restage(Ok(true))`,
@@ -1873,7 +1873,7 @@ is the one concrete piece.
   `SinkControl::Detach` sets `LaneState.detach_asked`; the lane detaches at its next probe the
   destination refuses (`hold` with `probe`) or, restaging, when its staging comes due instead of
   staging; a landed probe or staging drops the ask. Once nothing of the lane is in flight
-  (`start_detaches`) the sink records it (`Sink::detach`, OpenSearch `detachment/record.rs`: the
+  (`start_detaches`) the sink records it (`Records::detach`, OpenSearch `detachment/record.rs`: the
   marker moved first past every generation keeping `detaching_from`, then the record created or
   replaced on its version, then unserved generations deleted, best effort; every write conditional
   on the `_mget` before it, a 409 reads again; `refused_keys` as JSON text). `Kept` only: the lane's
@@ -1887,8 +1887,9 @@ is the one concrete piece.
   `NotKept` (the default) drops the ask; an error keeps it and sets `detach_unsure`: before the lane's
   next probe a `detached` record found is deleted and the marker put back (`clear_failed_detach`). A fence past `through` answers `Unserved::Detached` at once, never "not following";
   `/status` shows the lane `detached`, not counted in `flusso.lane.parked`. **The rebuild** (R13, r1–r4,
-  step 4): a reindex of a detached index calls `Sink::begin_rebuild` (OpenSearch: partials deleted, the
-  marker moved past every generation, the record `rebuilding` with `attempts + 1`, all conditional;
+  step 4): a reindex of a detached index calls `Records::begin_rebuild` (OpenSearch: every generation
+  but the one the alias serves deleted, the marker moved past every generation with its gaps, the
+  record `rebuilding`, not live only, with `attempts + 1`, all conditional;
   the record says `rebuilding` before `Attach` is sent, S2), `ensure_index`, `on_index_rebuilding`
   (the fence `Rebuilding`, frozen until the seed, S3), then attaches; at `Attached` the lane opens
   `rebuilding` and asks its backfill; the seed's `mark_seeded` deletes the record after the marker.
@@ -1904,17 +1905,21 @@ is the one concrete piece.
   reattach <index> --sink <name> --accept-gap`; `--sink` reads no env var); the edge waits for the
   engine's verdict (`SinkControl::Reattach { reply }`, `Reply<ReattachVerdict>`, at most 30 s:
   `Started` → `202`, `Refused(why)` → `409`, `Failed`/run ended/timeout → `503`);
-  `SinkEngine::reattach` reads the records (detached, live only, marker on serving seeded; otherwise a
-  refusal naming what works), `ensure_index`, `Sink::record_gaps` (the kept list plus `{from: the
+  `SinkEngine::reattach` reads the records (detached, live only, marker on serving, seeded or not: a
+  `backfill = false` sink never seeds; otherwise a refusal naming what works), `ensure_index`,
+  `Records::record_gaps` (the kept list plus `{from: the
   record's through, to: None}`), `forget_detachment` (the commit point; guard:
   `a_reattach_killed_before_any_step_comes_back_with_its_gap_or_detached`), attach; `take_attached` sets
   the last gap's `to` where the lane stands (`SinkEngine::place`: `progress.lane` through
   `SourcePositions`, the daemon's `CapturePositions`), tells the fence (`Observer::on_lane_gaps`)
   **before** the lane opens, then keeps them (`record_reattached`; a failure fails the run and the
   restage completes it). The gaps live in the seed marker (`gaps: [{from, to}]`, OpenSearch `_update`;
-  an older single `gap` reads as a list of one; `Detachment.gaps`; a seed or a reindex drops them). A
-  start on a `backfill = false` sink puts a `detached` record that isn't live only back live only
-  (`Sink::demote(mapping, true)`), so a reattach applies. Every detach records `through` (`Detach.through`, the lane's place before it
+  an older single `gap` reads as a list of one; `Detachment.gaps`; only a seed that completed drops
+  them, the review of the closing round, A). A start on a `backfill = false` sink puts a `detached`
+  record that isn't live only, or one beside a marker off the generation reads see (D), back live
+  only on that generation (`Records::demote(mapping, true)`), so a reattach applies. A record written
+  while nothing served the index (its generation deleted from under the sink) names no generation:
+  never finished, never reattached (a known dead end, the world leaves it out of its liveness). Every detach records `through` (`Detach.through`, the lane's place before it
   leaves the minimum) and carries it on `LaneHealth::Detached`, where the fence freezes (S3: what is
   refused after a reattach starts where vouching stopped). The fence refuses a position in `(from,
   to]` of any gap at once (`FenceOutcome::InGap`, `/wait` `409` `reason: gap`, naming that gap),
@@ -1923,7 +1928,7 @@ is the one concrete piece.
   (`known_gaps(.., settle)`, `SourcePositions::parses`; a staging hears the gap and flags it,
   `gaps_unsettled`): an unknown `to` becomes where the lane stands (nothing of it landed since, so
   the gap still covers what was dropped), an unreadable `from` unknown (reaching back only into the
-  past). `Sink::record_gaps` takes a decision over the list kept (`DecideGaps`); OpenSearch writes it
+  past). `Records::record_gaps` takes a decision over the list kept (`DecideGaps`); OpenSearch writes it
   conditionally on the marker's `if_seq_no`/`if_primary_term`, reading again on a conflict; the
   attach takes its gap by its start, open or not, and only ever moves its end later (S-a': another
   process believing it held the slot may have settled it at a stale place). A gap entry that can't
@@ -1969,9 +1974,17 @@ is the one concrete piece.
   answers `Sink::records()` with its `sink::Records`, whose record and marker writes take the stamp
   and have no defaults, and the engine writes through it alone on such a sink, so no marker goes out
   unstamped (the review of round 11, m-2); the OpenSearch adapter writes every whole record or marker
-  through `put_if`/`put_meta`, which stamp it. A detach that moves the marker keeps its gaps in
-  `detaching_from`; the read's put-back and a live-only demotion restore them (S-1). A detach over a
-  record already detached keeps its `through` and `since` (where the drop began). A read is the same when
+  through `put_if`/`put_meta`, which stamp it. Its decisions over the meta documents are pure plans
+  (`detachment/plan.rs`, re-exported as `sink_opensearch::meta`: documents read in, writes out, the
+  HTTP code sending each conditionally); `meta::memory` (feature `testing`) runs the same plans over an
+  in-memory meta index. **A gap is dropped only by a seed that completed** (the review of the closing
+  round, A): a detach that moves the marker keeps its gaps in `detaching_from`, a rebuild or demotion
+  over a marker no detach moved makes it, a created generation and a reindex rewrite the marker
+  carrying both (`rewrite_marker`, conditional; only the seed's `write_index_meta` drops them), and the
+  put-back and a live-only demotion restore every gap from both places (S-1). A marker carrying
+  `detaching_from` reads as moved, never on serving, whatever its number (a generation deleted from
+  under it lets the next take the same number). No plan deletes the generation the alias serves (E). A detach over a record already detached or rebuilding keeps its `through` (and a detached
+  one its `since`): the serving generation lacks every change from the first drop. A read is the same when
   each document carries this writer or is exactly what was last read (the record: presence, version,
   stamp, state, attempts, `through`; the marker: stamp and gaps); an unstamped document is adopted at
   a start and foreign to a running process once it differs; a write of unknown outcome needs nothing
@@ -1991,22 +2004,29 @@ is the one concrete piece.
   of the index is confirmed past what its records cover: `Progress::hold_while_unread` holds
   confirmation while a detached lane is unread, and attached or parked lanes write nothing before
   their read. One deployment never meets it (its OpenSearch sinks on distinct clusters, which `run`
-  checks by `cluster_uuid`: m-6), own writes of lost outcome included
+  checks by `cluster_uuid`, every cluster at once, at most 10 s, after binding its listeners: the
+  review of the closing round, C), own writes of lost outcome included
   (`a_single_process_never_stops`, whose world lands and fails every write). Two OpenSearch sinks on
   one cluster share every name there (the deployment's `prefix` alone): `run` refuses them
   (`adapters::distinct_clusters_online`) and `check` reports them as a `shared_cluster` error of its
   report; both ask each sink's cluster its `cluster_uuid` (`GET /`,
   `OpensearchSink::cluster_uuid`), so two URLs of one cluster are found, and `check --offline`
   compares URLs only (`adapters::cluster_findings`); a sink whose URL can't be resolved or whose
-  cluster can't be asked is `check_skipped` in `check` and only logged by `run`. Sinks on different
+  cluster can't be asked (a `cluster_uuid` of `_na_` or empty included: a cluster not formed yet, B)
+  is `check_skipped` in `check` and only logged by `run`. Sinks on different
   clusters (a backup) are accepted (S-4). What the stamps rely on from OpenSearch is pinned by
   the adapter's `detachment::tests` (request bodies, and
   `every_record_or_marker_body_carries_the_callers_stamp`) and, on a real cluster, `seeding`'s
   `who_wrote_each_record_survives_every_write_as_opensearch_answers_it`,
   `a_gap_comes_back_with_the_marker_onto_the_serving_generation` and
-  `two_urls_of_one_cluster_answer_one_cluster_uuid`. The stand-ins (`tests::detach`'s `Gate`, the
-  world's `Store`) keep `detaching_from` and put a half-moved marker back on a read, as the adapter
-  does (S-3). A staging that finds the index seeded on another target than its outstanding backfill
+  `two_urls_of_one_cluster_answer_one_cluster_uuid`. The world's `Store`
+  (`libs/3-daemon/src/fence/tests/gate_world.rs`) keeps its meta index in `meta::memory` (a
+  path-only dev-dependency with `testing`, which `cargo publish` strips: with a version, packaging
+  resolved the registry's adapter, which has no `testing` yet), so the
+  stand-in decides as the sink does, for this process and the other alike; its oracle adds that no
+  write leaves the alias serving nothing and that a `backfill = false` sink's detached lane comes back
+  by a reattach, or a start and a reattach. The engine's `Gate` (`tests::detach`) keeps what it is
+  asked and nothing more (item 1). A staging that finds the index seeded on another target than its outstanding backfill
   asked for is foreign too. Every read tells the fence its gap list, empty included (a created
   generation drops the gaps). Open (#490, an owner lease, and reconciliation if ever): a sink call
   already begun when the stream ends (`mark_seeded` refreshes the whole generation and drops others
