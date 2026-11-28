@@ -185,7 +185,7 @@ struct Store {
     /// Each generation number a hand deletion freed, per index. A later
     /// generation of that number is another index under a reused number, a
     /// known dead end (#492): replacing it is not judged.
-    hand_deleted: Mutex<BTreeSet<(String, u64, String, u64)>>,
+    hand_deleted: Mutex<BTreeSet<(String, u64, String)>>,
     /// Every generation (uuid) a seed completed on: it holds every row, so
     /// a delete dropped while reads see it leaves the row's document there.
     seeded_ever: Mutex<BTreeSet<String>>,
@@ -340,19 +340,20 @@ impl Store {
             .1
             .and_then(|record| record.get("serving"))
             .and_then(serde_json::Value::as_u64);
-        // Written before a hand deletion of the generation it names (m-A:
-        // by the record's version, not the number alone).
-        let written_at = found
-            .version
-            .as_ref()
-            .and_then(|version| version.as_str().split(':').next()?.parse::<u64>().ok());
+        // A hand deletion removed the generation it names, and that number
+        // now names no generation or another one (m-A: by uuid, so a
+        // generation of that number created since and still there is not
+        // taken for the deleted one). A record carries no uuid, so one written
+        // after a later generation took the number is exempt too; only the
+        // liveness checks skip it, never the oracle.
         let freed = named.is_some_and(|generation| {
+            let now = self.meta().uuid(of, generation).map(str::to_owned);
             self.hand_deleted
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|(index, deleted, _, at)| {
-                    index == of && *deleted == generation && written_at.is_some_and(|w| w < *at)
+                .any(|(index, deleted, uuid)| {
+                    index == of && *deleted == generation && now.as_deref() != Some(uuid.as_str())
                 })
         });
         found.record.is_some()
@@ -418,7 +419,7 @@ impl Store {
                         .lock()
                         .unwrap()
                         .iter()
-                        .any(|(index, _, deleted, _)| index == of && deleted == uuid)
+                        .any(|(index, _, deleted)| index == of && deleted == uuid)
                 })
         };
         let reused = marker_before.as_ref().is_some_and(|marker| {
@@ -514,12 +515,10 @@ impl Store {
             let uuid = meta.uuid(of, generation).map(str::to_owned);
             meta.delete_generation(of, generation);
             if let Some(uuid) = uuid {
-                self.hand_deleted.lock().unwrap().insert((
-                    of.to_owned(),
-                    generation,
-                    uuid,
-                    meta.seq(),
-                ));
+                self.hand_deleted
+                    .lock()
+                    .unwrap()
+                    .insert((of.to_owned(), generation, uuid));
             }
         }
         // Deleted by hand: what reads saw is gone, and the next generation
