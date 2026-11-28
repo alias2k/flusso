@@ -5328,6 +5328,44 @@ async fn a_seed_whose_record_delete_failed_deletes_it_and_never_stops_one_proces
     task.abort();
 }
 
+/// The review of round 13, m-7: the record the seed's failed delete left is
+/// one this version no longer writes, `rebuilding` and live only (an older
+/// flusso's rebuild of a live-only record). The seed's read back finds it
+/// beside the seeded newer marker and forgets it at once, without waiting
+/// for a staging.
+#[tokio::test(start_paused = true)]
+async fn a_seed_forgets_a_live_only_rebuilding_record_its_delete_left() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task, _control, attempt) = rebuilding_on_reindex(&rig).await;
+    if let Some(kept) = rig.sink.kept.lock().unwrap().get_mut("users") {
+        kept.record = Some(DetachRecord::Rebuilding { live_only: true });
+    }
+    *rig.sink.seed_keeps_record.lock().unwrap() = true;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let stream::Request::Backfill { ticket, .. } = next_request(&rig).await else {
+        panic!("backfill");
+    };
+    publish(
+        &rig,
+        LaneItem::SnapshotComplete {
+            index: users(),
+            ticket,
+        },
+    )
+    .await;
+    eventually("the lane is current", || {
+        engine.lane_state(&lane(users())).rebuilding.is_none()
+    })
+    .await;
+    assert!(
+        rig.sink.kept.lock().unwrap().get("users").is_none(),
+        "the seed's read back left {:?}",
+        rig.sink.kept.lock().unwrap().get("users")
+    );
+    task.abort();
+}
+
 /// The review of the cut, B-2: `begin_rebuild` lands, its call fails (the
 /// response lost, e.g. this host's network dropped, which also ends the
 /// replication stream). A lone process's next opening doesn't stop it.
