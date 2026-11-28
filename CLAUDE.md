@@ -1965,14 +1965,20 @@ is the one concrete piece.
   record and marker write carries a `sink::Stamp` (`KnownRecords::stamp`: a writer token made once
   per sink engine at process start, never persisted, and a write number), which the sink stores and
   returns (`Detachment.record_stamp`/`marker_stamp`); forgetting a record writes a tombstone carrying
-  its forgetter's stamp, conditional on the version read, never a delete. A read is the same when
+  its forgetter's stamp, conditional on the version read, never a delete. A sink that keeps records
+  answers `Sink::records()` with its `sink::Records`, whose record and marker writes take the stamp
+  and have no defaults, and the engine writes through it alone on such a sink, so no marker goes out
+  unstamped (the review of round 11, m-2); the OpenSearch adapter writes every whole record or marker
+  through `put_if`/`put_meta`, which stamp it. A detach that moves the marker keeps its gaps in
+  `detaching_from`; the read's put-back and a live-only demotion restore them (S-1). A detach over a
+  record already detached keeps its `through` and `since` (where the drop began). A read is the same when
   each document carries this writer or is exactly what was last read (the record: presence, version,
   stamp, state, attempts, `through`; the marker: stamp and gaps); an unstamped document is adopted at
   a start and foreign to a running process once it differs; a write of unknown outcome needs nothing
   kept, since the next read shows its stamp, what was read before, or something foreign; a failed
   call counts as landed exactly when the record read back while held carries its own stamp
-  (`slot::settled`); with nothing read yet, an own record write makes the record known as only this
-  process's; a read under the same held opening, `Rereads::held_or_alone`, never after a clean end,
+  (`slot::settled`); a gated write with nothing read of its index reads the records first, so no own
+  write goes out unjudged (m-3); a read under the same held opening, `Rereads::held_or_alone`, never after a clean end,
   is adopted; the failed-detach clear forgets only a record stamped by this process, and a lane's own
   landed detach found by the read again is taken as detached, as staging takes it; every gated write
   stands on records read under the opening held now (`slot`'s `held_fresh` reads stale ones again
@@ -1984,14 +1990,23 @@ is the one concrete piece.
   ends the deployment with it (no restart, the other sinks stop too) and the CLI exits 1. No change
   of the index is confirmed past what its records cover: `Progress::hold_while_unread` holds
   confirmation while a detached lane is unread, and attached or parked lanes write nothing before
-  their read. One deployment never meets it, own writes of lost outcome included
+  their read. One deployment never meets it (its OpenSearch sinks on distinct clusters, which `run`
+  checks by `cluster_uuid`: m-6), own writes of lost outcome included
   (`a_single_process_never_stops`, whose world lands and fails every write). Two OpenSearch sinks on
   one cluster share every name there (the deployment's `prefix` alone): `run` refuses them
-  (`adapters::distinct_clusters`) and `check` reports them as a `shared_cluster` error of its report,
-  a sink whose URL can't be resolved there as `check_skipped` (`adapters::cluster_findings`); sinks
-  on different clusters (a backup) are accepted. What the stamps rely on from OpenSearch is pinned by
-  the adapter's `detachment::tests` (request bodies) and, on a real cluster, `seeding`'s
-  `who_wrote_each_record_survives_every_write_as_opensearch_answers_it`. A staging that finds the index seeded on another target than its outstanding backfill
+  (`adapters::distinct_clusters_online`) and `check` reports them as a `shared_cluster` error of its
+  report; both ask each sink's cluster its `cluster_uuid` (`GET /`,
+  `OpensearchSink::cluster_uuid`), so two URLs of one cluster are found, and `check --offline`
+  compares URLs only (`adapters::cluster_findings`); a sink whose URL can't be resolved or whose
+  cluster can't be asked is `check_skipped` in `check` and only logged by `run`. Sinks on different
+  clusters (a backup) are accepted (S-4). What the stamps rely on from OpenSearch is pinned by
+  the adapter's `detachment::tests` (request bodies, and
+  `every_record_or_marker_body_carries_the_callers_stamp`) and, on a real cluster, `seeding`'s
+  `who_wrote_each_record_survives_every_write_as_opensearch_answers_it`,
+  `a_gap_comes_back_with_the_marker_onto_the_serving_generation` and
+  `two_urls_of_one_cluster_answer_one_cluster_uuid`. The stand-ins (`tests::detach`'s `Gate`, the
+  world's `Store`) keep `detaching_from` and put a half-moved marker back on a read, as the adapter
+  does (S-3). A staging that finds the index seeded on another target than its outstanding backfill
   asked for is foreign too. Every read tells the fence its gap list, empty included (a created
   generation drops the gaps). Open (#490, an owner lease, and reconciliation if ever): a sink call
   already begun when the stream ends (`mark_seeded` refreshes the whole generation and drops others
@@ -2034,13 +2049,22 @@ is the one concrete piece.
   `a_rebuild_restart_whose_read_back_is_lost_never_stops_a_single_process`,
   `anothers_detach_from_the_same_place_ends_in_a_stop`,
   `a_lane_restaging_on_its_longest_backoff_is_served_by_the_end` (the liveness phase outlasts the
-  minute-long backoff), `another_process_s_reattach_of_a_rebuildable_sink_keeps_the_gaps`; `known::tests`; `slot::tests`'
-  `every_gated_write_reads_records_from_an_earlier_stream_first`, `a_refused_gated_write_names_why`;
+  minute-long backoff), `another_process_s_detach_of_a_rebuildable_sink_carries_the_gaps`,
+  `a_gap_survives_a_backfill_flipped_on_and_off_again`,
+  `a_gap_survives_a_failed_detach_s_clear_and_the_put_back` (a sink's `backfill` flips between
+  processes: `FlipBackfill`), `a_detach_over_a_detached_record_keeps_where_the_drop_began`,
+  `a_live_only_detach_over_a_moved_marker_leaves_it_moved`,
+  `another_process_never_reattaches_beside_a_moved_marker`; `known::tests`; `slot::tests`'
+  `every_gated_write_reads_records_from_an_earlier_stream_first`, `a_refused_gated_write_names_why`,
+  `a_record_keeping_sink_has_its_marker_writes_stamped`,
+  `a_gated_write_with_nothing_read_reads_first_and_never_stops_one_process`;
   `tests::detach`' `a_rebuild_restart_detach_with_no_through_never_stops_one_process`,
   `a_failed_live_only_demotion_is_not_taken_as_done`,
   `anothers_detach_from_the_same_place_is_never_taken_for_ours`,
   `many_failed_rebuild_tries_never_stop_one_process`,
   `a_rebuild_restart_whose_detach_is_unknown_writes_nothing_until_a_read`,
+  `a_rebuild_restart_whose_read_back_failed_once_is_cleared_and_goes_on`,
+  `the_clear_forgets_no_record_another_writer_stamped`,
   `a_seed_whose_record_delete_failed_deletes_it_and_never_stops_one_process`,
   `a_rebuild_that_landed_unseen_never_stops_one_process`,
   `a_reattach_whose_delete_failed_finishes_either_way_without_a_stop`,
@@ -2053,7 +2077,8 @@ is the one concrete piece.
   `a_change_found_by_a_gated_write_s_read_stops_the_deployment`,
   `a_lane_taken_detached_on_a_read_from_an_earlier_stream_is_read_again`; `adapters::tests`'
   `two_opensearch_sinks_on_one_cluster_are_refused`,
-  `two_opensearch_sinks_on_different_clusters_are_accepted`,
+  `urls_that_differ_pass_the_url_comparison`, `sinks_answering_one_cluster_uuid_share_a_cluster`,
+  `a_cluster_that_cannot_be_asked_is_a_skipped_check`,
   `a_sink_url_that_cannot_be_resolved_is_a_skipped_check`; `check::tests`'
   `sinks_on_one_cluster_are_an_error_and_an_unresolved_url_a_skipped_check`; `check_report`'s
   `two_sinks_on_one_cluster_are_a_finding_of_the_report`;
