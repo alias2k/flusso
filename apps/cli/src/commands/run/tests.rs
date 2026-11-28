@@ -1,6 +1,6 @@
 use super::{
-    ConfigPlan, lay_backoff, lay_index_budget_share, lay_max_pending_documents, lay_max_waiting,
-    plan_config,
+    ConfigPlan, bind_then_compare_clusters, lay_backoff, lay_index_budget_share,
+    lay_max_pending_documents, lay_max_waiting, plan_config,
 };
 use std::path::{Path, PathBuf};
 
@@ -478,4 +478,49 @@ fn max_pending_documents_of_zero_is_refused_naming_where_it_came_from() {
             .contains("FLUSSO_MAX_PENDING_DOCUMENTS: `lots` is not a whole number"),
         "{refused}"
     );
+}
+
+/// The review of round 13, m-5: the listeners are bound before any cluster is
+/// asked its `cluster_uuid`: a taken public port fails with no `GET /` sent
+/// to either cluster.
+#[tokio::test]
+async fn a_taken_port_fails_before_any_cluster_is_asked() {
+    use config::ParseFrom;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let asked = std::sync::Arc::new(AtomicUsize::new(0));
+    let cluster = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", cluster.local_addr().unwrap());
+    let counted = std::sync::Arc::clone(&asked);
+    tokio::spawn(async move {
+        while let Ok((_socket, _)) = cluster.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let config = config::Config::from(
+        config::toml::ConfigToml::try_parse(&format!(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "{url}"
+
+            [sinks.audit]
+            type = "opensearch"
+            url = "{url}/other"
+            "#
+        ))
+        .unwrap(),
+    );
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let public = taken.local_addr().unwrap();
+    let private: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+    assert!(
+        bind_then_compare_clusters(&config, public, private)
+            .await
+            .is_err()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "a cluster was asked");
 }
