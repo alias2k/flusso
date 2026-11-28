@@ -9,7 +9,7 @@
 
 pub use crate::detachment::plan::{
     Kept, Plan, Step, begin_rebuild, demote, detach, gaps_update, is_tombstone, put_back, read,
-    rewritten, tombstone, whole_marker,
+    reindex_moves, rewritten, seeded, tombstone, whole_marker,
 };
 
 #[cfg(feature = "testing")]

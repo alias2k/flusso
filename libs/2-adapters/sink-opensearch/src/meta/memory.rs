@@ -336,13 +336,15 @@ impl MemoryMeta {
             return Err(format!("{alias}'s active generation {active} is gone"));
         }
         let uuid = self.uuid(alias, active).map(str::to_owned);
+        let in_place = self.serving.get(alias) == Some(&active);
+        let current = self.doc(alias).cloned();
         self.serving.insert(alias.to_owned(), active);
         if let Some(made) = self.generations.get_mut(alias) {
             made.retain(|generation, _| *generation == active);
         }
         self.put(
             alias,
-            meta::whole_marker(active, true, uuid.as_deref()),
+            meta::seeded(current.as_ref(), active, uuid.as_deref(), in_place),
             Some(stamp),
         );
         let record = record_id(alias);
@@ -356,11 +358,13 @@ impl MemoryMeta {
         Ok(())
     }
 
-    /// `reindex`: a seeded index's marker moves, written whole, to a
-    /// generation past every one, unseeded, for the next ensure to create;
-    /// its gaps and `detaching_from` kept.
+    /// `reindex`: a seeded index's marker, or one keeping a gap on the
+    /// generation the alias serves (`meta::reindex_moves`), moves, written
+    /// whole, to a generation past every one, unseeded, for the next ensure
+    /// to create; its gaps and `detaching_from` kept.
     pub fn reindex(&mut self, alias: &str, stamp: &Stamp) {
-        if !self.is_seeded(alias) {
+        let serving = self.serving.get(alias).copied();
+        if !self.is_seeded(alias) && !meta::reindex_moves(self.doc(alias), serving) {
             return;
         }
         let next = self

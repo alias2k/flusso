@@ -805,6 +805,9 @@ impl OpensearchSink {
         // convenience alias's name taken by an index, or a stale generation
         // gone meanwhile), the holders are read again and the hash alias
         // moves alone; the convenience alias stays best-effort.
+        // The alias already on this generation: a backfill in place, over
+        // whatever gaps the marker keeps (B-1).
+        let in_place = serving.contains(generation);
         let hash = (hash_alias.as_str(), serving.as_slice());
         let both = [hash, (convenience.as_str(), named.as_slice())];
         let retired: Vec<&String> = serving
@@ -850,7 +853,7 @@ impl OpensearchSink {
         }
         steps.mark("aliases");
 
-        self.write_index_meta(hash_alias, active, true, live.as_deref(), stamp)
+        self.write_seeded_marker(hash_alias, active, live.as_deref(), in_place, stamp)
             .await?;
         steps.mark("marker");
         // A rebuild after a detach is finished with the seed (r4): its record
@@ -879,7 +882,9 @@ impl OpensearchSink {
     ///
     /// A no-op when the index isn't seeded (no meta doc, or `seeded: false`):
     /// a from-scratch rebuild is already pending, and staging yet another
-    /// generation would orphan the one being built.
+    /// generation would orphan the one being built. Except an unseeded
+    /// marker keeping a gap on the generation the alias serves: a backfill
+    /// there would seed over the gap, so it moves too (B-1).
     pub(crate) async fn stage_reindex(
         &self,
         mapping: &IndexMapping,
@@ -887,7 +892,9 @@ impl OpensearchSink {
     ) -> Result<()> {
         let logical = mapping.index.as_ref();
         let hash_alias = self.hash_alias(logical, &mapping.hash.to_string());
-        if !matches!(self.read_index_meta(&hash_alias).await?, Some((_, true))) {
+        if !matches!(self.read_index_meta(&hash_alias).await?, Some((_, true)))
+            && !self.reindex_moves(&hash_alias).await?
+        {
             info!(
                 logical,
                 hash_alias,

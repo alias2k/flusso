@@ -255,6 +255,12 @@ impl<T> PartialEq for Reply<T> {
 
 impl<T> Eq for Reply<T> {}
 
+/// Why an index is rebuilt into a new generation before its backfill: it
+/// keeps a gap on the generation reads see (the review of round 14, B-1).
+const REBUILD_OVER_A_GAP: &str = "the index keeps a gap on the generation reads see, where rows \
+     deleted in the gap keep their documents: it is rebuilt into a new generation, and the gap \
+     stays until that rebuild is seeded";
+
 /// What staging does to one index.
 #[derive(Debug, Clone, Copy)]
 enum Step {
@@ -343,6 +349,9 @@ pub struct SinkEngine {
     /// the deployment is dropped with it (the daemon refuses new ones once
     /// stopping).
     pending_reindex: Mutex<Option<Vec<IndexName>>>,
+    /// Indexes whose backfill waits for a rebuild into a new generation:
+    /// their marker keeps a gap on the generation reads see (B-1).
+    over_a_gap: Mutex<BTreeSet<IndexName>>,
     /// Whether `pending_reindex` holds one: the run asks every turn, so
     /// the answer is read without the lock.
     reindex_waiting: AtomicBool,
@@ -429,6 +438,7 @@ impl SinkEngine {
             merge_wait: crate::BatchPolicy::default().max_delay,
             blame: Mutex::new(Blame::Everyone),
             pending_reindex: Mutex::new(None),
+            over_a_gap: Mutex::default(),
             reindex_waiting: AtomicBool::new(false),
             health: Mutex::new(std::collections::BTreeMap::new()),
             backoff: crate::Backoff::default(),
@@ -1433,6 +1443,14 @@ impl SinkEngine {
         self.known.keeps_gaps(index)
     }
 
+    /// Whether `index`'s backfill waits for a rebuild over a gap (B-1).
+    pub(super) fn is_over_a_gap(&self, index: &IndexName) -> bool {
+        self.over_a_gap
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(index)
+    }
+
     /// The sink's requests that may erase or loosen a record, each checked
     /// against the slot right before it is sent (`slot`).
     fn erasing(&self) -> slot::Erasing<'_> {
@@ -1980,7 +1998,24 @@ impl SinkEngine {
         tracing::info!(indexes = requests.len(), "requesting backfill");
         let producer = self.stream.requests()?.producer;
         let mut indexes = Vec::with_capacity(requests.len());
+        let mut rebuilds = Vec::new();
         for (index, mut after, target) in requests {
+            // A seed drops a gap only on a generation created after it (the
+            // review of round 14, B-1): a backfill writes only the rows that
+            // exist, so a row deleted in the gap keeps its document in the
+            // generation reads see. Its backfill is asked once a reindex has
+            // staged a new generation; the gap stays until that seed.
+            if self.gaps_kept(&index)
+                && !self
+                    .sink
+                    .is_rebuilding(&index)
+                    .await
+                    .map_err(|error| staging_failed(&index, error))?
+            {
+                tracing::warn!(%index, sink = %self.name, "{REBUILD_OVER_A_GAP}");
+                rebuilds.push(index);
+                continue;
+            }
             // A walk resumes from its checkpoint only where the records keep
             // no gap: a drop kept as a gap may postdate the pages before the
             // mark, and the seed drops the gaps. It walks from the first key
@@ -2017,7 +2052,10 @@ impl SinkEngine {
             self.drop_owed_seed(&index);
             indexes.push(index);
         }
-        self.observer.on_backfill_requested(&self.name, &indexes);
+        if !indexes.is_empty() {
+            self.observer.on_backfill_requested(&self.name, &indexes);
+        }
+        self.owe_rebuild_over_a_gap(rebuilds);
         Ok(())
     }
 
@@ -2133,6 +2171,27 @@ impl SinkEngine {
         self.pending_reindex
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Owe a rebuild of each of `indexes` into a new generation, its backfill
+    /// waiting for it (B-1): the reindex path, run with the pending ones.
+    fn owe_rebuild_over_a_gap(&self, indexes: Vec<IndexName>) {
+        if indexes.is_empty() {
+            return;
+        }
+        self.over_a_gap
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(indexes.iter().cloned());
+        let mut pending = self.lock_pending_reindex();
+        let mut all = pending.take().unwrap_or_default();
+        for index in indexes {
+            if !all.contains(&index) {
+                all.push(index);
+            }
+        }
+        *pending = Some(all);
+        self.reindex_waiting.store(true, Ordering::Release);
     }
 
     fn set_pending_reindex(&self, indexes: Vec<IndexName>) {
@@ -2300,7 +2359,14 @@ impl SinkEngine {
             failed: tried
                 .failed
                 .into_iter()
-                .map(|(index, error)| (index, format!("the reindex could not stage: {error}")))
+                .map(|(index, error)| {
+                    let why = if self.is_over_a_gap(&index) {
+                        format!("{REBUILD_OVER_A_GAP}; it could not stage: {error}")
+                    } else {
+                        format!("the reindex could not stage: {error}")
+                    };
+                    (index, why)
+                })
                 .collect(),
         };
         let not_started = if self.stop.is_requested() {

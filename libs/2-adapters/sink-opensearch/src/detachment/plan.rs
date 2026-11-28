@@ -15,10 +15,15 @@
 //! Three rules hold for every plan (the review of the closing round, A and E;
 //! of round 13, F):
 //!
-//! - **A gap is dropped only by a seed that completed** (the index then holds
-//!   everything): a marker on serving keeps its gaps; a marker moved off it
-//!   keeps them in `detaching_from`; every write that rewrites the marker
-//!   whole carries them, and only [`whole_marker`], the seed's, has none.
+//! - **A gap is dropped only by the seed of a generation created after it**
+//!   (the review of round 14, B-1): a marker on serving keeps its gaps; a
+//!   marker moved off it keeps them in `detaching_from`; every write that
+//!   rewrites the marker whole carries them. A seed of a generation created
+//!   since holds everything and drops them ([`seeded`]); a seed of the
+//!   generation the alias already served keeps them, since a backfill writes
+//!   only the rows that exist and a row deleted in a gap keeps its document
+//!   there. So a gap on the generation reads see is cleared by a rebuild into
+//!   a new generation ([`reindex_moves`]), never by a backfill in place.
 //! - **No plan deletes the generation the hash alias serves**, whatever the
 //!   record says it served: a seed since may have moved the alias.
 //! - **The marker's `uuid` always names the generation in its
@@ -316,6 +321,45 @@ pub fn rewritten(current: Option<&Value>, generation: u64, uuid: Option<&str>) -
         }
     }
     doc
+}
+
+/// The marker the seed of `generation` writes, seeded, with its `uuid`.
+/// `in_place`: the alias already served `generation`, which existed during
+/// the gaps `current` keeps, so they stay (B-1); else none (a generation
+/// created after them holds everything).
+pub fn seeded(
+    current: Option<&Value>,
+    generation: u64,
+    uuid: Option<&str>,
+    in_place: bool,
+) -> Value {
+    let mut doc = whole_marker(generation, true, uuid);
+    if in_place && let (Some(current), Some(fields)) = (current, doc.as_object_mut()) {
+        for key in ["gaps", "gap"] {
+            if let Some(value) = current.get(key).filter(|value| !value.is_null()) {
+                fields.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    doc
+}
+
+/// Whether a reindex moves `marker` to a new generation: a seeded one
+/// always; an unseeded one only when it keeps a gap on the generation the
+/// alias serves (`serving`), which a backfill in place would seed over (B-1).
+/// Otherwise a rebuild is already pending (or the first backfill is under
+/// way), and staging another generation would orphan it.
+pub fn reindex_moves(marker: Option<&Value>, serving: Option<u64>) -> bool {
+    let Some(marker) = marker else {
+        return false;
+    };
+    let seeded = marker
+        .get("seeded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let on_serving =
+        serving.is_some() && marker.get("active_generation").and_then(Value::as_u64) == serving;
+    seeded || (on_serving && !read_gaps(marker).is_empty())
 }
 
 /// The partial update of the marker's gaps (an earlier single `gap` nulled).

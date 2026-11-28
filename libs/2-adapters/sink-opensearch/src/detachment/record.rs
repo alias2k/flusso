@@ -418,6 +418,58 @@ impl OpensearchSink {
         )))
     }
 
+    /// The seed's marker write (see [`plan::seeded`]): whole and seeded;
+    /// `in_place`, keeping the gaps of the marker read, conditional on it.
+    pub(crate) async fn write_seeded_marker(
+        &self,
+        hash_alias: &str,
+        generation: u64,
+        uuid: Option<&str>,
+        in_place: bool,
+        stamp: Option<&Stamp>,
+    ) -> Result<()> {
+        if !in_place {
+            return self
+                .write_index_meta(hash_alias, generation, true, uuid, stamp)
+                .await;
+        }
+        for _ in 0..CONFLICT_ROUNDS {
+            let Kept { marker, .. } = self.read_kept(hash_alias).await?;
+            let doc = plan::seeded(
+                marker.as_ref().map(|found| &found.source),
+                generation,
+                uuid,
+                true,
+            );
+            if let Written::Done = self
+                .put_if(hash_alias, &doc, marker.as_ref(), stamp)
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Err(SinkError::Write(format!(
+            "the seed marker of {hash_alias} kept changing while it was seeded"
+        )))
+    }
+
+    /// Whether a reindex moves `hash_alias`'s unseeded marker to a new
+    /// generation: when it keeps a gap on the generation the alias serves
+    /// ([`plan::reindex_moves`]).
+    pub(crate) async fn reindex_moves(&self, hash_alias: &str) -> Result<bool> {
+        let Kept { marker, .. } = self.read_kept(hash_alias).await?;
+        let serving = self
+            .alias_holders(hash_alias)
+            .await?
+            .iter()
+            .filter_map(|holder| parse_generation(hash_alias, holder))
+            .max();
+        Ok(plan::reindex_moves(
+            marker.as_ref().map(|found| &found.source),
+            serving,
+        ))
+    }
+
     /// Wait until the meta index's primary shard is active, at most
     /// [`META_PRIMARY_WAIT`]: OpenSearch's cluster health at `yellow` for it.
     async fn wait_for_meta_primary(&self) -> Result<()> {
