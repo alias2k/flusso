@@ -34,7 +34,7 @@ Every secret-valued option also has an **override variable**, so one file runs u
 
 ## CLI flags
 
-Every flag but `check --fix` reads a `FLUSSO_*` variable. **The flag wins** when both are set. `flusso <cmd> --help` shows each flag's variable.
+Every flag but `check --fix` and `reattach`'s `--sink` and `--accept-gap` reads a `FLUSSO_*` variable. **The flag wins** when both are set. `flusso <cmd> --help` shows each flag's variable.
 
 | Variable | Flag | Commands |
 | --- | --- | --- |
@@ -52,8 +52,8 @@ Every flag but `check --fix` reads a `FLUSSO_*` variable. **The flag wins** when
 | `FLUSSO_QUEUE_CAPACITY` | `--queue-capacity` (deprecated, ignored) | `run` |
 | `FLUSSO_PUBLIC_ADDRESS` | `--public-address` | `run` |
 | `FLUSSO_PRIVATE_ADDRESS` | `--private-address` | `run` |
-| `FLUSSO_ADMIN_USER` | `--admin-user` | `run`, `indexes`, `reindex` |
-| `FLUSSO_ADMIN_PASSWORD` | `--admin-password` | `run`, `indexes`, `reindex` |
+| `FLUSSO_ADMIN_USER` | `--admin-user` | `run`, `indexes`, `reindex`, `reattach` |
+| `FLUSSO_ADMIN_PASSWORD` | `--admin-password` | `run`, `indexes`, `reindex`, `reattach` |
 | `FLUSSO_LAG_POLL_SECS` | `--lag-poll-secs` | `run` |
 | `FLUSSO_INDEX_PREFIX` | `--index-prefix` | `run` |
 | `FLUSSO_BATCH_MAX_CHANGES` | `--batch-max-changes` | `run` |
@@ -69,8 +69,9 @@ Every flag but `check --fix` reads a `FLUSSO_*` variable. **The flag wins** when
 | `FLUSSO_BACKOFF_MAX_MS` | `--backoff-max-ms` | `run` |
 | `FLUSSO_SHUTDOWN_TIMEOUT_SECS` | `--shutdown-timeout-secs` | `run` |
 | `FLUSSO_EXIT_WITH_PARENT` | `--exit-with-parent` | `run` |
-| `FLUSSO_SERVER` | `--server` | `indexes`, `reindex` |
-| `FLUSSO_CA_FILE` | `--ca-file` | `indexes`, `reindex` |
+| `FLUSSO_SERVER` | `--server` | `indexes`, `reindex`, `reattach` |
+| `FLUSSO_CA_FILE` | `--ca-file` | `indexes`, `reindex`, `reattach` |
+| `FLUSSO_SINK` | `--sink` | `reindex` (not `reattach`) |
 | `FLUSSO_OFFLINE` | `--offline` | `check` |
 | `FLUSSO_FORMAT` | `--format` | `check`, `show` |
 | `FLUSSO_COLOR` | `--color` | `check`, `show` |

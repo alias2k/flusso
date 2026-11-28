@@ -5,7 +5,7 @@
 | Surface | Default bind | Auth | Endpoints |
 | --- | --- | --- | --- |
 | public | `127.0.0.1:9464` | none | `GET /healthz`, `GET /readyz`, `GET /status`, `GET /metrics`, `GET /wait`, `GET /indexes/<name>/status` |
-| private | `127.0.0.1:9465` | HTTP Basic | `GET /indexes`, `POST /indexes/<name>/reindex` |
+| private | `127.0.0.1:9465` | HTTP Basic | `GET /indexes`, `POST /indexes/<name>/reindex`, `POST /indexes/<name>/reattach` |
 
 Each surface answers `404` for the other's routes.
 
@@ -40,6 +40,7 @@ The live status document as JSON: the deployment, then one block per sink.
 | `visibility_wait_seconds` | number or null | How long the source has held a committed transaction that isn't visible yet; every later change waits behind it. Timed from when that transaction was first found invisible, so an ingest engine restart doesn't reset it. Null while nothing waits, and once the source server is refused. See [Behind a synchronous standby](source-postgres.md#behind-a-synchronous-standby). |
 | `applied_position` | string or null | The source position every sink has applied: a fetch by id sees every commit at or before it. The slowest sink's. Null until the source follows live changes. |
 | `searchable_position` | string or null | The source position every sink can search. The slowest sink's. |
+| `detached` | list, absent | Every [detached](#lane-health) lane, as `{"index", "sink"}`: reads of that index on that sink are frozen. Absent while none is. See [Bring back a detached index](../operate/detached-index.md). |
 | `memory.limit_bytes` | int | `[concurrency] max_built_mib` in bytes. |
 | `memory.built_bytes` | int | Built documents not yet acknowledged by every sink, builds in flight included. See [config.toml](config-toml.md#concurrency). |
 | `memory.backfill_bytes` | int | Backfills' share of `built_bytes`, every index's together: at most half the limit, past one batch per index backfilling ([memory budget](config-toml.md#concurrency)). |
@@ -49,12 +50,13 @@ The live status document as JSON: the deployment, then one block per sink.
 | `script_failures.<index>.last` | object | The most recent: `id`, `field` (path, e.g. `variants[2].gross`), `message`, `line` and `column` in the script (null without a position), `at` (RFC 3339). |
 | `sinks.<name>.phase` | `starting` \| `backfilling` \| `live` \| `failed` \| `stopped` | `failed` while the daemon waits to restart that sink engine; the others keep running. |
 | `sinks.<name>.indexes` | map of name to state | That sink's own view of each index. |
-| `sinks.<name>.changes_committed` | int | Live changes this sink has written, counted in read order. A change counts once **every lane** of the sink (one per index) has written it, or had nothing to write for it, and every change read before it counts. A change that gives no document for the sink (an update of a column no document reads) counts as soon as it is read and everything read before it is written. A redelivered batch that had already landed counts once, so it never passes `changes_captured`. Never goes down, also across an ingest engine restart. A sink with no index counts every change read. |
+| `sinks.<name>.changes_committed` | int | Live changes this sink has written, counted in read order. A change counts once **every lane** of the sink (one per index) has written it, or had nothing to write for it, and every change read before it counts. A change that gives no document for the sink (an update of a column no document reads) counts as soon as it is read and everything read before it is written. A redelivered batch that had already landed counts once, so it never passes `changes_captured`. Never goes down, also across an ingest engine restart. A sink with no index counts every change read. A [detached](#lane-health) lane doesn't count: the sink's other lanes decide. |
 | `sinks.<name>.changes_in_flight` | int | Captured minus this sink's committed. Above `0` while any lane of the sink is behind: one stalled or [parked](#lane-health) index holds the count for all the sink's indexes. `0` means everything read is written on this sink. When the ingest engine fails and restarts, changes it had read but not yet written stay in flight from the moment it fails until the restarted engine builds their index again. |
 | `sinks.<name>.envelopes_applied` | int | Documents written to this sink. |
 | `sinks.<name>.batches` | int | |
 | `sinks.<name>.documents_quarantined` | int | Non-zero means data is being dropped under `on_error = "skip"`. |
 | `sinks.<name>.last_flush_micros` | int | Duration of this sink's most recently finished write. |
+| `sinks.<name>.detached_lanes` | list of string, absent | The indexes whose lanes on this sink are detached. Absent while none is. |
 | `sinks.<name>.applied_position` | string or null | The source position this sink has applied. |
 | `sinks.<name>.searchable_position` | string or null | The source position this sink can search. Trails `applied_position` by the destination's refresh while a backlog drains. The slowest of its lanes. |
 | `sinks.<name>.lanes.<index>.applied_position` | string or null | How far this sink has applied that index: its `(index, sink)` lane. A stalled index holds back only its own lane here. |
@@ -62,10 +64,13 @@ The live status document as JSON: the deployment, then one block per sink.
 | `sinks.<name>.lanes.<index>.outstanding` | int | Items routed to the lane and not written yet. A lane that stays high is the one holding back the slot. |
 | `sinks.<name>.lanes.<index>.stall_seconds` | number, absent | How long the lane's oldest outstanding change has stayed its oldest: the lane has written nothing for that long. Only what the lane holds itself counts: items routed to it and not written yet, and a built batch being handed to it that it hasn't taken (a full lane). Its index's backlog (documents not built or not yet handed to a sink) stalls no lane: `pinned_by` names it instead. 0 while the lane holds nothing, and while it lands steadily. Sampled every second. Backfill rows aren't counted: they carry no position. See [A lane is stalled](../operate/stalled-lane.md). |
 | `sinks.<name>.lanes.<index>.wal_behind_bytes` | int, absent | Bytes of WAL the replication slot keeps behind this lane: the slot lag less how far the lane is ahead of whatever pins the slot (another lane, or an index's backlog). It counts WAL flusso hasn't read yet as well as what it read and hasn't landed (a stalled lane pins both), so a healthy catch-up shows a large value on lanes that land every second: read it with the stall age. It is computed from the slot lag, polled every `--lag-poll-secs` (15 s by default); a failed poll keeps the last value. Absent while the lane holds nothing itself (an index's backlog doesn't count), or before the first lag sample. |
-| `sinks.<name>.lanes.<index>.health` | `open` \| `refused` \| `blocked` \| `restaging` | Whether flusso writes the lane. See [Lane health](#lane-health). |
-| `sinks.<name>.lanes.<index>.parked_since` | string, absent | When the lane stopped being written (RFC 3339, UTC). Absent while `open`. |
+| `sinks.<name>.lanes.<index>.health` | `open` \| `refused` \| `blocked` \| `restaging` \| `detached` | Whether flusso writes the lane. See [Lane health](#lane-health). |
+| `sinks.<name>.lanes.<index>.parked_since` | string, absent | When the lane stopped being written, or was detached (RFC 3339, UTC). Absent while `open`. |
 | `sinks.<name>.lanes.<index>.next_probe` | string, absent | When a `refused` or `blocked` lane next writes its oldest batch again, or tries its seed again (RFC 3339, UTC). A probe further ahead than any date shows as the latest date there is. Absent while `open` or `restaging`. |
 | `sinks.<name>.lanes.<index>.reason` | string, absent | Why the lane isn't written, in the destination's words. Absent while `open`. |
+| `sinks.<name>.lanes.<index>.rebuilding` | int, absent | A rebuild of a detached index is under way: how many rebuilds its record counts as started. Absent otherwise. |
+| `sinks.<name>.lanes.<index>.attaching` | bool, absent | `true` while the lane waits to be attached again: a rebuild starting, or a reattach. Absent otherwise. |
+| `sinks.<name>.lanes.<index>.gaps` | list, absent | The changes each reattach accepted as missing, oldest first: `{"from", "to"}`, in the source's text, `null` for an end not known; `"settling": true` while `to` isn't known yet (flusso settles it at its next read of the records while it holds the slot). A fence refuses a position inside any of them. Absent while none, and once a seed rebuilt the index. See [What a gap means](../operate/detached-index.md#what-a-gap-means). |
 | `sinks.<name>.lanes.<index>.backfill_checkpoints` | int, absent | Times this run recorded how far the lane's backfill got, so a restart resumes after it (about one every 10 s while a backfill lands); absent while 0. Staying absent through a long backfill means nothing lands. See [Postgres source](source-postgres.md), "An interrupted backfill resumes". |
 
 A source position is in the source's own text form: for Postgres, a WAL LSN such as `0/16B3748`, comparable with `pg_current_wal_lsn()`. Both positions keep moving while the watched tables are idle, because the source follows unrelated WAL too.
@@ -186,9 +191,10 @@ Each `(index, sink)` lane is written unless something about that one index stops
 | `open` | Written as usual. | (absent) | |
 | `refused` | A document of the lane was refused under [`on_error = "stop"`](index-and-on-error.md#on_error). | `refused: id <ids> (<first reason>)`, a few ids at most | a probe lands |
 | `blocked` | The destination refuses every write to the index for now: a [write block](sink-opensearch.md#write-blocks), a closed index, a role without write permission on it. Or a rebuild's seed can't [retire the old generation](sink-opensearch.md#an-old-generation-that-cant-be-retired), which is blocked. | `blocked: <OpenSearch's reason>`; for a closed index, `blocked: index [<generation>] is closed`; for a seed, `blocked: the new generation <new> is built, but the old generation <old> can't be retired: <OpenSearch's reason>; <the ways out>. The seed then finishes on its own` | a probe lands |
-| `restaging` | The index's target was deleted while flusso ran, a [reindex couldn't stage](#when-the-reindex-cant-stage) its new generation, or a [restart couldn't ensure the index](#when-a-restart-cant-ensure-an-index): it is staged again, alone. | OpenSearch's reason; for a reindex, `the reindex could not stage: <error>` or `the reindex could not ask for its backfill: <error>`; after a restart, `could not be ensured: <error>` or `not tried: 8 indexes in a row could not be ensured before it` | staging succeeds |
+| `restaging` | The index's target was deleted while flusso ran, a [reindex couldn't stage](#when-the-reindex-cant-stage) its new generation, or a [restart couldn't ensure the index](#when-a-restart-cant-ensure-an-index): it is staged again, alone. | OpenSearch's reason; for a reindex, `the reindex could not stage: <error>` or `the reindex could not ask for its backfill: <error>`; after a restart, `could not be ensured: <error>` or `not tried: 8 indexes in a row could not be ensured before it`; while the records ask what waits for the slot, `the records ask for a demotion or a detach, which waits until this process holds the slot` | staging succeeds |
+| `detached` | The lane is out of the replication slot's minimum: nothing of it is written, and reads of its index stay as they were at the detach. Its detach is recorded in the sink's [meta documents](sink-opensearch.md#the-meta-documents). | `the detach record says detached` (`, live only` on a `backfill = false` sink); `the records say a rebuild is under way; put back to detached once this process holds the slot`; `the detach records can't be acted on as they stand (…); detached again`; after a failed rebuild, `the rebuild could not begin: <why>; tried again in <d>` | a [rebuild](../operate/detached-index.md) seeds it, or a reattach opens it |
 
-A `refused` or `blocked` lane is **parked**: flusso holds it and probes it, and the logs say `the lane is parked`. The metric [`flusso.lane.parked`](metrics.md) and the `FlussoLaneParked` alert cover every lane that isn't `open`, `restaging` included; their `why` label is the lane's `health`.
+A `refused` or `blocked` lane is **parked**: flusso holds it and probes it, and the logs say `the lane is parked`. The metric [`flusso.lane.parked`](metrics.md) and the `FlussoLaneParked` alert cover every lane that isn't `open`, `restaging` included, except a `detached` one; their `why` label is the lane's `health`. A detached lane is neither probed nor staged: [Bring back a detached index](../operate/detached-index.md).
 
 A **probe** writes a parked lane's oldest batch again, alone, on the [`[backoff]`](config-toml.md#backoff) schedule (1 s after it parked, doubling to 60 s, by default). A lane parked on its seed tries the seed again instead. A `refused` lane's probe writes a [fresh build](index-and-on-error.md#a-refused-lanes-fresh-build) of that batch instead; while it waits for one, the lane stays `refused` and `next_probe` is the end of the wait. Another lane landing never shortens the wait; a stop probes at once. A failed staging of a `restaging` lane is retried on the same schedule. A [reindex](#a-reindex-of-a-lane-flusso-doesnt-write) of the index opens a lane in any of the three states, except one parked on its seed. A lane flusso doesn't write:
 
@@ -249,9 +255,10 @@ Hold the request until a commit is readable: a fence. `position` is what the cli
 | `408` | The timeout passed first. Nothing is wrong with the request; ask again or give up. |
 | `400` | `position` is missing or not a position the source can read, or `until`, `sink`, `index`, or `timeout_ms` is malformed. |
 | `404` | `sink` is not a configured sink, or an `index` is not an enabled index. |
-| `503` | This process can't answer now, or can't vouch for the position yet. `Retry-After: 1`, and `reason` says why: `starting` (the source isn't following live changes yet: startup, or the ingest engine is restarting), `stopping` (the [stop](cli.md#stopping)'s drain is over), `backfilling` or `rebuilding` (below). |
+| `409` | At once: the position falls inside a [gap](#a-wait-inside-a-gap) on a lane the wait needs. Waiting can't help. `reason: gap`. |
+| `503` | This process can't answer now, or can't vouch for the position yet. `Retry-After: 1`, and `reason` says why: `starting` (the source isn't following live changes yet: startup, the ingest engine restarting, or a lane whose records aren't read yet since the slot last opened), `stopping` (the [stop](cli.md#stopping)'s drain is over), `backfilling` or `rebuilding` (below), `detached` (at once: a lane the wait needs is [detached](#lane-health) short of the position). |
 
-`200` and `408` share a body; errors carry `{"error": "…"}`, a `503` also `"reason"`.
+`200` and `408` share a body; errors carry `{"error": "…"}`, a `409` and a `503` also `"reason"`.
 
 ```json
 { "reached": true, "position": "0/16B3780", "until": "searchable", "sink": "primary", "indexes": ["users"] }
@@ -259,19 +266,35 @@ Hold the request until a commit is readable: a fence. `position` is what the cli
 
 `position` is how far the lanes waited on have got (the slowest one): at or past the one asked for on `200`, short of it on `408`. `indexes` echoes the `index` parameters, empty when none was given.
 
-A `503` for an index being seeded or rebuilt also names the lanes holding it up:
+A `503` for an index that is being seeded, rebuilt or is detached, or whose lane answers `starting`, also names the lanes holding it up:
 
 ```json
 { "error": "reads don't see this position yet: users on primary (rebuilding)", "reason": "rebuilding",
   "position": "0/16B3780", "lanes": [{ "index": "users", "sink": "primary", "state": "rebuilding" }] }
 ```
 
+With several such lanes, `reason` is the strongest of their states: `detached`, then `rebuilding`, then `backfilling`, then `starting`. For `detached`, `position` is how far the detached lanes froze, `""` when none can say (a lane detached before this process started).
+
 - **It only waits.** Nothing is flushed or refreshed on a caller's behalf. Under a draining backlog `searchable` trails `applied` by up to the sink's [`refresh_interval`](sink-opensearch.md#refresh).
 - **It vouches only for what reads see.** While a sink seeds an index for the first time, reads see it filling; while it rebuilds one (a [reindex](../operate/reindex.md), including one [waiting to stage](#when-the-reindex-cant-stage), or every seeded index after the [slot was lost](../operate/dropped-slot.md)), reads see the old copy and live writes go to the new one. A wait that needs such an index holds, and is answered `200` the moment the index is seeded and covers the position. If the timeout comes first it is `503` with `reason: backfilling` or `rebuilding` instead of `408`. During a reindex the old copy still serves everything written before the reindex began, so a wait for such a position is `200` throughout. A process that starts in the middle of a reindex knows nothing of what the old copy holds, so it vouches for nothing of that index until the swap. Without the slot, the old copy misses changes, so after a lost slot nothing is vouched for until the rebuild is seeded. The reason is `rebuilding` when any lane holding the wait rebuilds, else `backfilling`.
 - **Each index gets there on its own.** One commit that touches two indexes can be written to one well before the other, or one index can be [down](config-toml.md#a-failing-index) while the other is written. A wait naming one index passes once that index has it; a wait naming both, or none, passes once both have it.
 - **A position already passed answers at once**, however old it is.
 - **During a stop it keeps answering.** A wait open when the stop begins, or opened during the drain, is answered `200` if its position lands meanwhile: that is when in-flight commits reach the sinks. While a wait on `searchable` is open the drain also waits out the sink's refresh interval, inside the stop's deadline. Once the drain is over every wait still open is answered `503` with `reason: stopping`, and so is a new one.
+- **A detached lane answers at once.** It vouches for what its index had reached at the detach and never moves past it: a wait for a position up to there passes, one past it is `503` with `reason: detached` at once, never held. See [Bring back a detached index](../operate/detached-index.md).
+- **Right after each opening of the slot**, a lane answers `starting` until its sink has read the index's records under the new stream, normally well under a second; a wait held over it passes once they're read. A gap, a detached, rebuilding or backfilling lane answers as itself meanwhile. See [Run one flusso per slot](../operate/one-process-per-slot.md#while-flusso-doesnt-hold-the-slot).
 - **A `503` means ask again**, against the same address, until your own timeout. The position is the source's own (a WAL LSN), so the next process answers the same question: it starts from the position the last one confirmed, which after a graceful stop covers everything the last one indexed.
+
+### A wait inside a gap
+
+A [reattach](#post-indexesnamereattachsinknameaccept_gaptrue) accepts that the changes from a lane's detach to its attach never reach its index: a **gap**. A wait whose position falls inside a gap of any lane it needs is answered `409` at once, naming each such lane and its gap (`from` and `to` in the source's text, `null` for an end not known):
+
+```json
+{ "error": "the position falls inside changes a reattach accepted as missing: users on audit (from 0/16B3748 to 0/17C0010); reindex the index on a sink that can rebuild it",
+  "reason": "gap", "position": "0/16C0000",
+  "lanes": [{ "index": "users", "sink": "audit", "state": "gap", "gap": { "from": "0/16B3748", "to": "0/17C0010" } }] }
+```
+
+A position before a gap's `from` or after its `to` is waited on as usual. The gaps are kept with the seed marker, so a restart refuses the same positions; a seed of the index ends them. A `409` is checked before anything else, so it wins over every `503` reason. Name the read's indexes (`index=…`) so a gap on another index doesn't refuse it.
 
 The runbook is [Read your own writes](../operate/read-your-writes.md); the Rust client is [Reading your own writes](../query/read-your-writes.md).
 
@@ -303,13 +326,27 @@ curl -u admin:… -X POST 'http://10.0.0.5:9465/indexes/users/reindex?sink=prima
 
 | Response | When |
 | --- | --- |
-| `202 Accepted` | Queued: `{"index": "users", "sink": "primary", "queued": true}`, with `"sink": null` for every sink. Each targeted sink engine stages the new generation between two batches and requests its own snapshot; nothing restarts, reads stay on the old generation until the swap, and untargeted sinks are untouched. A sink with `backfill = false` logs and ignores it. Watch `/status` for the index leaving and returning to `seeded` under that sink. |
+| `202 Accepted` | Queued: `{"index": "users", "sink": "primary", "queued": true}`, with `"sink": null` for every sink. Each targeted sink engine stages the new generation between two batches and requests its own snapshot; nothing restarts, reads stay on the old generation until the swap, and untargeted sinks are untouched. A sink with `backfill = false` logs and ignores it. Without `sink`, `skipped` lists the sinks it [didn't queue on](#a-reindex-that-is-skipped), when any. Watch `/status` for the index leaving and returning to `seeded` under that sink. On a [detached](#lane-health) index it begins a rebuild: [Bring back a detached index](../operate/detached-index.md). |
 | `400` | `{"error": "invalid index name \"…\""}` or `{"error": "invalid sink name \"…\""}`. |
 | `401` | Credentials missing or wrong. |
 | `404` | `{"error": "unknown index <name>", "indexes": [...]}`: not an enabled index. `{"error": "unknown sink <name>"}`: not a configured sink. |
-| `503` | `{"error": "…"}`: flusso is [stopping](cli.md#stopping), that sink's operation queue is full (retry shortly), or its engine has stopped for good. |
+| `409` | `{"error", "reason", "index", "skipped": [{"sink", "reason"}]}`: the sink named, or every sink, is [skipped](#a-reindex-that-is-skipped). `reason` is the first one's. Nothing is queued. |
+| `503` | Stopping: `Retry-After: 1` and `{"error": "flusso is stopping and takes no operation; ask the next process", "reason": "stopping"}` ([stopping](cli.md#stopping)). Otherwise `{"error": "…"}`: that sink's operation queue is full (retry shortly), or its engine has stopped for good. |
 
 Without `sink`, each sink stages on its own: one that can't stage doesn't hold up the others.
+
+### A reindex that is skipped
+
+A lane whose index is being rebuilt after a detach takes no second reindex, and a detached lane on a sink that can't rebuild needs a reattach instead. Such a sink is skipped, with one of these reasons:
+
+| `reason` | The lane |
+| --- | --- |
+| `the index is being rebuilt (starting)` | A rebuild waits for the lane's attach. |
+| `the index is being rebuilt` | A rebuild runs, the lane open. |
+| `the rebuild waits for the block on the serving generation: <the lane's reason>` | The rebuild's seed is [parked](sink-opensearch.md#an-old-generation-that-cant-be-retired) on the old generation's block; its complete generation is kept. Lift the block. |
+| `this sink can't rebuild the index (backfill = false): flusso reattach <index> --sink <sink> --accept-gap` | Detached, on a `backfill = false` sink: [reattach](#post-indexesnamereattachsinknameaccept_gaptrue) it. |
+
+A rebuild whose lane is parked or restaging for another reason isn't skipped: the reindex starts it again.
 
 ### A reindex of a lane flusso doesn't write
 
@@ -359,3 +396,38 @@ The call has already answered `202`. When the sink can't create the new generati
 Either way the item the lane was stuck on is written again like any other, so a cause still in place parks the lane again. A stop drops a reindex not staged yet, too ([Stopping](cli.md#lanes-flusso-doesnt-write-at-a-stop)).
 
 The runbook is [Reindex without downtime](../operate/reindex.md); the CLI wrapper is [`flusso reindex`](cli.md#reindex).
+
+## POST /indexes/\<name\>/reattach?sink=\<name\>&accept_gap=true
+
+Reattach a [detached](#lane-health) lane on a sink with `backfill = false`, which can't rebuild the index, accepting that the changes made while it was detached never reach it: a [gap](#a-wait-inside-a-gap). Basic auth required; the public surface answers `404`. Both parameters are required.
+
+```sh
+curl -u admin:… -X POST 'http://10.0.0.5:9465/indexes/users/reattach?sink=audit&accept_gap=true'
+```
+
+The answer waits for the sink engine's verdict, given between two batches, for at most 30 s.
+
+| Response | When |
+| --- | --- |
+| `202 Accepted` | Started: `{"index": "users", "sink": "audit", "started": true}`. The sink checked the records, kept the gap with the seed marker and deleted the detach record; the lane is being attached (`attaching: true` in `/status`), then opens with its gap under `gaps`. |
+| `400` | `{"error", "index"}`: an invalid index name, `sink` missing (`name the sink: a reattach is for one lane (?sink=<name>)`) or invalid, or `accept_gap` not exactly `true` (`a reattach drops the changes made while the lane was detached: say so with accept_gap=true`). |
+| `401` | Credentials missing or wrong. |
+| `404` | `{"error": "unknown index <name>", "indexes": [...]}` or `{"error": "unknown sink <name>", "index"}`. |
+| `409` | `{"error", "reason", "index", "sink"}`: the reattach doesn't apply, and `reason` says what does. [The reasons](#a-reattach-that-is-refused). Nothing changed. |
+| `503` | Stopping: `Retry-After: 1` and `reason: stopping`, as for a reindex. Otherwise `{"error", "index"}`: the sink's operation queue is full or its engine stopped; `the reattach failed: <error>. …` (the lane still `detached` in `/status`: ask again; `attaching` or open: it took effect); the sink engine's run ended before the reattach started (nothing changed: ask again); or `no verdict within 30s: …` (it may still start: watch `/status`). |
+
+### A reattach that is refused
+
+| `reason` | Means |
+| --- | --- |
+| `this sink can rebuild the index (backfill = true), with nothing missing: flusso reindex <index> --sink <sink>` | A [reindex](#post-indexesnamereindexsinkname) rebuilds it instead, with no gap. |
+| `the lane is not detached` | Nothing to reattach. |
+| `the lane is being attached already` | A reattach or rebuild is under way. |
+| `the sink keeps no detach record of the index: it is not detached` | The records say otherwise than the lane. |
+| `the seed marker is not on the seeded generation reads see (a demotion not finished); restart flusso: …` | Restart flusso, which puts the records back to detached on the generation reads see, then reattach again. |
+| `the record was written while this sink could rebuild; restart flusso: …` | The same. |
+| `the record says <record>, not detached; restart flusso: …` | The same. |
+| `the record was read without its version` | Ask again. |
+| `this process doesn't hold the slot …`, `the records, read under an earlier stream, could not be read again …`, `another process changed the records …` | flusso doesn't hold the replication slot right now: [what waits for it](../operate/one-process-per-slot.md#while-flusso-doesnt-hold-the-slot). Ask again once it does. |
+
+The runbook is [Bring back a detached index](../operate/detached-index.md); the CLI wrapper is [`flusso reattach`](cli.md#reattach).
