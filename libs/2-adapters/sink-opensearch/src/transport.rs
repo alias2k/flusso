@@ -290,28 +290,40 @@ impl OpensearchSink {
     /// what tells two URLs reaching one cluster apart from two clusters
     /// (the review of round 11, S-4). An answer without one is an error.
     pub async fn cluster_uuid(&self) -> Result<String> {
-        let context = "asking the cluster its uuid failed";
+        // A read: its errors say what was asked and what came back, never
+        // "write failed" (the review of round 13).
+        let read = |error: SinkError| match error {
+            SinkError::Write(text) => SinkError::Read(text),
+            other => other,
+        };
         let url = format!("{}/", self.base_url);
         let resp = self
             .maybe_auth(self.client.get(&url))
             .send()
             .await
-            .map_err(|e| request_error(context, e))?;
+            .map_err(|e| read(request_error("the cluster gave no answer", e)))?;
         if !resp.status().is_success() {
-            return Err(Self::status_error(resp, context).await);
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(SinkError::Read(format!(
+                "the cluster answered HTTP {status}: {text}"
+            )));
         }
-        let body: serde_json::Value = resp.json().await.map_err(|e| request_error(context, e))?;
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| read(request_error("the cluster's answer can't be read", e)))?;
         // `_na_` is OpenSearch's `UNKNOWN_CLUSTER_UUID`, answered until a
         // cluster manager is elected: two clusters not formed yet answer it
         // alike, so it names no cluster (the review of the closing round, B).
         match body.get("cluster_uuid").and_then(serde_json::Value::as_str) {
             Some(uuid) if !uuid.is_empty() && uuid != "_na_" => Ok(uuid.to_owned()),
-            Some(uuid) => Err(SinkError::Write(format!(
-                "{context}: the cluster answers cluster_uuid {uuid:?}, which names no cluster \
-                 (no cluster manager elected yet)"
+            Some(uuid) => Err(SinkError::Read(format!(
+                "the cluster answers cluster_uuid {uuid:?}, which names no cluster (no cluster \
+                 manager elected yet)"
             ))),
-            None => Err(SinkError::Write(format!(
-                "{context}: no cluster_uuid in {body}"
+            None => Err(SinkError::Read(format!(
+                "the cluster's answer names no cluster_uuid: {body}"
             ))),
         }
     }

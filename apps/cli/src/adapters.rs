@@ -331,7 +331,7 @@ pub(crate) async fn cluster_findings_online(config: &Config) -> Vec<ClusterFindi
             Ok(uuid) => answers.push((name, uuid)),
             Err(why) => findings.push(ClusterFinding::Skipped {
                 sink: (*name).clone(),
-                why: format!("its cluster could not be asked its cluster_uuid: {why}"),
+                why: format!("its cluster_uuid could not be read: {why}"),
             }),
         }
     }
@@ -599,6 +599,19 @@ mod tests {
             assert!(refused.is_ok(), "{body}: refused: {refused:?}");
             let findings = cluster_findings_online(&config).await;
             assert_eq!(findings.len(), 2, "{body}: {findings:?}");
+            // One clean sentence: nothing was written (the review of round 13).
+            if body.contains("_na_") {
+                for finding in &findings {
+                    let ClusterFinding::Skipped { why, .. } = finding else {
+                        continue;
+                    };
+                    assert_eq!(
+                        why,
+                        "its cluster_uuid could not be read: the cluster answers cluster_uuid \"_na_\", \
+                         which names no cluster (no cluster manager elected yet)"
+                    );
+                }
+            }
             assert!(
                 findings
                     .iter()
@@ -771,7 +784,7 @@ mod tests {
         assert_eq!(findings.len(), 2, "{findings:?}");
         assert!(
             findings.iter().all(|finding| matches!(finding,
-                ClusterFinding::Skipped { why, .. } if why.contains("could not be asked"))),
+                ClusterFinding::Skipped { why, .. } if why.contains("could not be read: the cluster gave no answer"))),
             "{findings:?}"
         );
         distinct_clusters_online(&config).await.unwrap();

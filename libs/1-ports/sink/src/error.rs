@@ -11,6 +11,11 @@ pub enum SinkError {
     #[error("write failed: {0}")]
     Write(String),
 
+    /// Reading from the destination failed, or its answer can't be used:
+    /// nothing was written. The text says what was asked and what came back.
+    #[error("{0}")]
+    Read(String),
+
     /// A document could not be serialized for the destination.
     #[error("serialization failed: {0}")]
     Serialize(String),
