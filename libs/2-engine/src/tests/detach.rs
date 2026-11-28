@@ -139,6 +139,12 @@ struct Gate {
     tombstones: Mutex<BTreeMap<String, (RecordVersion, Option<sink::Stamp>)>>,
     /// The stamp of each index's marker's last stamped write.
     marker_stamps: Mutex<BTreeMap<String, sink::Stamp>>,
+    /// A marker a detach that can rebuild moved off the serving generation:
+    /// the gaps its `detaching_from` carries, as the adapter keeps them (the
+    /// review of round 11, S-3).
+    detaching: Mutex<BTreeMap<String, Vec<sink::Gap>>>,
+    /// Each index a read put back.
+    put_back: Mutex<Vec<String>>,
 }
 
 impl Gate {
@@ -166,6 +172,65 @@ impl Gate {
             Some(stamp) => stamps.insert(index.to_owned(), stamp.clone()),
             None => stamps.remove(index),
         };
+    }
+
+    /// `index`'s marker moved off serving by `stamp`: its gaps go into
+    /// `detaching_from`, unless a detach moved it already.
+    fn move_marker(&self, index: &str, stamp: Option<&sink::Stamp>) {
+        let gaps = self
+            .marker_gaps
+            .lock()
+            .unwrap()
+            .remove(index)
+            .unwrap_or_default();
+        self.detaching
+            .lock()
+            .unwrap()
+            .entry(index.to_owned())
+            .or_insert(gaps);
+        self.stamp_marker(index, stamp);
+    }
+
+    /// `index`'s marker back on serving, written by `stamp`, with the gaps
+    /// `detaching_from` carried.
+    fn restore_marker(&self, index: &str, stamp: Option<&sink::Stamp>) {
+        let carried = self.detaching.lock().unwrap().remove(index);
+        let mut gaps = self.marker_gaps.lock().unwrap();
+        match carried.filter(|carried| !carried.is_empty()) {
+            Some(carried) => {
+                gaps.insert(index.to_owned(), carried);
+            }
+            None => {
+                gaps.remove(index);
+            }
+        }
+        drop(gaps);
+        self.stamp_marker(index, stamp);
+    }
+
+    /// A read of `index`'s records that got through, as the adapter's: a
+    /// marker a detach moved with no record beside it is put back on
+    /// serving first, stamped by the reader (`stamp`), its gaps with it.
+    fn answer(&self, index: &str, stamp: &sink::Stamp) -> Detachment {
+        let unrecorded = !self.kept.lock().unwrap().contains_key(index);
+        let put_back = unrecorded && self.detaching.lock().unwrap().contains_key(index);
+        if put_back {
+            self.restore_marker(index, Some(stamp));
+            self.put_back.lock().unwrap().push(index.to_owned());
+        }
+        let mut kept = self.read_kept(index);
+        if put_back {
+            kept.restored = Some(1);
+        }
+        kept
+    }
+
+    /// `index`'s marker written whole by a seed or a reindex: no gap, no
+    /// `detaching_from`.
+    fn marker_written_whole(&self, index: &str, stamp: Option<&sink::Stamp>) {
+        self.marker_gaps.lock().unwrap().remove(index);
+        self.detaching.lock().unwrap().remove(index);
+        self.stamp_marker(index, stamp);
     }
 
     /// What a read of `index`'s records finds: the record or its
@@ -372,10 +437,10 @@ impl sink::Records for Gate {
     async fn detachment(
         &self,
         mapping: &IndexMapping,
-        _: &sink::Stamp,
+        stamp: &sink::Stamp,
     ) -> sink::Result<Detachment> {
         if *self.read_first.lock().unwrap() {
-            let kept = self.read_kept(mapping.index.as_ref());
+            let kept = self.answer(mapping.index.as_ref(), stamp);
             let gate = self.read_gate.lock().unwrap().clone();
             if let Some(gate) = gate {
                 gate.acquire().await.unwrap().forget();
@@ -404,7 +469,7 @@ impl sink::Records for Gate {
                 mapping.index
             )));
         }
-        Ok(self.read_kept(mapping.index.as_ref()))
+        Ok(self.answer(mapping.index.as_ref(), stamp))
     }
 
     async fn detach(
@@ -448,8 +513,14 @@ impl sink::Records for Gate {
                 // As the adapter's `record_body`: a detach with no `through`
                 // keeps the record's.
                 record.through = detach.through.clone().or(earlier);
-                if !detach.live_only {
-                    self.stamp_marker(mapping.index.as_ref(), detach.stamp.as_ref());
+                if !detach.live_only
+                    && !self
+                        .detaching
+                        .lock()
+                        .unwrap()
+                        .contains_key(mapping.index.as_ref())
+                {
+                    self.move_marker(mapping.index.as_ref(), detach.stamp.as_ref());
                 }
                 self.store(mapping.index.as_ref(), record, detach.stamp.as_ref());
                 if matches!(kind, Record::LandsAsAskedThenFails) {
@@ -464,7 +535,14 @@ impl sink::Records for Gate {
                 "the meta index refused the record".to_owned(),
             )),
             Record::FailAfterWriting => {
-                self.stamp_marker(mapping.index.as_ref(), detach.stamp.as_ref());
+                if !self
+                    .detaching
+                    .lock()
+                    .unwrap()
+                    .contains_key(mapping.index.as_ref())
+                {
+                    self.move_marker(mapping.index.as_ref(), detach.stamp.as_ref());
+                }
                 self.store(
                     mapping.index.as_ref(),
                     Detachment::recorded(
@@ -552,7 +630,7 @@ impl sink::Records for Gate {
         record.record = Some(DetachRecord::Rebuilding { live_only: false });
         record.attempts = Some(attempts);
         record.marker = Some(MarkerAt::Newer { seeded: false });
-        self.stamp_marker(index, Some(stamp));
+        self.move_marker(index, Some(stamp));
         self.store(index, record, Some(stamp));
         self.rebuilds
             .lock()
@@ -586,8 +664,10 @@ impl sink::Records for Gate {
             // R14: live only, the marker is back on the generation reads see.
             if live_only {
                 record.marker = Some(MarkerAt::Serving { seeded: true });
+                self.restore_marker(index, Some(stamp));
+            } else {
+                self.move_marker(index, Some(stamp));
             }
-            self.stamp_marker(index, Some(stamp));
             self.store(index, record, Some(stamp));
         }
         self.demoted
@@ -607,8 +687,7 @@ impl sink::Records for Gate {
             });
         }
         // The marker written whole: no gap, this seed's stamp.
-        self.marker_gaps.lock().unwrap().remove(index.as_ref());
-        self.stamp_marker(index.as_ref(), Some(stamp));
+        self.marker_written_whole(index.as_ref(), Some(stamp));
         // r4: the seed forgets a finished rebuild's record.
         if *self.seed_keeps_record.lock().unwrap() {
             if let Some(kept) = self.kept.lock().unwrap().get_mut(index.as_ref()) {
@@ -626,11 +705,7 @@ impl sink::Records for Gate {
             .lock()
             .unwrap()
             .push(mapping.index.to_string());
-        self.marker_gaps
-            .lock()
-            .unwrap()
-            .remove(mapping.index.as_ref());
-        self.stamp_marker(mapping.index.as_ref(), Some(stamp));
+        self.marker_written_whole(mapping.index.as_ref(), Some(stamp));
         Ok(())
     }
 }
@@ -2250,6 +2325,65 @@ async fn a_rebuild_restart_whose_detach_is_unknown_writes_nothing_until_a_read()
         "written onto a detach of unknown outcome: {late:?}"
     );
     assert!(!task.is_finished(), "{:?}", task.await);
+    task.abort();
+}
+
+/// The review of round 11, S-3: the same restart whose detach landed and
+/// failed, its read back failing once while the stream is still held, so no
+/// read again settles it. The clear forgets the record (this process's),
+/// its final read puts the marker the detach moved back on serving, and the
+/// lane goes on: no stop, and the rebuild is staged again.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_restart_whose_read_back_failed_once_is_cleared_and_goes_on() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    let (engine, task, control, attempt) = rebuilding_on_reindex(&rig).await;
+    publish(&rig, LaneItem::Attached { attempt }).await;
+    let _backfill = next_request(&rig).await;
+    rig.sink.block(&users(), true);
+    rig.live(&users(), 2, 2).await;
+    eventually("the rebuilding lane parks", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Parked { .. }
+        )
+    })
+    .await;
+    rig.sink
+        .records
+        .lock()
+        .unwrap()
+        .push_back(Record::FailAfterWriting);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    eventually("the restart's detach was sent", || {
+        !rig.sink.detaches().is_empty()
+    })
+    .await;
+    rig.sink.block(&users(), false);
+    eventually("the clear forgets the detach's record", || {
+        rig.sink.forgotten.lock().unwrap().len() == 1
+    })
+    .await;
+    eventually("a read puts the moved marker back", || {
+        rig.sink
+            .put_back
+            .lock()
+            .unwrap()
+            .contains(&"users".to_owned())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert!(!task.is_finished(), "one process stopped: {:?}", task.await);
+    assert!(
+        !engine.lane_health(&lane(users())).is_detached(),
+        "{:?}",
+        engine.lane_health(&lane(users()))
+    );
     task.abort();
 }
 

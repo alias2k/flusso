@@ -148,8 +148,16 @@ struct Kept {
 struct Store {
     /// Whether this process holds a stream, as the world tracks it.
     holding: Arc<Holding>,
-    live_only: bool,
+    /// The sink's `backfill = false`, as the process running now has it:
+    /// flipped between processes by `FlipBackfill`.
+    live_only: std::sync::atomic::AtomicBool,
     kept: Mutex<BTreeMap<String, Kept>>,
+    /// A marker a detach that can rebuild moved off the serving generation:
+    /// the gaps it kept, carried in `detaching_from` as OpenSearch does
+    /// (the review of round 11, S-1), restored when the marker comes back
+    /// on serving (a read's put-back, a live-only demotion), dropped by a
+    /// write that rebuilds the index.
+    detaching: Mutex<BTreeMap<String, Vec<sink::Gap>>>,
     /// The next record or marker write this process makes fails: `true`,
     /// after it landed (its response lost); `false`, before.
     fails: Mutex<Option<bool>>,
@@ -203,8 +211,9 @@ impl Store {
     fn new(live_only: bool, holding: Arc<Holding>) -> Self {
         Self {
             holding,
-            live_only,
+            live_only: std::sync::atomic::AtomicBool::new(live_only),
             kept: Mutex::default(),
+            detaching: Mutex::default(),
             fails: Mutex::default(),
             seed_keeps_record: Mutex::default(),
             reads_answered_first: Mutex::default(),
@@ -319,6 +328,48 @@ impl Store {
             .insert(of.to_owned(), stamp.clone());
     }
 
+    fn live_only(&self) -> bool {
+        self.live_only.load(Ordering::SeqCst)
+    }
+
+    /// `of`'s marker moved off the serving generation by `stamp`, as
+    /// OpenSearch's d2b and its rebuild or demotion move it: the gaps go
+    /// into `detaching_from`, unless a detach moved it already.
+    fn move_marker(&self, of: &str, stamp: &sink::Stamp) {
+        let gaps = self.gaps.lock().unwrap().remove(of).unwrap_or_default();
+        self.detaching
+            .lock()
+            .unwrap()
+            .entry(of.to_owned())
+            .or_insert(gaps);
+        self.stamp_marker(of, stamp);
+    }
+
+    /// `of`'s marker back on the serving generation, written by `stamp`, the
+    /// gaps `detaching_from` carried with it.
+    fn restore_marker(&self, of: &str, stamp: &sink::Stamp) {
+        let carried = self.detaching.lock().unwrap().remove(of);
+        let mut gaps = self.gaps.lock().unwrap();
+        match carried.filter(|carried| !carried.is_empty()) {
+            Some(carried) => {
+                gaps.insert(of.to_owned(), carried);
+            }
+            _ => {
+                gaps.remove(of);
+            }
+        }
+        drop(gaps);
+        self.stamp_marker(of, stamp);
+    }
+
+    /// `of`'s marker written whole by a write that rebuilds the index (a
+    /// seed, a reindex, a created generation): no gap, no `detaching_from`.
+    fn marker_written_whole(&self, of: &str, stamp: &sink::Stamp) {
+        self.gaps.lock().unwrap().remove(of);
+        self.detaching.lock().unwrap().remove(of);
+        self.stamp_marker(of, stamp);
+    }
+
     /// `of`'s record forgotten by `stamp`: a tombstone in its place, at a
     /// new version.
     fn forget(&self, of: &str, stamp: &sink::Stamp) {
@@ -407,7 +458,7 @@ impl Store {
     /// Another process detached `of` from `through` (where its reads stood,
     /// as the adapter records it) and dropped its changes.
     fn dropped(&self, of: &str, through: Option<String>) {
-        let (record, marker) = if self.live_only {
+        let (record, marker) = if self.live_only() {
             (
                 DetachRecord::Detached { live_only: true },
                 MarkerAt::Serving { seeded: true },
@@ -418,14 +469,11 @@ impl Store {
                 MarkerAt::Newer { seeded: false },
             )
         };
-        // The marker its detach moves keeps the gaps here, unlike
-        // OpenSearch's: the world's other process may reattach a
-        // rebuildable sink's detach, which the real reattach refuses, and
-        // with the gaps gone that unreal reattach would leave a drop no gap
-        // covers (round 11's sweep, seed `15942218590030476190`).
+        // As OpenSearch: a detach that can rebuild moves the marker, its
+        // gaps into `detaching_from`.
         let stamp = self.anothers();
-        if !self.live_only {
-            self.stamp_marker(of, &stamp);
+        if !self.live_only() {
+            self.move_marker(of, &stamp);
         }
         self.keep(of, record, marker, false, &stamp);
         if let Some(kept) = self.kept.lock().unwrap().get_mut(of) {
@@ -436,9 +484,8 @@ impl Store {
     /// Another process detached `of` from `through`, began its rebuild
     /// (whose walk began at `began`), then went away.
     fn rebuilt_by_another(&self, of: &str, began: u64, through: Option<String>) {
-        // The gaps stay, as for `dropped`.
         let stamp = self.anothers();
-        self.stamp_marker(of, &stamp);
+        self.move_marker(of, &stamp);
         self.keep(
             of,
             DetachRecord::Rebuilding { live_only: false },
@@ -580,8 +627,7 @@ impl sink::Records for Store {
             self.next_generation(of);
             // As OpenSearch: a generation created writes the marker whole,
             // unseeded, with no gap and no walk checkpoint.
-            self.gaps.lock().unwrap().remove(of);
-            self.stamp_marker(of, stamp);
+            self.marker_written_whole(of, stamp);
             self.walked.lock().unwrap().remove(of);
             self.unseeded.lock().unwrap().insert(of.to_owned());
         }
@@ -606,12 +652,29 @@ impl sink::Records for Store {
     async fn detachment(
         &self,
         mapping: &IndexMapping,
-        _: &sink::Stamp,
+        stamp: &sink::Stamp,
     ) -> sink::Result<Detachment> {
         let began = self.held();
         let of = mapping.index.as_ref();
+        // As OpenSearch's read: a marker a detach moved with no record beside
+        // it is put back on serving, stamped by the reader, its gaps with it.
+        let unrecorded = !self.kept.lock().unwrap().contains_key(of);
+        let put_back = unrecorded
+            && !self.unreadable.lock().unwrap().contains(of)
+            && self.detaching.lock().unwrap().contains_key(of);
+        if put_back {
+            self.restore_marker(of, stamp);
+        }
+        let answer = || {
+            self.answer(of).map(|mut answer| {
+                if put_back {
+                    answer.restored = Some(1);
+                }
+                answer
+            })
+        };
         if *self.reads_answered_first.lock().unwrap() {
-            let answer = self.answer(of);
+            let answer = answer();
             self.read_hold.pass().await;
             if answer.is_ok() {
                 self.reads.lock().unwrap().push((of.to_owned(), began));
@@ -619,7 +682,7 @@ impl sink::Records for Store {
             return answer;
         }
         self.read_hold.pass().await;
-        let answer = self.answer(of);
+        let answer = answer();
         if answer.is_ok() {
             self.reads.lock().unwrap().push((of.to_owned(), began));
         }
@@ -645,13 +708,19 @@ impl sink::Records for Store {
         let Some(stamp) = detach.stamp.clone() else {
             return Err(sink::SinkError::Write("an unstamped detach".to_owned()));
         };
-        // As OpenSearch: a detach that can rebuild moves the marker, written
-        // whole, so the gaps go.
-        if !detach.live_only {
-            self.gaps.lock().unwrap().remove(mapping.index.as_ref());
-            self.stamp_marker(mapping.index.as_ref(), &stamp);
+        // As OpenSearch: a detach that can rebuild moves the marker (left as
+        // it is when a detach moved it already), its gaps into
+        // `detaching_from`.
+        if !detach.live_only
+            && !self
+                .detaching
+                .lock()
+                .unwrap()
+                .contains_key(mapping.index.as_ref())
+        {
+            self.move_marker(mapping.index.as_ref(), &stamp);
         }
-        let marker = if self.live_only {
+        let marker = if self.live_only() {
             MarkerAt::Serving { seeded: true }
         } else {
             MarkerAt::Newer { seeded: false }
@@ -787,9 +856,8 @@ impl sink::Records for Store {
         self.next_generation(of);
         self.unseeded.lock().unwrap().insert(of.to_owned());
         self.walked.lock().unwrap().remove(of);
-        // As OpenSearch: the marker moves, written whole.
-        self.gaps.lock().unwrap().remove(of);
-        self.stamp_marker(of, stamp);
+        // As OpenSearch: the marker moves, keeping `detaching_from`.
+        self.move_marker(of, stamp);
         match fails {
             Some(landed) => Err(Self::failed(landed)),
             None => Ok(attempts),
@@ -817,13 +885,21 @@ impl sink::Records for Store {
             };
         }
         self.walked.lock().unwrap().remove(of);
-        // As OpenSearch: the marker moves (or is put back), written whole.
-        self.gaps.lock().unwrap().remove(of);
-        self.stamp_marker(of, stamp);
+        // As OpenSearch: the marker moves, keeping `detaching_from`, or, live
+        // only, is put back on serving with the gaps it carried (R14).
+        if live_only {
+            self.restore_marker(of, stamp);
+        } else {
+            self.move_marker(of, stamp);
+        }
         let held = self.held();
         let version = self.version();
         if let Some(kept) = self.kept.lock().unwrap().get_mut(of) {
             kept.detachment.record = Some(DetachRecord::Detached { live_only });
+            // R14: live only, the marker is back on the generation reads see.
+            if live_only {
+                kept.detachment.marker = Some(MarkerAt::Serving { seeded: true });
+            }
             kept.detachment.version = Some(version);
             kept.detachment.record_stamp = Some(stamp.clone());
             kept.ours = true;
@@ -860,8 +936,7 @@ impl sink::Records for Store {
         if forgotten {
             self.forget(name, stamp);
         }
-        self.gaps.lock().unwrap().remove(name);
-        self.stamp_marker(name, stamp);
+        self.marker_written_whole(name, stamp);
         self.unseeded.lock().unwrap().remove(name);
         self.walked.lock().unwrap().remove(name);
         let began = self.completing.lock().unwrap().remove(name).unwrap_or(0);
@@ -886,8 +961,7 @@ impl sink::Records for Store {
         self.missing.lock().unwrap().insert(of.to_owned());
         self.unseeded.lock().unwrap().insert(of.to_owned());
         self.walked.lock().unwrap().remove(of);
-        self.gaps.lock().unwrap().remove(of);
-        self.stamp_marker(of, stamp);
+        self.marker_written_whole(of, stamp);
         match fails {
             Some(landed) => Err(Self::failed(landed)),
             None => Ok(()),
@@ -1034,6 +1108,35 @@ enum Event {
     /// A wait on `lane` just inside the last range another process dropped
     /// on it.
     WaitDropped {
+        lane: usize,
+    },
+    /// A wait on `lane` at the first change of its index the store never
+    /// got (dropped by a detach of this process or another).
+    WaitUnwritten {
+        lane: usize,
+    },
+    /// `sink`'s `backfill` flips, for the next process to start (the review
+    /// of round 11, S-1: an operator turning it on, then off again).
+    FlipBackfill {
+        sink: usize,
+    },
+    /// The review of round 11, S-1: `lane` of the `backfill = false` sink is
+    /// detached and reattached, keeping a gap; `backfill` is turned on and
+    /// the lane detached again, which moves the marker; turned off again, the
+    /// next start puts the marker back on serving (a live-only demotion), and
+    /// a reattach follows. A wait inside the first gap must be refused.
+    /// Expanded before the run.
+    BackfillFlips {
+        lane: usize,
+    },
+    /// The review of round 11, S-1 and S-3: `lane` of the `backfill = false`
+    /// sink is detached and reattached, keeping a gap; `backfill` is turned
+    /// on, and a detach that moves the marker lands but fails, its read back
+    /// failing too. The clear forgets its record and its read puts the
+    /// marker back on serving, the gap with it: a wait inside the gap, by a
+    /// new process that knows it only from the marker, must be refused.
+    /// Expanded before the run.
+    PutBackAfterFlip {
         lane: usize,
     },
     /// The seventh re-check's B-1, drawn often: this process's stream ends,
@@ -1206,6 +1309,75 @@ impl Event {
                     Event::Apply { index: lane % 2 },
                     Event::WaitNewest { lane },
                 ];
+            }
+            Event::PutBackAfterFlip { lane } => {
+                let index = lane % 2;
+                let sink = lane / 2;
+                return vec![
+                    opens.clone(),
+                    Event::Detach { lane, fails: false },
+                    Event::Apply { index },
+                    Event::Elapse,
+                    Event::Elapse,
+                    Event::Unblock { lane },
+                    Event::Reattach { index },
+                    Event::Elapse,
+                    Event::Apply { index },
+                    Event::Elapse,
+                    Event::FlipBackfill { sink },
+                    Event::NewProcess,
+                    opens.clone(),
+                    Event::Elapse,
+                    Event::Detach { lane, fails: true },
+                    Event::Unreadable { lane },
+                    Event::Apply { index },
+                    Event::Elapse,
+                    Event::Elapse,
+                    Event::Readable { sink },
+                    Event::Unblock { lane },
+                    Event::Elapse,
+                    Event::Elapse,
+                    Event::Elapse,
+                    // A new process knows the gap only from the marker.
+                    Event::NewProcess,
+                    opens,
+                    Event::Elapse,
+                    Event::Apply { index },
+                    Event::Elapse,
+                    Event::WaitUnwritten { lane },
+                ];
+            }
+            Event::BackfillFlips { lane } => {
+                let index = lane % 2;
+                let sink = lane / 2;
+                let detaches = [
+                    Event::Detach { lane, fails: false },
+                    Event::Apply { index },
+                    Event::Elapse,
+                    Event::Elapse,
+                    Event::Unblock { lane },
+                ];
+                let reattaches = [
+                    Event::Reattach { index },
+                    Event::Elapse,
+                    Event::Apply { index },
+                    Event::Elapse,
+                ];
+                let flips = [
+                    Event::FlipBackfill { sink },
+                    Event::NewProcess,
+                    opens.clone(),
+                    Event::Elapse,
+                ];
+                let mut events = vec![opens.clone()];
+                events.extend(detaches.clone());
+                events.extend(reattaches.clone());
+                events.extend(flips.clone());
+                events.extend(detaches);
+                events.extend(flips);
+                events.extend(reattaches);
+                events.push(Event::WaitUnwritten { lane });
+                return events;
             }
             Event::RestartLost { lane } => {
                 let index = lane % 2;
@@ -1383,6 +1555,8 @@ fn event() -> impl Strategy<Value = Event> {
         1 => (0usize..4).prop_map(|lane| Event::Block { lane }),
         1 => (0usize..4).prop_map(|lane| Event::Unreadable { lane }),
         1 => (2usize..4).prop_map(|lane| Event::RestartLost { lane }),
+        1 => (0usize..2).prop_map(|lane| Event::BackfillFlips { lane }),
+        1 => (0usize..2).prop_map(|lane| Event::PutBackAfterFlip { lane }),
         2 => (0usize..4).prop_map(|lane| Event::SameDetachElsewhere { lane }),
     ]
 }
@@ -1484,7 +1658,7 @@ impl Pipeline {
                         Arc::clone(&progress),
                     )
                     .with_options(sink::SinkOptions {
-                        backfill: *name != "audit",
+                        backfill: !store.live_only(),
                     })
                     .with_observer(Arc::clone(&observer) as Arc<dyn engine::Observer>)
                     .with_rereads(Arc::clone(&rereads))
@@ -1662,7 +1836,7 @@ impl World {
                         // The gap the operator accepted holds whatever the lane
                         // missed before this.
                         if let Some(lane) = self.lane_of(&key)
-                            && self.stores[Self::sink_of(lane)].live_only
+                            && self.stores[Self::sink_of(lane)].live_only()
                         {
                             self.tick += 1;
                             self.attached[lane].push(self.tick);
@@ -1871,7 +2045,7 @@ impl World {
                 Some(DetachRecord::Detached { .. })
             );
             if drop == Some(lane) && !already_detached {
-                if rebuild && !store.live_only {
+                if rebuild && !store.live_only() {
                     let half = held_to + (to - held_to) / 2;
                     self.dropped[lane].push((from, half, now));
                     store.rebuilt_by_another(of, half, Some(from.to_string()));
@@ -1924,8 +2098,7 @@ impl World {
         }
         let stamp = store.anothers();
         store.forget(of, &stamp);
-        store.gaps.lock().unwrap().remove(of);
-        store.stamp_marker(of, &stamp);
+        store.marker_written_whole(of, &stamp);
         store.unseeded.lock().unwrap().remove(of);
         store.walked.lock().unwrap().remove(of);
         store
@@ -1944,8 +2117,13 @@ impl World {
         }
         let store = &self.stores[Self::sink_of(lane)];
         let of = Self::index_of(lane);
+        // As the real reattach: only a record a sink that can't rebuild wrote
+        // (the review of round 11, S-2).
         let detached = store.kept.lock().unwrap().get(of).is_some_and(|kept| {
-            matches!(kept.detachment.record, Some(DetachRecord::Detached { .. }))
+            matches!(
+                kept.detachment.record,
+                Some(DetachRecord::Detached { live_only: true })
+            )
         });
         // A reattach's gap starts where reads stood at the detach (the
         // record's `through`, as the adapter's reattach takes it), covering
@@ -2049,6 +2227,30 @@ impl World {
     /// another process dropped is held only by such a seed: a wait inside the
     /// range it dropped never passes without one, a reattach or not; past
     /// it, a reattach after the drop gives it up.
+    /// The first change of `lane`'s index its store never got and no seed
+    /// covers; the newest change when there is none.
+    fn first_unwritten(&self, lane: usize) -> u64 {
+        let store = &self.stores[Self::sink_of(lane)];
+        let of = Self::index_of(lane);
+        self.changes[lane % 2]
+            .iter()
+            .map(|(at, _)| *at)
+            .find(|at| {
+                !store
+                    .written
+                    .lock()
+                    .unwrap()
+                    .contains(&(of.to_owned(), *at))
+                    && !store
+                        .seeds
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(index, began)| index == of && began >= at)
+            })
+            .unwrap_or(self.horizon)
+    }
+
     fn holds(&self, lane: usize, p: u64) -> std::result::Result<(), String> {
         let store = &self.stores[Self::sink_of(lane)];
         let of = Self::index_of(lane);
@@ -2179,6 +2381,12 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
                 searchable: false,
                 at: world.dropped[lane].last().map_or(0, |(from, ..)| from + 1),
             },
+            Event::WaitUnwritten { lane } => Event::Wait {
+                lane,
+                whole_sink: false,
+                searchable: false,
+                at: world.first_unwritten(lane),
+            },
             event => event,
         };
         match event.clone() {
@@ -2294,6 +2502,10 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
                 let _ = world.fence.positions();
             }
             Event::NewProcess => world.new_process().await,
+            Event::FlipBackfill { sink: at } => {
+                let store = &world.stores[at];
+                store.live_only.store(!store.live_only(), Ordering::SeqCst);
+            }
             Event::Reindex { index: at } => world.control(
                 1,
                 SinkControl::Reindex {
@@ -2316,10 +2528,12 @@ async fn run(events: Vec<Event>, solo: bool) -> std::result::Result<usize, TestC
             | Event::GapOverSlowRead { .. }
             | Event::RebuildBegunAgain { .. }
             | Event::RestartLost { .. }
-            | Event::SameDetachElsewhere { .. } => {
+            | Event::SameDetachElsewhere { .. }
+            | Event::BackfillFlips { .. }
+            | Event::PutBackAfterFlip { .. } => {
                 unreachable!("expanded before the run")
             }
-            Event::WaitNewest { .. } | Event::WaitDropped { .. } => {
+            Event::WaitNewest { .. } | Event::WaitDropped { .. } | Event::WaitUnwritten { .. } => {
                 unreachable!("made a wait above")
             }
             Event::Finishes { lane } => world.finishes(lane),
@@ -2542,6 +2756,8 @@ fn solo_event() -> impl Strategy<Value = Event> {
         1 => (0usize..4).prop_map(|lane| Event::Block { lane }),
         1 => (0usize..4).prop_map(|lane| Event::Unreadable { lane }),
         2 => (2usize..4).prop_map(|lane| Event::RestartLost { lane }),
+        1 => (0usize..2).prop_map(|lane| Event::BackfillFlips { lane }),
+        1 => (0usize..2).prop_map(|lane| Event::PutBackAfterFlip { lane }),
     ]
 }
 
@@ -2596,12 +2812,13 @@ fn replay_as(events: Vec<Event>, solo: bool) -> usize {
 }
 
 /// Round 11's sweep, seed `15942218590030476190` of `gate_world` at
-/// 50,000 cases, shrunk: a model error, not the engine's. The other
-/// process's detach of a rebuildable sink dropped the gaps (as OpenSearch's
-/// moved marker does), then its reattach, which the real reattach refuses
-/// on such a sink, left the drop uncovered. The world keeps the gaps there.
+/// 50,000 cases, shrunk, re-pinned under the real rules (the review of
+/// round 11, S-2): the other process's detach of a rebuildable sink carries
+/// the gaps in `detaching_from` as OpenSearch does, and its reattach of
+/// that record is refused as the real reattach refuses it. Nothing is
+/// vouched for inside a drop.
 #[test]
-fn another_process_s_reattach_of_a_rebuildable_sink_keeps_the_gaps() {
+fn another_process_s_detach_of_a_rebuildable_sink_carries_the_gaps() {
     replay(vec![
         Event::HolderFinishes {
             lane: 0,
@@ -2640,6 +2857,27 @@ fn another_process_s_reattach_of_a_rebuildable_sink_keeps_the_gaps() {
             at: 86,
         },
     ]);
+}
+
+/// The review of round 11, S-1: a gap kept while the sink was
+/// `backfill = false` survives the sink's `backfill` turned on (a detach
+/// that moves the marker) and off again (a live-only demotion that puts it
+/// back on serving): a wait inside it is refused.
+#[test]
+fn a_gap_survives_a_backfill_flipped_on_and_off_again() {
+    for lane in 0..2 {
+        assert_eq!(replay_solo(vec![Event::BackfillFlips { lane }]), 0);
+    }
+}
+
+/// The same gap survives a failed detach's clear on the sink with
+/// `backfill` turned on: the read after the clear puts the moved marker back
+/// on serving, the gap with it (the review of round 11, S-3).
+#[test]
+fn a_gap_survives_a_failed_detach_s_clear_and_the_put_back() {
+    for lane in 0..2 {
+        assert_eq!(replay_solo(vec![Event::PutBackAfterFlip { lane }]), 0);
+    }
 }
 
 /// The review of round 10, S-3: seed `14283768201718162447` of
