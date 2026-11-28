@@ -5853,3 +5853,36 @@ async fn an_unseeded_index_with_no_gap_is_backfilled_in_place() {
     assert!(rig.sink.reindexed.lock().unwrap().is_empty());
     task.abort();
 }
+
+/// B-1's rebuild waits for the slot like any reindex: until then the lane
+/// restages, and its reason says a rebuild over the gap is under way.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_over_a_gap_waiting_for_the_slot_says_why() {
+    let rig = Rig::new(64);
+    rig.rereads.will_open();
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    rig.sink.marker_gaps.lock().unwrap().insert(
+        "users".to_owned(),
+        vec![sink::Gap {
+            from: Some("1".to_owned()),
+            to: Some("2".to_owned()),
+        }],
+    );
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    eventually("the rebuild is owed", || {
+        matches!(
+            engine.lane_health(&lane(users())),
+            LaneHealth::Restaging { .. }
+        )
+    })
+    .await;
+    let health = engine.lane_health(&lane(users()));
+    assert!(
+        format!("{health:?}").contains("rebuilt into a new generation"),
+        "{health:?}"
+    );
+    assert!(rig.sink.reindexed.lock().unwrap().is_empty());
+    task.abort();
+}
