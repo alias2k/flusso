@@ -301,10 +301,19 @@ impl OpensearchSink {
             return Err(Self::status_error(resp, context).await);
         }
         let body: serde_json::Value = resp.json().await.map_err(|e| request_error(context, e))?;
-        body.get("cluster_uuid")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| SinkError::Write(format!("{context}: no cluster_uuid in {body}")))
+        // `_na_` is OpenSearch's `UNKNOWN_CLUSTER_UUID`, answered until a
+        // cluster manager is elected: two clusters not formed yet answer it
+        // alike, so it names no cluster (the review of the closing round, B).
+        match body.get("cluster_uuid").and_then(serde_json::Value::as_str) {
+            Some(uuid) if !uuid.is_empty() && uuid != "_na_" => Ok(uuid.to_owned()),
+            Some(uuid) => Err(SinkError::Write(format!(
+                "{context}: the cluster answers cluster_uuid {uuid:?}, which names no cluster \
+                 (no cluster manager elected yet)"
+            ))),
+            None => Err(SinkError::Write(format!(
+                "{context}: no cluster_uuid in {body}"
+            ))),
+        }
     }
 
     /// The `index.uuid` of `index`, which OpenSearch gives each index it

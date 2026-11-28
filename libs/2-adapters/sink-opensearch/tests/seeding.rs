@@ -1278,10 +1278,14 @@ async fn who_wrote_each_record_survives_every_write_as_opensearch_answers_it() {
     assert_eq!(again.record_stamp, Some(mine.clone()));
 }
 
-/// The review of round 11, S-1, on a real cluster: a gap kept with a seeded
-/// marker comes back when a rebuildable detach's marker comes back on the
-/// serving generation, by a live-only demotion (R14) or by a read's put-back
-/// of a marker a detach left half moved.
+/// The review of round 11, S-1, and of the closing round, A, on a real
+/// cluster: a gap kept with a seeded marker comes back when the marker comes
+/// back on the serving generation: by a live-only demotion (R14) of a
+/// rebuildable detach, by a read's put-back of a marker a detach left half
+/// moved (the read that puts it back tells the gap too), and by a live-only
+/// demotion of a rebuild begun, and its generation created, after a
+/// live-only or a rebuildable detach. Only a seed drops a gap. A rebuild
+/// begun from a live-only record is not live only (E).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
 async fn a_gap_comes_back_with_the_marker_onto_the_serving_generation() {
@@ -1292,7 +1296,7 @@ async fn a_gap_comes_back_with_the_marker_onto_the_serving_generation() {
         from: Some("0/10".to_owned()),
         to: Some("0/20".to_owned()),
     };
-    for (logical, by_put_back) in [("demoted", false), ("put_back", true)] {
+    for logical in ["demoted", "put_back", "rebuilt_live_only", "rebuilt_moved"] {
         let mapping = mapping(logical, 1);
         let index = mapping.index.clone();
         let first = sink(&base);
@@ -1304,16 +1308,38 @@ async fn a_gap_comes_back_with_the_marker_onto_the_serving_generation() {
             .await
             .unwrap();
         let detach = sink::Detach::new("blocked").stamp(stamp.clone());
-        if by_put_back {
-            // The detach dies between its marker move and its record.
-            proxy.refuse(|seen, _| seen.path.contains("detach:"));
-            assert!(sink(&proxy.url).detach(&mapping, &detach).await.is_err());
-            proxy.heal();
-            let read = sink(&base).detachment(&mapping, &stamp).await.unwrap();
-            assert!(read.restored.is_some(), "{logical}: {read:?}");
-        } else {
-            first.detach(&mapping, &detach).await.unwrap();
-            first.demote(&mapping, true, &stamp).await.unwrap();
+        match logical {
+            "put_back" => {
+                // The detach dies between its marker move and its record.
+                proxy.refuse(|seen, _| seen.path.contains("detach:"));
+                assert!(sink(&proxy.url).detach(&mapping, &detach).await.is_err());
+                proxy.heal();
+                let read = sink(&base).detachment(&mapping, &stamp).await.unwrap();
+                assert!(read.restored.is_some(), "{logical}: {read:?}");
+                assert_eq!(
+                    read.gaps,
+                    [gap.clone()],
+                    "{logical}, the put-back read: {read:?}"
+                );
+            }
+            "demoted" => {
+                first.detach(&mapping, &detach).await.unwrap();
+                first.demote(&mapping, true, &stamp).await.unwrap();
+            }
+            _ => {
+                let detach = detach.live_only(logical == "rebuilt_live_only");
+                first.detach(&mapping, &detach).await.unwrap();
+                first.begin_rebuild(&mapping, &stamp).await.unwrap();
+                let rebuilding = first.detachment(&mapping, &stamp).await.unwrap();
+                assert_eq!(
+                    rebuilding.record,
+                    Some(sink::DetachRecord::Rebuilding { live_only: false }),
+                    "{logical}: {rebuilding:?}"
+                );
+                // The rebuild's generation created, its marker rewritten whole.
+                first.ensure_index_as(&mapping, &stamp).await.unwrap();
+                first.demote(&mapping, true, &stamp).await.unwrap();
+            }
         }
         let read = sink(&base).detachment(&mapping, &stamp).await.unwrap();
         assert_eq!(read.gaps, [gap.clone()], "{logical}: {read:?}");

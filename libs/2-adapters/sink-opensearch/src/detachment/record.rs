@@ -6,7 +6,9 @@
 //!   `detaching_from`, checkpoint and gaps included: a put-back or a live-only
 //!   demotion brings them back with the marker onto the serving generation,
 //!   which still lacks the gaps' changes (the review of round 11, S-1). Only a
-//!   write that rebuilds the index (a seed, a reindex) drops them. A marker that already carries `detaching_from` is left
+//!   seed that completed drops them (the review of the closing round, A): a
+//!   rebuild, a demotion, a generation created and a reindex all carry them.
+//!   A marker that already carries `detaching_from` is left
 //!   exactly as it is, so a detach run again never moves it again. Skipped
 //!   for a `live_only` detach: its marker stays on the serving generation.
 //! - **d2a.** The record, `detach:{hash_alias}`: created when none was read,
@@ -35,9 +37,10 @@ use kernel::IndexMapping;
 use serde_json::{Value, json};
 use sink::{Detach, RecordVersion, Recorded, Result, SinkError, Stamp};
 
-use super::{FORGOTTEN, Found, Kept, carried_gaps, gaps_value, read_gaps, stamp_value};
+use super::plan::{self, Plan, Step};
+use super::{Found, Kept, stamp_value};
 use crate::OpensearchSink;
-use crate::generations::{next_generation, parse_generation};
+use crate::generations::{generation_name, parse_generation};
 use crate::transport::request_error;
 
 /// How many times a detach reads again after a conflict before it gives up.
@@ -49,7 +52,91 @@ pub(super) enum Written {
     Conflict,
 }
 
+/// What a plan stands on: the documents read with their versions, and the
+/// generations behind the hash alias.
+struct Read {
+    marker: Option<Found>,
+    record: Option<Found>,
+    serving: Option<u64>,
+    generations: Vec<u64>,
+}
+
+impl Read {
+    fn kept<'a>(&'a self, now: &'a str) -> plan::Kept<'a> {
+        plan::Kept {
+            marker: self.marker.as_ref().map(|found| &found.source),
+            record: self.record.as_ref().map(|found| &found.source),
+            serving: self.serving,
+            generations: &self.generations,
+            now,
+        }
+    }
+}
+
 impl OpensearchSink {
+    /// The documents and generations a plan for `hash_alias` reads.
+    async fn read_for_plan(&self, hash_alias: &str) -> Result<Read> {
+        let Kept { marker, record, .. } = self.read_kept(hash_alias).await?;
+        let serving = self
+            .alias_holders(hash_alias)
+            .await?
+            .iter()
+            .filter_map(|holder| parse_generation(hash_alias, holder))
+            .max();
+        let generations = self
+            .list_generations(hash_alias)
+            .await?
+            .iter()
+            .filter_map(|name| parse_generation(hash_alias, name))
+            .collect();
+        Ok(Read {
+            marker,
+            record,
+            serving,
+            generations,
+        })
+    }
+
+    /// Send `plan` for `hash_alias`, in order, each write conditional on
+    /// `read` and stamped `stamp`; then its best-effort deletes. `Conflict`
+    /// when a write met another first: the caller reads again.
+    async fn apply(
+        &self,
+        hash_alias: &str,
+        plan: &Plan,
+        read: &Read,
+        stamp: Option<&Stamp>,
+    ) -> Result<Written> {
+        let record_id = format!("detach:{hash_alias}");
+        for step in &plan.steps {
+            let written = match step {
+                Step::Delete(generation) => {
+                    self.delete_index(&generation_name(hash_alias, *generation))
+                        .await?;
+                    Written::Done
+                }
+                Step::Marker(doc) => {
+                    self.put_if(hash_alias, doc, read.marker.as_ref(), stamp)
+                        .await?
+                }
+                Step::Record(doc) => {
+                    self.put_if(&record_id, doc, read.record.as_ref(), stamp)
+                        .await?
+                }
+            };
+            if let Written::Conflict = written {
+                return Ok(Written::Conflict);
+            }
+        }
+        for generation in &plan.best_effort {
+            let name = generation_name(hash_alias, *generation);
+            if let Err(error) = self.delete_index(&name).await {
+                tracing::warn!(generation = name, %error, "could not delete an unserved generation after a detach; the rebuild deletes it");
+            }
+        }
+        Ok(Written::Done)
+    }
+
     /// Record a detach of `mapping`'s index (see the module doc).
     pub(crate) async fn write_detach(
         &self,
@@ -57,52 +144,15 @@ impl OpensearchSink {
         detach: &Detach,
     ) -> Result<Recorded> {
         let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
-        let record_id = format!("detach:{hash_alias}");
         for _ in 0..CONFLICT_ROUNDS {
-            let Kept { marker, record, .. } = self.read_kept(&hash_alias).await?;
-            let serving = self
-                .alias_holders(&hash_alias)
-                .await?
-                .iter()
-                .filter_map(|holder| parse_generation(&hash_alias, holder))
-                .max();
-            if !detach.live_only
-                && let Some(marker) = &marker
-                && marker
-                    .source
-                    .get("detaching_from")
-                    .is_none_or(Value::is_null)
-            {
-                let next = next_generation(&self.list_generations(&hash_alias).await?, &hash_alias);
-                let moved = json!({
-                    "active_generation": next,
-                    "seeded": false,
-                    "walked": null,
-                    "uuid": null,
-                    "detaching_from": {
-                        "generation": marker.source.get("active_generation"),
-                        "seeded": marker.source.get("seeded").and_then(Value::as_bool).unwrap_or(false),
-                        "uuid": marker.source.get("uuid"),
-                        "walked": marker.source.get("walked"),
-                        "gaps": gaps_value(&read_gaps(&marker.source)),
-                    },
-                });
-                if let Written::Conflict = self
-                    .put_if(&hash_alias, &moved, Some(marker), detach.stamp.as_ref())
-                    .await?
-                {
-                    continue;
-                }
-            }
-            let body = record_body(detach, serving, record.as_ref())?;
+            let read = self.read_for_plan(&hash_alias).await?;
+            let now = now();
+            let plan = plan::detach(&read.kept(&now), detach).map_err(SinkError::Write)?;
             if let Written::Conflict = self
-                .put_if(&record_id, &body, record.as_ref(), detach.stamp.as_ref())
+                .apply(&hash_alias, &plan, &read, detach.stamp.as_ref())
                 .await?
             {
                 continue;
-            }
-            if let Some(serving) = serving {
-                self.delete_unserved(&hash_alias, serving).await;
             }
             tracing::warn!(
                 index = mapping.index.as_ref(),
@@ -157,7 +207,7 @@ impl OpensearchSink {
         };
         self.put_if(
             &format!("detach:{hash_alias}"),
-            &json!({ "state": FORGOTTEN }),
+            &plan::tombstone(),
             Some(&read),
             stamp,
         )
@@ -214,70 +264,6 @@ impl OpensearchSink {
             "{context}: HTTP {status}: {text}"
         )))
     }
-
-    /// d2c: delete every generation of `hash_alias` but `serving`, best
-    /// effort: one left behind is deleted by the rebuild (R9).
-    async fn delete_unserved(&self, hash_alias: &str, serving: u64) {
-        let generations = match self.list_generations(hash_alias).await {
-            Ok(generations) => generations,
-            Err(error) => {
-                tracing::warn!(hash_alias, %error, "could not list the generations to delete after a detach; the rebuild deletes them");
-                return;
-            }
-        };
-        for generation in generations {
-            if parse_generation(hash_alias, &generation).is_none_or(|n| n == serving) {
-                continue;
-            }
-            if let Err(error) = self.delete_index(&generation).await {
-                tracing::warn!(generation, %error, "could not delete an unserved generation after a detach; the rebuild deletes it");
-            }
-        }
-    }
-}
-
-/// The detach record to write: a fresh one, or `read` brought to `detached`,
-/// keeping its attempts, and its `since` and `through` when it was already
-/// detached. A tombstone read keeps nothing.
-pub(crate) fn record_body(
-    detach: &Detach,
-    serving: Option<u64>,
-    read: Option<&Found>,
-) -> Result<Value> {
-    let read = read.filter(|found| !found.is_tombstone());
-    let kept = |key: &str| {
-        read.and_then(|found| found.source.get(key))
-            .cloned()
-            .unwrap_or(Value::Null)
-    };
-    let was_detached = read
-        .and_then(|found| found.source.get("state"))
-        .and_then(Value::as_str)
-        == Some("detached");
-    let since = if was_detached && !kept("since").is_null() {
-        kept("since")
-    } else {
-        Value::from(now())
-    };
-    let refused_keys = serde_json::to_string(&detach.refused_keys)
-        .map_err(|e| SinkError::Write(format!("the refused keys can't be written: {e}")))?;
-    Ok(json!({
-        "state": "detached",
-        "live_only": detach.live_only,
-        "serving": serving,
-        "why": detach.why,
-        "refused_keys": refused_keys,
-        "attempts": kept("attempts").as_u64().unwrap_or(0),
-        "last_attempt": kept("last_attempt"),
-        "since": since,
-        // A record already detached keeps where its detach began, as it keeps
-        // its `since`: the lane has dropped changes from there, so a
-        // reattach's gap starts there (round 12's sweep).
-        "through": match &detach.through {
-            Some(through) if !was_detached => Value::from(through.as_str()),
-            _ => kept("through"),
-        },
-    }))
 }
 
 /// `seq_no:primary_term`, as [`read_detachment`](OpensearchSink::read_detachment) writes it.
@@ -292,45 +278,17 @@ fn now() -> String {
 }
 
 impl OpensearchSink {
-    /// r1 of a rebuild (see [`Records::begin_rebuild`](sink::Records::begin_rebuild)):
-    /// delete every generation but the record's `serving`, move the marker
-    /// past every existing generation (keeping `detaching_from`), and write
-    /// the record `rebuilding` with one more attempt, both stamped `stamp`.
-    /// The new attempt.
+    /// r1 of a rebuild (see [`Records::begin_rebuild`](sink::Records::begin_rebuild)),
+    /// as [`plan::begin_rebuild`] decides it, stamped `stamp`. The new
+    /// attempt.
     pub(crate) async fn write_rebuild(&self, mapping: &IndexMapping, stamp: &Stamp) -> Result<u64> {
         let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
-        let record_id = format!("detach:{hash_alias}");
         for _ in 0..CONFLICT_ROUNDS {
-            let Kept { marker, record, .. } = self.read_kept(&hash_alias).await?;
-            let Some(record) = record.filter(|found| !found.is_tombstone()) else {
-                return Err(SinkError::Write(format!(
-                    "{hash_alias} has no detach record to rebuild from"
-                )));
-            };
-            let serving = record.source.get("serving").and_then(Value::as_u64);
-            self.delete_all_but(&hash_alias, serving).await?;
-            if let Written::Conflict = self
-                .move_marker_past(&hash_alias, marker.as_ref(), stamp)
-                .await?
-            {
-                continue;
-            }
-            let attempts = record
-                .source
-                .get("attempts")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                + 1;
-            let mut body = record.source.clone();
-            if let Some(fields) = body.as_object_mut() {
-                fields.insert("state".to_owned(), Value::from("rebuilding"));
-                fields.insert("attempts".to_owned(), Value::from(attempts));
-                fields.insert("last_attempt".to_owned(), Value::from(now()));
-            }
-            if let Written::Conflict = self
-                .put_if(&record_id, &body, Some(&record), Some(stamp))
-                .await?
-            {
+            let read = self.read_for_plan(&hash_alias).await?;
+            let now = now();
+            let (plan, attempts) = plan::begin_rebuild(&read.kept(&now))
+                .map_err(|why| SinkError::Write(format!("{hash_alias}: {why}")))?;
+            if let Written::Conflict = self.apply(&hash_alias, &plan, &read, Some(stamp)).await? {
                 continue;
             }
             tracing::info!(
@@ -346,10 +304,8 @@ impl OpensearchSink {
         )))
     }
 
-    /// A rebuild put back to detached (O26, R14): the partial generation and
-    /// its checkpoint go, the record says `detached` again; the marker moves
-    /// past every generation, or, `live_only`, back on `serving` as it was.
-    /// The marker and the record are stamped `stamp`.
+    /// A rebuild put back to detached (O26, R14), as [`plan::demote`]
+    /// decides it, stamped `stamp`.
     pub(crate) async fn write_demotion(
         &self,
         mapping: &IndexMapping,
@@ -357,37 +313,13 @@ impl OpensearchSink {
         stamp: &Stamp,
     ) -> Result<()> {
         let hash_alias = self.hash_alias(mapping.index.as_ref(), &mapping.hash.to_string());
-        let record_id = format!("detach:{hash_alias}");
         for _ in 0..CONFLICT_ROUNDS {
-            let Kept { marker, record, .. } = self.read_kept(&hash_alias).await?;
-            let Some(record) = record.filter(|found| !found.is_tombstone()) else {
+            let read = self.read_for_plan(&hash_alias).await?;
+            let now = now();
+            let Some(plan) = plan::demote(&read.kept(&now), live_only) else {
                 return Ok(());
             };
-            let serving = record.source.get("serving").and_then(Value::as_u64);
-            if serving.is_some() {
-                self.delete_all_but(&hash_alias, serving).await?;
-            }
-            let moved = if live_only {
-                self.restore_marker(&hash_alias, marker.as_ref(), serving, stamp)
-                    .await?
-            } else {
-                self.move_marker_past(&hash_alias, marker.as_ref(), stamp)
-                    .await?
-            };
-            if let Written::Conflict = moved {
-                continue;
-            }
-            let mut body = record.source.clone();
-            if let Some(fields) = body.as_object_mut() {
-                fields.insert("state".to_owned(), Value::from("detached"));
-                if live_only {
-                    fields.insert("live_only".to_owned(), Value::from(true));
-                }
-            }
-            if let Written::Conflict = self
-                .put_if(&record_id, &body, Some(&record), Some(stamp))
-                .await?
-            {
+            if let Written::Conflict = self.apply(&hash_alias, &plan, &read, Some(stamp)).await? {
                 continue;
             }
             tracing::warn!(
@@ -406,6 +338,33 @@ impl OpensearchSink {
     /// The record of a rebuild the seed just finished, forgotten on the
     /// version read by a tombstone stamped `stamp`; none (or a tombstone) is
     /// fine.
+    /// Write the marker whole on `generation`, unseeded, for a write that is
+    /// not a seed (a generation created, a reindex): it keeps the gaps and
+    /// the `detaching_from` of the marker read, conditional on it, read
+    /// again on a conflict (the review of the closing round, A). Only the
+    /// seed's write ([`write_index_meta`](Self::write_index_meta)) drops them.
+    pub(crate) async fn rewrite_marker(
+        &self,
+        hash_alias: &str,
+        generation: u64,
+        uuid: Option<&str>,
+        stamp: Option<&Stamp>,
+    ) -> Result<()> {
+        for _ in 0..CONFLICT_ROUNDS {
+            let Kept { marker, .. } = self.read_kept(hash_alias).await?;
+            let doc = plan::rewritten(marker.as_ref().map(|found| &found.source), generation, uuid);
+            if let Written::Done = self
+                .put_if(hash_alias, &doc, marker.as_ref(), stamp)
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Err(SinkError::Write(format!(
+            "the seed marker of {hash_alias} kept changing while it was rewritten"
+        )))
+    }
+
     pub(crate) async fn forget_finished_rebuild(
         &self,
         hash_alias: &str,
@@ -414,7 +373,7 @@ impl OpensearchSink {
         let Kept { record, .. } = self.read_kept(hash_alias).await?;
         let Some(read) = record
             .as_ref()
-            .filter(|found| !found.is_tombstone())
+            .filter(|found| !plan::is_tombstone(&found.source))
             .and_then(Found::version)
         else {
             return Ok(());
@@ -426,84 +385,14 @@ impl OpensearchSink {
             ))),
         }
     }
-
-    /// Delete every generation of `hash_alias` but `keep`; a refused delete is
-    /// an error (r1a: nothing is read while a partial stays).
-    async fn delete_all_but(&self, hash_alias: &str, keep: Option<u64>) -> Result<()> {
-        for generation in self.list_generations(hash_alias).await? {
-            let Some(number) = parse_generation(hash_alias, &generation) else {
-                continue;
-            };
-            if Some(number) != keep {
-                self.delete_index(&generation).await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The marker moved past every existing generation, unseeded, with no
-    /// checkpoint and no uuid, keeping its `detaching_from`: the explicit move
-    /// of a rebuild or a demotion (never R4's d2b, which leaves a moved marker
-    /// as it is).
-    async fn move_marker_past(
-        &self,
-        hash_alias: &str,
-        marker: Option<&Found>,
-        stamp: &Stamp,
-    ) -> Result<Written> {
-        let next = next_generation(&self.list_generations(hash_alias).await?, hash_alias);
-        let detaching_from = marker
-            .and_then(|found| found.source.get("detaching_from"))
-            .cloned()
-            .unwrap_or(Value::Null);
-        let moved = json!({
-            "active_generation": next,
-            "seeded": false,
-            "walked": null,
-            "uuid": null,
-            "detaching_from": detaching_from,
-        });
-        self.put_if(hash_alias, &moved, marker, Some(stamp)).await
-    }
-
-    /// The marker back on `serving` as `detaching_from` says it was (R14).
-    async fn restore_marker(
-        &self,
-        hash_alias: &str,
-        marker: Option<&Found>,
-        serving: Option<u64>,
-        stamp: &Stamp,
-    ) -> Result<Written> {
-        let from = marker.and_then(|found| found.source.get("detaching_from"));
-        let Some(generation) = serving else {
-            return Ok(Written::Done);
-        };
-        let mut restored = json!({
-            "active_generation": generation,
-            "seeded": from.and_then(|from| from.get("seeded")).and_then(Value::as_bool).unwrap_or(true),
-        });
-        if let Some(fields) = restored.as_object_mut() {
-            if let Some(uuid) = from
-                .and_then(|from| from.get("uuid"))
-                .and_then(Value::as_str)
-            {
-                fields.insert("uuid".to_owned(), Value::from(uuid));
-            }
-            if let Some(gaps) = carried_gaps(from) {
-                fields.insert("gaps".to_owned(), gaps);
-            }
-        }
-        self.put_if(hash_alias, &restored, marker, Some(stamp))
-            .await
-    }
 }
 
 impl OpensearchSink {
     /// Change the gaps kept with the seed marker as `decide` says: a partial
     /// update touching nothing else but the stamp (an earlier single `gap`
     /// nulled), conditional on the marker read, read again and decided again
-    /// on a conflict. A whole-document write of the marker (a reindex, a
-    /// seed) drops them: the index is rebuilt then, and nothing is missing.
+    /// on a conflict. Only the seed's whole write of the marker drops them:
+    /// the index then holds everything (the review of the closing round, A).
     pub(crate) async fn write_gaps(
         &self,
         mapping: &IndexMapping,
@@ -533,11 +422,11 @@ impl OpensearchSink {
                 self.base_url,
                 self.meta_index()
             );
-            let body = json!({ "doc": {
-                "gaps": gaps_value(&gaps),
-                "gap": null,
-                "stamp": stamp_value(Some(stamp)),
-            } });
+            let mut doc = plan::gaps_update(&gaps);
+            if let Some(fields) = doc.as_object_mut() {
+                fields.insert("stamp".to_owned(), stamp_value(Some(stamp)));
+            }
+            let body = json!({ "doc": doc });
             let response = self
                 .maybe_auth(self.client.post(&url).json(&body))
                 .send()

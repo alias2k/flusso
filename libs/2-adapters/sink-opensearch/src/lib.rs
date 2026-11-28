@@ -9,6 +9,7 @@ mod config;
 mod detachment;
 mod generations;
 mod mapping;
+pub mod meta;
 mod refresh;
 mod settings;
 mod sink_impl;

@@ -35,9 +35,7 @@
 
 use kernel::IndexMapping;
 use serde_json::{Value, json};
-use sink::{
-    DetachRecord, Detachment, MarkerAt, RecordVersion, Result, SinkError, Stamp, StuckClock,
-};
+use sink::{DetachRecord, Detachment, MarkerAt, Result, SinkError, Stamp, StuckClock};
 
 use crate::OpensearchSink;
 use crate::transport::request_error;
@@ -60,12 +58,6 @@ impl Found {
     /// The `(seq_no, primary_term)` a write conditional on this read names.
     fn version(&self) -> Option<(u64, u64)> {
         self.seq_no.zip(self.primary_term)
-    }
-
-    /// Whether this is a record's tombstone, left where a record was
-    /// forgotten.
-    fn is_tombstone(&self) -> bool {
-        self.source.get("state").and_then(Value::as_str) == Some(FORGOTTEN)
     }
 }
 
@@ -119,28 +111,15 @@ impl OpensearchSink {
             stuck,
         } = self.read_kept(&hash_alias).await?;
 
-        let mut kept = Detachment::default();
-        if let Some(found) = &record {
-            kept.record_stamp = read_stamp(&found.source);
-            kept.version = found
-                .version()
-                .map(|(seq_no, term)| RecordVersion::new(format!("{seq_no}:{term}")));
-        }
-        let record = record.filter(|found| !found.is_tombstone());
-        kept.marker_stamp = marker.as_ref().and_then(|found| read_stamp(&found.source));
-        if let Some(record) = &record {
-            let serving = record.source.get("serving").and_then(Value::as_u64);
-            kept.marker = marker
-                .as_ref()
-                .and_then(|marker| marker_at(&marker.source, serving));
-            kept.attempts = record.source.get("attempts").and_then(Value::as_u64);
-            kept.through = record
-                .source
-                .get("through")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-        }
-        kept.record = record.map(|record| read_record(&record.source));
+        let version = record
+            .as_ref()
+            .and_then(Found::version)
+            .map(|(seq_no, term)| format!("{seq_no}:{term}"));
+        let mut kept = plan::read(
+            marker.as_ref().map(|found| &found.source),
+            record.as_ref().map(|found| &found.source),
+            version.as_deref(),
+        );
         kept.stuck = stuck.map(|stuck| {
             let text = |key: &str| {
                 stuck
@@ -151,25 +130,24 @@ impl OpensearchSink {
             };
             StuckClock::new(text("since"), text("seen_at"))
         });
-        kept.gaps = marker
-            .as_ref()
-            .map(|marker| read_gaps(&marker.source))
-            .unwrap_or_default();
-        if kept.record.is_none()
-            && let Some(marker) = marker
-            && let Some(from) = marker.source.get("detaching_from").filter(|v| !v.is_null())
-        {
-            match generation_of(from) {
-                Ok(generation) => {
-                    kept.restored = Some(
-                        self.put_back(&hash_alias, &marker, from, generation, stamp)
-                            .await?,
-                    );
-                    kept.marker_stamp = Some(stamp.clone());
-                    kept.gaps = read_gaps(from);
+        let shape = plan::Kept {
+            marker: marker.as_ref().map(|found| &found.source),
+            record: record.as_ref().map(|found| &found.source),
+            serving: None,
+            generations: &[],
+            now: "",
+        };
+        match plan::put_back(&shape) {
+            Ok(None) => {}
+            Ok(Some((doc, generation))) => {
+                if let Some(marker) = &marker {
+                    self.put_back(&hash_alias, marker, &doc, stamp).await?;
                 }
-                Err(why) => kept.unreadable_marker = Some(why),
+                kept.restored = Some(generation);
+                kept.marker_stamp = Some(stamp.clone());
+                kept.gaps = read_gaps(&doc);
             }
+            Err(why) => kept.unreadable_marker = Some(why),
         }
         Ok(kept)
     }
@@ -227,34 +205,17 @@ impl OpensearchSink {
         })
     }
 
-    /// Put the seed marker back on `generation`, as `from` says it was,
-    /// stamped `stamp`, conditionally on `marker` as read: the generation
-    /// put back.
+    /// Put the seed marker back as `doc` ([`plan::put_back`]), stamped
+    /// `stamp`, conditionally on `marker` as read.
     async fn put_back(
         &self,
         hash_alias: &str,
         marker: &Found,
-        from: &Value,
-        generation: u64,
+        doc: &Value,
         stamp: &Stamp,
-    ) -> Result<u64> {
-        let mut doc = json!({
-            "active_generation": generation,
-            "seeded": from.get("seeded").and_then(Value::as_bool).unwrap_or(false),
-        });
-        if let Some(fields) = doc.as_object_mut() {
-            if let Some(uuid) = from.get("uuid").and_then(Value::as_str) {
-                fields.insert("uuid".to_owned(), Value::from(uuid));
-            }
-            if let Some(walked) = from.get("walked").filter(|walked| !walked.is_null()) {
-                fields.insert("walked".to_owned(), walked.clone());
-            }
-            if let Some(gaps) = carried_gaps(Some(from)) {
-                fields.insert("gaps".to_owned(), gaps);
-            }
-        }
+    ) -> Result<()> {
         if let record::Written::Conflict = self
-            .put_if(hash_alias, &doc, Some(marker), Some(stamp))
+            .put_if(hash_alias, doc, Some(marker), Some(stamp))
             .await?
         {
             return Err(SinkError::Write(format!(
@@ -263,10 +224,9 @@ impl OpensearchSink {
         }
         tracing::warn!(
             hash_alias,
-            generation,
             "a detach left the seed marker moved with no record beside it; put back on the generation it came from"
         );
-        Ok(generation)
+        Ok(())
     }
 }
 
@@ -366,6 +326,7 @@ fn read_record(source: &Value) -> DetachRecord {
     }
 }
 
+pub(crate) mod plan;
 mod record;
 
 #[cfg(test)]

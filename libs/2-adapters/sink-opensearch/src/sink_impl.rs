@@ -627,7 +627,7 @@ impl OpensearchSink {
             // no uuid, so a failure after the create can't leave a "seeded"
             // or another generation's uuid beside the new, empty one. The
             // next staging adopts what it finds, unseeded.
-            self.write_index_meta(&hash_alias, generation, false, None, stamp)
+            self.rewrite_marker(&hash_alias, generation, None, stamp)
                 .await?;
             // The aliases this generation takes anyway, attached at creation:
             // one cluster-state update instead of one per alias. Never the
@@ -688,7 +688,7 @@ impl OpensearchSink {
         // gains it.
         if exists {
             if meta.is_none() {
-                self.write_index_meta(&hash_alias, generation, false, live.as_deref(), stamp)
+                self.rewrite_marker(&hash_alias, generation, live.as_deref(), stamp)
                     .await?;
             } else if recorded.is_none()
                 && let Some(uuid) = &live
@@ -898,8 +898,7 @@ impl OpensearchSink {
         // Past everything that currently exists, so a crashed earlier reindex
         // can't make us reuse a live generation's name.
         let next = next_generation(&self.list_generations(&hash_alias).await?, &hash_alias);
-        self.write_index_meta(&hash_alias, next, false, None, stamp)
-            .await?;
+        self.rewrite_marker(&hash_alias, next, None, stamp).await?;
         debug!(
             logical,
             hash_alias, next, "staged reindex into a new generation"

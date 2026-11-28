@@ -220,9 +220,12 @@ impl OpensearchSink {
         Ok(())
     }
 
-    /// Write an index's meta doc: its active generation, seeded-state, the
-    /// `index.uuid` the generation was created with, once it exists, and who
-    /// wrote it (`stamp`, `null` for a caller that keeps no records).
+    /// Write an index's meta doc whole: its active generation, seeded-state,
+    /// the `index.uuid` the generation was created with, once it exists, and
+    /// who wrote it (`stamp`, `null` for a caller that keeps no records). No
+    /// gap and no `detaching_from`: the seed's write, the one write that may
+    /// drop them (every other goes through
+    /// [`rewrite_marker`](Self::rewrite_marker)).
     pub(crate) async fn write_index_meta(
         &self,
         hash_alias: &str,
@@ -231,10 +234,7 @@ impl OpensearchSink {
         uuid: Option<&str>,
         stamp: Option<&sink::Stamp>,
     ) -> Result<()> {
-        let mut doc = json!({ "active_generation": generation, "seeded": seeded });
-        if let (Some(uuid), Some(fields)) = (uuid, doc.as_object_mut()) {
-            fields.insert("uuid".to_owned(), Value::from(uuid));
-        }
+        let doc = crate::meta::whole_marker(generation, seeded, uuid);
         self.put_meta(hash_alias, doc, stamp).await
     }
 

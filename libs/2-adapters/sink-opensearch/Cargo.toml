@@ -21,6 +21,9 @@ workspace = true
 # Exposes the document → bulk-body rendering to the in-process `render` bench.
 # Off by default; not part of the stable API.
 bench = []
+# The in-memory meta index (`meta::memory`) the engine's and the daemon's
+# tests build their stand-in sinks on. Not part of the stable API.
+testing = []
 
 [dependencies]
 sink.workspace = true

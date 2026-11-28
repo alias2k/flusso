@@ -1015,7 +1015,7 @@ async fn a_gap_survives_a_detach_whose_marker_comes_back_on_serving() {
     let _ = dying.sink().detach(&mapping(), &blocked()).await;
     store.lock().unwrap().killed_at = None;
     let next = serve(&store).await;
-    next.sink().detachment(&mapping(), &stamp()).await.unwrap();
+    let putting_back = next.sink().detachment(&mapping(), &stamp()).await.unwrap();
     let after_put_back = next.sink().detachment(&mapping(), &stamp()).await.unwrap();
 
     let store_b = Arc::new(Mutex::new(with_gap()));
@@ -1031,6 +1031,10 @@ async fn a_gap_survives_a_detach_whose_marker_comes_back_on_serving() {
         from: Some("0/10".to_owned()),
         to: Some("0/20".to_owned()),
     };
+    // The read that puts the marker back tells its gaps too, or the fence
+    // hears "no gap" until the next read (the review of the closing round).
+    assert!(putting_back.restored.is_some(), "{putting_back:?}");
+    assert_eq!(putting_back.gaps, [gap.clone()]);
     assert_eq!(after_put_back.gaps, [gap.clone()]);
     assert_eq!(after_demotion.gaps, [gap]);
     assert_eq!(store.lock().unwrap().doc(ALIAS).unwrap()["gaps"], gaps);
@@ -1202,10 +1206,12 @@ async fn every_record_or_marker_body_carries_the_callers_stamp() {
 /// already says detached keeps where that detach began (its `through`), as
 /// it keeps its `since`: the lane has dropped changes from there, and a
 /// reattach's gap must start there, not where reads stand at the later
-/// detach. A detach over a record of another state takes its own.
+/// detach. Over a `rebuilding` record too (the closing round's sweep): the
+/// rebuild given up seeded nothing, so the serving generation still lacks
+/// every change from there.
 #[tokio::test]
 async fn a_detach_over_a_detached_record_keeps_where_it_began() {
-    for (state, kept_through) in [("detached", true), ("rebuilding", false)] {
+    for (state, kept_through) in [("detached", true), ("rebuilding", true)] {
         let mut seeded = Store::seeded();
         seeded.put(
             DETACH,
@@ -1224,5 +1230,99 @@ async fn a_detach_over_a_detached_record_keeps_where_it_began() {
         let record = store.lock().unwrap().doc(DETACH).unwrap();
         let expected = if kept_through { "0/10" } else { "0/39" };
         assert_eq!(record["through"], expected, "{state}: {record}");
+    }
+}
+
+/// The review of the closing round, A: a gap kept on the serving marker, a
+/// live-only detach (marker left on serving, no `detaching_from`), then
+/// `backfill` turned on: a rebuild begins over a marker with no
+/// `detaching_from`, then `backfill` turned off again before it seeds: the
+/// live-only demotion puts the marker back on serving. The serving
+/// generation still lacks the gap's changes, so the gap comes back.
+#[tokio::test]
+async fn a_gap_survives_a_rebuild_begun_over_a_live_only_detach() {
+    let gaps = json!([{ "from": "0/10", "to": "0/20" }]);
+    let mut store = Store::seeded();
+    let mut kept = marker();
+    kept["gaps"] = gaps.clone();
+    store.put(ALIAS, kept);
+    let store = Arc::new(Mutex::new(store));
+    let stub = serve(&store).await;
+    stub.sink()
+        .detach(&mapping(), &blocked().live_only(true).stamp(stamp()))
+        .await
+        .unwrap();
+    let before = stub.sink().detachment(&mapping(), &stamp()).await.unwrap();
+    assert_eq!(
+        before.gaps.len(),
+        1,
+        "after the live-only detach: {before:?}"
+    );
+    stub.sink()
+        .begin_rebuild(&mapping(), &stamp())
+        .await
+        .unwrap();
+    let moved = store.lock().unwrap().doc(ALIAS);
+    stub.sink()
+        .demote(&mapping(), true, &stamp())
+        .await
+        .unwrap();
+    let after = stub.sink().detachment(&mapping(), &stamp()).await.unwrap();
+    assert_eq!(
+        after.gaps.len(),
+        1,
+        "the gap is lost: marker after begin_rebuild {moved:?}, after the demotion {:?}; read {after:?}",
+        store.lock().unwrap().doc(ALIAS)
+    );
+}
+
+/// The review of the closing round, A: as the engine's `rebuild` does it,
+/// `begin_rebuild` then `ensure_index_as` (which creates the generation the
+/// marker names and rewrites the marker whole, `rewrite_marker`), then a
+/// live-only demotion.
+/// With the marker moved by d2b first (S-1's own case, plus a reindex) and
+/// with a live-only detach first.
+#[tokio::test]
+async fn a_gap_survives_a_begun_rebuild_put_back_live_only() {
+    for live_only_detach in [false, true] {
+        let gaps = json!([{ "from": "0/10", "to": "0/20" }]);
+        let mut store = Store::seeded();
+        let mut kept = marker();
+        kept["gaps"] = gaps.clone();
+        store.put(ALIAS, kept);
+        let store = Arc::new(Mutex::new(store));
+        let stub = serve(&store).await;
+        stub.sink()
+            .detach(
+                &mapping(),
+                &blocked().live_only(live_only_detach).stamp(stamp()),
+            )
+            .await
+            .unwrap();
+        stub.sink()
+            .begin_rebuild(&mapping(), &stamp())
+            .await
+            .unwrap();
+        // What `ensure_generation` writes when the generation the marker
+        // names does not exist yet (`sink_impl.rs`, `if !exists`).
+        let next = store.lock().unwrap().doc(ALIAS).unwrap()["active_generation"]
+            .as_u64()
+            .unwrap();
+        let ensured = stub
+            .sink()
+            .rewrite_marker(ALIAS, next, None, Some(&stamp()))
+            .await;
+        let after_ensure = store.lock().unwrap().doc(ALIAS);
+        stub.sink()
+            .demote(&mapping(), true, &stamp())
+            .await
+            .unwrap();
+        let after = stub.sink().detachment(&mapping(), &stamp()).await.unwrap();
+        assert_eq!(
+            after.gaps.len(),
+            1,
+            "live_only detach {live_only_detach}: ensure {ensured:?}, marker after it {after_ensure:?}, after the demotion {:?}",
+            store.lock().unwrap().doc(ALIAS)
+        );
     }
 }
