@@ -64,6 +64,40 @@ fn read_and_route(
     key
 }
 
+/// The docs pass of the closing round: readiness is the deployment's and
+/// each sink engine's phase alone. A detached lane, or one whose index keeps
+/// a gap, leaves `/readyz` ready: the lane is reported on `/status`, and the
+/// fence refuses what it doesn't hold.
+#[test]
+fn a_detached_lane_or_a_gap_leaves_the_deployment_ready() {
+    let (status, _progress) = status_over(&[primary()]);
+    let observer = StatusObserver::new(Arc::clone(&status));
+    observer.on_indexes_ensured(&primary(), 1);
+    observer.on_sink_started(&primary());
+    observer.on_live_started();
+    assert!(status.is_ready());
+    let lane = ::stream::LaneKey::new(users(), primary());
+    observer.on_lane_health(
+        &lane,
+        &engine::LaneHealth::Detached {
+            since: tokio::time::Instant::now(),
+            reason: "blocked".to_owned(),
+            through: Some("10".to_owned()),
+        },
+    );
+    assert!(status.is_ready(), "a detached lane");
+    observer.on_lane_gaps(
+        &lane,
+        &[sink::Gap {
+            from: Some("10".to_owned()),
+            to: Some("20".to_owned()),
+        }],
+    );
+    assert!(status.is_ready(), "a detached lane with a gap");
+    observer.on_lane_health(&lane, &engine::LaneHealth::Open);
+    assert!(status.is_ready(), "an attached lane with a gap");
+}
+
 /// The observer drives the status surface through a full lifecycle — one
 /// ingest side, one sink — and the snapshot serializes to the `/status` shape.
 #[test]
@@ -1761,7 +1795,7 @@ async fn a_change_by_another_process_stops_the_deployment() {
         error.contains("another flusso process changed")
             && error.contains("users")
             && error.contains("primary")
-            && error.contains("No change of this index was confirmed past what its records cover"),
+            && error.contains("No change of this index was confirmed past what they cover"),
         "{error}"
     );
     assert_eq!(sink.reads.load(Ordering::SeqCst), 2, "not restaged");
