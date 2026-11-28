@@ -286,6 +286,27 @@ impl OpensearchSink {
         }
     }
 
+    /// The `cluster_uuid` of the cluster this sink writes to, from `GET /`:
+    /// what tells two URLs reaching one cluster apart from two clusters
+    /// (the review of round 11, S-4). An answer without one is an error.
+    pub async fn cluster_uuid(&self) -> Result<String> {
+        let context = "asking the cluster its uuid failed";
+        let url = format!("{}/", self.base_url);
+        let resp = self
+            .maybe_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| request_error(context, e))?;
+        if !resp.status().is_success() {
+            return Err(Self::status_error(resp, context).await);
+        }
+        let body: serde_json::Value = resp.json().await.map_err(|e| request_error(context, e))?;
+        body.get("cluster_uuid")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| SinkError::Write(format!("{context}: no cluster_uuid in {body}")))
+    }
+
     /// The `index.uuid` of `index`, which OpenSearch gives each index it
     /// creates (again after a deletion, an auto-create or a restore); `None`
     /// when no index has that name.

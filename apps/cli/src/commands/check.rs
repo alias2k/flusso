@@ -173,7 +173,11 @@ async fn inspect(
     path: std::path::PathBuf,
 ) -> anyhow::Result<()> {
     let config = Arc::new(config);
-    let clusters = adapters::cluster_findings(&config);
+    let clusters = if args.offline {
+        adapters::cluster_findings(&config)
+    } else {
+        adapters::cluster_findings_online(&config).await
+    };
 
     let postgres = adapters::source_config(&config)?;
 
@@ -1311,6 +1315,7 @@ mod tests {
             first: sink("primary"),
             second: sink("audit"),
             cluster: "https://search:9200".to_owned(),
+            compared: adapters::Compared::Url,
         }];
         let report = Report {
             clusters: &shared,

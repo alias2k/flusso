@@ -132,6 +132,15 @@ pub(crate) fn index_sink_config(
     }
 }
 
+/// How two sinks were found on one cluster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Compared {
+    /// Their URLs name it, however spelled (`check --offline`).
+    Url,
+    /// Both clusters answered the same `cluster_uuid`.
+    ClusterUuid,
+}
+
 /// What `check` finds of the OpenSearch sinks' clusters (the review of the
 /// cut, m-3; of round 10, m-5 and m-6).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,15 +148,18 @@ pub(crate) enum ClusterFinding {
     /// Two sinks write to one cluster: every index, alias and seed marker
     /// flusso owns there is named by the deployment's `prefix` alone, never
     /// by the sink, so both would share them, each taking the other's
-    /// records for another process's. An error; `run` refuses it. Two URLs
-    /// naming one cluster by different hosts (a DNS alias, an IP) are not
-    /// told apart here: each sink then reads the other's stamped writes as
-    /// another process's, and the deployment stops at the first such read
-    /// (the review of round 10, m-4).
+    /// records for another process's. An error; `run` refuses it. Told by the
+    /// `cluster_uuid` each sink's cluster answers (`GET /`) where the cluster
+    /// can be asked (`run`, `check` online), so two URLs reaching one cluster
+    /// (two nodes, a hostname and its IP) are found; by the URL alone under
+    /// `check --offline`, which asks nothing and so misses them (the review
+    /// of round 11, S-4).
     Shared {
         first: SinkName,
         second: SinkName,
+        /// The URL both name, or the `cluster_uuid` both answer.
         cluster: String,
+        compared: Compared,
     },
     /// A sink's URL can't be resolved here (an unset environment variable),
     /// so it was not compared with the other sinks: `check_skipped`.
@@ -183,20 +195,35 @@ impl ClusterFinding {
                 first,
                 second,
                 cluster,
-            } => format!(
-                "[sinks.{first}] and [sinks.{second}] write to the same OpenSearch cluster \
-                 ({cluster}): every index, alias and seed marker flusso keeps there is named by \
-                 the deployment's `prefix`, never by the sink, so the two would share them. Give \
-                 each sink its own cluster, or run each in its own deployment with its own \
-                 `prefix`"
+                compared: Compared::Url,
+            } => shared_message(first, second, &format!("both URLs name {cluster}")),
+            Self::Shared {
+                first,
+                second,
+                cluster,
+                compared: Compared::ClusterUuid,
+            } => shared_message(
+                first,
+                second,
+                &format!("both answer cluster_uuid {cluster}"),
             ),
             Self::Skipped { sink, why } => format!(
-                "[sinks.{sink}]'s URL can't be resolved here ({why}): not checked against the \
-                 other OpenSearch sinks for a shared cluster; `flusso run` checks it where the \
-                 URL resolves"
+                "[sinks.{sink}] was not compared with the other OpenSearch sinks for a shared \
+                 cluster ({why}); `flusso run` checks it where it can reach the cluster"
             ),
         }
     }
+}
+
+/// The finding of `first` and `second` on one cluster, found as `how` says.
+fn shared_message(first: &SinkName, second: &SinkName, how: &str) -> String {
+    format!(
+        "[sinks.{first}] and [sinks.{second}] write to the same OpenSearch cluster \
+                 ({how}): every index, alias and seed marker flusso keeps there is named by \
+                 the deployment's `prefix`, never by the sink, so the two would share them. Give \
+                 each sink its own cluster, or run each in its own deployment with its own \
+                 `prefix`"
+    )
 }
 
 /// The OpenSearch sinks' clusters, compared: each pair on one cluster, and
@@ -240,23 +267,110 @@ pub(crate) fn cluster_findings(config: &Config) -> Vec<ClusterFinding> {
                 first: first.clone(),
                 second: (*name).clone(),
                 cluster,
+                compared: Compared::Url,
             });
         }
     }
     findings
 }
 
-/// Refuse two OpenSearch sinks on one cluster ([`ClusterFinding::Shared`]),
-/// as `run` does before anything starts. A URL that can't be resolved here
-/// is left to the sink's own start.
-pub(crate) fn distinct_clusters(config: &Config) -> anyhow::Result<()> {
-    match cluster_findings(config)
-        .into_iter()
-        .find(ClusterFinding::is_error)
-    {
-        Some(shared) => Err(anyhow!(shared.message())),
-        None => Ok(()),
+/// [`cluster_findings`], then each OpenSearch sink's cluster asked its
+/// `cluster_uuid` (`GET /`): two answering the same are on one cluster,
+/// however their URLs differ; one that can't be asked is not compared
+/// (`check_skipped`, naming why). Online `check` and `run` (the review of
+/// round 11, S-4).
+pub(crate) async fn cluster_findings_online(config: &Config) -> Vec<ClusterFinding> {
+    let mut findings = cluster_findings(config);
+    let opensearch: Vec<(&SinkName, Box<OpensearchConfig>)> = config
+        .sinks
+        .iter()
+        .filter_map(|(name, entry)| match sink_config(name, entry) {
+            Ok(SinkConfig::Opensearch(sink)) => Some((name, sink)),
+            _ => None,
+        })
+        .collect();
+    if opensearch.len() < 2 {
+        return findings;
     }
+    let mut answers: Vec<(&SinkName, String)> = Vec::new();
+    for (name, sink) in &opensearch {
+        let skipped = |findings: &[ClusterFinding]| {
+            findings.iter().any(
+                |finding| matches!(finding, ClusterFinding::Skipped { sink, .. } if sink == *name),
+            )
+        };
+        if skipped(&findings) {
+            continue;
+        }
+        let asked = match sink_opensearch::OpensearchSink::from_config(name, sink) {
+            Ok(built) => built
+                .cluster_uuid()
+                .await
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        match asked {
+            Ok(uuid) => answers.push((name, uuid)),
+            Err(why) => findings.push(ClusterFinding::Skipped {
+                sink: (*name).clone(),
+                why: format!("its cluster could not be asked its cluster_uuid: {why}"),
+            }),
+        }
+    }
+    let answered: Vec<(&SinkName, &str)> = answers
+        .iter()
+        .map(|(name, uuid)| (*name, uuid.as_str()))
+        .collect();
+    let by_uuid = shared_by_uuid(&answered, &findings);
+    findings.extend(by_uuid);
+    findings
+}
+
+/// The pairs of `answers` (each sink and the `cluster_uuid` its cluster
+/// answered) on one cluster, but for those `found` names already.
+pub(crate) fn shared_by_uuid(
+    answers: &[(&SinkName, &str)],
+    found: &[ClusterFinding],
+) -> Vec<ClusterFinding> {
+    let named = |a: &SinkName, b: &SinkName| {
+        found.iter().any(|finding| {
+            matches!(finding, ClusterFinding::Shared { first, second, .. }
+                if (first == a && second == b) || (first == b && second == a))
+        })
+    };
+    let mut seen: std::collections::BTreeMap<&str, &SinkName> = std::collections::BTreeMap::new();
+    let mut shared = Vec::new();
+    for (name, uuid) in answers {
+        match seen.get(uuid) {
+            Some(first) if !named(first, name) => shared.push(ClusterFinding::Shared {
+                first: (*first).clone(),
+                second: (*name).clone(),
+                cluster: (*uuid).to_owned(),
+                compared: Compared::ClusterUuid,
+            }),
+            Some(_) => {}
+            None => {
+                seen.insert(uuid, name);
+            }
+        }
+    }
+    shared
+}
+
+/// Refuse two OpenSearch sinks on one cluster ([`ClusterFinding::Shared`]),
+/// as `run` does before anything starts, by URL and by the `cluster_uuid`
+/// each cluster answers. A sink whose cluster can't be asked is not
+/// refused, only logged: its own start fails on it as before (the review of
+/// round 11, S-4).
+pub(crate) async fn distinct_clusters_online(config: &Config) -> anyhow::Result<()> {
+    let findings = cluster_findings_online(config).await;
+    if let Some(shared) = findings.iter().find(|finding| finding.is_error()) {
+        return Err(anyhow!(shared.message()));
+    }
+    for skipped in &findings {
+        tracing::warn!("{}", skipped.message());
+    }
+    Ok(())
 }
 
 /// The cluster `url` names, however it is spelled: scheme and host in lower
@@ -440,9 +554,11 @@ mod tests {
             ("https://search:9200/", "https://SEARCH:9200"),
             ("https://search", "https://search:443/"),
         ] {
-            let error = distinct_clusters(&two_opensearch_sinks(primary, audit))
-                .map(|()| String::new())
-                .unwrap_or_else(|error| format!("{error:#}"));
+            let error = cluster_findings(&two_opensearch_sinks(primary, audit))
+                .iter()
+                .find(|finding| finding.is_error())
+                .map(ClusterFinding::message)
+                .unwrap_or_default();
             assert!(
                 error.contains("[sinks.audit]") && error.contains("[sinks.primary]"),
                 "{primary} and {audit}: {error}"
@@ -461,14 +577,16 @@ mod tests {
             type = "stdout"
             "#,
         );
-        distinct_clusters(&one_and_stdout).unwrap();
         assert!(cluster_findings(&one_and_stdout).is_empty());
     }
 
-    /// The owner's decision on the review of round 10: a second OpenSearch
-    /// sink on another cluster (a backup, an audit copy) keeps working.
+    /// The URL comparison, which `check --offline` makes: URLs that differ
+    /// pass it, whether they name two clusters (a backup, an audit copy: the
+    /// owner's decision on the review of round 10) or two ways to one (two
+    /// nodes, a proxy's paths), which only asking the cluster tells apart
+    /// (the review of round 11, S-4).
     #[test]
-    fn two_opensearch_sinks_on_different_clusters_are_accepted() {
+    fn urls_that_differ_pass_the_url_comparison() {
         for (primary, audit) in [
             ("https://search:9200", "https://backup:9200"),
             ("https://search:9200", "https://search:9201"),
@@ -476,9 +594,57 @@ mod tests {
             ("https://proxy/a", "https://proxy/b"),
         ] {
             let config = two_opensearch_sinks(primary, audit);
-            distinct_clusters(&config).unwrap();
             assert_eq!(cluster_findings(&config), [], "{primary} and {audit}");
         }
+    }
+
+    /// The review of round 11, S-4: sinks are on one cluster when they answer
+    /// the same `cluster_uuid`, however their URLs differ; a sink on another
+    /// cluster (a backup) is accepted. Each pair on one cluster is named once.
+    #[test]
+    fn sinks_answering_one_cluster_uuid_share_a_cluster() {
+        let name = |name: &str| SinkName::try_new(name).unwrap();
+        let (primary, audit, backup) = (name("primary"), name("audit"), name("backup"));
+        let answers = [(&primary, "c1"), (&backup, "c2"), (&audit, "c1")];
+        assert_eq!(
+            shared_by_uuid(&answers, &[]),
+            [ClusterFinding::Shared {
+                first: primary.clone(),
+                second: audit.clone(),
+                cluster: "c1".to_owned(),
+                compared: Compared::ClusterUuid,
+            }]
+        );
+        let by_url = ClusterFinding::Shared {
+            first: primary.clone(),
+            second: audit.clone(),
+            cluster: "https://search:9200".to_owned(),
+            compared: Compared::Url,
+        };
+        assert_eq!(
+            shared_by_uuid(&answers, std::slice::from_ref(&by_url)),
+            [],
+            "named once, by its URL"
+        );
+        assert_eq!(
+            shared_by_uuid(&[(&primary, "c1"), (&backup, "c2")], &[]),
+            []
+        );
+    }
+
+    /// An online check asks each sink's cluster: one that can't be asked is
+    /// `check_skipped`, naming why; `run` leaves it to the sink's own start.
+    #[tokio::test]
+    async fn a_cluster_that_cannot_be_asked_is_a_skipped_check() {
+        let config = two_opensearch_sinks("http://127.0.0.1:1", "http://127.0.0.1:2");
+        let findings = cluster_findings_online(&config).await;
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(
+            findings.iter().all(|finding| matches!(finding,
+                ClusterFinding::Skipped { why, .. } if why.contains("could not be asked"))),
+            "{findings:?}"
+        );
+        distinct_clusters_online(&config).await.unwrap();
     }
 
     /// The review of round 10, m-5: a sink whose URL names an environment
@@ -509,7 +675,6 @@ mod tests {
             ),
             "{findings:?}"
         );
-        distinct_clusters(&unresolved).unwrap();
     }
 
     #[test]

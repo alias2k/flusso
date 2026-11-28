@@ -1320,6 +1320,19 @@ async fn a_gap_comes_back_with_the_marker_onto_the_serving_generation() {
     }
 }
 
+/// The review of round 11, S-4, on a real cluster: two URLs reaching one
+/// cluster (`127.0.0.1` and `localhost`) answer the same `cluster_uuid`,
+/// which is how `run` and an online `check` find two sinks on one cluster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn two_urls_of_one_cluster_answer_one_cluster_uuid() {
+    let (_container, base) = start_opensearch().await;
+    let by_name = base.replace("127.0.0.1", "localhost");
+    let by_ip = sink(&base).cluster_uuid().await.unwrap();
+    assert!(!by_ip.is_empty());
+    assert_eq!(sink(&by_name).cluster_uuid().await.unwrap(), by_ip);
+}
+
 /// Each of `ids` in the meta index: its sequence number and source.
 async fn meta_documents(
     client: &reqwest::Client,
