@@ -1721,3 +1721,72 @@ fn the_meta_primary_wait_stays_under_the_client_timeout() {
         assert_eq!(meta_primary_wait(timeout), wait, "{timeout:?}");
     }
 }
+
+/// CI's flake on round 15 (`meta get failed: … no_shard_available_action_exception`):
+/// every read of the meta index the staging makes waits for its primary on
+/// a shard not ready yet, then reads again; one never ready fails as a
+/// read. The two kinds of read: the marker's `GET` (`read_index_meta`, which
+/// `read_meta` and `seeding` share) and the records' `_mget` (a detachment
+/// read). H's tests drove only `rewrite_marker`, which wrapped its own
+/// `_mget`, so the `GET` the staging makes first went unguarded.
+#[tokio::test]
+async fn every_meta_read_waits_for_a_shard_not_ready_then_fails_as_a_read() {
+    for kind in ["get", "mget"] {
+        for ready in [true, false] {
+            let store = Arc::new(Mutex::new(Store::seeded()));
+            let routed = Arc::clone(&store);
+            let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let once = Arc::clone(&refused);
+            let stub = Stub::start(move |line, body| {
+                let (method, target) = line.split_once(' ').unwrap();
+                let path = target.split_once('?').map_or(target, |(path, _)| path);
+                let read = match kind {
+                    "get" => method == "GET" && path.starts_with("/flusso_meta/_doc/"),
+                    _ => path == "/flusso_meta/_mget",
+                };
+                if read && (!ready || !once.swap(true, std::sync::atomic::Ordering::SeqCst)) {
+                    return (
+                        503,
+                        json!({ "error": { "type": "no_shard_available_action_exception" }, "status": 503 })
+                            .to_string(),
+                    );
+                }
+                if line.starts_with("GET /_cluster/health/flusso_meta") {
+                    return if ready {
+                        (200, json!({ "status": "yellow", "timed_out": false }).to_string())
+                    } else {
+                        (408, json!({ "status": "red", "timed_out": true }).to_string())
+                    };
+                }
+                if method == "GET" && path.starts_with("/flusso_meta/_doc/") {
+                    let id = path.trim_start_matches("/flusso_meta/_doc/");
+                    return match routed.lock().unwrap().doc(id) {
+                        Some(source) => (200, json!({ "_id": id, "found": true, "_source": source }).to_string()),
+                        None => (404, json!({ "found": false }).to_string()),
+                    };
+                }
+                routed.lock().unwrap().answer(line, body)
+            })
+            .await;
+            let sink = stub.sink();
+            let read = match kind {
+                "get" => sink.read_index_meta(ALIAS).await.map(|_| ()),
+                _ => sink.detachment(&mapping(), &stamp()).await.map(|_| ()),
+            };
+            let waited = stub
+                .lines()
+                .iter()
+                .any(|line| line.starts_with("GET /_cluster/health/flusso_meta"));
+            assert!(waited, "{kind}, ready {ready}: {:?}", stub.lines());
+            if ready {
+                assert!(read.is_ok(), "{kind}: {read:?}");
+            } else {
+                let error = read.unwrap_err();
+                assert!(
+                    matches!(error, sink::SinkError::Read(_)),
+                    "{kind}: {error:?}"
+                );
+            }
+        }
+    }
+}
