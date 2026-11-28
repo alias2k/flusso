@@ -1377,6 +1377,86 @@ async fn a_detach_during_a_reindex_then_a_live_only_start_keeps_the_generation_r
     assert_eq!(searchable(&client, &base, &hash_alias).await, ["1", "2"]);
 }
 
+/// The review of round 14, B-1, on a real cluster: a detach during a reindex,
+/// a live-only start's demotion (the marker unseeded on the generation reads
+/// see) and a reattach keep a gap there; row 2 is deleted in the gap, so
+/// nothing removes its document. With `backfill` back on, the reindex the
+/// engine stages moves the marker to a new generation, the gap stays until
+/// its seed, and that seed serves a generation without row 2's document. A
+/// seed into the generation reads already saw keeps the gap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_gap_is_dropped_only_by_the_seed_of_a_generation_created_after_it() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    for (logical, rebuilt) in [("rebuilt", true), ("in_place", false)] {
+        let mapping = mapping(logical, 1);
+        let index = mapping.index.clone();
+        let hash_alias = format!("{logical}_{}", mapping.hash);
+        let first = sink(&base);
+        first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+        write(&first, &index, &[1, 2, 3]).await;
+        first.mark_seeded_as(&index, &stamp()).await.unwrap();
+        let served = alias_targets(&client, &base, &hash_alias).await;
+        first.reindex_as(&mapping, &stamp()).await.unwrap();
+        first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+        first
+            .detach(&mapping, &sink::Detach::new("blocked").stamp(stamp()))
+            .await
+            .unwrap();
+        let live_only = sink(&base);
+        live_only.demote(&mapping, true, &stamp()).await.unwrap();
+        let gap = sink::Gap {
+            from: Some("0/10".to_owned()),
+            to: Some("0/20".to_owned()),
+        };
+        live_only
+            .record_gaps(&mapping, &|_| Some(vec![gap.clone()]), &stamp())
+            .await
+            .unwrap();
+        let version = live_only
+            .detachment(&mapping, &stamp())
+            .await
+            .unwrap()
+            .version
+            .unwrap();
+        live_only
+            .forget_detachment(&mapping, &version, &stamp())
+            .await
+            .unwrap();
+        // `backfill` turned back on: the engine stages a reindex over the gap.
+        let again = sink(&base);
+        if rebuilt {
+            again.reindex_as(&mapping, &stamp()).await.unwrap();
+        }
+        again.ensure_index_as(&mapping, &stamp()).await.unwrap();
+        write(&again, &index, &[1, 3]).await;
+        let before = again.detachment(&mapping, &stamp()).await.unwrap();
+        assert_eq!(
+            before.gaps,
+            [gap.clone()],
+            "{logical}: the gap before the seed"
+        );
+        again.mark_seeded_as(&index, &stamp()).await.unwrap();
+        let after = again.detachment(&mapping, &stamp()).await.unwrap();
+        if rebuilt {
+            assert_ne!(alias_targets(&client, &base, &hash_alias).await, served);
+            assert_eq!(searchable(&client, &base, &hash_alias).await, ["1", "3"]);
+            assert!(after.gaps.is_empty(), "{logical}: {after:?}");
+        } else {
+            assert_eq!(
+                searchable(&client, &base, &hash_alias).await,
+                ["1", "2", "3"]
+            );
+            assert_eq!(
+                after.gaps,
+                [gap],
+                "{logical}: row 2's document is still there"
+            );
+        }
+    }
+}
+
 /// The review of the closing round, D, on a real cluster: a live-only detach
 /// over a marker a rebuildable detach moved leaves the marker moved, so it
 /// reads beside the record as off serving; the live-only demotion a start

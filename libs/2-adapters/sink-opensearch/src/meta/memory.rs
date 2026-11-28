@@ -439,6 +439,20 @@ impl MemoryMeta {
             .map(String::as_str)
     }
 
+    /// The version of the last document write, across the index: a write
+    /// after another has a higher one.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// The uuid of every generation of `alias` that exists now.
+    pub fn uuids(&self, alias: &str) -> Vec<String> {
+        self.generations
+            .get(alias)
+            .map(|made| made.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// The generation the hash alias serves, with its uuid: what reads see.
     pub fn read_by(&self, alias: &str) -> Option<(u64, String)> {
         let generation = self.serving(alias)?;
@@ -459,5 +473,61 @@ impl MemoryMeta {
     /// judgement.
     pub fn documents(&self, alias: &str) -> (Option<&Value>, Option<&Value>) {
         (self.doc(alias), self.doc(&record_id(alias)))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use serde_json::json;
+    use sink::Stamp;
+
+    use super::*;
+
+    fn stamp() -> Stamp {
+        Stamp::new("w", 1)
+    }
+
+    /// An index seeded on generation 1, its marker then keeping a gap, and
+    /// put back unseeded on it (a live-only demotion over a reindex's moved
+    /// marker leaves it so).
+    fn unseeded_on_serving_with_a_gap() -> MemoryMeta {
+        let mut meta = MemoryMeta::default();
+        meta.ensure("users", &stamp());
+        meta.seed("users", &stamp(), true).unwrap();
+        meta.update_marker("users", "seeded", Value::from(false));
+        meta.update_marker("users", "gaps", json!([{ "from": "10", "to": "20" }]));
+        meta
+    }
+
+    /// The review of round 14, B-1: a reindex of an index whose marker keeps
+    /// a gap on the generation reads see moves it to a new generation, even
+    /// unseeded: only a generation created after the gap may be seeded over
+    /// it.
+    #[test]
+    fn a_reindex_over_a_gap_on_serving_stages_a_new_generation() {
+        let mut meta = unseeded_on_serving_with_a_gap();
+        meta.reindex("users", &stamp());
+        assert_eq!(meta.active("users"), Some(2));
+        assert_eq!(meta.serving("users"), Some(1));
+        let gaps = meta::read(meta.documents("users").0, None, None).gaps;
+        assert_eq!(gaps.len(), 1, "the gap stays until the seed");
+    }
+
+    /// B-1: a seed of the generation the alias already served keeps the
+    /// gaps; a seed of a generation created since drops them.
+    #[test]
+    fn only_a_seed_of_a_newer_generation_drops_the_gaps() {
+        let mut in_place = unseeded_on_serving_with_a_gap();
+        in_place.seed("users", &stamp(), true).unwrap();
+        let gaps = meta::read(in_place.documents("users").0, None, None).gaps;
+        assert_eq!(gaps.len(), 1, "a seed in place keeps the gap");
+        let mut rebuilt = unseeded_on_serving_with_a_gap();
+        rebuilt.reindex("users", &stamp());
+        rebuilt.ensure("users", &stamp());
+        rebuilt.seed("users", &stamp(), true).unwrap();
+        assert_eq!(rebuilt.serving("users"), Some(2));
+        let gaps = meta::read(rebuilt.documents("users").0, None, None).gaps;
+        assert!(gaps.is_empty(), "{gaps:?}");
     }
 }

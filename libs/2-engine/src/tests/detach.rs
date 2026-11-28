@@ -339,6 +339,12 @@ impl Sink for Gate {
         Ok(report)
     }
 
+    /// A reindex moved the index's writes to a new generation, which reads
+    /// don't see until its seed.
+    async fn is_rebuilding(&self, index: &IndexName) -> sink::Result<bool> {
+        Ok(self.reindexed.lock().unwrap().contains(&index.to_string()))
+    }
+
     async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {
         Ok(!self.unseeded.lock().unwrap().contains(index.as_ref()))
     }
@@ -5795,4 +5801,55 @@ async fn a_live_only_record_beside_an_unseeded_marker_on_serving_reattaches() {
     task.abort();
     let _ = task.await;
     assert!(format!("{verdict:?}").contains("Started"), "{verdict:?}");
+}
+
+/// The review of round 14, B-1: on a sink that can backfill, an index whose
+/// marker keeps a gap on the generation reads see is never backfilled in
+/// place (rows deleted in the gap keep their documents there, and the seed
+/// would drop the gap): it is rebuilt into a new generation first, as a
+/// reindex does, and its backfill asked only then.
+#[tokio::test(start_paused = true)]
+async fn a_backfill_over_a_gap_rebuilds_into_a_new_generation_first() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    rig.sink.marker_gaps.lock().unwrap().insert(
+        "users".to_owned(),
+        vec![sink::Gap {
+            from: Some("1".to_owned()),
+            to: Some("2".to_owned()),
+        }],
+    );
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    let stream::Request::Backfill { index, .. } = next_request(&rig).await else {
+        panic!("a backfill");
+    };
+    assert_eq!(index, users());
+    assert_eq!(
+        *rig.sink.reindexed.lock().unwrap(),
+        ["users".to_owned()],
+        "the backfill was asked before a new generation was staged"
+    );
+    task.abort();
+}
+
+/// B-1's control: an index that keeps no gap (a fresh index, or one whose
+/// generation was deleted and is reseeded) is backfilled in place, as on
+/// `main`.
+#[tokio::test(start_paused = true)]
+async fn an_unseeded_index_with_no_gap_is_backfilled_in_place() {
+    let rig = Rig::new(64);
+    rig.rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+    rig.sink.unseeded.lock().unwrap().insert("users".to_owned());
+    let engine = rig.engine();
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let (task, _control) = spawn(&engine);
+    let stream::Request::Backfill { index, .. } = next_request(&rig).await else {
+        panic!("a backfill");
+    };
+    assert_eq!(index, users());
+    assert!(rig.sink.reindexed.lock().unwrap().is_empty());
+    task.abort();
 }

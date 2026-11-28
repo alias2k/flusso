@@ -73,6 +73,13 @@ use super::*;
 const INDEXES: [&str; 2] = ["orders", "users"];
 const SINKS: [&str; 2] = ["audit", "primary"];
 
+/// Whether the change at `position` deletes its row: every third change. A
+/// backfill into a generation that existed before the delete leaves the
+/// row's document there (the review of round 14, B-1).
+fn is_delete(position: u64) -> bool {
+    (position / 5) % 3 == 2
+}
+
 fn lanes() -> Vec<LaneKey> {
     SINKS
         .iter()
@@ -178,7 +185,7 @@ struct Store {
     /// Each generation number a hand deletion freed, per index. A later
     /// generation of that number is another index under a reused number, a
     /// known dead end (#492): replacing it is not judged.
-    hand_deleted: Mutex<BTreeSet<(String, u64)>>,
+    hand_deleted: Mutex<BTreeSet<(String, u64, String, u64)>>,
     /// The next record or marker write this process makes fails: `true`,
     /// after it landed (its response lost); `false`, before.
     fails: Mutex<Option<bool>>,
@@ -324,11 +331,20 @@ impl Store {
             .1
             .and_then(|record| record.get("serving"))
             .and_then(serde_json::Value::as_u64);
+        // Written before a hand deletion of the generation it names (m-A:
+        // by the record's version, not the number alone).
+        let written_at = found
+            .version
+            .as_ref()
+            .and_then(|version| version.as_str().split(':').next()?.parse::<u64>().ok());
         let freed = named.is_some_and(|generation| {
             self.hand_deleted
                 .lock()
                 .unwrap()
-                .contains(&(of.to_owned(), generation))
+                .iter()
+                .any(|(index, deleted, _, at)| {
+                    index == of && *deleted == generation && written_at.is_some_and(|w| w < *at)
+                })
         });
         found.record.is_some()
             && (freed || matches!(found.marker, Some(sink::MarkerAt::Elsewhere { .. }) | None))
@@ -369,18 +385,57 @@ impl Store {
     ) -> T {
         let mut meta = self.meta();
         let before = record_in(&meta, of);
+        let marker_before = meta.documents(of).0.cloned();
+        let gaps_before = os_meta::read(marker_before.as_ref(), None, None).gaps;
+        let in_place = meta.serving(of).is_some() && meta.active(of) == meta.serving(of);
         let out = write(&mut meta);
         let after = record_in(&meta, of);
         let now = meta.read_by(of);
+        let gaps_after = os_meta::read(meta.documents(of).0, None, None).gaps;
         drop(meta);
         let mut ledger = self.read_by.lock().unwrap();
         let was = ledger.get(of).cloned().flatten();
-        let reused = was.as_ref().is_some_and(|(generation, _)| {
-            self.hand_deleted
-                .lock()
-                .unwrap()
-                .contains(&(of.to_owned(), *generation))
+        // A uuid deleted by hand carried in the marker before the write: a
+        // generation number taken again (#492). Keyed by uuid (m-A), so one
+        // hand deletion leaves every later generation of that number judged.
+        let carried = |value: Option<&serde_json::Value>| {
+            value
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|uuid| {
+                    self.hand_deleted
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(index, _, deleted, _)| index == of && deleted == uuid)
+                })
+        };
+        let reused = marker_before.as_ref().is_some_and(|marker| {
+            carried(marker.get("uuid"))
+                || carried(
+                    marker
+                        .get("detaching_from")
+                        .and_then(|from| from.get("uuid")),
+                )
         });
+        // The review of round 14, B-1: a seed drops a gap only on a
+        // generation created after the gap; one into the generation reads
+        // already saw keeps what was lost in it (rows deleted in the gap keep
+        // their documents there).
+        // After a hand deletion of the index, the generation the alias now
+        // serves was created since, maybe after the gap: not judged (#492).
+        let deleted_by_hand = self
+            .hand_deleted
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(index, ..)| index == of);
+        if seed && in_place && !deleted_by_hand && !gaps_before.is_empty() && gaps_after.is_empty()
+        {
+            self.violations.lock().unwrap().push(format!(
+                "{of}: a seed into the generation reads already saw ({was:?}) dropped the gaps \
+                 {gaps_before:?}"
+            ));
+        }
         match was {
             Some(was) if !seed && !reused && now.as_ref() != Some(&was) => {
                 self.violations.lock().unwrap().push(format!(
@@ -444,11 +499,16 @@ impl Store {
             Target::Generation(generation) => Some(generation),
         };
         if let Some(generation) = generation {
+            let uuid = meta.uuid(of, generation).map(str::to_owned);
             meta.delete_generation(of, generation);
-            self.hand_deleted
-                .lock()
-                .unwrap()
-                .insert((of.to_owned(), generation));
+            if let Some(uuid) = uuid {
+                self.hand_deleted.lock().unwrap().insert((
+                    of.to_owned(),
+                    generation,
+                    uuid,
+                    meta.seq(),
+                ));
+            }
         }
         // Deleted by hand: what reads saw is gone, and the next generation
         // created takes the alias.
@@ -1632,6 +1692,12 @@ struct World {
     dropped: Vec<Vec<(u64, u64, u64)>>,
     /// Per lane, when each reattach was attached.
     attached: Vec<Vec<u64>>,
+    /// Per lane, each reattach's tick and the position its gap ended at.
+    attached_at: Vec<Vec<(u64, u64)>>,
+    /// Per sink and index, at each delete published, the uuids of the
+    /// generations that existed then: a backfill into one of them leaves
+    /// the deleted row's document there.
+    existing: BTreeMap<(usize, usize, u64), BTreeSet<String>>,
     /// Per lane, the backfill asked and not yet completed: its ticket and
     /// where its walk began.
     asked: Vec<Option<(stream::Ticket, u64)>>,
@@ -1743,6 +1809,8 @@ impl World {
             changes: [Vec::new(), Vec::new()],
             dropped: vec![Vec::new(); 4],
             attached: vec![Vec::new(); 4],
+            attached_at: vec![Vec::new(); 4],
+            existing: BTreeMap::new(),
             asked: vec![None; 4],
             stops: 0,
         }
@@ -1875,6 +1943,7 @@ impl World {
                         {
                             self.tick += 1;
                             self.attached[lane].push(self.tick);
+                            self.attached_at[lane].push((self.tick, self.horizon));
                         }
                         if let Ok(lane) = self.stream.lane(&key) {
                             let _ = lane
@@ -2201,6 +2270,7 @@ impl World {
         });
         self.tick += 1;
         self.attached[lane].push(self.tick);
+        self.attached_at[lane].push((self.tick, self.horizon));
     }
 
     /// A change of `index`, published only while the process holds a stream:
@@ -2212,6 +2282,13 @@ impl World {
         self.horizon += 5;
         self.tick += 1;
         self.changes[at].push((self.horizon, self.tick));
+        if is_delete(self.horizon) {
+            for sink_at in 0..2 {
+                let uuids = self.stores[sink_at].meta().uuids(INDEXES[at]);
+                self.existing
+                    .insert((sink_at, at, self.horizon), uuids.into_iter().collect());
+            }
+        }
         self.publish(at, self.horizon);
     }
 
@@ -2299,13 +2376,39 @@ impl World {
                 self.attached[lane]
             ))
         };
+        // What reads see now: a delete dropped from it leaves its row's
+        // document there unless the generation was created after the delete
+        // (a backfill writes only the rows that exist).
+        let reads_see = store.meta().read_by(of).map(|(_, uuid)| uuid);
         for (at, when) in self.changes[lane % 2].iter().filter(|(at, _)| *at <= p) {
             let written = store
                 .written
                 .lock()
                 .unwrap()
                 .contains(&(of.to_owned(), *at));
-            if written || seeded(*at) || (given_up(*when) && *at < p) {
+            if written {
+                continue;
+            }
+            if is_delete(*at) {
+                let born_after = reads_see.as_ref().is_some_and(|uuid| {
+                    !self
+                        .existing
+                        .get(&(Self::sink_of(lane), lane % 2, *at))
+                        .is_some_and(|existed| existed.contains(uuid))
+                });
+                // A reattach accepted the drop for positions past its gap.
+                let accepted = self.attached_at[lane]
+                    .iter()
+                    .any(|(tick, ended)| *tick > *when && *ended < p);
+                if (born_after && seeded(*at)) || accepted {
+                    continue;
+                }
+                return not_held(format!(
+                    "the row deleted at {at} still has its document in the generation reads see \
+                     ({reads_see:?})"
+                ));
+            }
+            if seeded(*at) || (given_up(*when) && *at < p) {
                 continue;
             }
             return not_held(format!("the change at {at} is not held"));
@@ -3011,6 +3114,21 @@ fn a_detach_over_a_rebuilding_record_keeps_where_the_drop_began() {
             Event::Reindex { sink: 0, index: 1 },
             Event::PutBackAfterFlip { lane: 1 },
             Event::BackfillFlips { lane: 1 },
+        ]),
+        0
+    );
+}
+
+/// The review of round 14, B-1: a reattach keeps a gap on the generation
+/// reads see; `backfill` turned back on, the start backfills. Rows deleted
+/// in the gap keep their documents in that generation, so it is rebuilt into
+/// a new one, and the gap stays until that seed.
+#[test]
+fn a_backfill_turned_back_on_over_a_gap_rebuilds_into_a_new_generation() {
+    assert_eq!(
+        replay_solo(vec![
+            Event::ReindexThenDetach { lane: 3 },
+            Event::ReindexThenDetach { lane: 2 },
         ]),
         0
     );
