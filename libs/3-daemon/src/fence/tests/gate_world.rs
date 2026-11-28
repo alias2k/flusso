@@ -2133,14 +2133,16 @@ impl World {
         }
         let store = &self.stores[Self::sink_of(lane)];
         let of = Self::index_of(lane);
-        // As the real reattach: only a record a sink that can't rebuild wrote
-        // (the review of round 11, S-2).
-        let detached = store.kept.lock().unwrap().get(of).is_some_and(|kept| {
-            matches!(
-                kept.detachment.record,
-                Some(DetachRecord::Detached { live_only: true })
-            )
-        });
+        // As the real reattach: only a record a sink that can't rebuild wrote,
+        // beside a marker on the generation reads see (the review of round
+        // 11, S-2; round 12's sweep).
+        let detached = !store.marker_moved(of)
+            && store.kept.lock().unwrap().get(of).is_some_and(|kept| {
+                matches!(
+                    kept.detachment.record,
+                    Some(DetachRecord::Detached { live_only: true })
+                )
+            });
         // A reattach's gap starts where reads stood at the detach (the
         // record's `through`, as the adapter's reattach takes it), covering
         // every range dropped since the last reattach: a lane this process
@@ -2941,6 +2943,27 @@ fn a_live_only_detach_over_a_moved_marker_leaves_it_moved() {
         },
         Event::PutBackAfterFlip { lane: 1 },
         Event::BackfillFlips { lane: 1 },
+    ]);
+}
+
+/// Round 12's sweep, seed `5275283102389846757` of `gate_world` at 50,000
+/// cases, shrunk: a model error. The other process reattached a live-only
+/// record beside a marker an earlier detach had moved, which the real
+/// reattach refuses, and the read's put-back then dropped that gap.
+#[test]
+fn another_process_never_reattaches_beside_a_moved_marker() {
+    replay(vec![
+        Event::Restart {
+            sink: 0,
+            unreadable: 1,
+        },
+        Event::PutBackAfterFlip { lane: 0 },
+        Event::Unreadable { lane: 0 },
+        Event::PutBackAfterFlip { lane: 0 },
+        Event::HolderFinishes {
+            lane: 0,
+            reattach: true,
+        },
     ]);
 }
 
