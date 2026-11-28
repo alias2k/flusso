@@ -165,7 +165,7 @@ loom = "0.7"
 proptest = { version = "1.*" }
 axum = { version = "0.8.*" }
 # The sender of a stop signal (`siginfo`), which tokio's signals don't expose.
-signal-hook = { version = "0.3.18", default-features = false, features = ["extended-siginfo"] }
+signal-hook = { version = "0.4.6", default-features = false, features = ["extended-siginfo"] }
 base64 = "0.23"
 # Embeds the schema designer's built SPA (`apps/design/dist/`) into the binary.
 # `debug-embed` embeds in debug builds too, so the served assets don't depend on
