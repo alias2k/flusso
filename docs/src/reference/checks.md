@@ -184,7 +184,7 @@ A sink that can't be compared is `check_skipped`, a warning, and the run goes on
 
 - why the `url` couldn't be resolved: `environment variable '<VAR>' is not set`, `invalid HTTP URL: …`;
 - `not a URL this check reads`;
-- `its cluster could not be asked its cluster_uuid: <error>`: a cluster down, a role that can't read `GET /`, `no answer within 10 s`, or a cluster not formed yet, `… the cluster answers cluster_uuid "_na_", which names no cluster (no cluster manager elected yet)`. Such a cluster is never compared, so it never matches another.
+- `its cluster_uuid could not be read: <why>`, where `<why>` is `the cluster gave no answer: …` (a cluster down), `the cluster answered HTTP <status>: …` (a role that can't read `GET /`, say), `no answer within 10 s`, or, for a cluster not formed yet, `the cluster answers cluster_uuid "_na_", which names no cluster (no cluster manager elected yet)`. Such a cluster is never compared, so it never matches another.
 
 At `run` it's a `WARN` log line, and the start goes on:
 

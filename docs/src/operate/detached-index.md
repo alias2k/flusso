@@ -75,7 +75,7 @@ A **gap** is the run of changes a reattach accepted as missing: from where reads
 
 ## A known limit
 
-A detach recorded while no generation served the index (its serving generation deleted by hand) leaves a record that names no generation. flusso can't act on it: a rebuild from it is never taken as finished, so every start takes it over again, and a live-only one is never reattached; restarting flusso doesn't change that. There is no way out from flusso yet; it is tracked as a follow-up issue. Don't delete a detached index's serving generation by hand.
+After a generation index of a detached or rebuilding index is deleted by hand, its lane may not reattach or rebuild: the records can name a generation that is gone, or one whose number was taken again. A rebuild is then never taken as finished, so every start takes it over again, and a live-only lane is never reattached; restarting flusso doesn't change that. There is no way out from flusso yet: see [issue #492](https://github.com/alias2k/flusso/issues/492). Don't delete a generation index of a detached or rebuilding index by hand.
 
 ## Related
 
