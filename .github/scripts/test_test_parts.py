@@ -195,9 +195,11 @@ class Verdict(unittest.TestCase):
 class VerdictCli(unittest.TestCase):
     """`verdict` end to end over JUnit reports laid out as download-artifact writes them."""
 
+    # Two tests in each part's report.
+    LISTED = 2 * len(parts.PARTS)
     NEEDS = {
         "plan": {"result": "success", "outputs": {"docs_only": "false"}},
-        "build": {"result": "success", "outputs": {"count": "10"}},
+        "build": {"result": "success", "outputs": {"count": str(LISTED)}},
         "lint": {"result": "success", "outputs": {}},
         "doctests": {"result": "success", "outputs": {}},
         "tests": {"result": "success", "outputs": {}},
@@ -210,7 +212,7 @@ class VerdictCli(unittest.TestCase):
                 folder.mkdir()
                 (folder / "junit.xml").write_text(text)
             return subprocess.run(
-                [sys.executable, str(SCRIPT), "verdict", "--needs", json.dumps(self.NEEDS), "--expected", "10", "--junit", tmp],
+                [sys.executable, str(SCRIPT), "verdict", "--needs", json.dumps(self.NEEDS), "--expected", str(self.LISTED), "--junit", tmp],
                 capture_output=True,
                 text=True,
             )
@@ -231,7 +233,9 @@ class VerdictCli(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("::error::the JUnit report of part rest can't be read", result.stderr)
-        self.assertIn("::error::the parts ran 8 tests, the whole run lists 10", result.stderr)
+        self.assertIn(
+            f"::error::the parts ran {self.LISTED - 2} tests, the whole run lists {self.LISTED}", result.stderr
+        )
 
 
 class Cli(unittest.TestCase):

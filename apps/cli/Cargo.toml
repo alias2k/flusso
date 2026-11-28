@@ -86,4 +86,5 @@ flusso-query = { path = "../../sdk/query" }
 # is a `futures` one.
 futures.workspace = true
 # Paused time for the shutdown deadline's unit tests.
-tokio = { workspace = true, features = ["test-util"] }
+# The detach e2e's proxies (`tests/common/live.rs`) read and write sockets.
+tokio = { workspace = true, features = ["test-util", "io-util"] }
