@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-sink-stdout-v0.18.0...flusso-sink-stdout-v0.19.0) - 2026-11-28
+
+### Other
+
+- *(engine)* a lane item carries its build's own ids, not a key per envelope
+- *(engine)* a document's key rides in its envelope, not in a vector of its own
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-sink-stdout-v0.17.0...flusso-sink-stdout-v0.18.0) - 2026-11-19
 
 ### Added

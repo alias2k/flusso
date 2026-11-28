@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-source-postgres-v0.18.0...flusso-source-postgres-v0.19.0) - 2026-11-28
+
+### Added
+
+- *(source)* a stream opened past Rereads::open vouches for nothing (m-1)
+
+### Fixed
+
+- *(source-postgres)* prepare is quiet only about the publication gaps the start reported
+- *(cli)* judge schema errors and capture gaps in one verdict, reported once
+- *(source)* required over a view's column is a warning that says why
+- *(source)* [**breaking**] an index that differs from its schema is an error
+
+### Other
+
+- spikes S1, S3 and S4 for the detach probe, against live OpenSearch and Postgres
+- *(daemon)* one capture per process in the world, and its write oracle on the world's own state (fifth re-check, CI red)
+- *(source-postgres)* spike S5, the source confirms what no lane needs
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-source-postgres-v0.17.0...flusso-source-postgres-v0.18.0) - 2026-11-19
 
 ### Added

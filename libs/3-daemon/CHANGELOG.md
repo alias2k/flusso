@@ -7,6 +7,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-daemon-v0.18.0...flusso-daemon-v0.19.0) - 2026-11-28
+
+### Added
+
+- *(engine)* [**breaking**] stop when another process changed the records, instead of reconciling
+- *(source)* a stream opened past Rereads::open vouches for nothing (m-1)
+- *(daemon)* every reattach's gap is kept exactly as a list, and a gap end the source can't read is settled at a start (gap list, m4)
+- *(daemon)* reattach --accept-gap keeps its gap and the fence refuses inside it; records read again once the slot is held (O16, S3, O29)
+- *(daemon)* /status shows rebuilds and detached lanes, and a reindex of a rebuild starting or running answers 409 (O20)
+- *(engine)* a reindex of a detached index rebuilds it to the seed, a start attaches a rebuild or demotes it, and O20(c)
+- *(engine)* attach a detached lane by quiescing its index's builder, and publish nothing to a detached lane
+- *(engine)* detach a lane at its next refused probe, discard what it holds, and stage it detached
+- *(daemon)* [**breaking**] keep an index's last error per kind
+- *(daemon)* show a walk a live failure cut as waiting, and cut an index's error at 4 KiB
+- *(daemon)* show a down index and a walk retrying in /status
+- *(daemon)* hand [backoff] to the ingest engine for per-index restarts
+- *(cli)* [**breaking**] GET /indexes/<name>/status and POST /indexes/<name>/reindex; POST /reindex is gone
+- *(daemon)* /status's ingest.indexes.<name>: documents waiting, backlog age, exemption, hold, walk, working
+- *(cli)* a stop cut short by its deadline names each index left with documents read and not built
+- *(config)* [concurrency] max_pending_documents, --max-pending-documents, FLUSSO_MAX_PENDING_DOCUMENTS
+- *(cli)* [concurrency] max_waiting_per_index and max_waiting, with flags and FLUSSO_* variables
+- *(engine)* share the memory budget per index, for many reservers
+- *(engine)* changes_committed counts what every lane of a sink landed
+- *(engine)* [**breaking**] keep each index's pending documents in the progress
+- *(config)* a [backoff] table sets the engines' retry schedule
+- *(daemon)* /status names each lane's health; flusso.lane.parked and flusso.lane.probes
+- *(engine)* [**breaking**] a lane parks alone on a refusal or a write block, and restages alone on a missing target
+
+### Fixed
+
+- *(sink-opensearch)* a marker carrying detaching_from never reads as on serving, and keeps every gap
+- *(sink-opensearch)* a detach over a detached record keeps where it began
+- *(engine)* record-keeping sinks write only stamped, and nothing goes out unread
+- *(engine)* judge detach records by who wrote them
+- *(engine)* a lane taken detached on a read from an earlier stream is read again
+- *(engine)* every gated write stands on records read under the stream now held
+- *(engine)* a decision that rewrites the records stands on a read under the stream now held
+- *(engine)* the stop's message says only what holds of the confirmation
+- *(engine)* a lane never drops a change no record covers
+- *(engine)* no seed without the slot; plain writes as on main (fifth re-check B-1, S-1)
+- *(daemon)* a detach heard again during a rebuild keeps it a rebuild
+- *(engine)* a detached lane holds confirmation until read under the current stream
+- *(engine)* another process's rebuild is put back to detached before its lane drops anything (B-2)
+- *(engine)* reads of the detach records count per lane, never per sink: an index whose read failed stays unread while its siblings go on (B1''')
+- *(daemon)* an unread lane vouches for nothing: the frozen answer is gone, and an opening wakes every sink engine to read at once (item 2)
+- *(daemon)* /status and the log say an unknown gap end settles by itself at the next read while the slot is held, and what an operator can do meanwhile (m-g)
+- *(daemon)* an unread lane's frozen answer advances at an opening only for a sink that read during the stream left; a property test over the fence gate (B1'')
+- *(daemon)* a detach adopted while its sink is unread freezes at what the lane applied under the previous stream, never at the new stream's start (S-c)
+- *(engine)* the live stream opens only through Rereads::open, which marks every sink unread and freezes what lanes applied under the previous stream before the new one can answer (B1', m-a)
+- *(daemon)* a reattach answers the engine's verdict, a detached record on a sink switched to backfill = false is put back live only, and refusals name what works (S4, m5, m6)
+- *(engine)* a reindex of a rebuild waiting on its seed's retire block is refused with 409, naming the block (S2, O28)
+- *(daemon)* an unread sink masks only a lane serving its writes, keeps what it applied before the slot opened, and its read wakes waits (B1)
+- *(engine)* a lane held detached stays so at a later staging, and its fence stays detached under a backfill ask
+- *(daemon)* a stop before the first staging never lets the source prepare
+- *(engine)* name the index pacing the reader, track enabled indexes only
+- *(engine,daemon,cli)* working is about progress, the backlog age is a lag, a run's end clears its state
+- *(cli)* an unset max_waiting rises to max_waiting_per_index, and the other way round
+- *(engine)* the share bounds an index's live bytes, and nothing per index passes the limit
+- *(engine)* a skipped step always replaces a lane's newest entry; steps_kept reads with the unlanded count
+- *(engine)* a lane keeps a bounded record of steps while it is parked
+- *(engine)* pending builds by step, main's admission and settle order
+- *(engine,sink-opensearch)* cut a backfill by its target's identity, not one staging's word
+- *(engine)* a backfill whose target was created anew no longer seeds it
+- *(cli)* the stop message says a refused lane is refused, from the one name /status gives
+- *(cli)* one judge for [backoff], and an unset cap rises with the first wait
+- *(daemon)* a probe past every date reads as the latest one, never a panic
+- *(daemon)* /status names a refused lane `refused`, as the metric's `why` does
+
+### Other
+
+- *(daemon)* a drop under a kept record loses only what the lane still held
+- *(daemon)* the world's other process forgets a record a seed outlived
+- *(daemon)* the hand-deletion exemption judges a freed generation by its uuid
+- *(daemon)* the world's stand-in answers is_rebuilding, and judges deletes by what held the row
+- B-1, a seed dropping a gap on a generation that still holds its ghosts
+- *(daemon)* a record naming a generation a hand deletion freed is #492's
+- *(daemon)* the world judges what reads see against its own ledger
+- *(daemon)* the world's dev-dependency on the adapter is path only
+- *(daemon)* the world's stand-in runs the OpenSearch sink's own plans
+- *(daemon)* the world's other process reattaches only beside a marker on serving
+- *(daemon,engine)* a live-only detach leaves a moved marker where it is
+- *(daemon,engine)* the stand-ins model detaching_from and the read's put-back
+- *(daemon)* the world's other process keeps the gaps on its detach
+- *(daemon)* outlast the longest backoff before the world judges liveness
+- *(daemon)* the world draws a rebuild finished and begun again often
+- *(daemon)* the world judges liveness by what the records mean
+- *(daemon)* the world reaches a read answered under an earlier stream
+- *(daemon)* every own write in the world can land and fail, as on OpenSearch
+- *(daemon)* the world's store and other process as OpenSearch and Postgres have them
+- *(daemon)* a walk resumed over a kept gap starts from the first key
+- *(daemon)* a backfill cut while the slot is away is asked again
+- *(daemon)* both fence properties read PROPTEST_CASES
+- *(daemon)* a rebuild begun again under the same attempts is a different rebuild
+- *(daemon)* a rebuild whose record was replaced meanwhile is dropped by the run
+- *(engine)* the sink engine holds its sink as one that can't erase
+- *(daemon)* the world's other process finishes rebuilds and reattaches (seventh re-check S-3)
+- *(daemon)* the reviewer's world seeds kept as their event lists
+- *(daemon)* the gate property judges every record and draws each unheld case
+- *(engine)* a gate checked before awaits lets an erasing request through once the stream ended (sixth re-check B-1)
+- *(daemon)* the world ends streams with no opening begun, and detaches lanes itself (fifth re-check)
+- *(daemon)* one capture per process in the world, and its write oracle on the world's own state (fifth re-check, CI red)
+- *(daemon)* the world property writes for real, waits, and judges by what the test did (S-2)
+- *(daemon)* the O29 gate's property through the real sink engines (two sinks, partial reads, restarts, drops, reattach, rebuild, both levels); it found a rebuild begun while unread vouching, fixed (item 3)
+- *(engine)* the attach's R6 check asserted, the quiesce beside another builder, the fence after an attach, and step 3's review in the note
+- *(source-postgres)* spike S5, the source confirms what no lane needs
+- *(engine)* the review's cases for a seed parked on a blocked old generation
+- *(daemon)* a stop asked inside the first staging starts no engine
+- *(daemon)* a panicking build's deployment runs on and ends Ok at the stop
+- *(engine)* drop the change counts nothing reads
+- *(daemon)* changes_committed counts once every lane of a sink landed a change
+- *(engine)* the review of stage 8a slice 2, red first
+- *(engine)* [**breaking**] key lane items per index, not by their position
+- *(daemon)* a restart after progress starts over at the configured first wait
+- LaneHealthView.state documented, Chunk below the imports, LaneSnapshot's new fields on the upgrade page
+- *(daemon)* the status document's lane block carries its health
+- a parked lane in the manual, the 0.19 upgrade page, CLAUDE.md and stage 9 as built
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-daemon-v0.17.0...flusso-daemon-v0.18.0) - 2026-11-19
 
 ### Added

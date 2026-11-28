@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-sink-opensearch-v0.18.0...flusso-sink-opensearch-v0.19.0) - 2026-11-28
+
+### Added
+
+- *(engine)* [**breaking**] stop when another process changed the records, instead of reconciling
+- *(daemon)* every reattach's gap is kept exactly as a list, and a gap end the source can't read is settled at a start (gap list, m4)
+- *(daemon)* reattach --accept-gap keeps its gap and the fence refuses inside it; records read again once the slot is held (O16, S3, O29)
+- *(sink)* begin a rebuild, demote it, and delete a finished rebuild's record at the seed
+- *(sink)* record a detach, marker first, every write conditional on what was read
+- *(engine)* read the detach records at the top of every staging step
+- *(sinks)* a closed index parks its lane blocked, and staging it no longer fails the sink
+- *(engine)* [**breaking**] a lane parks alone on a refusal or a write block, and restages alone on a missing target
+
+### Fixed
+
+- *(sink-opensearch)* every meta-index read waits for a shard not ready and fails as a read
+- *(sink-opensearch)* H's wait stays under the client timeout, fails as a read, and only on a shard not ready
+- *(sink-opensearch)* refresh the generation reads see once per start, seeded or not
+- *(sink-opensearch)* record a generation's uuid only on the marker naming it
+- a seed drops a gap only on a generation created after it
+- *(sink-opensearch)* reading the cluster uuid fails as a read
+- *(sink-opensearch)* the minors of round 13's review
+- *(sink-opensearch)* a marker rewrite waits for a meta index still recovering
+- *(sink-opensearch)* a demotion carries no details of another generation
+- *(sink-opensearch)* a marker carrying detaching_from never reads as on serving, and keeps every gap
+- *(sink-opensearch)* the meta documents' plans as pure functions; only a seed drops a gap
+- *(sink-opensearch)* a detach over a detached record keeps where it began
+- *(cli)* find two OpenSearch sinks on one cluster by the cluster's uuid
+- *(engine)* record-keeping sinks write only stamped, and nothing goes out unread
+- *(sink-opensearch)* a detach keeps the marker's gaps and gives them back
+- *(engine)* judge detach records by who wrote them
+- *(daemon)* /status and the log say an unknown gap end settles by itself at the next read while the slot is held, and what an operator can do meanwhile (m-g)
+- *(sink-opensearch)* a gap the seed marker keeps that can't be read is a gap with unknown ends, never no gap (m-c)
+- *(engine)* a gap end is settled only in a read while this process holds the slot, the marker's gap write is conditional, and a reattach reuses the open gap a failed delete left and reads the record again before answering (S-a, S-b)
+- *(sink-opensearch)* a put-back restores the marker's checkpoint too, byte for byte
+- *(engine)* a live-only record never reads as a finished rebuild, nor one with no known serving copy
+- *(engine)* read each block of a seed's refusal on its own, and say what a delete costs
+- *(engine)* a seed refused by a blocked old generation parks its lane
+- *(engine)* an unreadable detach marker stages as before, and every _mget entry answers for its id
+- *(sink-opensearch)* listing generations asks for no hidden indexes
+- *(sink-opensearch)* a generation is created only after its meta doc says unseeded
+- *(engine,sink-opensearch)* cut a backfill by its target's identity, not one staging's word
+- *(engine)* a backfill whose target was created anew no longer seeds it
+
+### Other
+
+- spikes S1, S3 and S4 for the detach probe, against live OpenSearch and Postgres
+- *(sink-opensearch)* every meta read waits for a shard not ready, then fails as a read
+- *(sink-opensearch)* contains_key in MemoryMeta::ensure (clippy)
+- *(sink-opensearch)* m-C, a start refreshes the generation reads see whatever its seeded flag
+- *(sink-opensearch)* m-B's model test reaches a demotion that carries no uuid
+- *(sink-opensearch)* m-B, a uuid recorded on a marker naming another generation
+- B-1, a seed dropping a gap on a generation that still holds its ghosts
+- *(sink-opensearch)* F, D and E on a real cluster
+- *(sink-opensearch)* a live-only demotion after a detach during a reindex keeps the serving generation
+- *(engine)* guard the restart arm and every gated write's fresh read
+- *(daemon)* a rebuild begun again under the same attempts is a different rebuild
+- *(engine)* the review's cases for a seed parked on a blocked old generation
+- *(sink-opensearch)* a seed past a read-only generation waits for the block
+- *(sink-opensearch)* spike B1, what OpenSearch answers past a read-only generation
+- *(sink-opensearch)* a seed past a blocked or closed old generation deletes it
+- *(sink-opensearch)* strip the prefix from a name listed after a comma
+- *(engine)* pin the review's cases for reading the detach records
+- *(engine)* staging reads the detach records first, failing until it does
+- *(sinks)* a closed index is blocked, never rejected, and parks its lane until opened or reindexed
+- *(sink-opensearch)* a generation deleted or replaced mid-backfill, case by case
+- *(sink-opensearch)* a seeded generation recreated by a failed staging is never served seeded
+- *(sink-opensearch)* an auto-created generation is never seeded
+- *(sink-opensearch)* staging a generation deleted mid-backfill says it is new
+- LaneHealthView.state documented, Chunk below the imports, LaneSnapshot's new fields on the upgrade page
+- *(engine)* a lane parks alone on a refusal or a write block, and restages alone on a missing target
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-sink-opensearch-v0.17.0...flusso-sink-opensearch-v0.18.0) - 2026-11-19
 
 ### Added

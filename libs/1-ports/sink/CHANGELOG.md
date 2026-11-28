@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-sink-v0.18.0...flusso-sink-v0.19.0) - 2026-11-28
+
+### Added
+
+- *(engine)* [**breaking**] stop when another process changed the records, instead of reconciling
+- *(daemon)* every reattach's gap is kept exactly as a list, and a gap end the source can't read is settled at a start (gap list, m4)
+- *(daemon)* reattach --accept-gap keeps its gap and the fence refuses inside it; records read again once the slot is held (O16, S3, O29)
+- *(sink)* begin a rebuild, demote it, and delete a finished rebuild's record at the seed
+- *(sink)* record a detach, marker first, every write conditional on what was read
+
+### Fixed
+
+- *(sink-opensearch)* reading the cluster uuid fails as a read
+- *(engine)* record-keeping sinks write only stamped, and nothing goes out unread
+- *(engine)* judge detach records by who wrote them
+- *(engine)* a gap end is settled only in a read while this process holds the slot, the marker's gap write is conditional, and a reattach reuses the open gap a failed delete left and reads the record again before answering (S-a, S-b)
+- *(engine)* a live-only record never reads as a finished rebuild, nor one with no known serving copy
+- *(engine)* read each block of a seed's refusal on its own, and say what a delete costs
+- *(engine)* a seed refused by a blocked old generation parks its lane
+- *(engine)* an unreadable detach marker stages as before, and every _mget entry answers for its id
+- *(engine,sink-opensearch)* cut a backfill by its target's identity, not one staging's word
+- *(engine)* a backfill whose target was created anew no longer seeds it
+
+### Other
+
+- *(daemon)* a rebuild begun again under the same attempts is a different rebuild
+- *(engine)* a seed refused by a blocked old generation parks its lane
+- *(engine)* pin the review's cases for reading the detach records
+- *(engine)* staging reads the detach records first, failing until it does
+- *(sink)* an ordered sink's order is per lane; a parked lane is overtaken
+- *(engine)* a lane parks alone on a refusal or a write block, and restages alone on a missing target
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-sink-v0.17.0...flusso-sink-v0.18.0) - 2026-11-19
 
 ### Added

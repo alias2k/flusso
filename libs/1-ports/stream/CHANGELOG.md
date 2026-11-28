@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/alias2k/flusso/compare/flusso-stream-v0.18.0...flusso-stream-v0.19.0) - 2026-11-28
+
+### Added
+
+- *(engine)* attach a detached lane by quiescing its index's builder, and publish nothing to a detached lane
+- *(engine)* a builder serves a parked lane's fresh build on a substitute lane
+
+### Fixed
+
+- *(engine)* a backfill whose target was created anew no longer seeds it
+
+### Other
+
+- *(engine)* a lane item carries its build's own ids, not a key per envelope
+- *(engine)* a document's key rides in its envelope, not in a vector of its own
+- *(stream)* a returned delivery comes back in lane order, before anything new
+- *(engine)* drop the change counts nothing reads
+- *(engine)* [**breaking**] key lane items per index, not by their position
+- the target identity rule in CLAUDE.md, the ticket's process assumption
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-stream-v0.17.0...flusso-stream-v0.18.0) - 2026-11-19
 
 ### Added

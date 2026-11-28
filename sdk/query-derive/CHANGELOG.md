@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.18.0...flusso-query-derive-v0.18.1) - 2026-11-28
+
+### Fixed
+
+- *(query-derive)* the array advice names aggregates and constants, which hold one value
+- *(query-derive)* an array type at a single-valued field leads with `array: true`
+- *(query-derive)* a flattened field in a fragment no longer trips clippy::assertions_on_constants
+
+### Other
+
+- *(query-derive)* a consumer forbidding a lint from each clippy group
+- *(query-derive)* lint the derives' output as a strict consumer would
+
 ## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.17.0...flusso-query-derive-v0.18.0) - 2026-11-19
 
 ### Added
