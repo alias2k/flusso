@@ -1914,8 +1914,14 @@ is the one concrete piece.
   `SourcePositions`, the daemon's `CapturePositions`), tells the fence (`Observer::on_lane_gaps`)
   **before** the lane opens, then keeps them (`record_reattached`; a failure fails the run and the
   restage completes it). The gaps live in the seed marker (`gaps: [{from, to}]`, OpenSearch `_update`;
-  an older single `gap` reads as a list of one; `Detachment.gaps`; only a seed that completed drops
-  them, the review of the closing round, A). A start on a `backfill = false` sink puts a `detached`
+  an older single `gap` reads as a list of one; `Detachment.gaps`; only the seed of a generation
+  created after them drops them, the reviews of the closing round, A, and of round 14, B-1: a seed of
+  the generation the alias already served keeps them, `plan::seeded`; on a sink that can backfill,
+  `SinkEngine::request_backfill` never asks a backfill of an index keeping a gap whose target is the
+  generation reads see (`gaps_kept` and not `Sink::is_rebuilding`): it owes a rebuild through the
+  pending-reindex path instead (`owe_rebuild_over_a_gap`, the lane's reason `REBUILD_OVER_A_GAP` while
+  it waits for the slot), and the adapter's reindex moves such an unseeded marker
+  (`plan::reindex_moves`); an index with no gap is backfilled in place, as on `main`). A start on a `backfill = false` sink puts a `detached`
   record that isn't live only, or one beside a marker off the generation reads see (D), back live
   only on that generation (`Records::demote(mapping, true)`), so a reattach applies. A record written
   while nothing served the index (its generation deleted from under the sink) names no generation:
@@ -1979,10 +1985,10 @@ is the one concrete piece.
   through `put_if`/`put_meta`, which stamp it. Its decisions over the meta documents are pure plans
   (`detachment/plan.rs`, re-exported as `sink_opensearch::meta`: documents read in, writes out, the
   HTTP code sending each conditionally); `meta::memory` (feature `testing`) runs the same plans over an
-  in-memory meta index. **A gap is dropped only by a seed that completed** (the review of the closing
-  round, A): a detach that moves the marker keeps its gaps in `detaching_from`, a rebuild or demotion
+  in-memory meta index. **A gap is dropped only by the seed of a generation created after it** (the
+  reviews of the closing round, A, and of round 14, B-1): a detach that moves the marker keeps its gaps in `detaching_from`, a rebuild or demotion
   over a marker no detach moved makes it, a created generation and a reindex rewrite the marker
-  carrying both (`rewrite_marker`, conditional; only the seed's `write_index_meta` drops them), and the
+  carrying both (`rewrite_marker`, conditional; only a seed of a newer generation drops them), and the
   put-back and a live-only demotion restore every gap from both places (S-1). A marker carrying
   `detaching_from` reads as moved, never on serving, whatever its number (a generation deleted from
   under it lets the next take the same number). No plan deletes the generation the alias serves (E).
@@ -1990,8 +1996,13 @@ is the one concrete piece.
   `seeded` and `walked` too (the review of round 13, F): a live-only demotion takes `seeded` and `uuid`
   from `detaching_from` only when it names the serving generation, else from the marker itself standing
   there, else goes back unseeded with no uuid; a uuid naming another generation makes the next
-  `ensure_index` delete the generation as "not the one flusso created". `rewrite_marker` waits for the
-  meta index's primary (cluster health `yellow`, 30 s) when its read finds the shard not ready (H). A
+  `ensure_index` delete the generation as "not the one flusso created". A generation's uuid is recorded
+  only on the marker still naming it, by a conditional write (m-B, `record_uuid`). A start refreshes
+  the generation the alias serves whatever its seeded flag (m-C). Every meta-index read goes through
+  one helper, `generations.rs`'s `meta_read` (`get_meta`, `read_kept`): on a shard not ready, and only
+  then (m-D), it waits for the meta index's primary (cluster health `yellow`, a fifth under the
+  client's `timeout_secs`, 0.5–30 s) and reads once more; any failure is a `SinkError::Read`, never
+  "write failed" (H, and CI's `many_indexes_staged_at_once_each_get_their_own_generation`). A
   live-only detach tolerates a failed generation listing (its deletes are best effort; m-4). A detach over a record already detached or rebuilding keeps its `through` (and a detached
   one its `since`): the serving generation lacks every change from the first drop. A read is the same when
   each document carries this writer or is exactly what was last read (the record: presence, version,
@@ -2036,8 +2047,11 @@ is the one concrete piece.
   stand-in decides as the sink does, for this process and the other alike (`MemoryMeta` gives each
   generation a uuid and models `ensure_index`'s uuid check, the uuid record and the alias attach); its
   oracle adds that what reads see moves only by a seed (`read_by`: the world's own ledger of the
-  generation the alias serves and its uuid; deleted, emptied or recreated is a failure, but for a
-  generation number a hand deletion freed, #492) and that a `backfill = false` sink's detached lane comes
+  generation the alias serves and its uuid; deleted, emptied or recreated is a failure, but for a write
+  carrying a uuid a hand deletion freed, #492), that a seed into the generation reads already saw
+  drops no gap, that every third change is a delete whose dropped row keeps its document in the
+  generation reads saw (if a seed had completed on it) until reads see another one seeded past it or a
+  reattach's gap ended before the wait (B-1), and that a `backfill = false` sink's detached lane comes
   back by a reattach, or a start and a reattach. The engine's `Gate` (`tests::detach`) keeps what it is
   asked and nothing more (item 1). A staging that finds the index seeded on another target than its outstanding backfill
   asked for is foreign too. Every read tells the fence its gap list, empty included (a created
