@@ -110,6 +110,7 @@ PARTS = (
             "flusso-sink-opensearch::detach_spikes",
             "flusso-cli::detach_rebuild",
             "flusso-cli::detach_reattach",
+            "flusso-cli::detach_two_processes",
         ),
         group="opensearch",
         cargo=False,

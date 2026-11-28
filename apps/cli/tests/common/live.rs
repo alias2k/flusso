@@ -622,6 +622,22 @@ impl Flusso {
         }
     }
 
+    /// Wait until it exits by itself, within `limit`.
+    pub(crate) async fn exited(&mut self, limit: Duration) -> ExitStatus {
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "still running: {}",
+                self.stderr()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Stop it gracefully and require exit 0.
     pub(crate) fn stop(&mut self) {
         self.signal("TERM");
@@ -652,7 +668,7 @@ impl Flusso {
     }
 
     /// `/wait` for `position` at `level`, with a short timeout: its status
-    /// and body.
+    /// and body (status 0 when nothing listens).
     pub(crate) async fn wait(&self, position: &str, level: &str) -> (u16, Value) {
         wait_at(self.public, position, level, 3_000).await
     }
@@ -700,7 +716,7 @@ pub(crate) async fn wait_at(
     level: &str,
     timeout_ms: u64,
 ) -> (u16, Value) {
-    let response = reqwest::Client::new()
+    let Ok(response) = reqwest::Client::new()
         .get(format!("http://{public}/wait"))
         .query(&[
             ("position", position),
@@ -709,7 +725,10 @@ pub(crate) async fn wait_at(
         ])
         .send()
         .await
-        .unwrap();
+    else {
+        // Nothing listens: the process is gone.
+        return (0, Value::Null);
+    };
     let code = response.status().as_u16();
     (code, response.json().await.unwrap_or(Value::Null))
 }
