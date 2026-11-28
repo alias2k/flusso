@@ -1919,7 +1919,9 @@ is the one concrete piece.
   record that isn't live only, or one beside a marker off the generation reads see (D), back live
   only on that generation (`Records::demote(mapping, true)`), so a reattach applies. A record written
   while nothing served the index (its generation deleted from under the sink) names no generation:
-  never finished, never reattached (a known dead end, the world leaves it out of its liveness). Every detach records `through` (`Detach.through`, the lane's place before it
+  never finished, never reattached; so does one naming a generation a hand deletion freed (issue
+  #492: generation numbers are reused once every generation is gone; the world leaves both out of its
+  liveness). Every detach records `through` (`Detach.through`, the lane's place before it
   leaves the minimum) and carries it on `LaneHealth::Detached`, where the fence freezes (S3: what is
   refused after a reattach starts where vouching stopped). The fence refuses a position in `(from,
   to]` of any gap at once (`FenceOutcome::InGap`, `/wait` `409` `reason: gap`, naming that gap),
@@ -1983,7 +1985,14 @@ is the one concrete piece.
   carrying both (`rewrite_marker`, conditional; only the seed's `write_index_meta` drops them), and the
   put-back and a live-only demotion restore every gap from both places (S-1). A marker carrying
   `detaching_from` reads as moved, never on serving, whatever its number (a generation deleted from
-  under it lets the next take the same number). No plan deletes the generation the alias serves (E). A detach over a record already detached or rebuilding keeps its `through` (and a detached
+  under it lets the next take the same number). No plan deletes the generation the alias serves (E).
+  **The marker's `uuid` always names the generation in its `active_generation`, or is absent**, and
+  `seeded` and `walked` too (the review of round 13, F): a live-only demotion takes `seeded` from
+  `detaching_from` only when it names the serving generation and a uuid only from the marker itself
+  standing there, else goes back unseeded with no uuid; a uuid naming another generation makes the next
+  `ensure_index` delete the generation as "not the one flusso created". `rewrite_marker` waits for the
+  meta index's primary (cluster health `yellow`, 30 s) when its read finds the shard not ready (H). A
+  live-only detach tolerates a failed generation listing (its deletes are best effort; m-4). A detach over a record already detached or rebuilding keeps its `through` (and a detached
   one its `since`): the serving generation lacks every change from the first drop. A read is the same when
   each document carries this writer or is exactly what was last read (the record: presence, version,
   stamp, state, attempts, `through`; the marker: stamp and gaps); an unstamped document is adopted at
@@ -2012,8 +2021,9 @@ is the one concrete piece.
   report; both ask each sink's cluster its `cluster_uuid` (`GET /`,
   `OpensearchSink::cluster_uuid`), so two URLs of one cluster are found, and `check --offline`
   compares URLs only (`adapters::cluster_findings`); a sink whose URL can't be resolved or whose
-  cluster can't be asked (a `cluster_uuid` of `_na_` or empty included: a cluster not formed yet, B)
-  is `check_skipped` in `check` and only logged by `run`. Sinks on different
+  cluster can't be asked (a `cluster_uuid` of `_na_` or empty included: a cluster not formed yet, B;
+  the read fails as `SinkError::Read`, no "write failed") is `check_skipped` in `check` and only logged
+  by `run` (`commands/run.rs`'s `bind_then_compare_clusters`: the listeners first). Sinks on different
   clusters (a backup) are accepted (S-4). What the stamps rely on from OpenSearch is pinned by
   the adapter's `detachment::tests` (request bodies, and
   `every_record_or_marker_body_carries_the_callers_stamp`) and, on a real cluster, `seeding`'s
@@ -2023,9 +2033,12 @@ is the one concrete piece.
   (`libs/3-daemon/src/fence/tests/gate_world.rs`) keeps its meta index in `meta::memory` (a
   path-only dev-dependency with `testing`, which `cargo publish` strips: with a version, packaging
   resolved the registry's adapter, which has no `testing` yet), so the
-  stand-in decides as the sink does, for this process and the other alike; its oracle adds that no
-  write leaves the alias serving nothing and that a `backfill = false` sink's detached lane comes back
-  by a reattach, or a start and a reattach. The engine's `Gate` (`tests::detach`) keeps what it is
+  stand-in decides as the sink does, for this process and the other alike (`MemoryMeta` gives each
+  generation a uuid and models `ensure_index`'s uuid check, the uuid record and the alias attach); its
+  oracle adds that what reads see moves only by a seed (`read_by`: the world's own ledger of the
+  generation the alias serves and its uuid; deleted, emptied or recreated is a failure, but for a
+  generation number a hand deletion freed, #492) and that a `backfill = false` sink's detached lane comes
+  back by a reattach, or a start and a reattach. The engine's `Gate` (`tests::detach`) keeps what it is
   asked and nothing more (item 1). A staging that finds the index seeded on another target than its outstanding backfill
   asked for is foreign too. Every read tells the fence its gap list, empty included (a created
   generation drops the gaps). Open (#490, an owner lease, and reconciliation if ever): a sink call
