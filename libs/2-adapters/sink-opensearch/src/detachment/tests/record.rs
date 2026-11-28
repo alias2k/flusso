@@ -1326,3 +1326,80 @@ async fn a_gap_survives_a_begun_rebuild_put_back_live_only() {
         );
     }
 }
+
+/// The review of round 13, F: a reindex staged (the marker on generation 4,
+/// unseeded, its uuid recorded), a rebuildable detach moves it, the sink is
+/// made `backfill = false`, and the start's live-only demotion (D) puts the
+/// marker back on the alias's generation 3 carrying generation 4's uuid and
+/// seeded state. The next `ensure_index` (a reattach makes one) then reads
+/// generation 3 as "not the one flusso created" and deleted it, the
+/// generation every read sees. The marker now goes back with no uuid.
+#[tokio::test]
+async fn a_live_only_demotion_after_a_detach_during_a_reindex_keeps_the_serving_generation() {
+    let mut store = Store::seeded();
+    store.put(
+        ALIAS,
+        json!({ "active_generation": 4, "seeded": false, "uuid": "u4" }),
+    );
+    let store = Arc::new(Mutex::new(store));
+    let routed = Arc::clone(&store);
+    let stub = Stub::start(move |line, body| {
+        let (method, target) = line.split_once(' ').unwrap();
+        let path = target.split_once('?').map_or(target, |(path, _)| path);
+        if method == "GET" && path.starts_with("/flusso_meta/_doc/") {
+            let id = path.trim_start_matches("/flusso_meta/_doc/");
+            return match routed.lock().unwrap().doc(id) {
+                Some(source) => (
+                    200,
+                    json!({ "_id": id, "found": true, "_source": source }).to_string(),
+                ),
+                None => (404, json!({ "found": false }).to_string()),
+            };
+        }
+        if method == "GET" && path.ends_with("/_settings/index.uuid") {
+            let index = path.trim_start_matches('/').split('/').next().unwrap();
+            let uuid = format!("u{}", index.rsplit('_').next().unwrap());
+            return if routed.lock().unwrap().generations.contains(index) {
+                (
+                    200,
+                    json!({ index: { "settings": { "index": { "uuid": uuid } } } }).to_string(),
+                )
+            } else {
+                (404, "{}".to_owned())
+            };
+        }
+        let known = path.starts_with("/flusso_meta/")
+            || path.starts_with("/_alias/")
+            || path.starts_with("/_cat/indices/")
+            || method == "DELETE";
+        if known {
+            routed.lock().unwrap().answer(line, body)
+        } else {
+            (
+                500,
+                json!({ "error": "not modelled by the probe" }).to_string(),
+            )
+        }
+    })
+    .await;
+    stub.sink()
+        .detach(&mapping(), &blocked().live_only(false))
+        .await
+        .unwrap();
+    stub.sink()
+        .demote(&mapping(), true, &stamp())
+        .await
+        .unwrap();
+    let marker = store.lock().unwrap().doc(ALIAS).unwrap();
+    let ensured = sink::Records::ensure_index_as(&stub.sink(), &mapping(), &stamp()).await;
+    let deletes: Vec<String> = stub
+        .lines()
+        .into_iter()
+        .filter(|line| line.starts_with("DELETE /users_00000001_3"))
+        .collect();
+    assert!(
+        deletes.is_empty(),
+        "marker after the demotion {marker}; ensure {ensured:?}; the serving generation deleted: {deletes:?}; generations left {:?}",
+        store.lock().unwrap().generations
+    );
+}
