@@ -81,6 +81,8 @@ A refused connection ends in `tcp connect error: Connection refused` instead. Cr
 | A reachable HTTP(S) endpoint | The `url`. |
 | A user that can create, alias, write, and delete flusso's indexes, and read their settings | Plus the small `{prefix}flusso_meta` index. Staging and seeding read each generation's `index.uuid` (`GET /{generation}/_settings/index.uuid`). Staging reads each index's [meta documents](#the-meta-documents) with `POST /{prefix}flusso_meta/_mget`, so the role needs `indices:data/read/mget` there (the `read` action group has it); without it the sink retries its staging and writes nothing. |
 | `analysis-icu` on every node | Only with `text_analysis = "icu"`. |
+| `GET /` (`cluster:monitor/main`) | Only with two or more OpenSearch sinks: `check` and `run` read each cluster's `cluster_uuid` there to refuse [two sinks on one cluster](checks.md#two-opensearch-sinks-on-one-cluster). Without it the comparison is skipped with a warning, and the run goes on. |
+| A cluster of its own | Per OpenSearch sink of a deployment: two on one cluster are [refused](checks.md#two-opensearch-sinks-on-one-cluster). |
 | `action.auto_create_index` excluding flusso's generations | Recommended. Keep `{prefix}flusso_meta` allowed (it's created by its first write) and forbid `{prefix}{logical}_*` for each index, first match wins; [why](#why-forbid-auto-create). With no `prefix`: `+flusso_meta,-users_*,-orders_*,+*`. With `prefix = "staging_"`, every entry carries it: `+staging_flusso_meta,-staging_users_*,-staging_orders_*,+*` (an unprefixed entry never matches, and the trailing `+*` lets auto-create through). |
 
 ## Index naming
@@ -102,16 +104,22 @@ Writes to a **seeded** index go through the hash alias, each bulk item flagged `
 
 | `_id` | Holds |
 | --- | --- |
-| `{prefix}{logical}_{hash}` | The seed marker (see the table above). |
-| `detach:{prefix}{logical}_{hash}` | Reserved. No released flusso writes it. |
-| `stuck:{prefix}{logical}_{hash}` | Reserved. No released flusso writes it. |
+| `{prefix}{logical}_{hash}` | The seed marker (see the table above), plus `stamp`, `gaps` and, while a detach has moved it, `detaching_from`. |
+| `detach:{prefix}{logical}_{hash}` | The **detach record**, while the index is [detached](../operate/detached-index.md) or being rebuilt after a detach: its `state` (`detached` or `rebuilding`), whether it is `live_only` (a `backfill = false` sink), the generation `serving` reads, why, how many rebuilds began, and `through`, where reads stood at the detach. Once a seed or a reattach is done with it, a **tombstone** (`state: "forgotten"`) takes its place instead of a delete, and reads as no record. |
+| `stuck:{prefix}{logical}_{hash}` | Reserved. Read, never written. |
+
+- **`stamp`**, on the marker and the record, names the process that last wrote it: `{"writer", "seq"}`, one writer per sink engine per process start, so a process tells its own writes from [another's](../operate/one-process-per-slot.md). A marker an older flusso wrote has none until it is next written.
+- **`gaps`** lists the changes each [reattach](../operate/detached-index.md#what-a-gap-means) accepted as missing, `{"from", "to"}` in the source's text. Only the seed of a new generation drops them: a rebuild, a reindex or a recreated generation carries them until it is seeded, and an unseeded index keeping gaps on the generation reads see is rebuilt, never backfilled in place ([Ending a gap](../operate/detached-index.md#ending-a-gap)).
+- **`detaching_from`**: a detach moves the marker to a new, unseeded generation past every existing one and keeps where it was in `detaching_from` (its generation, seeded state, `uuid`, `walked`, `gaps`), writes the record, then deletes every generation but the one serving. Every write is conditional on the version read.
+
+These documents are flusso's own bookkeeping, not an interface: their fields can change between releases.
 
 Every staging of an index (a start, a sink's restart, a reindex, and each of their retries) reads all three first, in one `POST /{prefix}flusso_meta/_mget`, before anything else touches the index:
 
 - **Nothing kept reads as empty**: the meta index missing (a `404` with OpenSearch's `index_not_found_exception`) or a document not found.
-- **Any other answer fails the staging**, and it's retried like any failed staging ([details](http.md#when-a-restart-cant-ensure-an-index)): a `403` (a role without `indices:data/read/mget`), a `404` that isn't OpenSearch's (a reverse proxy, a wrong path in the `url`), a timeout, a `5xx`. The error reads `write failed: reading the detach records failed: HTTP 403 Forbidden: …`.
-- **A `detach:` document found** is logged at error level, and the index is staged as before, as its seed marker says. A `stuck:` document is read and not acted on.
-- **The seed marker's `detaching_from` field** is reserved too, and no released flusso writes it. A marker carrying one with no `detach:` document beside it is put back as `detaching_from` says it was, conditionally on the marker read (logged at warn); one this version can't read is logged at error level and left as is.
+- **Any other answer fails the staging**, and it's retried like any failed staging ([details](http.md#when-a-restart-cant-ensure-an-index)): a `403` (a role without `indices:data/read/mget`), a `404` that isn't OpenSearch's (a reverse proxy, a wrong path in the `url`), a timeout, a `5xx`. The error reads `reading the detach records failed: HTTP 403 Forbidden: …`. A `{prefix}flusso_meta` whose primary shard is still recovering is waited for, within the sink's `timeout_secs` and at most 30 s, then read again.
+- **A `detached` record** stages the index detached: not ensured, not backfilled, its lane out of the slot's minimum. **A `rebuilding` record** resumes the rebuild on a start that backfills, and puts it back to detached on one that can't. A record that can't be acted on as it stands (one this version can't read, or one whose seed marker isn't where the record says it should be) detaches the index again. See [Bring back a detached index](../operate/detached-index.md). A `stuck:` document is read and not acted on.
+- **A marker carrying `detaching_from` with no record beside it** (a detach that died between its two writes) is put back as `detaching_from` says it was, gaps included, conditionally on the marker read (logged at warn); one this version can't read is logged at error level and left as is.
 
 ## Mapping
 

@@ -265,6 +265,9 @@ pub(super) struct Builds {
     granted: Option<Permit>,
     /// A build failed: nothing more is granted.
     halted: bool,
+    /// An attach waits for the builder's quiesce (ADR 0012 stage 10, R8):
+    /// nothing new is granted, what was granted publishes.
+    paused: bool,
     /// A walk failed and the builder's loop hasn't taken it yet.
     walk_failure: Option<WalkFailure>,
     /// Parked lanes' requests for a fresh build, oldest first, with the
@@ -374,6 +377,7 @@ impl Builds {
             ),
             granted: None,
             halted: false,
+            paused: false,
             walk_failure: None,
             spare: Vec::new(),
             lent: VecDeque::new(),
@@ -683,6 +687,18 @@ impl Builds {
         self.flights.len()
     }
 
+    /// Grant nothing new while `paused`: an attach waits for the builder's
+    /// quiesce (ADR 0012 stage 10, R8).
+    pub(super) fn pause(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    /// Whether nothing is granted and unpublished: no slot queued, no build
+    /// running. What an attach waits for.
+    pub(super) fn is_quiet(&self) -> bool {
+        self.slots.is_empty() && self.flights.is_empty()
+    }
+
     /// A build may start as far as this run goes: the queue has room and no
     /// build failed. The permit is the gate's to give.
     fn has_room(&self) -> bool {
@@ -745,7 +761,7 @@ impl Builds {
         backfill: Option<&[DocumentId]>,
     ) -> Option<Grant<L>> {
         self.refused = None;
-        if !self.has_room() {
+        if self.paused || !self.has_room() {
             self.leave_lines();
             return None;
         }

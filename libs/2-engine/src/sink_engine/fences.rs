@@ -89,6 +89,30 @@ impl Fences {
             .or_insert((position, Entry::Writing));
     }
 
+    /// Forget what `lane` was writing (ADR 0012 stage 10, R6): a detached
+    /// lane's items are acknowledged unwritten. Its last applied key stays,
+    /// so an item from before the detach, delivered again, is never entered.
+    pub(super) fn forget_lane(&mut self, lane: &LaneKey) {
+        if let Some(fences) = self.lanes.get_mut(lane) {
+            let deferred = fences
+                .entries
+                .values()
+                .filter(|(_, entry)| {
+                    matches!(
+                        entry,
+                        Entry::Written {
+                            due: Due::WithACaughtUpWrite,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            self.deferred = self.deferred.saturating_sub(deferred);
+            fences.entries.clear();
+        }
+        self.covered_below.remove(lane);
+    }
+
     /// How many writes have returned: what a write granted now covers if it
     /// is caught up.
     pub(super) fn returned(&self) -> u64 {

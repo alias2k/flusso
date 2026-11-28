@@ -14,6 +14,10 @@
 //! - **Restaging**: the index's target is gone. Once nothing of the lane is
 //!   in flight its index is staged again ([`Sink::ensure_index`]) and a
 //!   backfill requested, then the lane opens and writes its items again.
+//! - **Detached** (ADR 0012 stage 10): asked for, a parked lane detaches at
+//!   its next refused probe and a restaging one at its next due staging,
+//!   once the sink recorded it. Nothing of it is written; it is out of the
+//!   slot's minimum, and everything it receives is acknowledged unwritten.
 //!
 //! **Fresh builds** (stage 9, second half, §14.1 of the note). A lane parked
 //! on a refusal doesn't write its item again: when its probe is due it asks
@@ -33,6 +37,8 @@
 //!   │                           │  ▲
 //!   │                           └──┘ probe refused: backoff × 2
 //!   └──missing──▶ restaging ──staged──▶ open
+//!
+//! parked / restaging ──asked, refused again, recorded──▶ detached
 //! ```
 //!
 //! [`Sink::ensure_index`]: sink::Sink::ensure_index
@@ -96,17 +102,35 @@ pub enum LaneHealth {
         /// What the destination said.
         reason: String,
     },
+    /// Detached from the slot's minimum (ADR 0012 stage 10): nothing of it
+    /// is written, everything it receives is acknowledged unwritten, and
+    /// reads of its index are frozen at the detach.
+    Detached {
+        /// When it detached, in this process.
+        since: Instant,
+        /// The refusal it detached on, or what staging found.
+        reason: String,
+        /// Where reads of the index stood at the detach, in the source's own
+        /// text, when known: a fence vouches no further (S3).
+        through: Option<String>,
+    },
 }
 
 impl LaneHealth {
     /// The health's name in `/status`: `open`, `refused` or `blocked` (the
-    /// two ways a lane parks), or `restaging`.
+    /// two ways a lane parks), `restaging`, or `detached`.
     pub fn kind(&self) -> &'static str {
         match self {
             LaneHealth::Open => "open",
             LaneHealth::Parked { reason, .. } => reason.kind(),
             LaneHealth::Restaging { .. } => "restaging",
+            LaneHealth::Detached { .. } => "detached",
         }
+    }
+
+    /// Whether the lane is detached from the slot's minimum.
+    pub fn is_detached(&self) -> bool {
+        matches!(self, LaneHealth::Detached { .. })
     }
 
     /// Whether the lane is written as usual.
@@ -133,6 +157,13 @@ pub enum ParkReason {
         /// What the destination said.
         reason: String,
     },
+    /// The index's seed is held: its new generation is built, and the
+    /// generation reads see can't be retired, since the destination blocks
+    /// it (#479). The new generation waits for the block to lift.
+    SeedBlocked {
+        /// The block, and what lifts it.
+        reason: String,
+    },
 }
 
 impl ParkReason {
@@ -140,7 +171,7 @@ impl ParkReason {
     pub fn kind(&self) -> &'static str {
         match self {
             ParkReason::Refused { .. } => "refused",
-            ParkReason::Blocked { .. } => "blocked",
+            ParkReason::Blocked { .. } | ParkReason::SeedBlocked { .. } => "blocked",
         }
     }
 
@@ -148,7 +179,7 @@ impl ParkReason {
     pub fn label(&self) -> &'static str {
         match self {
             ParkReason::Refused { .. } => "refused",
-            ParkReason::Blocked { .. } => "blocked",
+            ParkReason::Blocked { .. } | ParkReason::SeedBlocked { .. } => "blocked",
         }
     }
 }
@@ -163,7 +194,9 @@ impl std::fmt::Display for ParkReason {
                 }
                 Ok(())
             }
-            ParkReason::Blocked { reason } => write!(f, "blocked: {reason}"),
+            ParkReason::Blocked { reason } | ParkReason::SeedBlocked { reason } => {
+                write!(f, "blocked: {reason}")
+            }
         }
     }
 }
@@ -243,6 +276,36 @@ pub(crate) struct LaneState {
     /// not known to be gone. It is staged again with ensure's rules, keeping
     /// an intact target's backfill (#471). Cleared when the lane opens.
     pub(crate) unensured: bool,
+    /// A detach was asked for (ADR 0012 stage 10, R3): it happens at the
+    /// lane's next probe the destination refuses, or its next staging. Dropped
+    /// when the lane opens.
+    pub(crate) detach_asked: bool,
+    /// A detach's record failed, and may have landed all the same (a
+    /// timeout after the write): before the lane's next probe, a record
+    /// found is deleted and the marker put back, so a lane that opens is
+    /// never detached by the next staging (§5).
+    pub(crate) detach_unsure: bool,
+    /// The attach attempt the lane waits for (R8): its `Attached` opens it.
+    /// Outlives a run, so a run restarted meanwhile asks again.
+    pub(crate) attaching: Option<u64>,
+    /// Rebuilding after a detach (ADR 0012 stage 10, R1): the rebuilds its
+    /// record counts as started. Cleared by the seed, or a detach again.
+    pub(crate) rebuilding: Option<u64>,
+    /// The target the rebuild's generation was ensured as: its backfill is
+    /// asked for it once the lane is attached.
+    pub(crate) rebuild_target: Option<sink::TargetId>,
+    /// A reattach (O16) whose record is gone, waiting for its `Attached`:
+    /// every gap kept, the last the one it accepted, its `to` still unknown.
+    /// Written with `to` once the lane opens.
+    pub(crate) reattach: Option<Vec<sink::Gap>>,
+    /// A rebuild asked for could not begin (§6a item 2): it is owed, and
+    /// tried again at `due`, on the staging backoff. Dropped by a detach
+    /// again and once one begins.
+    pub(crate) rebuild_owed: bool,
+    /// Taken as detached at a process's start while what the records asked
+    /// (a demotion, a detach) waited for the slot: the first read while the
+    /// slot is held decides it as if attached (`decide`).
+    pub(crate) undecided: bool,
 }
 
 /// A reindex whose staging failed, waiting for its retry.
@@ -286,6 +349,14 @@ impl LaneState {
             parked_item: None,
             reindex: None,
             unensured: false,
+            detach_asked: false,
+            detach_unsure: false,
+            attaching: None,
+            rebuilding: None,
+            rebuild_target: None,
+            reattach: None,
+            rebuild_owed: false,
+            undecided: false,
         }
     }
 
@@ -294,9 +365,13 @@ impl LaneState {
     fn reset(&mut self) {
         let superseded = std::mem::take(&mut self.superseded);
         let held_for_seed = std::mem::take(&mut self.held_for_seed);
+        let rebuilding = self.rebuilding.take();
+        let rebuild_target = self.rebuild_target.take();
         *self = Self::new(self.schedule);
         self.superseded = superseded;
         self.held_for_seed = held_for_seed;
+        self.rebuilding = rebuilding;
+        self.rebuild_target = rebuild_target;
     }
 }
 
@@ -334,7 +409,9 @@ impl LaneState {
                 };
                 true
             }
-            LaneHealth::Parked { .. } | LaneHealth::Restaging { .. } => false,
+            LaneHealth::Parked { .. }
+            | LaneHealth::Restaging { .. }
+            | LaneHealth::Detached { .. } => false,
         }
     }
 
@@ -343,7 +420,10 @@ impl LaneState {
     /// staging backoff, doubled up to the schedule's longest, when none did,
     /// whether or not the lane parked in between.
     pub(crate) fn restage(&mut self, reason: String, now: Instant) -> bool {
-        if matches!(self.health, LaneHealth::Restaging { .. }) {
+        if matches!(
+            self.health,
+            LaneHealth::Restaging { .. } | LaneHealth::Detached { .. }
+        ) {
             return false;
         }
         if self.unproven {
@@ -373,13 +453,14 @@ impl LaneState {
     /// one of its writes lands. How long it was not open.
     pub(crate) fn reopen(&mut self, now: Instant) -> Option<Duration> {
         let since = match &self.health {
-            LaneHealth::Open => return None,
+            LaneHealth::Open | LaneHealth::Detached { .. } => return None,
             LaneHealth::Parked { since, .. } | LaneHealth::Restaging { since, .. } => *since,
         };
         self.health = LaneHealth::Open;
         self.probes = 0;
         self.unproven = true;
         self.unensured = false;
+        self.detach_asked = false;
         Some(now.saturating_duration_since(since))
     }
 
@@ -394,12 +475,70 @@ impl LaneState {
     }
 
     /// Whether the engine keeps this state: a lane not open, or one keeping
-    /// its backoff.
+    /// its backoff, or asked to detach.
     pub(crate) fn is_kept(&self) -> bool {
         !self.is_open()
             || self.unproven
             || !self.superseded.is_empty()
             || !self.held_for_seed.is_empty()
+            || self.detach_asked
+            || self.detach_unsure
+            || self.attaching.is_some()
+            || self.rebuilding.is_some()
+    }
+
+    /// Its `Attached` took effect: the lane is open, written as usual from
+    /// the next item on. How long it was detached.
+    pub(crate) fn attached(&mut self, now: Instant) -> Option<Duration> {
+        let LaneHealth::Detached { since, .. } = &self.health else {
+            return None;
+        };
+        let since = *since;
+        let rebuilding = self.rebuilding.take();
+        let rebuild_target = self.rebuild_target.take();
+        *self = Self::new(self.schedule);
+        self.rebuilding = rebuilding;
+        self.rebuild_target = rebuild_target;
+        Some(now.saturating_duration_since(since))
+    }
+
+    /// Whether the lane is parked or being staged again: what the run's
+    /// probes and stagings look at. A detached lane is neither.
+    pub(crate) fn is_unhealthy(&self) -> bool {
+        matches!(
+            self.health,
+            LaneHealth::Parked { .. } | LaneHealth::Restaging { .. }
+        )
+    }
+
+    /// Detach the lane for `reason` (R6): whatever it kept of its parking,
+    /// its fresh builds, a reindex it was owed and what a reindex left it
+    /// holding goes; its schedule stays. Whether it wasn't detached already.
+    /// A rebuild of the detached lane could not begin for `why`: owed, tried
+    /// again after the staging backoff, doubled each time; the lane's reason
+    /// says so. Whether the lane is detached.
+    pub(crate) fn rebuild_failed(&mut self, why: &str, now: Instant) -> bool {
+        self.restage_failed(now);
+        let retry_in = self.due.saturating_duration_since(now);
+        let LaneHealth::Detached { reason, .. } = &mut self.health else {
+            return false;
+        };
+        *reason = format!("the rebuild could not begin: {why}; tried again in {retry_in:?}");
+        self.rebuild_owed = true;
+        true
+    }
+
+    pub(crate) fn detach(&mut self, reason: String, through: Option<String>, now: Instant) -> bool {
+        if self.health.is_detached() {
+            return false;
+        }
+        *self = Self::new(self.schedule);
+        self.health = LaneHealth::Detached {
+            since: now,
+            reason,
+            through,
+        };
+        true
     }
 
     /// A reindex could not stage (X15): the lane is owed it, `restaging` with
@@ -411,9 +550,9 @@ impl LaneState {
             || self.reindex.is_some_and(|owed| owed.parked);
         let (was_open, since) = match &self.health {
             LaneHealth::Open => (true, now),
-            LaneHealth::Parked { since, .. } | LaneHealth::Restaging { since, .. } => {
-                (false, *since)
-            }
+            LaneHealth::Parked { since, .. }
+            | LaneHealth::Restaging { since, .. }
+            | LaneHealth::Detached { since, .. } => (false, *since),
         };
         self.reindex = Some(OwedReindex { parked });
         self.rebuild = None;
@@ -472,7 +611,7 @@ impl LaneState {
     /// Open: a probe landed or the index is staged. How long it was not.
     pub(crate) fn open(&mut self, now: Instant) -> Option<Duration> {
         let since = match &self.health {
-            LaneHealth::Open => return None,
+            LaneHealth::Open | LaneHealth::Detached { .. } => return None,
             LaneHealth::Parked { since, .. } | LaneHealth::Restaging { since, .. } => *since,
         };
         self.reset();

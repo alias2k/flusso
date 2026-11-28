@@ -645,10 +645,17 @@ impl IngestEngine {
         let mut keyed: Option<(&IndexName, ItemKey)> = None;
         let groups = group_by_index(envelopes);
         let holds = self.holds(&groups, charges);
+        // R7: a detached lane gets no item, only the skip; one atomic load
+        // while none is.
+        let detached = self.progress.any_detached();
         for (lane, producer) in lanes {
             let Some(step) = steps.get(&lane.index).copied() else {
                 continue;
             };
+            if detached && self.progress.is_detached(lane) {
+                skipped.push((lane, step));
+                continue;
+            }
             match groups.get(&lane.index) {
                 Some(group) => {
                     let item_key = match keyed {
@@ -732,12 +739,17 @@ impl IngestEngine {
         let backfill_holds = self.holds(&groups, charges);
         let documents: usize = groups.values().map(|group| group.len()).sum();
         let mut publishes = Vec::new();
+        let detached = self.progress.any_detached();
         for (sink, indexes) in requested {
             for (index, ticket) in indexes {
                 let Some(group) = groups.get(index) else {
                     continue;
                 };
                 let key = LaneKey::new(index.clone(), sink.clone());
+                // R7: nothing of a walk reaches a detached lane.
+                if detached && self.progress.is_detached(&key) {
+                    continue;
+                }
                 let Some((key, producer)) = lanes.get_key_value(&key) else {
                     tracing::warn!(%sink, %index, "snapshot requested for a lane that does not exist; dropping its slice");
                     continue;

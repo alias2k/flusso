@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ff96a8b827626237bb16a30d00623436704711176794d7f7ebc73b012b29f500 # shrinks to events = [OpenOk { jump: 0 }, OpenOk { jump: 0 }, Wait { at: 0 }]
+cc 49846528eae447720a7fb588b10be47eca9462c1124b4fb120d360b84995cff4 # shrinks to events = [OpenOk { jump: 10 }, ReadBegins, ReadEnds, Wait { at: 0 }]

@@ -17,6 +17,9 @@ struct NumberedSource {
     state: Mutex<Numbered>,
     listeners: Mutex<Vec<AdvanceListener>>,
     closed: AtomicBool,
+    /// When set, the source counts the streams it opened (m-1).
+    counts_streams: AtomicBool,
+    streams: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for NumberedSource {
@@ -31,9 +34,25 @@ impl std::fmt::Debug for NumberedSource {
 struct Numbered {
     next_seq: u64,
     horizon: u64,
+    /// What `confirm` handed over last, in source positions.
+    confirmed: u64,
 }
 
 impl NumberedSource {
+    /// A capture a new process opens, closed until its stream opens, its
+    /// horizon and confirmed position where the slot confirmed (`at`), as
+    /// the Postgres capture starts at the slot's `confirmed_flush_lsn`.
+    fn starting_at(at: u64) -> Self {
+        let source = Self::default();
+        {
+            let mut state = source.state.lock().unwrap();
+            state.horizon = at;
+            state.confirmed = at;
+        }
+        source.close();
+        source
+    }
+
     /// A single-change commit at source position `at`.
     fn emit(&self, at: u64) -> Position {
         let mut state = self.state.lock().unwrap();
@@ -55,6 +74,21 @@ impl NumberedSource {
     fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
     }
+
+    /// What `landed` stands for, as the Postgres capture answers it: `Idle`
+    /// is its horizon while it emitted nothing, else what it confirmed
+    /// (`ack.rs`), never below where its stream started.
+    fn answer(&self, landed: Landed) -> u64 {
+        let state = self.state.lock().unwrap();
+        match landed {
+            Landed::Before(oldest) => oldest.fence_before,
+            Landed::Through(last) if last.seq + 1 == state.next_seq => state.horizon,
+            Landed::Through(last) => last.confirm_through,
+            Landed::Idle if state.next_seq == 0 => state.horizon.max(state.confirmed),
+            Landed::Idle => state.confirmed,
+            Landed::Free => state.horizon,
+        }
+    }
 }
 
 #[async_trait]
@@ -68,10 +102,24 @@ impl ChangeCapture for NumberedSource {
     }
 
     async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
+        self.streams.fetch_add(1, Ordering::SeqCst);
         Ok(Box::pin(futures::stream::empty()))
     }
 
-    fn confirm(&self, _: Landed) {}
+    fn streams_opened(&self) -> Option<u64> {
+        self.counts_streams
+            .load(Ordering::SeqCst)
+            .then(|| self.streams.load(Ordering::SeqCst))
+    }
+
+    fn confirm(&self, landed: Landed) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let at = self.answer(landed);
+        let mut state = self.state.lock().unwrap();
+        state.confirmed = state.confirmed.max(at);
+    }
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {
         text.parse()
@@ -83,14 +131,7 @@ impl ChangeCapture for NumberedSource {
         if self.closed.load(Ordering::SeqCst) {
             return None;
         }
-        let state = self.state.lock().unwrap();
-        Some(SourcePosition(match landed {
-            Landed::Before(oldest) => oldest.fence_before,
-            Landed::Through(last) if last.seq + 1 == state.next_seq => state.horizon,
-            Landed::Through(last) => last.confirm_through,
-            Landed::Idle if state.next_seq == 0 => state.horizon,
-            Landed::Idle => 0,
-        }))
+        Some(SourcePosition(self.answer(landed)))
     }
 
     fn on_advance(&self, listener: AdvanceListener) {
@@ -160,8 +201,17 @@ fn fence(sinks: &[&str]) -> Rig {
     fence_over(&["users"], sinks)
 }
 
-/// A fence over every lane of `indexes` × `sinks`.
+/// A fence over every lane of `indexes` × `sinks`, every sink staged.
 fn fence_over(indexes: &[&str], sinks: &[&str]) -> Rig {
+    let rig = fence_unstaged(indexes, sinks);
+    for on in sinks {
+        rig.observer.on_sink_started(&sink(on));
+    }
+    rig
+}
+
+/// A fence over every lane of `indexes` × `sinks`, no sink staged yet.
+fn fence_unstaged(indexes: &[&str], sinks: &[&str]) -> Rig {
     let source = Arc::new(NumberedSource::default());
     let lanes: Vec<LaneKey> = indexes
         .iter()
@@ -174,9 +224,6 @@ fn fence_over(indexes: &[&str], sinks: &[&str]) -> Rig {
         lanes.iter().cloned(),
     );
     let observer = FenceObserver::new(fence.clone());
-    for on in sinks {
-        observer.on_sink_started(&sink(on));
-    }
     Rig {
         fence,
         source,
@@ -977,4 +1024,1081 @@ async fn a_fence_on_a_healthy_sink_passes_while_its_index_build_waits_on_a_full_
         Some(Landed::Before(change)),
         "the full sibling still holds itself back"
     );
+}
+
+/// The health a detach gives a lane, as the sink engine reports it.
+fn detached() -> engine::LaneHealth {
+    engine::LaneHealth::Detached {
+        since: Instant::now(),
+        reason: "blocked: index write (api)".to_owned(),
+        through: None,
+    }
+}
+
+/// A detached lane (ADR 0012 stage 10, R5, O2): heard before it leaves the
+/// slot's minimum, its fence freezes at what it had reached. A wait at or
+/// before that passes; one past it is answered `detached` at once, not at
+/// its timeout, whatever the progress answers for the lane since.
+#[tokio::test(start_paused = true)]
+async fn a_detached_lane_answers_at_once() {
+    let rig = fence(&["primary"]);
+    let before = rig.source.emit(10);
+    rig.route(before);
+    rig.applied("primary", before);
+    rig.searchable("primary", before);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    rig.source.idle_to(30);
+
+    for level in [FenceLevel::Applied, FenceLevel::Searchable] {
+        assert_eq!(
+            rig.fence.wait(&request("10", level, None)).await,
+            reached("10"),
+            "{level}: frozen at what it had reached"
+        );
+        let started = Instant::now();
+        assert_eq!(
+            rig.fence.wait(&request("20", level, None)).await,
+            unserved("10", &[("users", "primary", Unserved::Detached)]),
+            "{level}: past the detach"
+        );
+        assert_eq!(started.elapsed(), Duration::ZERO, "{level}: at once");
+    }
+}
+
+/// A lane detached before this process started has nothing frozen: every
+/// wait on it is answered `detached` at once, never "not following live
+/// changes", and a wait naming no index fails with it (O14). A wait naming
+/// another index passes.
+#[tokio::test(start_paused = true)]
+async fn a_lane_detached_before_the_start_answers_detached_at_once() {
+    // Staging finds the record before the sink is started.
+    let rig = fence_unstaged(&["users", "orders"], &["primary"]);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    rig.observer.on_sink_started(&sink("primary"));
+    rig.source.close();
+    assert_eq!(
+        rig.fence
+            .wait(&on_indexes("1", FenceLevel::Applied, &["users"]))
+            .await,
+        unserved("", &[("users", "primary", Unserved::Detached)]),
+    );
+
+    let rig = fence_unstaged(&["users", "orders"], &["primary"]);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    rig.observer.on_sink_started(&sink("primary"));
+    let orders = LaneKey::new(index("orders"), sink("primary"));
+    let change = rig.source.emit(20);
+    rig.progress
+        .published(&orders, stream::ItemKey::new(change.seq), change, change);
+    rig.applied_on(&orders, change);
+    assert!(matches!(
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
+        Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Detached)]
+    ));
+    assert_eq!(
+        rig.fence
+            .wait(&on_indexes("20", FenceLevel::Applied, &["orders"]))
+            .await,
+        reached("20")
+    );
+}
+
+/// A backfill asked for a detached lane keeps its fence `detached`: reads
+/// stay frozen until the lane is attached again (review m5).
+#[tokio::test(start_paused = true)]
+async fn a_backfill_asked_for_a_detached_lane_keeps_it_detached() {
+    let rig = fence(&["primary"]);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    assert!(matches!(
+        rig.fence
+            .wait(&request("5", FenceLevel::Applied, None))
+            .await,
+        Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Detached)]
+    ));
+}
+
+/// A lane that opens again after a detach (its attach, review of step 3,
+/// m3) serves its writes from there: a position it reaches after the attach
+/// is vouched for. Step 4 narrows this for a rebuild and a reattach.
+#[tokio::test(start_paused = true)]
+async fn a_lane_attached_again_serves_its_writes() {
+    let rig = fence(&["primary"]);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    assert_eq!(
+        rig.progress.attach(&lane("primary"), 1),
+        engine::Attach::Attached
+    );
+    rig.observer
+        .on_lane_health(&lane("primary"), &engine::LaneHealth::Open);
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
+    assert_eq!(
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
+        reached("20")
+    );
+}
+
+/// Review of step 3, S3, for a rebuild: from the rebuild's start to its
+/// seed the fence serves `rebuilding`, keeping what it froze at the detach,
+/// even once the lane is attached and open: a change dropped while detached
+/// is never vouched for; at the seed reads see every write.
+#[tokio::test(start_paused = true)]
+async fn a_fence_on_a_rebuilding_lane_vouches_for_no_change_dropped_while_detached() {
+    let rig = fence(&["primary"]);
+    let before = rig.source.emit(10);
+    rig.route(before);
+    rig.applied("primary", before);
+    rig.searchable("primary", before);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    let dropped = rig.source.emit(20);
+    rig.observer
+        .on_index_rebuilding(&sink("primary"), &index("users"));
+    assert_eq!(
+        rig.progress.attach(&lane("primary"), 1),
+        engine::Attach::Attached
+    );
+    rig.observer
+        .on_lane_health(&lane("primary"), &engine::LaneHealth::Open);
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    let after = rig.source.emit(30);
+    rig.route(after);
+    rig.applied("primary", after);
+    let _ = dropped;
+    assert_eq!(
+        rig.fence
+            .wait(&request("10", FenceLevel::Applied, None))
+            .await,
+        reached("10"),
+        "what the serving generation held"
+    );
+    assert!(
+        matches!(
+            rig.fence
+                .wait(&request("20", FenceLevel::Applied, None))
+                .await,
+            Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Rebuilding)]
+        ),
+        "the change dropped while detached"
+    );
+    rig.observer
+        .on_index_seeded(&sink("primary"), &index("users"));
+    assert_eq!(
+        rig.fence
+            .wait(&request("30", FenceLevel::Applied, None))
+            .await,
+        reached("30")
+    );
+}
+
+fn gap(from: Option<&str>, to: Option<&str>) -> sink::Gap {
+    sink::Gap {
+        from: from.map(str::to_owned),
+        to: to.map(str::to_owned),
+    }
+}
+
+fn in_gap(position: &str, from: &str, to: Option<&str>) -> Result<FenceOutcome, FenceError> {
+    Ok(FenceOutcome::InGap {
+        position: position.to_owned(),
+        lanes: vec![(
+            lane("primary"),
+            FenceGap {
+                from: Some(from.to_owned()),
+                to: to.map(str::to_owned),
+            },
+        )],
+    })
+}
+
+/// Review of step 3, S3, for `reattach --accept-gap`: the lane vouches as
+/// usual from its attach on and as before up to its detach; a position
+/// inside the gap between them is refused at once, naming the gap. After a
+/// restart the gap is heard from the sink's own records, and refuses the
+/// same positions.
+#[tokio::test(start_paused = true)]
+async fn a_reattached_lane_vouches_only_from_its_attach() {
+    let rig = fence(&["primary"]);
+    let before = rig.source.emit(10);
+    rig.route(before);
+    rig.applied("primary", before);
+    rig.searchable("primary", before);
+    rig.observer.on_lane_health(
+        &lane("primary"),
+        &engine::LaneHealth::Detached {
+            since: Instant::now(),
+            reason: "blocked".to_owned(),
+            through: Some("10".to_owned()),
+        },
+    );
+    rig.progress.detach(&lane("primary"));
+    let dropped = rig.source.emit(20);
+    rig.route(dropped);
+    rig.progress.routed(dropped);
+    assert_eq!(
+        rig.progress.attach(&lane("primary"), 1),
+        engine::Attach::Attached
+    );
+    // What the sink engine hears when it takes `Attached`: the gap ends where
+    // the lane stands, before it opens.
+    let to = rig
+        .source
+        .reached(rig.progress.lane(&lane("primary"), Level::Applied).unwrap())
+        .unwrap();
+    assert_eq!(to, SourcePosition(20));
+    rig.observer
+        .on_lane_gaps(&lane("primary"), &[gap(Some("10"), Some("20"))]);
+    rig.observer
+        .on_lane_health(&lane("primary"), &engine::LaneHealth::Open);
+    let after = rig.source.emit(30);
+    rig.route(after);
+    rig.applied("primary", after);
+    rig.searchable("primary", after);
+
+    for level in [FenceLevel::Applied, FenceLevel::Searchable] {
+        assert_eq!(
+            rig.fence.wait(&request("10", level, None)).await,
+            reached("30"),
+            "{level}: before the detach"
+        );
+        let started = Instant::now();
+        for inside in ["11", "20"] {
+            assert_eq!(
+                rig.fence.wait(&request(inside, level, None)).await,
+                in_gap(inside, "10", Some("20")),
+                "{level}: {inside} is inside the gap"
+            );
+        }
+        assert_eq!(started.elapsed(), Duration::ZERO, "{level}: at once");
+        for after in ["21", "30"] {
+            assert_eq!(
+                rig.fence.wait(&request(after, level, None)).await,
+                reached("30"),
+                "{level}: {after} is after the attach"
+            );
+        }
+    }
+
+    // A restart: staging hears the gap from the seed marker.
+    let rig = fence_unstaged(&["users"], &["primary"]);
+    rig.observer
+        .on_lane_gaps(&lane("primary"), &[gap(Some("10"), Some("20"))]);
+    rig.observer.on_sink_started(&sink("primary"));
+    let change = rig.source.emit(40);
+    rig.route(change);
+    rig.applied("primary", change);
+    assert_eq!(
+        rig.fence
+            .wait(&request("15", FenceLevel::Applied, None))
+            .await,
+        in_gap("15", "10", Some("20"))
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("40", FenceLevel::Applied, None))
+            .await,
+        reached("40")
+    );
+}
+
+/// A gap whose end is not known yet (the reattach died between deleting its
+/// record and the attach) refuses every position past its start, until it
+/// is heard completed. A seed (a reindex) ends a gap: the index holds every
+/// change again.
+#[tokio::test(start_paused = true)]
+async fn an_open_gap_refuses_everything_past_its_start_and_a_seed_ends_it() {
+    let rig = fence(&["primary"]);
+    let change = rig.source.emit(50);
+    rig.route(change);
+    rig.applied("primary", change);
+    rig.observer
+        .on_lane_gaps(&lane("primary"), &[gap(Some("10"), None)]);
+    assert_eq!(
+        rig.fence
+            .wait(&request("50", FenceLevel::Applied, None))
+            .await,
+        in_gap("50", "10", None)
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("10", FenceLevel::Applied, None))
+            .await,
+        reached("50")
+    );
+    rig.observer
+        .on_lane_gaps(&lane("primary"), &[gap(Some("10"), Some("40"))]);
+    assert_eq!(
+        rig.fence
+            .wait(&request("50", FenceLevel::Applied, None))
+            .await,
+        reached("50")
+    );
+    rig.observer
+        .on_index_seeded(&sink("primary"), &index("users"));
+    assert_eq!(
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
+        reached("50")
+    );
+}
+
+/// S3: a detach freezes the fence where the sink recorded reads stood, the
+/// start of a later reattach's gap, even when the lane reached further by
+/// the time the detach was heard: what is refused after a reattach starts
+/// exactly where vouching stopped.
+#[tokio::test(start_paused = true)]
+async fn a_detach_freezes_where_the_sink_recorded_it() {
+    let rig = fence(&["primary"]);
+    let change = rig.source.emit(10);
+    rig.route(change);
+    rig.applied("primary", change);
+    rig.source.idle_to(15);
+    rig.observer.on_lane_health(
+        &lane("primary"),
+        &engine::LaneHealth::Detached {
+            since: Instant::now(),
+            reason: "blocked".to_owned(),
+            through: Some("12".to_owned()),
+        },
+    );
+    rig.progress.detach(&lane("primary"));
+    assert_eq!(
+        rig.fence
+            .wait(&request("12", FenceLevel::Applied, None))
+            .await,
+        reached("12")
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("13", FenceLevel::Applied, None))
+            .await,
+        unserved("12", &[("users", "primary", Unserved::Detached)])
+    );
+}
+
+/// O29: once the live stream opens, a sink that hasn't read its detach
+/// records since vouches for nothing: what it read before the slot was held
+/// is advisory. Its read lets the wait through.
+#[tokio::test(start_paused = true)]
+async fn a_sink_that_has_not_read_its_records_since_the_slot_opened_vouches_for_nothing() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
+    assert_eq!(
+        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        reached("20"),
+        "the slot never opened: nothing to read again"
+    );
+    opened(&rereads).await;
+    let after = rig.source.emit(30);
+    rig.route(after);
+    rig.applied("primary", after);
+    assert_eq!(
+        fence.wait(&request("30", FenceLevel::Applied, None)).await,
+        unserved("30", &[("users", "primary", Unserved::Starting)])
+    );
+    rereads.read(&lane("primary"), rereads.read_begins());
+    assert_eq!(
+        fence.wait(&request("30", FenceLevel::Applied, None)).await,
+        reached("30")
+    );
+}
+
+/// Review of step 4, B1: a sink recording its read of the records wakes an
+/// open wait, which passes at once instead of at its timeout.
+#[tokio::test(start_paused = true)]
+async fn a_read_of_the_records_during_a_wait_lets_it_through_at_once() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
+    opened(&rereads).await;
+    let waiting = tokio::spawn({
+        let fence = fence.clone();
+        async move { fence.wait(&request("20", FenceLevel::Applied, None)).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let started = Instant::now();
+    rereads.read(&lane("primary"), rereads.read_begins());
+    assert_eq!(waiting.await.unwrap(), reached("20"));
+    assert!(started.elapsed() < Duration::from_secs(1), "at once");
+}
+
+/// Review of step 4, B1: an unread sink masks only a lane serving its
+/// writes. `Detached`, `Rebuilding` and `Backfilling` answer as themselves,
+/// since they vouch only for what this process saw applied (or nothing),
+/// which another process's detach can't take back.
+#[tokio::test(start_paused = true)]
+async fn an_unread_sink_still_answers_rebuilding_and_detached() {
+    let rig = fence(&["primary"]);
+    let gate = unread(&rig).await;
+    rig.observer
+        .on_index_rebuilding(&sink("primary"), &index("users"));
+    assert!(matches!(
+        gate.wait(&request("5", FenceLevel::Applied, None)).await,
+        Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Rebuilding)]
+    ));
+
+    let rig = fence(&["primary"]);
+    let gate = unread(&rig).await;
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    assert!(matches!(
+        gate.wait(&request("5", FenceLevel::Applied, None)).await,
+        Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Backfilling)]
+    ));
+
+    let rig = fence(&["primary"]);
+    let gate = unread(&rig).await;
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    let started = Instant::now();
+    assert!(matches!(
+        gate.wait(&request("5", FenceLevel::Applied, None)).await,
+        Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Detached)]
+    ));
+    assert_eq!(
+        started.elapsed(),
+        Duration::ZERO,
+        "detached answers at once"
+    );
+}
+
+/// The third re-check, item 2: an unread lane vouches for nothing. From the
+/// moment a new stream may answer until its records were read under that
+/// stream, it answers `starting`, even for a position this process applied
+/// before the opening; the read lets the wait through.
+#[tokio::test(start_paused = true)]
+async fn an_unread_lane_vouches_for_nothing_until_its_read() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    opened(&rereads).await;
+    rereads.read(&lane("primary"), rereads.read_begins());
+    let before = rig.source.emit(20);
+    rig.route(before);
+    rig.applied("primary", before);
+    assert_eq!(
+        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        reached("20")
+    );
+    opened(&rereads).await;
+    assert_eq!(
+        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        unserved("20", &[("users", "primary", Unserved::Starting)]),
+        "applied before the opening, still nothing until the read"
+    );
+    rereads.read(&lane("primary"), rereads.read_begins());
+    assert_eq!(
+        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        reached("20")
+    );
+}
+
+/// Review of step 4, the gap list: a lane reattached twice refuses a
+/// position inside either gap, each naming its own, and vouches as usual
+/// for one between them.
+#[tokio::test(start_paused = true)]
+async fn a_lane_with_two_gaps_vouches_between_them() {
+    let rig = fence(&["primary"]);
+    let change = rig.source.emit(50);
+    rig.route(change);
+    rig.applied("primary", change);
+    rig.observer.on_lane_gaps(
+        &lane("primary"),
+        &[gap(Some("10"), Some("20")), gap(Some("30"), Some("40"))],
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("15", FenceLevel::Applied, None))
+            .await,
+        in_gap("15", "10", Some("20"))
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("25", FenceLevel::Applied, None))
+            .await,
+        reached("50"),
+        "between the gaps"
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("35", FenceLevel::Applied, None))
+            .await,
+        in_gap("35", "30", Some("40"))
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("45", FenceLevel::Applied, None))
+            .await,
+        reached("50")
+    );
+}
+
+/// The slot opened: an opening whose new stream answers nothing new.
+async fn opened(rereads: &Rereads) {
+    rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+}
+
+/// The fourth re-check, m-1: a stream opened past `Rereads::open` (a second
+/// caller of `live`) is caught by the source's own count. Every lane answers
+/// `starting` while the source has opened more streams than the openings
+/// counted, instead of vouching from a stream the sinks never read under.
+#[tokio::test(start_paused = true)]
+async fn a_stream_opened_past_the_counted_openings_vouches_for_nothing() {
+    let rig = fence(&["primary"]);
+    rig.source.counts_streams.store(true, Ordering::SeqCst);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    let at = rig.source.emit(10);
+    rig.route(at);
+    rig.applied("primary", at);
+    rig.observer.on_sink_started(&sink("primary"));
+    let source = Arc::clone(&rig.source);
+    let _stream = rereads.open(source.live()).await.unwrap();
+    rereads.read(&lane("primary"), rereads.read_begins());
+    assert_eq!(
+        fence.wait(&request("10", FenceLevel::Applied, None)).await,
+        reached("10"),
+        "opened through Rereads::open and read"
+    );
+    let _bypass = rig.source.live().await.unwrap();
+    let after = rig.source.emit(20);
+    rig.route(after);
+    rig.applied("primary", after);
+    assert!(
+        matches!(
+            fence.wait(&request("20", FenceLevel::Applied, None)).await,
+            Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Starting)]
+        ),
+        "a stream opened past the count vouches for nothing"
+    );
+    let source = Arc::clone(&rig.source);
+    let _stream = rereads.open(source.live()).await.unwrap();
+    rereads.read(&lane("primary"), rereads.read_begins());
+    assert!(
+        matches!(
+            fence.wait(&request("20", FenceLevel::Applied, None)).await,
+            Ok(FenceOutcome::Unserved { .. })
+        ),
+        "the count stays ahead: the bypass is never forgotten"
+    );
+}
+
+/// Review of the step-4 fixes, B1': the new stream starts answering inside
+/// the opening, before it returns. A `/status` read there (which takes the
+/// lane's answer) never lets a wait pass past what this process applied
+/// under the previous stream: here nothing.
+#[tokio::test(start_paused = true)]
+async fn a_reached_answer_taken_before_the_opening_is_counted_never_vouches_past_the_old_stream() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    rereads
+        .open(async {
+            // The new stream answers the slot's confirmed position.
+            rig.source.idle_to(50);
+            let _ = fence.positions();
+            Ok::<(), ()>(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        unserved("50", &[("users", "primary", Unserved::Starting)])
+    );
+}
+
+/// Review of the step-4 fixes, B1': a wait while the opening is under way,
+/// the new stream already answering and the staging's read the last one,
+/// vouches for nothing new.
+#[tokio::test(start_paused = true)]
+async fn a_wait_between_the_stream_answering_and_the_opening_vouches_nothing_new() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    rereads.read(&lane("primary"), rereads.read_begins());
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let opening = tokio::spawn({
+        let rereads = Arc::clone(&rereads);
+        async move {
+            rereads
+                .open(async {
+                    let _ = released.await;
+                    Ok::<(), ()>(())
+                })
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    rig.source.idle_to(50);
+    assert_eq!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        unserved("50", &[("users", "primary", Unserved::Starting)])
+    );
+    let _ = release.send(());
+    opening.await.unwrap().unwrap();
+}
+
+/// Review of the step-4 fixes, B1': a read that began while the opening was
+/// under way doesn't count: only one begun once the slot is held does.
+#[tokio::test(start_paused = true)]
+async fn a_read_begun_during_the_opening_does_not_count() {
+    let rereads = Rereads::default();
+    let primary = lane("primary");
+    let mut during = None;
+    rereads
+        .open(async {
+            during = Some(rereads.read_begins());
+            Ok::<(), ()>(())
+        })
+        .await
+        .unwrap();
+    rereads.read(&primary, during.unwrap());
+    assert!(!rereads.current(&primary));
+    rereads.read(&primary, rereads.read_begins());
+    assert!(rereads.current(&primary));
+}
+
+/// The rig's fence over a sink unread since the slot opened.
+async fn unread(rig: &Rig) -> Fence {
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    opened(&rereads).await;
+    fence
+}
+
+/// Review of the step-4 fixes, S-c: a detach record without a readable
+/// `through`, adopted by the read once the slot is held, freezes the lane at
+/// what this process applied under the previous stream (here nothing),
+/// never at the new stream's start, which lies past the changes another
+/// process dropped.
+#[tokio::test(start_paused = true)]
+async fn an_adopted_detach_without_its_through_vouches_for_nothing_new() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    opened(&rereads).await;
+    rig.source.idle_to(50);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    let started = Instant::now();
+    assert_eq!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        unserved("", &[("users", "primary", Unserved::Detached)]),
+        "frozen at nothing, not at 50"
+    );
+    assert_eq!(started.elapsed(), Duration::ZERO, "at once");
+}
+
+/// A rebuild under way on `primary`'s `users`, frozen at 10 with the change at
+/// 20 dropped while detached; the detach heard again meanwhile (a staging
+/// re-announces it).
+fn rebuilding_heard_detached_again() -> Rig {
+    let rig = fence(&["primary"]);
+    let before = rig.source.emit(10);
+    rig.route(before);
+    rig.applied("primary", before);
+    rig.searchable("primary", before);
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig.progress.detach(&lane("primary"));
+    let _dropped = rig.source.emit(20);
+    rig.observer
+        .on_index_rebuilding(&sink("primary"), &index("users"));
+    rig.observer.on_lane_health(&lane("primary"), &detached());
+    rig
+}
+
+/// The fourth re-check's world property: a detach heard again while a
+/// rebuild waits for its attach keeps the lane rebuilding, so the attach
+/// never makes it vouch for what the old generation misses: after the attach
+/// a wait inside the drop is `rebuilding`, not vouched for, not `backfilling`.
+#[tokio::test(start_paused = true)]
+async fn a_detach_heard_again_during_a_rebuild_keeps_it_a_rebuild() {
+    let rig = rebuilding_heard_detached_again();
+    assert_eq!(
+        rig.progress.attach(&lane("primary"), 1),
+        engine::Attach::Attached
+    );
+    rig.observer
+        .on_lane_health(&lane("primary"), &engine::LaneHealth::Open);
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    let after = rig.source.emit(30);
+    rig.route(after);
+    rig.applied("primary", after);
+    assert_eq!(
+        rig.fence
+            .wait(&request("10", FenceLevel::Applied, None))
+            .await,
+        reached("10")
+    );
+    assert!(
+        matches!(
+            rig.fence
+                .wait(&request("20", FenceLevel::Applied, None))
+                .await,
+            Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Rebuilding)]
+        ),
+        "the change dropped while detached"
+    );
+}
+
+/// ... and only the rebuild's end makes the lane plain detached, frozen
+/// where the rebuild froze.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_that_ends_without_its_seed_leaves_the_lane_detached() {
+    let rig = rebuilding_heard_detached_again();
+    rig.observer.on_lane_rebuild(&lane("primary"), None, None);
+    assert_eq!(
+        rig.fence
+            .wait(&request("10", FenceLevel::Applied, None))
+            .await,
+        reached("10")
+    );
+    assert!(
+        matches!(
+            rig.fence
+                .wait(&request("20", FenceLevel::Applied, None))
+                .await,
+            Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Detached)]
+        ),
+        "frozen where the rebuild froze"
+    );
+}
+
+/// Review of the second fix round, B1'': the property over the fence and
+/// the O29 gate. Random sequences of what one sink and one lane go through
+/// run against a small model whose only rule is that a wait for `p` passes
+/// only if, at some moment while the sink counted as read and the lane was
+/// attached, the source answered that the lane had covered `p`.
+mod gate_property {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    enum Event {
+        /// The live stream opens; the new stream starts `jump` past where
+        /// the source stood. A jump past what this process applied is
+        /// another process confirming changes it dropped for the lane (it
+        /// had detached it), which the records then say.
+        OpenOk { jump: u64 },
+        /// An opening fails, the new stream having answered `jump` past.
+        OpenFailed { jump: u64 },
+        /// The sink engine begins reading its records.
+        ReadBegins,
+        /// That read ends: it counts for when it began.
+        ReadEnds,
+        /// The lane applies a change (only while the sink counts as read and
+        /// the lane is attached: the engine writes nothing else).
+        Apply,
+        /// The source reads on with nothing to deliver (idle WAL).
+        Horizon { by: u64 },
+        /// A `/status` read: every lane's answer taken.
+        Status,
+        /// A client waits for `at`.
+        Wait { at: u64 },
+    }
+
+    fn event() -> impl Strategy<Value = Event> {
+        prop_oneof![
+            (0u64..3).prop_map(|jump| Event::OpenOk { jump: jump * 10 }),
+            (0u64..3).prop_map(|jump| Event::OpenFailed { jump: jump * 10 }),
+            Just(Event::ReadBegins),
+            Just(Event::ReadEnds),
+            Just(Event::Apply),
+            (1u64..10).prop_map(|by| Event::Horizon { by }),
+            Just(Event::Status),
+            (0u64..120).prop_map(|at| Event::Wait { at }),
+        ]
+    }
+
+    /// The model: its own count of openings and reads, and what the lane
+    /// covered while read.
+    #[derive(Debug, Default)]
+    struct Model {
+        opened: u64,
+        held: u64,
+        holding: bool,
+        began: Option<u64>,
+        read: u64,
+        /// The highest position covered while read and attached.
+        covered: Option<u64>,
+        /// An opening jumped past what this process covered: the records
+        /// say the lane is detached, and the next read adopts it.
+        dropped: bool,
+        detached: bool,
+    }
+
+    impl Model {
+        fn current(&self) -> bool {
+            self.opened == 0 || (self.held == self.opened && self.read >= self.opened)
+        }
+    }
+
+    async fn run(events: Vec<Event>) -> std::result::Result<(), TestCaseError> {
+        let rig = fence(&["primary"]);
+        // A fresh process: nothing answers before the first opening.
+        rig.source.close();
+        let rereads = Arc::new(Rereads::default());
+        let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+        let primary = lane("primary");
+        let mut model = Model::default();
+        let mut horizon = 0u64;
+        let mut began = None;
+        for event in events {
+            match event {
+                Event::OpenOk { jump } | Event::OpenFailed { jump } => {
+                    let ok = matches!(event, Event::OpenOk { .. });
+                    let start = horizon + jump;
+                    if model.covered.is_none_or(|covered| start > covered) && jump > 0 {
+                        model.dropped = true;
+                    }
+                    model.opened += 1;
+                    model.holding = false;
+                    let opened = rereads
+                        .open(async {
+                            rig.source.closed.store(false, Ordering::SeqCst);
+                            rig.source.idle_to(start);
+                            if ok { Ok(()) } else { Err(()) }
+                        })
+                        .await;
+                    horizon = start;
+                    prop_assert_eq!(opened.is_ok(), ok);
+                    if ok {
+                        model.held = model.opened;
+                        model.holding = true;
+                    }
+                }
+                Event::ReadBegins => {
+                    began = Some(rereads.read_begins());
+                    model.began = Some(model.held);
+                }
+                Event::ReadEnds => {
+                    let (Some(at), Some(model_at)) = (began.take(), model.began.take()) else {
+                        continue;
+                    };
+                    // What the sink engine's read does: adopt a detach the
+                    // records hold, then count the read.
+                    if model.dropped && model_at == model.opened && model.held == model.opened {
+                        if !model.detached {
+                            rig.observer.on_lane_health(&lane("primary"), &detached());
+                            rig.progress.detach(&lane("primary"));
+                        }
+                        model.detached = true;
+                    }
+                    rereads.read(&primary, at);
+                    model.read = model.read.max(model_at);
+                }
+                Event::Apply => {
+                    if !model.current() || model.detached || !model.holding {
+                        continue;
+                    }
+                    horizon += 5;
+                    let change = rig.source.emit(horizon);
+                    rig.route(change);
+                    rig.applied("primary", change);
+                }
+                Event::Horizon { by } => {
+                    if !model.holding {
+                        continue;
+                    }
+                    horizon += by;
+                    rig.source.idle_to(horizon);
+                }
+                Event::Status => {
+                    let _ = fence.positions();
+                }
+                Event::Wait { at } => {
+                    let outcome = fence
+                        .wait(&FenceRequest {
+                            timeout: Duration::from_millis(10),
+                            ..request(&at.to_string(), FenceLevel::Applied, None)
+                        })
+                        .await;
+                    if let Ok(FenceOutcome::Reached { .. }) = outcome {
+                        prop_assert!(
+                            model.covered.is_some_and(|covered| at <= covered),
+                            "the fence passed a wait for {at}; the model covered {:?}: {model:?}",
+                            model.covered
+                        );
+                    }
+                }
+            }
+            // What the lane covers while read and attached.
+            if model.current() && !model.detached && model.opened > 0 {
+                let reached = rig
+                    .progress
+                    .lane(&lane("primary"), Level::Applied)
+                    .and_then(|landed| rig.source.reached(landed));
+                if let Some(SourcePosition(at)) = reached {
+                    model.covered = Some(model.covered.map_or(at, |covered| covered.max(at)));
+                }
+            }
+        }
+        // Liveness: read once the slot is held, attached, a change applied
+        // is vouched for.
+        if !model.detached {
+            if !model.holding || model.held != model.opened {
+                rereads.open(async { Ok::<(), ()>(()) }).await.unwrap();
+                rig.source.closed.store(false, Ordering::SeqCst);
+            }
+            rereads.read(&primary, rereads.read_begins());
+            let change = rig.source.emit(horizon + 5);
+            rig.route(change);
+            rig.applied("primary", change);
+            let at = (horizon + 5).to_string();
+            prop_assert_eq!(
+                fence.wait(&request(&at, FenceLevel::Applied, None)).await,
+                reached(&at),
+                "read and attached, an applied change is vouched for"
+            );
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: proptest_cases(512), ..ProptestConfig::default() })]
+
+        #[test]
+        fn a_lane_vouches_only_for_what_it_covered_while_its_sink_was_read(
+            events in prop::collection::vec(event(), 1..40)
+        ) {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap()
+                .block_on(run(events))?;
+        }
+    }
+}
+
+/// A fence over the rig whose source answers nothing until its first
+/// opening, which starts the stream at `start` (the slot's confirmed
+/// position, past changes another process dropped).
+async fn first_stream_at(rig: &Rig, start: u64) -> (Fence, Arc<Rereads>) {
+    rig.source.close();
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    rereads
+        .open(async {
+            rig.source.closed.store(false, Ordering::SeqCst);
+            rig.source.idle_to(start);
+            Ok::<(), ()>(())
+        })
+        .await
+        .unwrap();
+    (fence, rereads)
+}
+
+/// Review of the second fix round, B1'': the stream ends before the sink
+/// read its records and opens again. What the first opening froze (nothing)
+/// stays: the first stream's answer was its start, never vouched while read.
+#[tokio::test(start_paused = true)]
+async fn a_second_opening_before_the_read_keeps_what_the_first_froze() {
+    let rig = fence(&["primary"]);
+    let (fence, rereads) = first_stream_at(&rig, 50).await;
+    opened(&rereads).await;
+    assert_eq!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        unserved("50", &[("users", "primary", Unserved::Starting)])
+    );
+}
+
+/// Review of the second fix round, B1'': openings that fail before the
+/// sink read its records keep what the first froze too.
+#[tokio::test(start_paused = true)]
+async fn a_failed_opening_before_the_read_keeps_what_the_first_froze() {
+    let rig = fence(&["primary"]);
+    let (fence, rereads) = first_stream_at(&rig, 50).await;
+    for _ in 0..2 {
+        let failed = rereads.open(async { Err::<(), ()>(()) }).await;
+        assert!(failed.is_err());
+    }
+    assert_eq!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        unserved("50", &[("users", "primary", Unserved::Starting)])
+    );
+}
+
+/// The third re-check, item 1: reads count per lane. A lane whose records
+/// weren't read under the stream answers `starting`; its read sibling on the
+/// same sink vouches as usual, and a wait naming only the read lane passes.
+#[tokio::test(start_paused = true)]
+async fn an_unread_lane_never_holds_back_its_read_sibling() {
+    let rig = fence_over(&["orders", "users"], &["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    opened(&rereads).await;
+    let users = LaneKey::new(index("users"), sink("primary"));
+    let orders = LaneKey::new(index("orders"), sink("primary"));
+    rereads.read(&users, rereads.read_begins());
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied_on(&users, change);
+    rig.applied_on(&orders, change);
+    assert_eq!(
+        fence
+            .wait(&on_indexes("20", FenceLevel::Applied, &["users"]))
+            .await,
+        reached("20")
+    );
+    assert_eq!(
+        fence
+            .wait(&on_indexes("20", FenceLevel::Applied, &["orders"]))
+            .await,
+        unserved("20", &[("orders", "primary", Unserved::Starting)])
+    );
+}
+
+mod gate_world;
+
+/// Found by the world property (the third re-check, item 3): a rebuild that
+/// begins while the lane's records are unread (a reindex staged after an
+/// opening) freezes at nothing: what it answered then may be the new
+/// stream's start, past changes another process dropped.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_begun_while_unread_vouches_for_nothing() {
+    let rig = fence(&["primary"]);
+    let rereads = Arc::new(Rereads::default());
+    let fence = rig.fence.clone().with_rereads(Arc::clone(&rereads));
+    opened(&rereads).await;
+    rig.source.idle_to(50);
+    let _ = fence.positions();
+    rig.observer
+        .on_index_rebuilding(&sink("primary"), &index("users"));
+    assert!(matches!(
+        fence.wait(&request("40", FenceLevel::Applied, None)).await,
+        Ok(FenceOutcome::Unserved { ref lanes, .. }) if lanes == &[(lane("primary"), Unserved::Rebuilding)]
+    ));
+}
+
+/// `PROPTEST_CASES` when set, else `default`: a property's own count would
+/// otherwise override the variable.
+fn proptest_cases(default: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(default)
 }

@@ -7,6 +7,7 @@ What `flusso check` and the start of `flusso run` verify, every finding they can
 | An error that [stops the start](#what-stops-a-plain-start) | error | fails | refuses to start | refuses to start |
 | Any other schema error, or a [capture gap](#capture-gaps) | error | fails | starts, and reports it as an [`error` event and a gauge](#errors-a-start-goes-on-with) | refuses to start |
 | A [stale or unreadable lock](lock.md#checked-by-flusso-check) | error | fails | not looked at | not looked at |
+| [Two OpenSearch sinks on one cluster](#two-opensearch-sinks-on-one-cluster) | error | fails | refuses to start | refuses to start |
 | A warning | warning | passes | starts | starts |
 
 **An error means an index won't work as its schema says**: a document holds something other than the schema declares, misses changes, or isn't indexed at all. A warning means nothing is known to be wrong. `check` exits non-zero on any error; its exit code always matches its last line.
@@ -81,6 +82,7 @@ Every problem of one run is listed together, each naming the index, the field pa
 - **The source server.** That it is the primary and doesn't name flusso a synchronous standby: the same check that stops `run` at start, with the same message (see [Behind a synchronous standby](source-postgres.md#behind-a-synchronous-standby)).
 - **Capture.** That the publication streams every table an index reads, and that each table's replica identity logs what flusso needs: see [Capture gaps](#capture-gaps).
 - **The lock.** That `flusso.lock` is what the config compiles to: see [flusso.lock](lock.md#checked-by-flusso-check).
+- **The sinks.** That no two OpenSearch sinks write to one cluster: see [Two OpenSearch sinks on one cluster](#two-opensearch-sinks-on-one-cluster).
 
 The transform and link checks ask Postgres to try the operation. When it won't (the role has no `USAGE` on a type's schema, which reading the column doesn't need), the check is reported as `check_skipped`, a warning naming what wasn't checked and Postgres's reason, instead of either verdict. Grant the role `USAGE` on that schema to run it.
 
@@ -118,9 +120,10 @@ The transform and link checks ask Postgres to try the operation. When it won't (
 | `nullability_untracked` | `required` over a column of a view, materialized view or foreign table: Postgres records no nullability there, so flusso can't check it. | warning | | no |
 | `ignored_primary_key` | A join `primary_key` that names no column. | warning | | no |
 | `duplicate_field_name` | Two fields of one name whose documents still hold a value the index maps, or where nothing is known either way. | warning | yes | no |
-| `check_skipped` | A transform or link check Postgres wouldn't run; the message names what wasn't checked and why. | warning | | no |
+| `shared_cluster` | Two OpenSearch sinks that write to one cluster. | error | by URL | yes |
+| `check_skipped` | A transform or link check Postgres wouldn't run, or an OpenSearch sink not compared with the others for a shared cluster; the message names what wasn't checked and why. | warning | the sink check | no |
 
-The two gap kinds and the two lock kinds appear in the report's own sections and under `gaps` and `lock` in [JSON](#json-output), not under `diagnostics`.
+The two gap kinds and the two lock kinds appear in the report's own sections and under `gaps` and `lock` in [JSON](#json-output), not under `diagnostics`; the two sink kinds in a `Sinks` section and under `sinks`.
 
 ## Capture gaps
 
@@ -148,6 +151,45 @@ Publication coverage
 Run to stream every table
 ─────────────────────────
   ALTER PUBLICATION "flusso" ADD TABLE "public"."reviews";
+```
+
+## Two OpenSearch sinks on one cluster
+
+Every index, alias and seed marker flusso keeps on a cluster is named by the deployment's [`prefix`](config-toml.md#prefix), never by the sink. Two OpenSearch sinks of one deployment on the same cluster would write the same generations and share one seed marker per index, so they're refused. Sinks on different clusters, a backup cluster for one, are fine: [Several sinks](config-toml.md#several-sinks).
+
+With fewer than two OpenSearch sinks nothing is compared. Otherwise:
+
+| Where | Compared |
+| --- | --- |
+| `check --offline` | The URLs, normalized: scheme, host in lowercase, port (the scheme's default when none is written), path without a trailing `/`. Credentials aren't compared. |
+| `check`, and every `flusso run` | The URLs, then each cluster's `cluster_uuid`, read from `GET /`, so two URLs that reach one cluster (a load balancer and a node, say) are caught too. Every cluster is asked at once, each for at most 10 s. `run` asks once it has bound its HTTP listeners, before it connects to Postgres. |
+
+A shared pair is an error:
+
+```text
+Sinks
+─────
+  ✗ [sinks.primary] and [sinks.backup] write to the same OpenSearch cluster (both answer cluster_uuid 3N9kD0QeR1yTzS5x_w2b1A): every index, alias and seed marker flusso keeps there is named by the deployment's `prefix`, never by the sink, so the two would share them. Give each sink its own cluster, or run each in its own deployment with its own `prefix`
+```
+
+(`both URLs name <url>` when the URLs alone match.) `check` fails with `check failed: 1 pair of two OpenSearch sinks on one cluster`; `run` exits `1` with the message, before anything is staged. The two ways out are in the message: a cluster per sink, or one deployment per sink, each with its own `prefix` and its own slot.
+
+A sink that can't be compared is `check_skipped`, a warning, and the run goes on:
+
+```text
+  ! [sinks.backup] was not compared with the other OpenSearch sinks for a shared cluster (<why>); `flusso run` checks it where it can reach the cluster
+```
+
+`<why>` is one of:
+
+- why the `url` couldn't be resolved: `environment variable '<VAR>' is not set`, `invalid HTTP URL: …`;
+- `not a URL this check reads`;
+- `its cluster_uuid could not be read: <why>`, where `<why>` is `the cluster gave no answer: …` (a cluster down), `the cluster answered HTTP <status>: …` (a role that can't read `GET /`, say), `no answer within 10 s`, or, for a cluster not formed yet, `the cluster answers cluster_uuid "_na_", which names no cluster (no cluster manager elected yet)`. Such a cluster is never compared, so it never matches another.
+
+At `run` it's a `WARN` log line, and the start goes on:
+
+```text
+[sinks.backup] was not compared with the other OpenSearch sinks for a shared cluster (<why>); starting anyway. If two of them write to one cluster, they share every index, alias and seed marker, and the deployment stops at the first read that finds the other's record writes
 ```
 
 ## Validation at start
@@ -222,7 +264,8 @@ Use it where a wrong index should never go live: a production deploy that `fluss
 | `pre_image` | `status`, `satisfied`, `complete`, `gaps` and `partial`: each `table`, `missing`, `missing_key`, `manageable`, `will_manage`, `blockers`, `remediation`, `kept` |
 | `gaps` | one per capture gap: `kind` (`publication_gap`, `replica_identity_gap`), `table`, `indexes`, `message` |
 | `diagnostics` | one per schema finding: `index`, `field`, `path`, `positions`, `anchor`, `severity` (`error`/`warning`), `kind`, `message` |
-| `summary` | `passed`, `errors` (gaps and a failing lock included), `warnings`, `offline`, `database_checked`, `server_refused`, `line` (the report's last line) |
+| `sinks` | one per [sink finding](#two-opensearch-sinks-on-one-cluster): `kind` (`shared_cluster`, `check_skipped`), `severity`, `sinks` (the two sharing, or the one skipped), `message`; `[]` with none, offline too |
+| `summary` | `passed`, `errors` (gaps, a failing lock and shared pairs included), `warnings` (skipped sinks included), `offline`, `database_checked`, `server_refused`, `line` (the report's last line) |
 
 A section's `status`:
 

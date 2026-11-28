@@ -1,4 +1,5 @@
-//! `flusso indexes` / `flusso reindex` — the operator client.
+//! `flusso indexes` / `flusso reindex` / `flusso reattach` — the operator
+//! client.
 //!
 //! Thin HTTP clients to a *running* flusso's private control surface (HTTP Basic
 //! auth). They hold no privilege the private API doesn't grant any caller — the
@@ -100,6 +101,27 @@ pub(crate) struct ReindexArgs {
     connect: ConnectArgs,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct ReattachArgs {
+    /// The logical index whose detached lane to reattach.
+    index: String,
+
+    /// The sink the lane writes to: one with `backfill = false`, which can't
+    /// rebuild the index. Always given on the command line, never read from
+    /// the environment: a reattach accepts lost changes on exactly the lane
+    /// named.
+    #[arg(long)]
+    sink: String,
+
+    /// Accept that the changes made while the lane was detached never reach
+    /// the index. Required: a reattach drops them.
+    #[arg(long)]
+    accept_gap: bool,
+
+    #[command(flatten)]
+    connect: ConnectArgs,
+}
+
 /// `flusso indexes` — list the server's indexes and their lifecycle state.
 pub(crate) async fn indexes(args: IndexesArgs) -> anyhow::Result<()> {
     let resp = args
@@ -123,7 +145,7 @@ pub(crate) async fn indexes(args: IndexesArgs) -> anyhow::Result<()> {
 
 /// `flusso reindex <index>` — trigger a from-scratch rebuild of one index.
 pub(crate) async fn reindex(args: ReindexArgs) -> anyhow::Result<()> {
-    let path = reindex_path(&args.index)?;
+    let path = index_path(&args.index, "reindex")?;
     let resp = args
         .connect
         .request(reqwest::Method::POST, &path)?
@@ -142,25 +164,94 @@ pub(crate) async fn reindex(args: ReindexArgs) -> anyhow::Result<()> {
 }
 
 /// What `flusso reindex` prints for the server's `202` body
-/// (`{"index", "sink", "queued"}`); a body it can't read is printed as is.
+/// (`{"index", "sink", "queued", "queued_on", "skipped"}`): the sinks the
+/// reindex was queued on, then each sink skipped with its reason, one a line.
+/// A body it can't read is printed as is.
 fn queued_message(body: &str) -> String {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return body.trim().to_owned();
     };
     let field = |name: &str| value.get(name).and_then(serde_json::Value::as_str);
-    match (field("index"), field("sink")) {
-        (Some(index), Some(sink)) => format!("reindex of {index} on {sink} queued"),
-        (Some(index), None) => format!("reindex of {index} on every sink queued"),
-        _ => body.trim().to_owned(),
-    }
+    let names = |name: &str| -> Option<Vec<&str>> {
+        value
+            .get(name)?
+            .as_array()
+            .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect())
+    };
+    let skipped: Vec<String> = value
+        .get("skipped")
+        .and_then(serde_json::Value::as_array)
+        .map(|skipped| {
+            skipped
+                .iter()
+                .map(|skip| {
+                    let text = |key: &str| {
+                        skip.get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("?")
+                    };
+                    format!("skipped on {}: {}", text("sink"), text("reason"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let queued = match (field("index"), field("sink"), names("queued_on")) {
+        (Some(index), Some(sink), _) => format!("reindex of {index} on {sink} queued"),
+        (Some(index), None, Some(on)) => {
+            format!("reindex of {index} queued on {}", on.join(", "))
+        }
+        (Some(index), None, None) if skipped.is_empty() => {
+            format!("reindex of {index} on every sink queued")
+        }
+        (Some(index), None, None) => format!("reindex of {index} queued on the other sinks"),
+        _ => return body.trim().to_owned(),
+    };
+    std::iter::once(queued)
+        .chain(skipped)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-/// `POST /indexes/<index>/reindex`'s path; an index name has only
+/// `flusso reattach <index> --sink <name> --accept-gap` — reattach a
+/// detached lane on a sink that can't rebuild (ADR 0012 stage 10, O16).
+pub(crate) async fn reattach(args: ReattachArgs) -> anyhow::Result<()> {
+    if !args.accept_gap {
+        bail!(
+            "a reattach drops the changes made to {} while its lane on {} was detached; \
+             pass --accept-gap to accept that, or reindex it on a sink that can rebuild",
+            args.index,
+            args.sink
+        );
+    }
+    let path = index_path(&args.index, "reattach")?;
+    let resp = args
+        .connect
+        .request(reqwest::Method::POST, &path)?
+        .query(&[("sink", args.sink.as_str()), ("accept_gap", "true")])
+        .send()
+        .await
+        .with_context(|| format!("requesting {path}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!("server returned {status}: {}", body.trim());
+    }
+    let mut out = std::io::stdout().lock();
+    writeln!(
+        out,
+        "reattach of {} on {} started: the record is gone and the lane is being attached; \
+         /status shows it open, with its gap",
+        args.index, args.sink
+    )?;
+    Ok(())
+}
+
+/// `POST /indexes/<index>/<action>`'s path; an index name has only
 /// characters a path takes as they are, and anything else is refused here.
-fn reindex_path(index: &str) -> anyhow::Result<String> {
+fn index_path(index: &str, action: &str) -> anyhow::Result<String> {
     let index = kernel::IndexName::try_new(index.to_owned())
         .map_err(|_| anyhow::anyhow!("{index:?} is not an index name"))?;
-    Ok(format!("/indexes/{}/reindex", index.as_ref()))
+    Ok(format!("/indexes/{}/{action}", index.as_ref()))
 }
 
 #[cfg(test)]

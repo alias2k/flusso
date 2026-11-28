@@ -4,6 +4,9 @@
 
 **Check before upgrading**
 
+- **Stop 0.18 before 0.19 starts on the same slot**: with two flusso processes on one replication slot, the one that finds the other changed an index's records stops with exit `1`: [One process per slot](#one-process-per-slot).
+- **Two OpenSearch sinks on one cluster are refused** (breaking for such a deployment): `check` fails and `run` won't start, and `check --format json` gains a `sinks` array: [Two OpenSearch sinks on one cluster are refused](#two-opensearch-sinks-on-one-cluster-are-refused).
+- **Tooling that reads `{prefix}flusso_meta`** sees `stamp` on the seed markers flusso writes, detach records, and tombstones where a record was forgotten: [The meta documents change](#the-meta-documents-change).
 - **A cut-down OpenSearch role needs `indices:data/read/mget`** on `{prefix}flusso_meta`: staging now reads three meta documents per index in one `_mget`; a sink whose role can't, or whose proxy answers that request `404`, retries its staging and writes nothing: [Staging reads the meta documents with one request](#staging-reads-the-meta-documents-with-one-request).
 - **`flusso check` fails on an index that won't work as its schema says** (breaking for its exit code): a `[]` column without `array: true`, `required` over a nullable column, a lossy `ids` element type, a duplicate field name that leaves a wrong value, a capture gap `run` won't close, and a time-of-day `format` over a date are errors now. A plain `run` still starts on them: [check fails on an index that won't work as written](#check-fails-on-an-index-that-wont-work-as-written).
 - **`flusso check` compares `flusso.lock` with the config** and fails on a stale or unreadable one; `check --fix` rewrites it: [check compares the lock](#check-compares-the-lock).
@@ -29,6 +32,10 @@
 - **A stuck index stops only itself**: with two or more indexes, the others keep being read and written while its changes wait as documents to build, up to `[concurrency] max_pending_documents`; the slot, and so the WAL, still waits for it: [A stuck index stops only itself](#a-stuck-index-stops-only-itself).
 - **Backfills of several indexes run at once**, within the same `builds` and Postgres connections; one stuck backfill no longer holds the others, and memory may pass `max_built_mib` by one backfill batch per index: [Backfills run at once](#backfills-run-at-once).
 - **One index's failure restarts only that index**: with two or more indexes, a failed build or a document failed under `on_error = "stop"` takes down its index alone, a failed backfill is retried alone while live changes flow, and the others keep indexing; with one index, a build that panics as it starts restarts the ingest engine instead of ending the deployment: [One index's failure restarts only that index](#one-indexs-failure-restarts-only-that-index).
+- **A detached index can be brought back**: `/status` shows detached lanes, a reindex rebuilds one, and the new `flusso reattach --accept-gap` reopens one on a `backfill = false` sink; nothing in 0.19 detaches an index on its own: [Detached indexes](#detached-indexes).
+- **A reindex can be refused or skipped** (breaking for a script reading its answers): `409` while the index is being rebuilt, `skipped` in a `202`, and a stopping `503` with `reason` and `Retry-After`: [A reindex can be refused](#a-reindex-can-be-refused).
+- **`/wait` has new answers** (breaking for a client that treats every non-`200` alike): `409` inside a gap a reattach accepted, `503 detached` at once, and a brief `starting` after each opening of the slot: [Fences on detached indexes](#fences-on-detached-indexes).
+- **A completed backfill's seed, or a reindex, during a reconnect waits for the slot**, and lands once flusso holds it again: [Some writes wait for the slot](#some-writes-wait-for-the-slot).
 - **`POST /reindex` is gone** (breaking): reindex with `POST /indexes/<name>/reindex[?sink=<name>]`, which answers JSON; `flusso reindex` already does: [Reindex moved to the index path](#reindex-moved-to-the-index-path).
 - **Each index's state is shown**: `/status`'s `ingest.indexes` (with `state`, `last_error` and `restarts`), `GET /indexes/<name>/status`, the `flusso_index_*` metrics, `flusso_reader_waits_seconds`, and a new alert, `FlussoIndexBacklog`: [Each index's state is shown](#each-indexs-state-is-shown).
 
@@ -36,12 +43,12 @@
 
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`, the per-index ingest state in `Status`, `Observer::on_reader_wait`, per-index restart (`IngestEngine::with_backoff`, `Observer::on_index_failed` and `on_index_restarted`), and `Sink::detachment`**; for checks, new `DiagnosticKind`s, `TimestampFormat` removed, `Catalog::tracks_nullability`, the date-format functions in `kernel`: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index, lane items keyed by a `stream::ItemKey`, `max_pending_documents`, the per-index ingest state in `Status`, `Observer::on_reader_wait`, per-index restart (`IngestEngine::with_backoff`, `Observer::on_index_failed` and `on_index_restarted`), the `sink::Records` trait, and detach and attach in the engine and the daemon**; for checks, new `DiagnosticKind`s, `TimestampFormat` removed, `Catalog::tracks_nullability`, the date-format functions in `kernel`: [For code embedding the crates](#for-code-embedding-the-crates).
 - **A `Vec` at a single-valued field** now fails to compile with the schema fix first: declare the field `array: true` when its column holds an array: [Arrays](../query/document-structs.md#arrays).
 
 ## Staging reads the meta documents with one request
 
-**What changed.** Every staging of an index (a start, a sink's restart, a reindex, and their retries) first reads three documents of `{prefix}flusso_meta` in one `POST /{prefix}flusso_meta/_mget`: the index's seed marker and two reserved ones, `detach:{alias}` and `stuck:{alias}`. No released flusso writes the reserved ones. 0.18 read only the seed marker, with a `GET`. What is read, and which answers fail the staging: [The meta documents](../reference/sink-opensearch.md#the-meta-documents).
+**What changed.** Every staging of an index (a start, a sink's restart, a reindex, and their retries) first reads three documents of `{prefix}flusso_meta` in one `POST /{prefix}flusso_meta/_mget`: the index's seed marker, its detach record (`detach:{alias}`) and a reserved one (`stuck:{alias}`). 0.18 read only the seed marker, with a `GET`. What is read, and which answers fail the staging: [The meta documents](../reference/sink-opensearch.md#the-meta-documents).
 
 **Who is affected.**
 
@@ -441,6 +448,69 @@ Every other failure with one index restarts the ingest engine, as in 0.18. The w
 - **A stop that fails costs a replay.** The next start reads again from the down index's oldest change, so every other index's changes since then are read and built again.
 - **One index, a panic every time** is now an endless restart loop paced by `[backoff]`, where 0.18 exited. Alert on `flusso_errors_total{engine="ingest"}` climbing.
 
+## One process per slot
+
+**What changed.** flusso stamps every write of an index's records in `{prefix}flusso_meta` with the process that made it, and reads them again after each opening of the replication stream. A process that finds another changed them while it didn't hold the slot stops with exit `1`: ``Error: sink `<sink>`, index `<index>`: another flusso process changed the index's detach record or seed marker while this one didn't hold the replication slot (…)``.
+
+**Who is affected.** Deployments that can run two processes on one slot at once: a rolling update, a 0.18 process left running beside 0.19, a second host. A single process never stops this way. The Helm chart's `Recreate` strategy never overlaps.
+
+**What to do.**
+
+1. **Stop the 0.18 process before starting 0.19.** Don't run the two against one slot at the same time.
+2. **If one stopped**, stop the other and start flusso again: nothing is lost, and the start decides from the records. The runbook is [Run one flusso per slot](one-process-per-slot.md).
+
+## Two OpenSearch sinks on one cluster are refused
+
+**What changed.** With two or more OpenSearch sinks, `check` and `run` compare their URLs and each cluster's `cluster_uuid` (`GET /`), and refuse two that write to one cluster ([how](../reference/checks.md#two-opensearch-sinks-on-one-cluster)). `check --offline` compares URLs only. A sink that can't be compared is a `check_skipped` warning. `check --format json` reports both in a new top-level `sinks` array.
+
+**Who is affected.** Deployments with two OpenSearch sinks on one cluster. They already shared every generation, alias and seed marker there, since those are named by the deployment's `prefix`, never by the sink: one sink's seed passed for the other's.
+
+**What to do.** Give each sink its own cluster, or split the sinks into deployments with their own `prefix` and slot. Sinks on different clusters, a backup cluster say, need nothing.
+
+## Detached indexes
+
+**What changed.** An `(index, sink)` lane can be **detached**: out of the replication slot's minimum, its index readable but frozen. Nothing in 0.19 detaches one on its own; a lane is detached only when the sink's meta index already holds a detach record for its index. What comes with it:
+
+- **`/status`**: a top-level `detached` list, `detached_lanes` per sink, and per lane the `detached` health, `rebuilding`, `attaching` and `gaps` ([fields](../reference/http.md#get-status)).
+- **A reindex rebuilds a detached index** on a sink that can backfill.
+- **`flusso reattach <index> --sink <name> --accept-gap`**, new, with `POST /indexes/<name>/reattach`: reattaches one on a `backfill = false` sink, leaving a gap ([CLI](../reference/cli.md#reattach)).
+- **`flusso_lane_parked`** has no series for a detached lane.
+
+**Who is affected.** Nobody without detach records. **What to do.** Nothing; the runbook is [Bring back a detached index](detached-index.md).
+
+## A reindex can be refused
+
+**What changed.** `POST /indexes/<name>/reindex` ([the route](../reference/http.md#post-indexesnamereindexsinkname)):
+
+- **`409`** `{"error", "reason", "index", "skipped"}` when the sink named, or every sink, is skipped: the index is being rebuilt after a detach, or a detached index sits on a `backfill = false` sink ([the reasons](../reference/http.md#a-reindex-that-is-skipped)).
+- **`202`** gains `queued_on`, the sinks it was queued on, and `skipped` when some sinks were left out; `flusso reindex` prints each skipped sink as `skipped on <sink>: <reason>`.
+- **Stopping** answers `503` with `Retry-After: 1` and `{"error": "flusso is stopping and takes no operation; ask the next process", "reason": "stopping"}`.
+
+**Who is affected.** Scripts that read the reindex answers. `flusso reindex` exits `1` on a `409`.
+
+## Fences on detached indexes
+
+**What changed.** `GET /wait` ([the route](../reference/http.md#get-waitpositionposition)):
+
+- **`409`**, `reason: gap`, at once, for a position inside a gap a reattach accepted on a lane the wait needs.
+- **`503`**, `reason: detached`, at once, when a lane the wait needs is detached short of the position; `position` is `""` when no lane can say how far it got.
+- **`starting`** for a moment after each opening of the replication slot, until each lane's records are read under it.
+- **The strongest reason wins** across lanes: `detached`, then `rebuilding`, `backfilling`, `starting`.
+
+**Who is affected.** Clients calling `/wait` themselves: a `409` is final, like a `400`. `flusso-query` answers a `409` with `FenceRefused`, and a `503 detached` with `FenceUnavailable` (`Unusable`) at its timeout ([Reading your own writes](../query/read-your-writes.md#when-the-wait-fails)).
+
+## Some writes wait for the slot
+
+**What changed.** While flusso doesn't hold the replication slot (a reconnect, a failed opening), a write that could erase another process's record waits until it does: a completed backfill's seed marker (its documents are written in full), a reindex (its lane `restaging`), a rebuild, and a reattach (refused with `409`). Plain writes go on, and a stop drains as before ([what waits](one-process-per-slot.md#while-flusso-doesnt-hold-the-slot)).
+
+**Who is affected.** Deployments whose connection to Postgres drops. **What to do.** Nothing: each goes through once the slot is back. A stop during the wait leaves the index unseeded, and the next start backfills it again.
+
+## The meta documents change
+
+**What changed.** In `{prefix}flusso_meta`, a seed marker flusso writes carries `stamp` (a 0.18 marker of a seeded index may stay without one until it is next written) and `gaps`; a detach adds `detaching_from` and a `detach:` record; a forgotten record becomes a tombstone (`state: "forgotten"`) instead of being deleted ([the documents](../reference/sink-opensearch.md#the-meta-documents)).
+
+**Who is affected.** Only tooling that reads the meta index, which is flusso's bookkeeping, not an interface.
+
 ## Reindex moved to the index path
 
 **What changed.** The private surface's reindex route is now `POST /indexes/<name>/reindex[?sink=<name>]`. `POST /reindex?index=…` is removed and answers `404`. Every answer is JSON ([the route](../reference/http.md#post-indexesnamereindexsinkname)):
@@ -448,11 +518,11 @@ Every other failure with one index restarts the ingest engine, as in 0.18. The w
 | | 0.18 | 0.19 |
 | --- | --- | --- |
 | The request | `POST /reindex?index=users&sink=primary` | `POST /indexes/users/reindex?sink=primary` |
-| `202` | text: `reindex of users on primary queued` | `{"index": "users", "sink": "primary", "queued": true}`, `sink` null for every sink |
+| `202` | text: `reindex of users on primary queued` | `{"index": "users", "sink": "primary", "queued": true, "queued_on": ["primary"]}`, `sink` null for every sink |
 | Refusals (`400`, `404`, `503`) | text | `{"error": "…"}`; an unknown index adds `"indexes"`, the enabled ones |
 | A disabled index | accepted | `404` |
 
-**Who is affected.** Scripts and tools that call `POST /reindex` themselves. `flusso reindex` is updated and prints what it printed before; use it at the same version as the server.
+**Who is affected.** Scripts and tools that call `POST /reindex` themselves. `flusso reindex` is updated; with `--sink` it prints what it printed before, without it the sinks it was queued on (`reindex of users queued on primary, audit`) and a line per sink [skipped](#a-reindex-can-be-refused). Use it at the same version as the server.
 
 **What to do.** Move each call to the new path: the index goes into the path, `sink` stays a query parameter. Read the `202`'s JSON instead of its text, if the script reads it.
 
@@ -580,7 +650,9 @@ To tell: `file flusso.lock` says `with CRLF line terminators`, and the lock hold
 - **Checks (`source`).** `DiagnosticKind` gains `DuplicateFieldNameWrong`, `NullabilityUntracked` and `TimeOfDayFormat`, and loses `TimestampFormat`: an exhaustive match must handle them. `Nullability`, `UndeclaredArrayColumn` and `IdsElementLossy` are now `Severity::Error`. `source::reads_iso_timestamps` is removed. `Catalog::tracks_nullability(schema, table)` is new, defaulting to `true` (the column is judged as a table's). New: `source::Reach`, `source::duplicate_is_wrong`, and `DuplicateOutcome::Stored`.
 - **Date formats (`kernel`).** New: `IndexSchema::completed_date_formats`, `kernel::ISO_DATE_PATTERN`, `DateValues`, `reads`, `reads_time_of_day_only`, `with_iso`, `iso_date_format`, `date_format`, `date_values` and `maps_children`. `IndexSchema::resolve` applies the completed format, and the content hash follows it.
 - **Capture gaps (`source-postgres`).** New `ReportedGaps` and `WalChangeCapture::with_reported_gaps`: `prepare` doesn't warn again about a gap the caller already reported.
-- **New: `Sink::detachment(&IndexMapping)`**, called at the start of every staging step, before `reindex` and `ensure_index`; its default keeps nothing. It returns a `sink::Detachment` (`record: Option<DetachRecord>`, `stuck: Option<StuckClock>`, `restored`, `unreadable_marker`), all new and `#[non_exhaustive]`. An `Err` fails the step. `SinkEngine::detachment(index)` returns what the last staging of the index read.
+- **New: the `sink::Records` trait**, reached through `Sink::records()` (default `None`: a sink that keeps no records, which never detaches). A sink that keeps records writes every record and seed marker through it, stamped (`sink::Stamp`); none of its methods has a default: `ensure_index_as`, `detachment` (read at the start of every staging step, before anything else; an `Err` fails the step), `detach`, `forget_detachment`, `begin_rebuild`, `record_gaps`, `demote`, `mark_seeded_as`, `reindex_as`. It returns a `sink::Detachment` (`record: Option<DetachRecord>`, with `Detached`, `Rebuilding` and `Unreadable`, `stuck: Option<StuckClock>`, `restored`, `unreadable_marker`, and the new `marker`, `version`, `record_stamp`, `marker_stamp`, `attempts`, `through` and `gaps`), with `sink::Detach`, `Recorded`, `Gap`, `MarkerAt` and `RecordVersion`, all new. `SinkEngine::detachment(index)` returns what the last staging of the index read.
+- **OpenSearch sink.** `OpensearchSink::cluster_uuid` (`GET /`) is new, and so is the public `sink_opensearch::meta` module: the sink's decisions over its meta documents as plain values (`Plan`, `Step`, `Kept` and the functions that make them), with an in-memory meta index, `meta::memory`, behind the new `testing` feature.
+- **Detach and attach in the engine.** `SinkControl` gains `Detach`, `Attach` and `Reattach` (with a `Reply<ReattachVerdict>`), `Request` gains `Attach`, `LaneItem` gains `Attached`, `LaneHealth` gains `Detached`, `ParkReason` gains `SeedBlocked`, and `source::cdc::Landed` gains `Free`: an exhaustive match must handle them. `EngineError::ForeignChange` stops the deployment (`EngineError::stops_the_deployment`). New `engine::Rereads` and `SourcePositions`; `ChangeCapture::streams_opened` (default `None`); `Observer::on_lane_rebuild` and `on_lane_gaps`, no-op by default. In `daemon`: `DaemonControl::reattach`, `is_stopping`, `is_live_only` and `with_live_only`, `ControlError::CanRebuild`, `Fence::with_rereads`, `FenceOutcome::InGap` and `FenceGap`, `Unserved::Detached`, `LaneHealthState::Detached`, `Status::reattach_refusal`, `reindex_refusal` and `detached_lanes`; `StatusSnapshot.detached`, `SinkSnapshot.detached_lanes`, and `LaneSnapshot`'s `rebuilding`, `attaching` and `gaps` (`LaneGap`), so struct literals must set them.
 
 ## Related
 

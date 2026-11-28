@@ -64,6 +64,40 @@ fn read_and_route(
     key
 }
 
+/// The docs pass of the closing round: readiness is the deployment's and
+/// each sink engine's phase alone. A detached lane, or one whose index keeps
+/// a gap, leaves `/readyz` ready: the lane is reported on `/status`, and the
+/// fence refuses what it doesn't hold.
+#[test]
+fn a_detached_lane_or_a_gap_leaves_the_deployment_ready() {
+    let (status, _progress) = status_over(&[primary()]);
+    let observer = StatusObserver::new(Arc::clone(&status));
+    observer.on_indexes_ensured(&primary(), 1);
+    observer.on_sink_started(&primary());
+    observer.on_live_started();
+    assert!(status.is_ready());
+    let lane = ::stream::LaneKey::new(users(), primary());
+    observer.on_lane_health(
+        &lane,
+        &engine::LaneHealth::Detached {
+            since: tokio::time::Instant::now(),
+            reason: "blocked".to_owned(),
+            through: Some("10".to_owned()),
+        },
+    );
+    assert!(status.is_ready(), "a detached lane");
+    observer.on_lane_gaps(
+        &lane,
+        &[sink::Gap {
+            from: Some("10".to_owned()),
+            to: Some("20".to_owned()),
+        }],
+    );
+    assert!(status.is_ready(), "a detached lane with a gap");
+    observer.on_lane_health(&lane, &engine::LaneHealth::Open);
+    assert!(status.is_ready(), "an attached lane with a gap");
+}
+
 /// The observer drives the status surface through a full lifecycle — one
 /// ingest side, one sink — and the snapshot serializes to the `/status` shape.
 #[test]
@@ -1631,5 +1665,144 @@ async fn a_disabled_index_has_no_ingest_entry() {
     assert!(
         status.snapshot().indexes.contains_key("archive"),
         "the older indexes.<name> section is unchanged"
+    );
+}
+
+/// A sink whose detach records another process changes after this one's
+/// first read: from the second read on, `users` reads detached.
+#[derive(Debug, Default)]
+struct ChangedAfterTheFirstRead {
+    reads: AtomicU64,
+    ops: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl Sink for ChangedAfterTheFirstRead {
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        for envelope in envelopes {
+            self.ops.lock().unwrap().push(envelope.id.clone());
+        }
+        Ok(WriteReport::clean())
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+
+    fn records(&self) -> Option<&dyn sink::Records> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl sink::Records for ChangedAfterTheFirstRead {
+    async fn ensure_index_as(
+        &self,
+        mapping: &IndexMapping,
+        _: &sink::Stamp,
+    ) -> sink::Result<sink::Ensured> {
+        sink::Sink::ensure_index(self, mapping).await
+    }
+
+    async fn detachment(
+        &self,
+        _: &IndexMapping,
+        _: &sink::Stamp,
+    ) -> sink::Result<sink::Detachment> {
+        if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(sink::Detachment::default());
+        }
+        Ok(sink::Detachment::recorded(
+            sink::DetachRecord::Detached { live_only: false },
+            Some(sink::MarkerAt::Newer { seeded: false }),
+            Some(sink::RecordVersion::new("1:1")),
+        ))
+    }
+
+    async fn detach(&self, _: &IndexMapping, _: &sink::Detach) -> sink::Result<sink::Recorded> {
+        Ok(sink::Recorded::NotKept)
+    }
+
+    async fn forget_detachment(
+        &self,
+        _: &IndexMapping,
+        _: &sink::RecordVersion,
+        _: &sink::Stamp,
+    ) -> sink::Result<()> {
+        Ok(())
+    }
+
+    async fn record_gaps(
+        &self,
+        _: &IndexMapping,
+        _: &sink::DecideGaps<'_>,
+        _: &sink::Stamp,
+    ) -> sink::Result<Vec<sink::Gap>> {
+        Ok(Vec::new())
+    }
+
+    async fn begin_rebuild(&self, mapping: &IndexMapping, _: &sink::Stamp) -> sink::Result<u64> {
+        Err(sink::SinkError::Write(format!(
+            "{}: no records to rebuild from",
+            mapping.index
+        )))
+    }
+
+    async fn demote(&self, _: &IndexMapping, _: bool, _: &sink::Stamp) -> sink::Result<()> {
+        Ok(())
+    }
+
+    async fn mark_seeded_as(&self, index: &IndexName, _: &sink::Stamp) -> sink::Result<()> {
+        sink::Sink::mark_seeded(self, index).await
+    }
+
+    async fn reindex_as(&self, mapping: &IndexMapping, _: &sink::Stamp) -> sink::Result<()> {
+        sink::Sink::reindex(self, mapping).await
+    }
+}
+
+/// The cut of 2026-11-27: a read that finds another process changed the
+/// records stops the whole deployment. `run` returns the error naming the
+/// index, the sink and what was found; the sink engine is not restarted
+/// (staged and read again), nothing of the lane is written, and nothing is
+/// confirmed past the stream's start.
+#[tokio::test]
+async fn a_change_by_another_process_stops_the_deployment() {
+    let sink = Arc::new(ChangedAfterTheFirstRead::default());
+    let (source, _end) = ScriptedSource::new(vec![row_event(false, 1)]).held_open();
+    let confirmed = Arc::clone(&source.confirmed);
+    let backends = backends(
+        source,
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let running = Daemon::new(fast_restarts(), backends)
+        .start()
+        .await
+        .unwrap();
+    let status = running.status();
+    let ended = tokio::time::timeout(
+        Duration::from_secs(10),
+        running.run(std::future::pending::<()>()),
+    )
+    .await
+    .expect("the deployment stops at once");
+    let error = format!("{:#}", ended.unwrap_err());
+    assert!(
+        error.contains("another flusso process changed")
+            && error.contains("users")
+            && error.contains("primary")
+            && error.contains("No change of this index was confirmed past what they cover"),
+        "{error}"
+    );
+    assert_eq!(sink.reads.load(Ordering::SeqCst), 2, "not restaged");
+    assert!(sink.ops.lock().unwrap().is_empty(), "nothing written");
+    assert!(confirmed.lock().unwrap().is_empty(), "nothing confirmed");
+    assert!(
+        status.snapshot().errors >= 1,
+        "the error reaches the status"
     );
 }

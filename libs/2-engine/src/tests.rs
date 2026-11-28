@@ -1911,6 +1911,7 @@ async fn stop_policy_fails_the_ingest_engine_on_a_failed_document() {
 mod builders;
 mod busy;
 mod concurrent;
+mod detach;
 mod gone;
 mod keys;
 mod lanes;
@@ -1922,6 +1923,7 @@ mod refresh;
 mod resume;
 mod seeding;
 mod snapshot;
+mod spikes;
 mod staging;
 mod stop;
 mod timings;
@@ -2059,4 +2061,22 @@ async fn a_start_in_the_middle_of_a_rebuild_announces_it() {
     .with_observer(Arc::new(RebuildEvents(Arc::clone(&events))));
     first_seed.stage(Continuity::Resumed).await.unwrap();
     assert_eq!(*events.lock().unwrap(), ["requested users"], "a first seed");
+}
+
+/// Review of the second fix round: the slot counts as held from the opening
+/// until the ingest run's stream ends, and no longer once the run returned
+/// (its `Held` guard), so nothing settles a gap end on a stream gone.
+#[tokio::test]
+async fn an_ingest_run_that_ends_no_longer_holds_the_slot() {
+    let rereads = Arc::new(crate::Rereads::default());
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1)]),
+        vec![(sink_name("primary"), sink)],
+    )
+    .map_ingest(|ingest| ingest.with_rereads(Arc::clone(&rereads)))
+    .map_sinks(|sink| sink.with_rereads(Arc::clone(&rereads)));
+    harness.run(Continuity::Resumed).await;
+    assert_eq!(rereads.read_begins(), 1, "the opening succeeded");
+    assert!(!rereads.holding(), "the run ended: the slot isn't held");
 }

@@ -342,3 +342,15 @@ fn listeners_hear_the_horizon_move_and_nothing_else() {
     emit(&p, 20);
     assert_eq!(calls.load(Ordering::SeqCst), 2, "a commit's last change");
 }
+
+/// `Landed::Idle`'s contract (the fifth re-check): a capture that emitted
+/// nothing answers it at or past where its stream started, the slot's
+/// confirmed position; one that emitted answers what it confirmed. Never
+/// below what an earlier holder of the slot dropped.
+#[test]
+fn idle_is_never_answered_below_the_streams_start() {
+    let p = positions(100, 0);
+    assert!(p.reached(Idle) >= 100);
+    emit(&p, 110);
+    assert!(p.reached(Idle) >= 100);
+}

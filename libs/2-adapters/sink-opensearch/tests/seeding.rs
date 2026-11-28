@@ -56,7 +56,7 @@ use kernel::{
 };
 use reqwest::StatusCode;
 use serde_json::Value;
-use sink::Sink;
+use sink::{Records, Sink};
 use sink_opensearch::OpensearchSink;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
@@ -114,6 +114,11 @@ fn sink(base_url: &str) -> Buffered {
         index_settings: Default::default(),
     };
     Buffered::new(OpensearchSink::from_config(&name, &config).unwrap())
+}
+
+/// The stamp the record tests write with.
+fn stamp() -> sink::Stamp {
+    sink::Stamp::new("seeding", 1)
 }
 
 fn mapping(logical: &str, hash: u32) -> IndexMapping {
@@ -1071,7 +1076,7 @@ async fn staging_reads_the_records_in_one_request_then_asks_what_it_asked_before
     let mapping = mapping("users", 1);
 
     let reading = prefixed(&proxy.url, "a_");
-    let read = reading.detachment(&mapping).await.unwrap();
+    let read = reading.detachment(&mapping, &stamp()).await.unwrap();
     assert!(read.is_empty(), "nothing kept on a fresh cluster: {read:?}");
     reading.ensure_index(&mapping).await.unwrap();
     reading.seeding(&mapping.index).await.unwrap();
@@ -1090,7 +1095,10 @@ async fn staging_reads_the_records_in_one_request_then_asks_what_it_asked_before
     );
 
     // Once the meta index exists, nothing kept still reads as nothing kept.
-    let again = prefixed(&base, "a_").detachment(&mapping).await.unwrap();
+    let again = prefixed(&base, "a_")
+        .detachment(&mapping, &stamp())
+        .await
+        .unwrap();
     assert!(again.is_empty(), "{again:?}");
 }
 
@@ -1142,7 +1150,7 @@ async fn a_record_written_by_hand_is_read_and_left_as_it_is() {
     let written = meta_documents(&client, &base, &ids).await;
 
     let restart = sink(&base);
-    let read = restart.detachment(&mapping).await.unwrap();
+    let read = restart.detachment(&mapping, &stamp()).await.unwrap();
     assert_eq!(
         read.record,
         Some(sink::DetachRecord::Detached { live_only: false })
@@ -1168,11 +1176,394 @@ async fn a_record_written_by_hand_is_read_and_left_as_it_is() {
         serde_json::json!({ "state": "frozen" }),
     )
     .await;
-    let read = sink(&base).detachment(&mapping).await.unwrap();
+    let read = sink(&base).detachment(&mapping, &stamp()).await.unwrap();
     assert!(
         matches!(&read.record, Some(sink::DetachRecord::Unreadable { reason }) if reason.contains("frozen")),
         "{read:?}"
     );
+}
+
+/// What the stamps of round 11 rely on, on a real OpenSearch (the adapter's
+/// unit tests pin the requests; this pins the answers):
+/// - a stamped detach and a stamped forget leave each stamp readable, the
+///   forget as a tombstone that reads as no record, with its own version;
+/// - a forget at a version the tombstone replaced conflicts, never deletes;
+/// - a detach over the tombstone replaces it on its version;
+/// - the checkpoint's partial `_update` keeps the marker's stamp, and the
+///   gaps' `_update` replaces it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn who_wrote_each_record_survives_every_write_as_opensearch_answers_it() {
+    let (_container, base) = start_opensearch().await;
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let mine = sink::Stamp::new("mine", 1);
+    let theirs = sink::Stamp::new("theirs", 7);
+
+    let first = sink(&base);
+    first.ensure_index_as(&mapping, &mine).await.unwrap();
+    write(&first, &index, &[1]).await;
+    first.mark_seeded_as(&index, &mine).await.unwrap();
+    let read = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(read.marker_stamp, Some(mine.clone()), "{read:?}");
+
+    first.record_walked(&index, "k").await.unwrap();
+    let read = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(
+        read.marker_stamp,
+        Some(mine.clone()),
+        "a checkpoint keeps the stamp"
+    );
+
+    let detach = sink::Detach::new("blocked")
+        .live_only(true)
+        .through(Some("0/10".to_owned()))
+        .stamp(mine.clone());
+    first.detach(&mapping, &detach).await.unwrap();
+    let detached = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(detached.record_stamp, Some(mine.clone()));
+
+    first
+        .record_gaps(
+            &mapping,
+            &|_| {
+                Some(vec![sink::Gap {
+                    from: Some("0/10".to_owned()),
+                    to: None,
+                }])
+            },
+            &theirs,
+        )
+        .await
+        .unwrap();
+    let read = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(
+        read.marker_stamp,
+        Some(theirs.clone()),
+        "the gaps' write stamps"
+    );
+
+    let version = detached.version.clone().unwrap();
+    first
+        .forget_detachment(&mapping, &version, &theirs)
+        .await
+        .unwrap();
+    let forgotten = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(forgotten.record, None, "a tombstone is no record");
+    assert_eq!(forgotten.record_stamp, Some(theirs.clone()));
+    assert!(forgotten.version.is_some() && forgotten.version != Some(version.clone()));
+    assert!(
+        first
+            .forget_detachment(&mapping, &version, &mine)
+            .await
+            .is_err(),
+        "a forget at the replaced version conflicts"
+    );
+    assert_eq!(
+        first
+            .detachment(&mapping, &mine)
+            .await
+            .unwrap()
+            .record_stamp,
+        Some(theirs.clone()),
+        "and leaves the tombstone as it was"
+    );
+
+    first.detach(&mapping, &detach).await.unwrap();
+    let again = first.detachment(&mapping, &mine).await.unwrap();
+    assert_eq!(
+        again.record,
+        Some(sink::DetachRecord::Detached { live_only: true })
+    );
+    assert_eq!(again.record_stamp, Some(mine.clone()));
+}
+
+/// The review of round 11, S-1, and of the closing round, A, on a real
+/// cluster: a gap kept with a seeded marker comes back when the marker comes
+/// back on the serving generation: by a live-only demotion (R14) of a
+/// rebuildable detach, by a read's put-back of a marker a detach left half
+/// moved (the read that puts it back tells the gap too), and by a live-only
+/// demotion of a rebuild begun, and its generation created, after a
+/// live-only or a rebuildable detach. Only a seed drops a gap. A rebuild
+/// begun from a live-only record is not live only (E).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_gap_comes_back_with_the_marker_onto_the_serving_generation() {
+    let (_container, base) = start_opensearch().await;
+    let proxy = FaultProxy::start(&base).await;
+    let stamp = sink::Stamp::new("mine", 1);
+    let gap = sink::Gap {
+        from: Some("0/10".to_owned()),
+        to: Some("0/20".to_owned()),
+    };
+    for logical in ["demoted", "put_back", "rebuilt_live_only", "rebuilt_moved"] {
+        let mapping = mapping(logical, 1);
+        let index = mapping.index.clone();
+        let first = sink(&base);
+        first.ensure_index_as(&mapping, &stamp).await.unwrap();
+        write(&first, &index, &[1]).await;
+        first.mark_seeded_as(&index, &stamp).await.unwrap();
+        first
+            .record_gaps(&mapping, &|_| Some(vec![gap.clone()]), &stamp)
+            .await
+            .unwrap();
+        let detach = sink::Detach::new("blocked").stamp(stamp.clone());
+        match logical {
+            "put_back" => {
+                // The detach dies between its marker move and its record.
+                proxy.refuse(|seen, _| seen.path.contains("detach:"));
+                assert!(sink(&proxy.url).detach(&mapping, &detach).await.is_err());
+                proxy.heal();
+                let read = sink(&base).detachment(&mapping, &stamp).await.unwrap();
+                assert!(read.restored.is_some(), "{logical}: {read:?}");
+                assert_eq!(
+                    read.gaps,
+                    [gap.clone()],
+                    "{logical}, the put-back read: {read:?}"
+                );
+            }
+            "demoted" => {
+                first.detach(&mapping, &detach).await.unwrap();
+                first.demote(&mapping, true, &stamp).await.unwrap();
+            }
+            _ => {
+                let detach = detach.live_only(logical == "rebuilt_live_only");
+                first.detach(&mapping, &detach).await.unwrap();
+                first.begin_rebuild(&mapping, &stamp).await.unwrap();
+                let rebuilding = first.detachment(&mapping, &stamp).await.unwrap();
+                assert_eq!(
+                    rebuilding.record,
+                    Some(sink::DetachRecord::Rebuilding { live_only: false }),
+                    "{logical}: {rebuilding:?}"
+                );
+                // The rebuild's generation created, its marker rewritten whole.
+                first.ensure_index_as(&mapping, &stamp).await.unwrap();
+                first.demote(&mapping, true, &stamp).await.unwrap();
+            }
+        }
+        let read = sink(&base).detachment(&mapping, &stamp).await.unwrap();
+        assert_eq!(read.gaps, [gap.clone()], "{logical}: {read:?}");
+    }
+}
+
+/// The review of round 13, F, on a real cluster: a reindex staged (its
+/// generation created, its uuid recorded), a rebuildable detach during it,
+/// then the start of a `backfill = false` sink demotes live only and a
+/// reattach ensures the index. The generation reads see keeps serving, with
+/// its documents.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_detach_during_a_reindex_then_a_live_only_start_keeps_the_generation_reads_see() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let hash_alias = format!("users_{}", mapping.hash);
+    let first = sink(&base);
+    first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    write(&first, &index, &[1, 2]).await;
+    first.mark_seeded_as(&index, &stamp()).await.unwrap();
+    let served = alias_targets(&client, &base, &hash_alias).await;
+    first.reindex_as(&mapping, &stamp()).await.unwrap();
+    first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    first
+        .detach(&mapping, &sink::Detach::new("blocked").stamp(stamp()))
+        .await
+        .unwrap();
+    let restart = sink(&base);
+    restart.demote(&mapping, true, &stamp()).await.unwrap();
+    restart.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    assert_eq!(alias_targets(&client, &base, &hash_alias).await, served);
+    assert_eq!(searchable(&client, &base, &hash_alias).await, ["1", "2"]);
+}
+
+/// The review of round 14, B-1, on a real cluster: a detach during a reindex,
+/// a live-only start's demotion (the marker unseeded on the generation reads
+/// see) and a reattach keep a gap there; row 2 is deleted in the gap, so
+/// nothing removes its document. With `backfill` back on, the reindex the
+/// engine stages moves the marker to a new generation, the gap stays until
+/// its seed, and that seed serves a generation without row 2's document. A
+/// seed into the generation reads already saw keeps the gap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_gap_is_dropped_only_by_the_seed_of_a_generation_created_after_it() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    for (logical, rebuilt) in [("rebuilt", true), ("in_place", false)] {
+        let mapping = mapping(logical, 1);
+        let index = mapping.index.clone();
+        let hash_alias = format!("{logical}_{}", mapping.hash);
+        let first = sink(&base);
+        first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+        write(&first, &index, &[1, 2, 3]).await;
+        first.mark_seeded_as(&index, &stamp()).await.unwrap();
+        let served = alias_targets(&client, &base, &hash_alias).await;
+        first.reindex_as(&mapping, &stamp()).await.unwrap();
+        first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+        first
+            .detach(&mapping, &sink::Detach::new("blocked").stamp(stamp()))
+            .await
+            .unwrap();
+        let live_only = sink(&base);
+        live_only.demote(&mapping, true, &stamp()).await.unwrap();
+        let gap = sink::Gap {
+            from: Some("0/10".to_owned()),
+            to: Some("0/20".to_owned()),
+        };
+        live_only
+            .record_gaps(&mapping, &|_| Some(vec![gap.clone()]), &stamp())
+            .await
+            .unwrap();
+        let version = live_only
+            .detachment(&mapping, &stamp())
+            .await
+            .unwrap()
+            .version
+            .unwrap();
+        live_only
+            .forget_detachment(&mapping, &version, &stamp())
+            .await
+            .unwrap();
+        // `backfill` turned back on: the engine stages a reindex over the gap.
+        let again = sink(&base);
+        if rebuilt {
+            again.reindex_as(&mapping, &stamp()).await.unwrap();
+        }
+        again.ensure_index_as(&mapping, &stamp()).await.unwrap();
+        write(&again, &index, &[1, 3]).await;
+        let before = again.detachment(&mapping, &stamp()).await.unwrap();
+        assert_eq!(
+            before.gaps,
+            [gap.clone()],
+            "{logical}: the gap before the seed"
+        );
+        again.mark_seeded_as(&index, &stamp()).await.unwrap();
+        let after = again.detachment(&mapping, &stamp()).await.unwrap();
+        if rebuilt {
+            assert_ne!(alias_targets(&client, &base, &hash_alias).await, served);
+            assert_eq!(searchable(&client, &base, &hash_alias).await, ["1", "3"]);
+            assert!(after.gaps.is_empty(), "{logical}: {after:?}");
+        } else {
+            assert_eq!(
+                searchable(&client, &base, &hash_alias).await,
+                ["1", "2", "3"]
+            );
+            assert_eq!(
+                after.gaps,
+                [gap],
+                "{logical}: row 2's document is still there"
+            );
+        }
+    }
+}
+
+/// The review of the closing round, D, on a real cluster: a live-only detach
+/// over a marker a rebuildable detach moved leaves the marker moved, so it
+/// reads beside the record as off serving; the live-only demotion a start
+/// makes puts it back on the generation reads see, which keeps serving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_live_only_record_beside_a_moved_marker_is_put_back_on_serving() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let hash_alias = format!("users_{}", mapping.hash);
+    let first = sink(&base);
+    first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    write(&first, &index, &[1, 2]).await;
+    first.mark_seeded_as(&index, &stamp()).await.unwrap();
+    let served = alias_targets(&client, &base, &hash_alias).await;
+    first
+        .detach(&mapping, &sink::Detach::new("blocked").stamp(stamp()))
+        .await
+        .unwrap();
+    first
+        .detach(
+            &mapping,
+            &sink::Detach::new("blocked").live_only(true).stamp(stamp()),
+        )
+        .await
+        .unwrap();
+    let read = first.detachment(&mapping, &stamp()).await.unwrap();
+    assert_eq!(
+        read.record,
+        Some(sink::DetachRecord::Detached { live_only: true })
+    );
+    assert!(
+        !matches!(read.marker, Some(sink::MarkerAt::Serving { .. })),
+        "{read:?}"
+    );
+    first.demote(&mapping, true, &stamp()).await.unwrap();
+    let read = first.detachment(&mapping, &stamp()).await.unwrap();
+    assert!(
+        matches!(read.marker, Some(sink::MarkerAt::Serving { .. })),
+        "{read:?}"
+    );
+    assert_eq!(alias_targets(&client, &base, &hash_alias).await, served);
+    assert_eq!(searchable(&client, &base, &hash_alias).await, ["1", "2"]);
+}
+
+/// The review of the closing round, E, on a real cluster: a rebuild begun
+/// from a live-only record is not live only; its seed's forget of the record
+/// fails (best effort); the record then reads beside a seeded newer marker
+/// (finished, whatever `live_only`), and a live-only demotion over it keeps
+/// the seeded generation the alias now serves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_rebuild_from_a_live_only_record_finishes_and_keeps_what_its_seed_serves() {
+    let (_container, base) = start_opensearch().await;
+    let proxy = FaultProxy::start(&base).await;
+    let client = reqwest::Client::new();
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let hash_alias = format!("users_{}", mapping.hash);
+    let first = sink(&base);
+    first.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    write(&first, &index, &[1]).await;
+    first.mark_seeded_as(&index, &stamp()).await.unwrap();
+    first
+        .detach(
+            &mapping,
+            &sink::Detach::new("blocked").live_only(true).stamp(stamp()),
+        )
+        .await
+        .unwrap();
+    first.begin_rebuild(&mapping, &stamp()).await.unwrap();
+    let read = first.detachment(&mapping, &stamp()).await.unwrap();
+    assert_eq!(
+        read.record,
+        Some(sink::DetachRecord::Rebuilding { live_only: false })
+    );
+    let seeding = sink(&proxy.url);
+    seeding.ensure_index_as(&mapping, &stamp()).await.unwrap();
+    write(&seeding, &index, &[1, 2, 3]).await;
+    proxy.refuse(|seen, _| seen.path.contains("detach:"));
+    seeding.mark_seeded_as(&index, &stamp()).await.unwrap();
+    proxy.heal();
+    let served = alias_targets(&client, &base, &hash_alias).await;
+    let read = sink(&base).detachment(&mapping, &stamp()).await.unwrap();
+    assert!(read.record.is_some(), "the forget failed: {read:?}");
+    assert_eq!(read.marker, Some(sink::MarkerAt::Newer { seeded: true }));
+    sink(&base).demote(&mapping, true, &stamp()).await.unwrap();
+    assert_eq!(alias_targets(&client, &base, &hash_alias).await, served);
+    assert_eq!(
+        searchable(&client, &base, &hash_alias).await,
+        ["1", "2", "3"]
+    );
+}
+
+/// The review of round 11, S-4, on a real cluster: two URLs reaching one
+/// cluster (`127.0.0.1` and `localhost`) answer the same `cluster_uuid`,
+/// which is how `run` and an online `check` find two sinks on one cluster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn two_urls_of_one_cluster_answer_one_cluster_uuid() {
+    let (_container, base) = start_opensearch().await;
+    let by_name = base.replace("127.0.0.1", "localhost");
+    let by_ip = sink(&base).cluster_uuid().await.unwrap();
+    assert!(!by_ip.is_empty());
+    assert_eq!(sink(&by_name).cluster_uuid().await.unwrap(), by_ip);
 }
 
 /// Each of `ids` in the meta index: its sequence number and source.
@@ -1208,7 +1599,7 @@ async fn a_refused_read_is_never_nothing_kept() {
 
     proxy.refuse(|seen, _| seen.path.contains("_mget"));
     let error = sink(&proxy.url)
-        .detachment(&mapping)
+        .detachment(&mapping, &stamp())
         .await
         .expect_err("a refused read fails");
     assert!(error.to_string().contains("503"), "{error}");
@@ -1258,7 +1649,7 @@ async fn a_half_detached_marker_is_put_back_and_the_old_generation_serves() {
     assert!(status.is_success(), "moving the marker returned {status}");
 
     let restart = sink(&base);
-    let read = restart.detachment(&mapping).await.unwrap();
+    let read = restart.detachment(&mapping, &stamp()).await.unwrap();
     assert_eq!(read.restored, Some(1));
     assert_eq!(marker(&client, &base, &hash_alias).await, (1, true));
     let source: Value = client
@@ -1283,7 +1674,11 @@ async fn a_half_detached_marker_is_put_back_and_the_old_generation_serves() {
     );
     assert_eq!(alias_targets(&client, &base, &hash_alias).await, [gen1]);
     assert!(
-        restart.detachment(&mapping).await.unwrap().is_empty(),
+        restart
+            .detachment(&mapping, &stamp())
+            .await
+            .unwrap()
+            .is_empty(),
         "nothing is left to put back"
     );
 }

@@ -37,8 +37,17 @@ pub enum Landed {
     /// engine has routed. A change emitted after it may not be routed yet:
     /// only the mechanism, which knows what it emitted, can tell.
     Through(Position),
-    /// The engine has routed nothing yet.
+    /// The engine has routed nothing yet. [`ChangeCapture::reached`] answers
+    /// it at or past where the current stream started, so at or past
+    /// anything an earlier holder of the slot dropped: the engine settles a
+    /// reattach's gap end where a lane that routed nothing stands, and a gap
+    /// must hold what was dropped (ADR 0012 stage 10, the fifth re-check).
     Idle,
+    /// No lane needs anything: every lane is detached (ADR 0012 stage 10).
+    /// Everything the mechanism has emitted may be confirmed, and the resume
+    /// point follows the source's own horizon, which never passes a change it
+    /// hasn't emitted.
+    Free,
 }
 
 impl Landed {
@@ -51,6 +60,7 @@ impl Landed {
             Landed::Before(oldest) => oldest.seq.checked_sub(1),
             Landed::Through(last) => Some(last.seq),
             Landed::Idle => None,
+            Landed::Free => Some(u64::MAX),
         }
     }
 }
@@ -190,6 +200,20 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
         Ok(None)
     }
 
+    /// How many live streams this source has begun: each call of
+    /// [`live`](Self::live) counts, before it does anything. The engine opens
+    /// every stream through one place that counts its openings first (ADR
+    /// 0012 stage 10, O29), so a count ahead of those openings is a stream
+    /// opened past them: a fence then vouches for no lane. `None` when the
+    /// source doesn't count, the default.
+    ///
+    /// A backstop beside the engine's own tripwire test, and it fails open:
+    /// a capture that wraps another (tracing, a test double) and doesn't
+    /// forward this answers `None`, and the fence skips the check.
+    fn streams_opened(&self) -> Option<u64> {
+        None
+    }
+
     /// How long the live stream has been holding a committed change that can't
     /// be read back yet (see [`live`](Self::live)); `None` while nothing waits.
     /// Cheap and non-blocking: sampled out of band, like [`lag`](Self::lag).
@@ -220,6 +244,8 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
     ///
     /// The answer keeps moving while the watched tables are idle: with nothing
     /// emitted after what landed, it follows what the mechanism has read.
+    /// [`Landed::Idle`] is never answered below where the current stream
+    /// started (the slot's confirmed position at the opening).
     /// Returns `None` while the mechanism cannot tell (no live stream yet, or
     /// no notion of a source position at all — the default).
     fn reached(&self, landed: Landed) -> Option<SourcePosition> {

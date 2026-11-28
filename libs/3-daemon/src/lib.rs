@@ -11,14 +11,16 @@ mod supervise;
 
 pub use backends::{Backends, SinkParts, SourceParts};
 pub use engine::{Backoff, Budget, Held, MaxWaiting, Pin, Progress};
+pub use fence::FenceGap;
 pub use fence::{
     Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
     LanePositions, SinkPositions, Unserved,
 };
 pub use observer::StatusObserver;
 pub use stall::{BACKLOG_SPAN, LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};
+pub use status::LaneGap;
 pub use status::{
-    BackfillSnapshot, BackfillState, Exemption, IndexErrors, IndexFailure, IndexHold,
+    BackfillSnapshot, BackfillState, DetachedLane, Exemption, IndexErrors, IndexFailure, IndexHold,
     IndexIngestSnapshot, IndexRestarts, IndexState, IngestSnapshot, IngestState, LaneHealthState,
     LaneHealthView, LaneSnapshot, LastScriptFailure, Phase, PinnedBy, ScriptFailures, SinkPhase,
     SinkSnapshot, Status, StatusSnapshot,
@@ -29,8 +31,8 @@ use supervise::ControlReceivers;
 
 pub use engine::{
     BuildStats, CommitStats, EngineId, ExemptionState, IndexStates, LaneHealth, Observer,
-    ParkReason, ProbeOutcome, ReaderBound, SinkControl, Stage, StageTiming, StartupStep, Stop,
-    Wake, Work,
+    ParkReason, ProbeOutcome, ReaderBound, ReattachVerdict, Reply, SinkControl, Stage, StageTiming,
+    StartupStep, Stop, Wake, Work,
 };
 pub use kernel::{IndexName, SinkName};
 
@@ -422,11 +424,17 @@ impl Daemon {
         let stream: Arc<dyn Stream> = backends.stream(&config, &lanes)?;
 
         let progress = Arc::new(Progress::new(lanes.iter().cloned()));
+        // O29: the ingest engine counts the slot's openings, the sink engines
+        // read their records again after each, and the fence vouches for no
+        // sink that hasn't.
+        let rereads = Arc::new(engine::Rereads::default());
+        progress.hold_while_unread(Arc::clone(&rereads));
         let fence = Fence::new(
             Arc::clone(&capture),
             Arc::clone(&progress),
             lanes.iter().cloned(),
-        );
+        )
+        .with_rereads(Arc::clone(&rereads));
         // Shared per index only with two or more: `mappings` are the
         // indexes that have lanes, the ones a build can hold bytes for.
         let budget = Arc::new(
@@ -489,9 +497,17 @@ impl Daemon {
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())
         .with_backoff(backoff)
-        .with_stop(stop.clone());
+        .with_stop(stop.clone())
+        .with_rereads(Arc::clone(&rereads));
         status.attach_index_states(ingest.index_states());
 
+        let live_only: Vec<SinkName> = sinks
+            .iter()
+            .filter(|parts| !parts.options.backfill)
+            .map(|parts| parts.name.clone())
+            .collect();
+        let positions: Arc<dyn engine::SourcePositions> =
+            Arc::new(engine::CapturePositions(Arc::clone(&capture)));
         let sink_engines: Vec<SinkEngine> = sinks
             .into_iter()
             .map(|parts| {
@@ -511,10 +527,13 @@ impl Daemon {
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)
                 .with_stop(stop.clone())
+                .with_positions(Arc::clone(&positions))
+                .with_rereads(Arc::clone(&rereads))
             })
             .collect();
 
         let (control, control_receivers) = DaemonControl::new(&sink_names, stop.clone());
+        let control = control.with_live_only(live_only);
         Ok(RunningDaemon {
             status,
             fence,

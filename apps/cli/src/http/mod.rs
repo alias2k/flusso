@@ -157,6 +157,46 @@ fn unserved(position: &str, lanes: &[(LaneKey, Unserved)]) -> Response {
         .into_response()
 }
 
+/// `409` for a wait inside a gap a reattach accepted (ADR 0012 stage 10,
+/// S3): the lanes' indexes never got those changes, so no wait helps. Each
+/// lane names its gap, in the source's own text.
+fn in_gap(position: &str, lanes: &[(LaneKey, daemon::FenceGap)]) -> Response {
+    let names: Vec<String> = lanes
+        .iter()
+        .map(|(lane, gap)| {
+            format!(
+                "{} on {} (from {} to {})",
+                lane.index,
+                lane.sink,
+                gap.from.as_deref().unwrap_or("an unknown position"),
+                gap.to.as_deref().unwrap_or("an unknown position"),
+            )
+        })
+        .collect();
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": format!(
+                "the position falls inside changes a reattach accepted as missing: {}; \
+                 reindex the index on a sink that can rebuild it",
+                names.join(", ")
+            ),
+            "reason": "gap",
+            "position": position,
+            "lanes": lanes
+                .iter()
+                .map(|(lane, gap)| json!({
+                    "index": lane.index.as_ref(),
+                    "sink": lane.sink.as_ref(),
+                    "state": "gap",
+                    "gap": gap,
+                }))
+                .collect::<Vec<_>>(),
+        })),
+    )
+        .into_response()
+}
+
 /// `503` with `Retry-After` and why: `stopping` (this process is going away;
 /// the next one answers the same position) or `starting` (the source isn't
 /// live yet).
@@ -290,12 +330,15 @@ pub(crate) struct PrivateState {
     /// The daemon's operations handle: a reindex reaches the targeted sink
     /// engines through it.
     pub control: DaemonControl,
+    /// How long a reattach waits for its sink engine's verdict.
+    pub reattach_wait: std::time::Duration,
 }
 
 pub(crate) fn private_router(state: PrivateState, basic_auth: Arc<BasicAuth>) -> Router {
     Router::new()
         .route("/indexes", get(indexes))
         .route("/indexes/{name}/reindex", post(reindex))
+        .route("/indexes/{name}/reattach", post(reattach))
         .layer(middleware::from_fn_with_state(
             basic_auth,
             auth::require_basic_auth,
@@ -442,6 +485,7 @@ async fn wait(
         Ok(FenceOutcome::Unserved { position, lanes }) => {
             return unserved(&position, &lanes);
         }
+        Ok(FenceOutcome::InGap { position, lanes }) => return in_gap(&position, &lanes),
         Err(error @ FenceError::InvalidPosition(_)) => {
             return refuse(StatusCode::BAD_REQUEST, error.to_string());
         }
@@ -524,9 +568,12 @@ async fn index_status(State(state): State<PublicState>, Path(name): Path<String>
 /// sink or, without `sink`, on every sink. Validates the names, then hands
 /// the operation to the daemon; the targeted sink engines stage a fresh
 /// generation and request their snapshot, no restart involved. `202`
-/// `{"index", "sink" (null: every sink), "queued": true}`; `400` an invalid
-/// index or sink name; `404` an unknown index or sink; `503` while stopping
-/// or with the engine not running.
+/// `{"index", "sink" (null: every sink), "queued": true, "queued_on": [the
+/// sinks queued]}`, with `skipped` (`{"sink", "reason"}` each) naming each
+/// sink left out when no sink is named: its rebuild of the index is starting
+/// or running (ADR 0012 stage 10, O20), or it can't rebuild a detached one; `409` when the named sink's (or
+/// every sink's) is; `400` an invalid index or sink name; `404` an unknown
+/// index or sink; `503` while stopping or with the engine not running.
 async fn reindex(
     State(state): State<PrivateState>,
     Path(name): Path<String>,
@@ -549,16 +596,92 @@ async fn reindex(
             }
         },
     };
-    match state.control.reindex(index.clone(), sink.as_ref()) {
-        Ok(()) => (
-            StatusCode::ACCEPTED,
+    // O20: a rebuild starting, or running with its lane open, takes no
+    // reindex. Named, the sink refuses with `409`; unnamed, the reindex goes
+    // on where it applies and lists the lanes it skipped.
+    let targets: Vec<SinkName> = match &sink {
+        Some(sink) => vec![sink.clone()],
+        None => state.control.sinks().cloned().collect(),
+    };
+    if state.control.is_stopping() {
+        return stopping_refusal();
+    }
+    let detached = state.status.detached_lanes();
+    let skipped: Vec<(SinkName, String)> = targets
+        .iter()
+        .filter_map(|target| {
+            let lane = LaneKey::new(index.clone(), target.clone());
+            // A detached index on a sink that can't rebuild is reattached
+            // (O16): a reindex there is ignored, so name what works.
+            if state.control.is_live_only(target) && detached.contains(&lane) {
+                return Some((
+                    target.clone(),
+                    format!(
+                        "this sink can't rebuild the index (backfill = false): \
+                         flusso reattach {index} --sink {target} --accept-gap"
+                    ),
+                ));
+            }
+            state
+                .status
+                .reindex_refusal(&lane)
+                .map(|reason| (target.clone(), reason))
+        })
+        .collect();
+    let refuse = |reason: &str| {
+        (
+            StatusCode::CONFLICT,
             Json(json!({
+                "error": reason,
+                "reason": reason,
+                "index": index.as_ref(),
+                "skipped": skipped
+                    .iter()
+                    .map(|(sink, reason)| json!({ "sink": sink.as_ref(), "reason": reason }))
+                    .collect::<Vec<_>>(),
+            })),
+        )
+            .into_response()
+    };
+    if let Some((_, reason)) = skipped.first()
+        && (sink.is_some() || skipped.len() == targets.len())
+    {
+        return refuse(reason);
+    }
+    let queued_on: Vec<&str> = targets
+        .iter()
+        .filter(|target| !skipped.iter().any(|(sink, _)| sink == *target))
+        .map(|target| target.as_ref())
+        .collect();
+    let queued = if skipped.is_empty() {
+        state.control.reindex(index.clone(), sink.as_ref())
+    } else {
+        targets
+            .iter()
+            .filter(|target| !skipped.iter().any(|(sink, _)| sink == *target))
+            .try_for_each(|target| state.control.reindex(index.clone(), Some(target)))
+    };
+    match queued {
+        Ok(()) => {
+            let mut body = json!({
                 "index": index.as_ref(),
                 "sink": sink.as_ref().map(|sink| sink.as_ref()),
                 "queued": true,
-            })),
-        )
-            .into_response(),
+                "queued_on": queued_on,
+            });
+            if !skipped.is_empty()
+                && let Some(fields) = body.as_object_mut()
+            {
+                fields.insert(
+                    "skipped".to_owned(),
+                    skipped
+                        .iter()
+                        .map(|(sink, reason)| json!({ "sink": sink.as_ref(), "reason": reason }))
+                        .collect(),
+                );
+            }
+            (StatusCode::ACCEPTED, Json(body)).into_response()
+        }
         Err(ControlError::UnknownSink(name)) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("unknown sink {name}") })),
@@ -570,6 +693,136 @@ async fn reindex(
         )
             .into_response(),
     }
+}
+
+/// `POST /indexes/{name}/reattach?sink=<name>&accept_gap=true` (ADR 0012
+/// stage 10, O16): reattach a detached lane on a sink that can't rebuild,
+/// accepting the changes it missed. `400` without `sink` or without
+/// `accept_gap=true`; `404` for an unknown index or sink; `409` when the
+/// lane is not detached, is being attached, or its sink can rebuild (a
+/// reindex does); `503` while stopping or busy; else `202`.
+async fn reattach(
+    State(state): State<PrivateState>,
+    Path(name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let index = match known_index(&state.status, &name) {
+        Ok(index) => index,
+        Err(refused) => return *refused,
+    };
+    let refuse = |status: StatusCode, error: String| {
+        (
+            status,
+            Json(json!({ "error": error, "index": index.as_ref() })),
+        )
+            .into_response()
+    };
+    let Some(raw) = params.get("sink") else {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "name the sink: a reattach is for one lane (?sink=<name>)".to_owned(),
+        );
+    };
+    let Ok(sink) = SinkName::try_new(raw.clone()) else {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            format!("invalid sink name {raw:?}"),
+        );
+    };
+    if params.get("accept_gap").map(String::as_str) != Some("true") {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "a reattach drops the changes made while the lane was detached: \
+             say so with accept_gap=true"
+                .to_owned(),
+        );
+    }
+    if !state.control.sinks().any(|known| *known == sink) {
+        return refuse(StatusCode::NOT_FOUND, format!("unknown sink {sink}"));
+    }
+    if state.control.is_stopping() {
+        return stopping_refusal();
+    }
+    let conflict = |reason: &str| {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": reason,
+                "reason": reason,
+                "index": index.as_ref(),
+                "sink": sink.as_ref(),
+            })),
+        )
+            .into_response()
+    };
+    if !state.control.is_live_only(&sink) {
+        return conflict(&format!(
+            "this sink can rebuild the index (backfill = true), with nothing missing: \
+             flusso reindex {index} --sink {sink}"
+        ));
+    }
+    if let Some(reason) = state
+        .status
+        .reattach_refusal(&LaneKey::new(index.clone(), sink.clone()))
+    {
+        return conflict(reason);
+    }
+    let verdict = match state.control.reattach(index.clone(), &sink) {
+        Ok(verdict) => verdict,
+        Err(ControlError::UnknownSink(name)) => {
+            return refuse(StatusCode::NOT_FOUND, format!("unknown sink {name}"));
+        }
+        Err(ControlError::Stopping) => return stopping_refusal(),
+        Err(error @ ControlError::CanRebuild(_)) => return conflict(&error.to_string()),
+        Err(error) => return refuse(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+    };
+    // The engine answers between two batches: the operator hears its
+    // verdict, not a blind "queued" (review of step 4, S4).
+    match tokio::time::timeout(state.reattach_wait, verdict).await {
+        Ok(Ok(daemon::ReattachVerdict::Started)) => (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "index": index.as_ref(),
+                "sink": sink.as_ref(),
+                "started": true,
+            })),
+        )
+            .into_response(),
+        Ok(Ok(daemon::ReattachVerdict::Refused(reason))) => conflict(&reason),
+        Ok(Ok(daemon::ReattachVerdict::Failed(error))) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "the reattach failed: {error}. Nothing accepted is lost. If it failed before \
+                 the record's delete, nothing changed; /status tells: the lane still detached, \
+                 ask again; attaching or open, the reattach took effect"
+            ),
+        ),
+        Ok(Err(_)) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the sink engine's run ended before the reattach started (a stop or a failure); \
+             nothing changed: ask again"
+                .to_owned(),
+        ),
+        Err(_) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "no verdict within {:.0}s: the sink engine is busy; the reattach may still \
+                 start, and /status shows the lane when it does",
+                state.reattach_wait.as_secs_f64()
+            ),
+        ),
+    }
+}
+
+/// How long a reattach waits for its sink engine's verdict.
+pub(crate) const REATTACH_VERDICT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `503` `stopping`: the deployment takes no operation while it stops.
+fn stopping_refusal() -> Response {
+    unavailable(
+        "stopping",
+        "flusso is stopping and takes no operation; ask the next process".to_owned(),
+    )
 }
 
 #[cfg(test)]

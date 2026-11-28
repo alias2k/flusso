@@ -1,0 +1,20 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8c8170fca267c138bf6070b4570a74160a88517981f4b6ea28add6e2a4851616 # CI's case on a9c7bd90: a reattach before the new process's first stream settled its gap at the stand-in's Idle answer, 0
+cc 0b57a55b9bba5af87a35c6ff97321ba59327bae9b091436305dfdd743b4027fd # shrinks to events = [Open { ok: true, jump: 10, drop: Some(2), rebuild: true }, NewProcess, Reindex { index: 0 }]
+cc 6d852a8c1fcb272790c37990536ad2c9148aafb4960d89a1865a3a92f684ab6d # the sixth re-check's B-1: a reattach waiting in ensure_index past the stream's end deleted another process's record
+cc 512dc941332a1b341e233faba3699ee4f8aa1d3b449d13a3f4fd814a216f9c6a # the sixth re-check's B-1: the same with its read held
+cc eef3a13df84a43dace676e4588725543459a9e86254bbfba5ffc3b1dd64c6f2d # shrinks to events = [Open { ok: true, jump: 0, drop: None, rebuild: false }, Reindex { index: 0 }, GapOverOwed { lane: 2 }]
+cc 674ea7172afbc285f50d30d28f0e0df0e1f9fc79035f13c49d1ab80e5757f156 # shrinks to events = [HolderFinishes { lane: 0, reattach: false }, HoldReads { sink: 0 }, HolderFinishes { lane: 1, reattach: true }, GapOverOwed { lane: 2 }, Open { ok: false, jump: 10, drop: None, rebuild: false }, HolderFinishes { lane: 0, reattach: true }, Release { sink: 0 }, Wait { lane: 0, whole_sink: false, searchable: false, at: 36 }]
+cc 76cd52a80d0e1542de647d5a1ccc30a2dfe26ed85baa3c0fccfb64973b85b765 # shrinks to events = [Unheld { lane: 3, rebuild: true, then: 0 }, GapOverOwed { lane: 3 }, Open { ok: true, jump: 10, drop: Some(3), rebuild: true }, StreamEnds { jump: 0, drop: None, rebuild: false }]
+cc 1626c8b49d4ee80b4d8de6e33159cc00084be0e12a0b238241cabb1a2487851a # shrinks to events = [HolderFinishes { lane: 2, reattach: true }, Unheld { lane: 0, rebuild: false, then: 0 }, Reindex { index: 0 }, GapOverOwed { lane: 2 }, HoldEnsure { sink: 1 }, Open { ok: true, jump: 0, drop: None, rebuild: false }, GapOverOwed { lane: 2 }, Release { sink: 1 }, Open { ok: true, jump: 10, drop: Some(2), rebuild: true }, Readable { sink: 0 }]
+cc f6faf5ff017b09b3b5b98322969b604e63a3bd4655028d96f4e4708dcaf7aaf6 # shrinks to events = [Reindex { index: 1 }, Unheld { lane: 0, rebuild: false, then: 0 }, Unheld { lane: 3, rebuild: true, then: 3 }, GapOverOwed { lane: 3 }, Unheld { lane: 3, rebuild: true, then: 1 }]
+cc 453bd374c95f302cb5fe3ab875c552129abdbb5853fb0f06b35c03d282ed53fb # shrinks to events = [Unheld { lane: 0, rebuild: false, then: 0 }, Reattach { index: 0 }, GapOverOwed { lane: 2 }, Reattaches { lane: 0 }, StreamEnds { jump: 0, drop: None, rebuild: false }, Missing { lane: 0 }]
+cc c06a14c6a620ffed29b3753e03826580bc248ba6b1e3fe9722570555277142ff # shrinks to events = [Restart { sink: 1, unreadable: 2 }, RebuildLost { lane: 3 }]
+cc 24cbcc4bca7e32567166edc6ce789f129600f740348a17ee1a691c7b40eaf219 # shrinks to events = [Open { ok: false, jump: 10, drop: Some(2), rebuild: true }, Fails { sink: 0, lands: false }, GapOverSlowRead { lane: 2 }]
+cc 2b4398abd9b8d526da80add8b3809e51ff477f9ba0a84854c55f6a0f3a55a614 # shrinks to events = [Reindex { index: 0 }, Detach { lane: 2, fails: false }, GapOverOwed { lane: 2 }]
+cc bfe3b12dfc373d15f523bb966aad606ad7580360f9440ad08aab05ade2c0b12e # shrinks to events = [HoldEnsure { sink: 0 }, Unheld { lane: 2, rebuild: false, then: 4 }, Restart { sink: 1, unreadable: 1 }, GapOverOwed { lane: 2 }]

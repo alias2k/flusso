@@ -9,6 +9,8 @@ mod config;
 mod detachment;
 mod generations;
 mod mapping;
+#[doc(hidden)]
+pub mod meta;
 mod refresh;
 mod settings;
 mod sink_impl;
@@ -89,6 +91,9 @@ pub struct OpensearchSink {
     /// `http.max_content_length`.
     pub(crate) max_bytes: usize,
     pub(crate) max_retries: u32,
+    /// The client's timeout for a request: what a server-side wait must
+    /// stay under.
+    pub(crate) timeout: Duration,
     pub(crate) pipeline: Option<String>,
     /// `refresh_interval` handed to each index once seeded — the steady-state
     /// visibility ceiling (see [`write`](OpensearchSink::write) for how a caught-up write
@@ -238,6 +243,7 @@ impl OpensearchSink {
             // larger than the cap is still sent (alone, with a warning).
             max_bytes: (config.max_bytes as usize).max(1),
             max_retries: config.max_retries,
+            timeout: Duration::from_secs(config.timeout_secs),
             pipeline: config.pipeline.clone(),
             refresh_interval: config.refresh_interval.clone(),
             index_options: IndexOptions {

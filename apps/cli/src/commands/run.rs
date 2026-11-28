@@ -337,10 +337,8 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         .or(config.server.private_address)
         .unwrap_or(DEFAULT_PRIVATE_ADDRESS);
 
-    // Bind both listeners before opening DB connections or starting the pipeline,
-    // so a bad address fails fast.
-    let public_listener = http::bind("public", public_addr, Some(public_addr)).await?;
-    let private_listener = http::bind("private", private_addr, None).await?;
+    let (public_listener, private_listener) =
+        bind_then_compare_clusters(&config, public_addr, private_addr).await?;
 
     let basic_auth = Arc::new(BasicAuth::new(args.admin_user, args.admin_password));
     if basic_auth.uses_default_password() {
@@ -401,6 +399,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
             http::PrivateState {
                 status: Arc::clone(&status),
                 control,
+                reattach_wait: http::REATTACH_VERDICT,
             },
             Arc::clone(&basic_auth),
         ),
@@ -739,6 +738,22 @@ fn lay_max_pending_documents(
     }
     daemon::max_pending_documents(config)?;
     Ok(())
+}
+
+/// Bind both listeners, then refuse two OpenSearch sinks on one cluster.
+/// Binding first, before any connection: a taken or bad address fails at
+/// once, never after the up to 10 s the clusters' answers may take (the
+/// review of the closing round, C; of round 13, m-5). The listeners are
+/// only bound here; nothing is served until the daemon has started.
+async fn bind_then_compare_clusters(
+    config: &Config,
+    public_addr: SocketAddr,
+    private_addr: SocketAddr,
+) -> anyhow::Result<(tokio::net::TcpListener, tokio::net::TcpListener)> {
+    let public_listener = http::bind("public", public_addr, Some(public_addr)).await?;
+    let private_listener = http::bind("private", private_addr, None).await?;
+    adapters::distinct_clusters_online(config).await?;
+    Ok((public_listener, private_listener))
 }
 
 #[cfg(test)]

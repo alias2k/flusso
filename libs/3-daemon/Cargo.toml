@@ -35,6 +35,7 @@ tokio = { workspace = true, features = ["rt", "time", "macros", "sync"] }
 
 [dev-dependencies]
 serde_json.workspace = true
+proptest.workspace = true
 stream-channel.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "test-util"] }
@@ -42,7 +43,12 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time
 # Postgres and a real OpenSearch: a fence is only worth its name if a read
 # right after it really sees the commit.
 source-postgres.workspace = true
-sink-opensearch.workspace = true
+# The fence world (`src/fence/tests/gate_world.rs`) keeps its stand-in
+# sink's meta index in `sink_opensearch::meta::memory` (feature `testing`),
+# which runs the OpenSearch sink's own plans. Path only, so `cargo publish`
+# strips it: a version would have the registry's copy of the adapter offer
+# `testing` before the libs train has published it.
+sink-opensearch = { path = "../2-adapters/sink-opensearch", package = "flusso-sink-opensearch", features = ["testing"] }
 sqlx.workspace = true
 testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }
 test-postgres.workspace = true

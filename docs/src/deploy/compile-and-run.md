@@ -54,7 +54,7 @@ You have a validated config and want to run it, locally or in a deployment. The 
 
 ## Run under a task runner or supervisor
 
-One flusso per replication slot: a second one on the same addresses fails at start, and on other addresses waits for the slot. So whatever starts flusso must also stop it, and give the [drain](../reference/cli.md#stopping) its 30 seconds before killing it.
+One flusso per replication slot: a second one on the same addresses fails at start, and on other addresses waits for the slot (and, should both run, can [stop the first](../operate/one-process-per-slot.md)). So whatever starts flusso must also stop it, and give the [drain](../reference/cli.md#stopping) its 30 seconds before killing it.
 
 | Supervisor | Waits after `SIGTERM` by default | Set |
 | --- | --- | --- |

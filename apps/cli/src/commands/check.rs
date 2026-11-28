@@ -173,6 +173,11 @@ async fn inspect(
     path: std::path::PathBuf,
 ) -> anyhow::Result<()> {
     let config = Arc::new(config);
+    let clusters = if args.offline {
+        adapters::cluster_findings(&config)
+    } else {
+        adapters::cluster_findings_online(&config).await
+    };
 
     let postgres = adapters::source_config(&config)?;
 
@@ -231,6 +236,7 @@ async fn inspect(
         config_path: args.config.as_deref(),
         fix: args.fix,
         diagnostics: &diagnostics,
+        clusters: &clusters,
         online,
     };
 
@@ -300,15 +306,21 @@ struct Report<'a> {
     /// `--fix` was asked for.
     fix: bool,
     diagnostics: &'a [Diagnostic],
+    /// The OpenSearch sinks' clusters: two on one, or one not checked.
+    clusters: &'a [adapters::ClusterFinding],
     /// `None` under `--offline`.
     online: Option<Online<'a>>,
 }
 
 impl Report<'_> {
     fn summary(&self) -> print::Summary {
+        let shared = self.clusters.iter().filter(|f| f.is_error()).count();
         print::Summary::of(
             self.diagnostics,
-            self.online.as_ref().map_or(0, |o| o.gaps.len()) + usize::from(self.lock.is_error()),
+            self.online.as_ref().map_or(0, |o| o.gaps.len())
+                + usize::from(self.lock.is_error())
+                + shared,
+            self.clusters.len() - shared,
             self.online.is_none(),
             self.online.as_ref().is_some_and(|o| o.server.is_some()),
         )
@@ -337,6 +349,7 @@ impl Report<'_> {
         }
         let gaps = self.online.as_ref().map_or(0, |o| o.gaps.len());
         let lock = usize::from(self.lock.is_error());
+        let shared = self.clusters.iter().filter(|f| f.is_error()).count();
         let plural = |n: usize, one: &str| {
             if n == 1 {
                 format!("1 {one}")
@@ -345,8 +358,17 @@ impl Report<'_> {
             }
         };
         let mut failed = Vec::new();
-        if summary.errors > gaps + lock {
-            failed.push(plural(summary.errors - gaps - lock, "schema error"));
+        if summary.errors > gaps + lock + shared {
+            failed.push(plural(
+                summary.errors - gaps - lock - shared,
+                "schema error",
+            ));
+        }
+        if shared > 0 {
+            failed.push(format!(
+                "{} of two OpenSearch sinks on one cluster",
+                plural(shared, "pair")
+            ));
         }
         if gaps > 0 {
             failed.push(format!(
@@ -392,6 +414,7 @@ impl Report<'_> {
             None => {
                 print::offline(out, pen)?;
                 print::offline_diagnostics(out, pen, self.diagnostics)?;
+                print::clusters(out, pen, self.clusters)?;
                 print::lock_error(out, pen, &self.lock_at(), self.lock)?;
             }
             Some(online) => {
@@ -410,6 +433,7 @@ impl Report<'_> {
                 }
                 print::diagnostics(out, pen, self.diagnostics)?;
                 print::gaps(out, pen, &online.gaps)?;
+                print::clusters(out, pen, self.clusters)?;
                 print::lock_error(out, pen, &self.lock_at(), self.lock)?;
                 if coverage_fails {
                     print::coverage(out, pen, online.coverage, online.manage_publication)?;
@@ -494,6 +518,15 @@ impl Report<'_> {
                 "indexes": gap.indexes.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "message": gap.message,
             })).collect::<Vec<_>>()),
+            "sinks": self.clusters
+                .iter()
+                .map(|finding| serde_json::json!({
+                    "kind": finding.kind(),
+                    "severity": if finding.is_error() { "error" } else { "warning" },
+                    "sinks": finding.sinks().iter().map(|sink| sink.as_ref()).collect::<Vec<_>>(),
+                    "message": finding.message(),
+                }))
+                .collect::<Vec<_>>(),
             "diagnostics": self.diagnostics
                 .iter()
                 .map(|d| serde_json::json!({
@@ -613,6 +646,7 @@ mod tests {
             config_path: None,
             fix: false,
             diagnostics,
+            clusters: &[],
             online: online.map(|o| {
                 Online::new(
                     &source_spec(config),
@@ -1267,5 +1301,70 @@ mod tests {
                 "{painted:?} missing from:\n{coloured:?}"
             );
         }
+    }
+
+    /// The review of round 10, m-5 and m-6: two OpenSearch sinks on one
+    /// cluster are an error of the report (human, JSON and the summary
+    /// line), like every other finding; a sink whose URL can't be resolved
+    /// here is `check_skipped`, a warning naming what wasn't checked.
+    #[test]
+    fn sinks_on_one_cluster_are_an_error_and_an_unresolved_url_a_skipped_check() {
+        let config = config();
+        let sink = |name: &str| kernel::SinkName::try_new(name).unwrap();
+        let shared = [adapters::ClusterFinding::Shared {
+            first: sink("primary"),
+            second: sink("audit"),
+            cluster: "https://search:9200".to_owned(),
+            compared: adapters::Compared::Url,
+        }];
+        let report = Report {
+            clusters: &shared,
+            ..built(&config, &[], None)
+        };
+        let mut out = Vec::new();
+        report.human(&mut out, print::Pen::plain()).unwrap();
+        let human = String::from_utf8(out).unwrap();
+        assert!(
+            human.contains("Sinks")
+                && human.contains("✗ [sinks.primary] and [sinks.audit] write to the same")
+                && human.ends_with("✗ check failed: 1 error, 0 warnings\n"),
+            "{human}"
+        );
+        let json = report.json();
+        assert_eq!(json["sinks"][0]["kind"], "shared_cluster");
+        assert_eq!(json["sinks"][0]["severity"], "error");
+        assert_eq!(
+            json["sinks"][0]["sinks"],
+            serde_json::json!(["primary", "audit"])
+        );
+        assert_eq!(json["summary"]["errors"], 1);
+        assert!(
+            report
+                .failure()
+                .is_some_and(|failure| failure.contains("1 pair of two OpenSearch sinks")),
+            "{:?}",
+            report.failure()
+        );
+
+        let skipped = [adapters::ClusterFinding::Skipped {
+            sink: sink("audit"),
+            why: "the environment variable AUDIT_URL is not set".to_owned(),
+        }];
+        let report = Report {
+            clusters: &skipped,
+            ..built(&config, &[], None)
+        };
+        let json = report.json();
+        assert_eq!(json["sinks"][0]["kind"], "check_skipped");
+        assert_eq!(json["sinks"][0]["severity"], "warning");
+        assert!(
+            json["sinks"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("AUDIT_URL"),
+            "{json}"
+        );
+        assert_eq!(json["summary"]["warnings"], 1);
+        assert_eq!(report.failure(), None);
     }
 }

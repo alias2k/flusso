@@ -573,3 +573,44 @@ fn show_writes_every_option_and_value_as_plain_json() {
     assert!(text_of("answer").contains("42"), "{text}");
     assert!(text_of("tags").contains("[\"a\",\"b\"]"), "{text}");
 }
+
+/// The review of round 10, m-6: two OpenSearch sinks on one cluster are a
+/// finding of the report, in the JSON and counted, not an error before it;
+/// a third on another cluster (a backup) is none.
+#[test]
+fn two_sinks_on_one_cluster_are_a_finding_of_the_report() {
+    let dir = project("one_cluster");
+    std::fs::write(
+        dir.join("flusso.toml"),
+        "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://nobody:hunter2@127.0.0.1:1/none\"\n\n\
+         [sinks.primary]\ntype = \"opensearch\"\nurl = \"https://search:9200\"\n\n\
+         [sinks.audit]\ntype = \"opensearch\"\nurl = \"https://SEARCH:9200/\"\n\n\
+         [sinks.backup]\ntype = \"opensearch\"\nurl = \"https://backup:9200\"\n\n\
+         [[index]]\nname = \"t\"\nschema = \"t.schema.yml\"\nenabled = true\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_flusso"))
+        .current_dir(&dir)
+        .args(["check", "--offline", "--format", "json"])
+        .env_remove("FLUSSO_CONFIG")
+        .env_remove("FLUSSO_LOCK")
+        .env_remove("FLUSSO_FORMAT")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let whole = shown(&output);
+    assert!(!output.status.success(), "{whole}");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("{error}: {whole}"));
+    assert_eq!(
+        json["sinks"],
+        serde_json::json!([{
+            "kind": "shared_cluster",
+            "severity": "error",
+            "sinks": ["audit", "primary"],
+            "message": json["sinks"][0]["message"],
+        }]),
+        "{whole}"
+    );
+    assert!(json["summary"]["errors"].as_u64().unwrap() >= 1, "{whole}");
+}

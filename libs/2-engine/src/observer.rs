@@ -503,6 +503,22 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (lane, outcome);
     }
 
+    /// A lane's rebuild after a detach changed (ADR 0012 stage 10):
+    /// `rebuilding` is the rebuilds its record counts while one is under way,
+    /// `attaching` the attach attempt it waits for.
+    fn on_lane_rebuild(&self, lane: &LaneKey, rebuilding: Option<u64>, attaching: Option<u64>) {
+        let _ = (lane, rebuilding, attaching);
+    }
+
+    /// A lane carries the gaps reattaches accepted (ADR 0012 stage 10, O16,
+    /// S3), the whole list: none of the changes after a gap's `from` and
+    /// through its `to` reached its index. Heard at an attach, and at every
+    /// staging that finds them. An unknown end stretches its gap that way,
+    /// until heard again completed.
+    fn on_lane_gaps(&self, lane: &LaneKey, gaps: &[sink::Gap]) {
+        let _ = (lane, gaps);
+    }
+
     /// One index's own work failed (ADR 0012 stage 8a, slice 8), and is
     /// tried again after `retry_in` while the reader and the other indexes
     /// go on. `kind` [`Work::Live`]: a live build or document; its builder
@@ -699,6 +715,18 @@ impl Observer for FanOut {
     fn on_lane_probe(&self, lane: &LaneKey, outcome: crate::ProbeOutcome) {
         for observer in &self.observers {
             observer.on_lane_probe(lane, outcome);
+        }
+    }
+
+    fn on_lane_rebuild(&self, lane: &LaneKey, rebuilding: Option<u64>, attaching: Option<u64>) {
+        for observer in &self.observers {
+            observer.on_lane_rebuild(lane, rebuilding, attaching);
+        }
+    }
+
+    fn on_lane_gaps(&self, lane: &LaneKey, gaps: &[sink::Gap]) {
+        for observer in &self.observers {
+            observer.on_lane_gaps(lane, gaps);
         }
     }
 

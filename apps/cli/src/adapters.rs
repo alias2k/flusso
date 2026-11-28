@@ -132,6 +132,287 @@ pub(crate) fn index_sink_config(
     }
 }
 
+/// How two sinks were found on one cluster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Compared {
+    /// Their URLs name it, however spelled (`check --offline`).
+    Url,
+    /// Both clusters answered the same `cluster_uuid`.
+    ClusterUuid,
+}
+
+/// What `check` finds of the OpenSearch sinks' clusters (the review of the
+/// cut, m-3; of round 10, m-5 and m-6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClusterFinding {
+    /// Two sinks write to one cluster: every index, alias and seed marker
+    /// flusso owns there is named by the deployment's `prefix` alone, never
+    /// by the sink, so both would share them, each taking the other's
+    /// records for another process's. An error; `run` refuses it. Told by the
+    /// `cluster_uuid` each sink's cluster answers (`GET /`) where the cluster
+    /// can be asked (`run`, `check` online), so two URLs reaching one cluster
+    /// (two nodes, a hostname and its IP) are found; by the URL alone under
+    /// `check --offline`, which asks nothing and so misses them (the review
+    /// of round 11, S-4).
+    Shared {
+        first: SinkName,
+        second: SinkName,
+        /// The URL both name, or the `cluster_uuid` both answer.
+        cluster: String,
+        compared: Compared,
+    },
+    /// A sink's URL can't be resolved here (an unset environment variable),
+    /// so it was not compared with the other sinks: `check_skipped`.
+    Skipped { sink: SinkName, why: String },
+}
+
+impl ClusterFinding {
+    /// Whether the finding fails `check`.
+    pub(crate) fn is_error(&self) -> bool {
+        matches!(self, Self::Shared { .. })
+    }
+
+    /// The finding's kind, as the JSON report names it.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Shared { .. } => "shared_cluster",
+            Self::Skipped { .. } => "check_skipped",
+        }
+    }
+
+    /// The sinks it is about.
+    pub(crate) fn sinks(&self) -> Vec<&SinkName> {
+        match self {
+            Self::Shared { first, second, .. } => vec![first, second],
+            Self::Skipped { sink, .. } => vec![sink],
+        }
+    }
+
+    /// What was found, and what to do.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Shared {
+                first,
+                second,
+                cluster,
+                compared: Compared::Url,
+            } => shared_message(first, second, &format!("both URLs name {cluster}")),
+            Self::Shared {
+                first,
+                second,
+                cluster,
+                compared: Compared::ClusterUuid,
+            } => shared_message(
+                first,
+                second,
+                &format!("both answer cluster_uuid {cluster}"),
+            ),
+            Self::Skipped { sink, why } => format!(
+                "[sinks.{sink}] was not compared with the other OpenSearch sinks for a shared \
+                 cluster ({why}); `flusso run` checks it where it can reach the cluster"
+            ),
+        }
+    }
+}
+
+/// The finding of `first` and `second` on one cluster, found as `how` says.
+fn shared_message(first: &SinkName, second: &SinkName, how: &str) -> String {
+    format!(
+        "[sinks.{first}] and [sinks.{second}] write to the same OpenSearch cluster \
+                 ({how}): every index, alias and seed marker flusso keeps there is named by \
+                 the deployment's `prefix`, never by the sink, so the two would share them. Give \
+                 each sink its own cluster, or run each in its own deployment with its own \
+                 `prefix`"
+    )
+}
+
+/// The OpenSearch sinks' clusters, compared: each pair on one cluster, and
+/// each sink whose URL can't be resolved here. Nothing with fewer than two
+/// OpenSearch sinks. A sink on another cluster (a backup, an audit copy) is
+/// no finding.
+pub(crate) fn cluster_findings(config: &Config) -> Vec<ClusterFinding> {
+    let opensearch: Vec<(&SinkName, Box<OpensearchConfig>)> = config
+        .sinks
+        .iter()
+        .filter_map(|(name, entry)| match sink_config(name, entry) {
+            Ok(SinkConfig::Opensearch(sink)) => Some((name, sink)),
+            _ => None,
+        })
+        .collect();
+    if opensearch.len() < 2 {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    let mut seen: std::collections::BTreeMap<String, &SinkName> = std::collections::BTreeMap::new();
+    for (name, sink) in &opensearch {
+        let url = match sink.resolve_url(name) {
+            Ok(url) => url,
+            Err(error) => {
+                findings.push(ClusterFinding::Skipped {
+                    sink: (*name).clone(),
+                    why: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let Some(cluster) = cluster_of(url.as_ref()) else {
+            findings.push(ClusterFinding::Skipped {
+                sink: (*name).clone(),
+                why: "not a URL this check reads".to_owned(),
+            });
+            continue;
+        };
+        if let Some(first) = seen.insert(cluster.clone(), name) {
+            findings.push(ClusterFinding::Shared {
+                first: first.clone(),
+                second: (*name).clone(),
+                cluster,
+                compared: Compared::Url,
+            });
+        }
+    }
+    findings
+}
+
+/// [`cluster_findings`], then each OpenSearch sink's cluster asked its
+/// `cluster_uuid` (`GET /`): two answering the same are on one cluster,
+/// however their URLs differ; one that can't be asked is not compared
+/// (`check_skipped`, naming why). Online `check` and `run` (the review of
+/// round 11, S-4).
+pub(crate) async fn cluster_findings_online(config: &Config) -> Vec<ClusterFinding> {
+    let mut findings = cluster_findings(config);
+    let opensearch: Vec<(&SinkName, Box<OpensearchConfig>)> = config
+        .sinks
+        .iter()
+        .filter_map(|(name, entry)| match sink_config(name, entry) {
+            Ok(SinkConfig::Opensearch(sink)) => Some((name, sink)),
+            _ => None,
+        })
+        .collect();
+    if opensearch.len() < 2 {
+        return findings;
+    }
+    // Every cluster at once, each for at most `CLUSTER_ASK_TIMEOUT`: a slow
+    // one delays the start by that, not by the sum of the sinks' timeouts
+    // (the review of the closing round, C).
+    let mut asks = tokio::task::JoinSet::new();
+    for (order, (name, sink)) in opensearch.iter().enumerate() {
+        let skipped = findings.iter().any(
+            |finding| matches!(finding, ClusterFinding::Skipped { sink, .. } if sink == *name),
+        );
+        if skipped {
+            continue;
+        }
+        let built = sink_opensearch::OpensearchSink::from_config(name, sink);
+        asks.spawn(async move {
+            let asked = match built {
+                Ok(built) => {
+                    match tokio::time::timeout(CLUSTER_ASK_TIMEOUT, built.cluster_uuid()).await {
+                        Ok(asked) => asked.map_err(|error| error.to_string()),
+                        Err(_) => Err(format!(
+                            "no answer within {} s",
+                            CLUSTER_ASK_TIMEOUT.as_secs()
+                        )),
+                    }
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            (order, asked)
+        });
+    }
+    let mut asked: Vec<(usize, std::result::Result<String, String>)> = asks.join_all().await;
+    asked.sort_by_key(|(order, _)| *order);
+    let mut answers: Vec<(&SinkName, String)> = Vec::new();
+    for (order, asked) in asked {
+        let Some((name, _)) = opensearch.get(order) else {
+            continue;
+        };
+        match asked {
+            Ok(uuid) => answers.push((name, uuid)),
+            Err(why) => findings.push(ClusterFinding::Skipped {
+                sink: (*name).clone(),
+                why: format!("its cluster_uuid could not be read: {why}"),
+            }),
+        }
+    }
+    let answered: Vec<(&SinkName, &str)> = answers
+        .iter()
+        .map(|(name, uuid)| (*name, uuid.as_str()))
+        .collect();
+    let by_uuid = shared_by_uuid(&answered, &findings);
+    findings.extend(by_uuid);
+    findings
+}
+
+/// How long `run` and `check` wait for a cluster to answer its
+/// `cluster_uuid`, all clusters at once.
+const CLUSTER_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The pairs of `answers` (each sink and the `cluster_uuid` its cluster
+/// answered) on one cluster, but for those `found` names already.
+pub(crate) fn shared_by_uuid(
+    answers: &[(&SinkName, &str)],
+    found: &[ClusterFinding],
+) -> Vec<ClusterFinding> {
+    let named = |a: &SinkName, b: &SinkName| {
+        found.iter().any(|finding| {
+            matches!(finding, ClusterFinding::Shared { first, second, .. }
+                if (first == a && second == b) || (first == b && second == a))
+        })
+    };
+    let mut seen: std::collections::BTreeMap<&str, &SinkName> = std::collections::BTreeMap::new();
+    let mut shared = Vec::new();
+    for (name, uuid) in answers {
+        match seen.get(uuid) {
+            Some(first) if !named(first, name) => shared.push(ClusterFinding::Shared {
+                first: (*first).clone(),
+                second: (*name).clone(),
+                cluster: (*uuid).to_owned(),
+                compared: Compared::ClusterUuid,
+            }),
+            Some(_) => {}
+            None => {
+                seen.insert(uuid, name);
+            }
+        }
+    }
+    shared
+}
+
+/// Refuse two OpenSearch sinks on one cluster ([`ClusterFinding::Shared`]),
+/// as `run` does before anything starts, by URL and by the `cluster_uuid`
+/// each cluster answers. A sink whose cluster can't be asked is not
+/// refused, only logged: its own start fails on it as before (the review of
+/// round 11, S-4).
+pub(crate) async fn distinct_clusters_online(config: &Config) -> anyhow::Result<()> {
+    let findings = cluster_findings_online(config).await;
+    if let Some(shared) = findings.iter().find(|finding| finding.is_error()) {
+        return Err(anyhow!(shared.message()));
+    }
+    for skipped in &findings {
+        if let ClusterFinding::Skipped { sink, why } = skipped {
+            tracing::warn!(
+                "[sinks.{sink}] was not compared with the other OpenSearch sinks for a shared \
+                 cluster ({why}); starting anyway. If two of them write to one cluster, they \
+                 share every index, alias and seed marker, and the deployment stops at the \
+                 first read that finds the other's record writes"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The cluster `url` names, however it is spelled: scheme and host in lower
+/// case, the port with its default filled in, the path without a trailing
+/// slash.
+fn cluster_of(url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let port = url.port_or_known_default()?;
+    let path = url.path().trim_end_matches('/');
+    Some(format!("{}://{host}:{port}{path}", url.scheme()))
+}
+
 /// The source entry as its adapter's typed config.
 pub(crate) fn source_config(config: &Config) -> anyhow::Result<PostgresConfig> {
     let entry = &config.source;
@@ -273,6 +554,270 @@ mod tests {
         validate(&cfg).unwrap();
         assert_eq!(source_config(&cfg).unwrap().slot, "flusso");
         assert_eq!(stream_config(&cfg).unwrap().capacity, None);
+    }
+
+    /// A local stub answering `GET /` with `body`, after holding every
+    /// request `hold`.
+    async fn root_stub(body: &'static str, hold: std::time::Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    tokio::time::sleep(hold).await;
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        url
+    }
+
+    /// The review of the closing round, B: two clusters that have not formed
+    /// yet both answer `cluster_uuid: "_na_"` (OpenSearch's
+    /// `Metadata.UNKNOWN_CLUSTER_UUID`), or an empty one: no cluster is
+    /// named, so the two are not compared, never refused.
+    #[tokio::test]
+    async fn two_unformed_clusters_are_not_one_cluster() {
+        for body in [
+            r#"{"name":"n","cluster_name":"c","cluster_uuid":"_na_"}"#,
+            r#"{"name":"n","cluster_name":"c","cluster_uuid":""}"#,
+        ] {
+            let a = root_stub(body, std::time::Duration::ZERO).await;
+            let b = root_stub(body, std::time::Duration::ZERO).await;
+            let config = two_opensearch_sinks(&a, &b);
+            let refused = distinct_clusters_online(&config).await;
+            assert!(refused.is_ok(), "{body}: refused: {refused:?}");
+            let findings = cluster_findings_online(&config).await;
+            assert_eq!(findings.len(), 2, "{body}: {findings:?}");
+            // One clean sentence: nothing was written (the review of round 13).
+            if body.contains("_na_") {
+                for finding in &findings {
+                    let ClusterFinding::Skipped { why, .. } = finding else {
+                        continue;
+                    };
+                    assert_eq!(
+                        why,
+                        "its cluster_uuid could not be read: the cluster answers cluster_uuid \"_na_\", \
+                         which names no cluster (no cluster manager elected yet)"
+                    );
+                }
+            }
+            assert!(
+                findings
+                    .iter()
+                    .all(|finding| matches!(finding, ClusterFinding::Skipped { .. })),
+                "{body}: {findings:?}"
+            );
+        }
+    }
+
+    /// The review of the closing round, a test gap: two URLs answering one
+    /// uuid are refused through the online path `run` calls; another uuid
+    /// starts.
+    #[tokio::test]
+    async fn one_uuid_through_the_online_path_is_refused() {
+        let body = r#"{"name":"n","cluster_name":"c","cluster_uuid":"Xy1"}"#;
+        let a = root_stub(body, std::time::Duration::ZERO).await;
+        let b = root_stub(body, std::time::Duration::ZERO).await;
+        assert!(
+            distinct_clusters_online(&two_opensearch_sinks(&a, &b))
+                .await
+                .is_err()
+        );
+        let other = root_stub(r#"{"cluster_uuid":"Zz9"}"#, std::time::Duration::ZERO).await;
+        distinct_clusters_online(&two_opensearch_sinks(&a, &other))
+            .await
+            .unwrap();
+    }
+
+    /// The review of the closing round, C: slow clusters are asked at once,
+    /// so they delay the check by one timeout (the sinks' 2 s here), not by
+    /// their sum.
+    #[tokio::test]
+    async fn slow_clusters_delay_the_check_by_one_timeout() {
+        let body = r#"{"cluster_uuid":"never"}"#;
+        let a = root_stub(body, std::time::Duration::from_secs(60)).await;
+        let b = root_stub(body, std::time::Duration::from_secs(60)).await;
+        let config = config(&format!(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "{a}"
+            timeout_secs = 2
+
+            [sinks.audit]
+            type = "opensearch"
+            url = "{b}"
+            timeout_secs = 2
+            "#
+        ));
+        let began = std::time::Instant::now();
+        distinct_clusters_online(&config).await.unwrap();
+        let took = began.elapsed();
+        assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
+    }
+
+    fn two_opensearch_sinks(primary: &str, audit: &str) -> Config {
+        config(&format!(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "{primary}"
+
+            [sinks.audit]
+            type = "opensearch"
+            url = "{audit}"
+            "#
+        ))
+    }
+
+    /// The review of the cut, m-3: two OpenSearch sinks on one cluster
+    /// share every index flusso owns there; refused, naming both sinks,
+    /// however the same URL is spelled.
+    #[test]
+    fn two_opensearch_sinks_on_one_cluster_are_refused() {
+        for (primary, audit) in [
+            ("https://search:9200", "https://search:9200"),
+            ("https://search:9200/", "https://SEARCH:9200"),
+            ("https://search", "https://search:443/"),
+        ] {
+            let error = cluster_findings(&two_opensearch_sinks(primary, audit))
+                .iter()
+                .find(|finding| finding.is_error())
+                .map(ClusterFinding::message)
+                .unwrap_or_default();
+            assert!(
+                error.contains("[sinks.audit]") && error.contains("[sinks.primary]"),
+                "{primary} and {audit}: {error}"
+            );
+        }
+        let one_and_stdout = config(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "https://search:9200"
+
+            [sinks.audit]
+            type = "stdout"
+            "#,
+        );
+        assert!(cluster_findings(&one_and_stdout).is_empty());
+    }
+
+    /// The URL comparison, which `check --offline` makes: URLs that differ
+    /// pass it, whether they name two clusters (a backup, an audit copy: the
+    /// owner's decision on the review of round 10) or two ways to one (two
+    /// nodes, a proxy's paths), which only asking the cluster tells apart
+    /// (the review of round 11, S-4).
+    #[test]
+    fn urls_that_differ_pass_the_url_comparison() {
+        for (primary, audit) in [
+            ("https://search:9200", "https://backup:9200"),
+            ("https://search:9200", "https://search:9201"),
+            ("http://search:9200", "https://search:9200"),
+            ("https://proxy/a", "https://proxy/b"),
+        ] {
+            let config = two_opensearch_sinks(primary, audit);
+            assert_eq!(cluster_findings(&config), [], "{primary} and {audit}");
+        }
+    }
+
+    /// The review of round 11, S-4: sinks are on one cluster when they answer
+    /// the same `cluster_uuid`, however their URLs differ; a sink on another
+    /// cluster (a backup) is accepted. Each pair on one cluster is named once.
+    #[test]
+    fn sinks_answering_one_cluster_uuid_share_a_cluster() {
+        let name = |name: &str| SinkName::try_new(name).unwrap();
+        let (primary, audit, backup) = (name("primary"), name("audit"), name("backup"));
+        let answers = [(&primary, "c1"), (&backup, "c2"), (&audit, "c1")];
+        assert_eq!(
+            shared_by_uuid(&answers, &[]),
+            [ClusterFinding::Shared {
+                first: primary.clone(),
+                second: audit.clone(),
+                cluster: "c1".to_owned(),
+                compared: Compared::ClusterUuid,
+            }]
+        );
+        let by_url = ClusterFinding::Shared {
+            first: primary.clone(),
+            second: audit.clone(),
+            cluster: "https://search:9200".to_owned(),
+            compared: Compared::Url,
+        };
+        assert_eq!(
+            shared_by_uuid(&answers, std::slice::from_ref(&by_url)),
+            [],
+            "named once, by its URL"
+        );
+        assert_eq!(
+            shared_by_uuid(&[(&primary, "c1"), (&backup, "c2")], &[]),
+            []
+        );
+    }
+
+    /// An online check asks each sink's cluster: one that can't be asked is
+    /// `check_skipped`, naming why; `run` leaves it to the sink's own start.
+    #[tokio::test]
+    async fn a_cluster_that_cannot_be_asked_is_a_skipped_check() {
+        let config = two_opensearch_sinks("http://127.0.0.1:1", "http://127.0.0.1:2");
+        let findings = cluster_findings_online(&config).await;
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(
+            findings.iter().all(|finding| matches!(finding,
+                ClusterFinding::Skipped { why, .. } if why.contains("could not be read: the cluster gave no answer"))),
+            "{findings:?}"
+        );
+        distinct_clusters_online(&config).await.unwrap();
+    }
+
+    /// The review of round 10, m-5: a sink whose URL names an environment
+    /// variable that isn't set is not compared, and says so; `run` leaves it
+    /// to the sink's own start.
+    #[test]
+    fn a_sink_url_that_cannot_be_resolved_is_a_skipped_check() {
+        let unresolved = config(
+            r#"
+            [source]
+            type = "postgres"
+
+            [sinks.primary]
+            type = "opensearch"
+            url = "https://search:9200"
+
+            [sinks.audit]
+            type = "opensearch"
+            url = { env = "FLUSSO_TEST_UNSET_AUDIT_URL" }
+            "#,
+        );
+        let findings = cluster_findings(&unresolved);
+        assert!(
+            matches!(
+                findings.as_slice(),
+                [ClusterFinding::Skipped { sink, why }]
+                    if sink.as_ref() == "audit" && why.contains("FLUSSO_TEST_UNSET_AUDIT_URL")
+            ),
+            "{findings:?}"
+        );
     }
 
     #[test]

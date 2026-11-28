@@ -13,12 +13,15 @@
 //!
 //! - `Before(o)`: `o` is the oldest position the lane hasn't landed;
 //! - `Through(p)`: nothing outstanding, `p` the newest routed to the lane;
-//! - `Idle`: nothing routed to the lane yet.
+//! - `Idle`: nothing routed to the lane yet;
+//! - `Free`: the lane is detached (ADR 0012 stage 10): it needs no change.
 //!
 //! Several lanes answer as the one that covers least: what the source may
-//! confirm is every lane's answer at once. The source turns the case into its
-//! own terms (`ChangeCapture::confirm`, `ChangeCapture::reached`), so it keeps
-//! no map of the changes it emitted.
+//! confirm is every lane's answer at once. A detached lane
+//! ([`Progress::detach`]) is left out, its index's backlog with it, so with
+//! every lane detached the source confirms through its own horizon. The
+//! source turns the case into its own terms (`ChangeCapture::confirm`,
+//! `ChangeCapture::reached`), so it keeps no map of the changes it emitted.
 //!
 //! ```
 //! use engine::{Level, Progress};
@@ -134,6 +137,19 @@ use stream::{ItemKey, LaneKey};
 use pending::Pending;
 pub use pending::{Taken, Token};
 
+/// What [`Progress::attach`] did (ADR 0012 stage 10, R8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attach {
+    /// The lane was detached and is attached now, for this attempt.
+    Attached,
+    /// The lane is attached for this attempt already: its `Attached` is
+    /// published again (a run that died between the two).
+    Again,
+    /// An attempt the lane is past, or a lane it doesn't apply to: nothing
+    /// is published.
+    Stale,
+}
+
 /// What holds the source's resume point back the most
 /// ([`Progress::pinned_by`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,6 +211,11 @@ pub struct Progress {
     /// confirm (ADR 0012 stage 8a, §3.9 §2): the listener's one slot is the
     /// fence's.
     registrations: Registrations,
+    /// How many lanes are detached.
+    detached: AtomicUsize,
+    /// When set, a detached lane leaves the minimum only once its records
+    /// were read under the current stream (O29, B-2).
+    rereads: OnceLock<Arc<crate::Rereads>>,
 }
 
 /// A flag raised after every registration, and the waker of whoever waits on
@@ -234,6 +255,10 @@ struct Registry {
     /// The newest position the reader routed in this engine run: a lane with
     /// nothing outstanding answers through it (§3.9 D1).
     routed: Option<Position>,
+    /// The newest position routed in this process, over every engine run:
+    /// `forget_all` keeps it. What an attached lane starts answering through
+    /// (ADR 0012 stage 10, H7).
+    routed_ever: Option<Position>,
 }
 
 /// One lane's routed items not yet covered, as `(key, oldest, step)` in
@@ -259,6 +284,16 @@ struct Registered {
     /// ended engine run left unbuilt, until a step is registered on the lane
     /// after the restart (§3.9 D2).
     restart: Option<u64>,
+    /// Detached from the minimum (ADR 0012 stage 10, R5): nothing registered
+    /// on it counts, and no answer over several lanes reads it.
+    detached: bool,
+    /// The attempt it was last attached for (R8): an attach for it again
+    /// publishes `Attached` again; an older one is stale.
+    attempt: Option<u64>,
+    /// Attached, and its `Attached` not yet published: a builder publishes
+    /// it before anything else of the lane, in any run (review of step 3,
+    /// S1).
+    unannounced: bool,
 }
 
 /// How far one lane's sink engine has written, in lane order: the key's
@@ -296,6 +331,7 @@ impl Progress {
                     .collect(),
                 next_step: 0,
                 routed: None,
+                routed_ever: None,
             }),
             marks,
             keys,
@@ -306,7 +342,20 @@ impl Progress {
             unmarked: AtomicU64::new(u64::MAX),
             listener: OnceLock::new(),
             registrations: Registrations::default(),
+            detached: AtomicUsize::new(0),
+            rereads: OnceLock::new(),
         }
+    }
+
+    /// Hold confirmation while a detached lane's records are unread under
+    /// the current stream (O29, B-2): what another process wrote meanwhile
+    /// may say it rebuilds the index, and a later start would resume that
+    /// rebuild's walk over the changes this one let the slot pass. The read
+    /// puts such a rebuild back to detached first; then the lane leaves the
+    /// minimum again. Set once, by whoever opens the stream through
+    /// `rereads`.
+    pub fn hold_while_unread(&self, rereads: Arc<crate::Rereads>) {
+        let _ = self.rereads.set(rereads);
     }
 
     /// Nothing routed, over one lane per pair of `indexes` and `sinks`.
@@ -325,6 +374,114 @@ impl Progress {
     /// Whether `lane` is one this progress keeps.
     pub fn knows(&self, lane: &LaneKey) -> bool {
         lock(&self.registry).lanes.contains_key(lane)
+    }
+
+    /// Take `lane` out of the minimum (ADR 0012 stage 10, R5): its
+    /// registrations and steps are dropped, every later registration on it is
+    /// ignored, and no answer over several lanes reads it, whatever it or its
+    /// index's backlog holds. With no lane left attached, [`landed`](Self::landed)
+    /// answers [`Landed::Free`]. Outlives [`forget_all`](Self::forget_all).
+    ///
+    /// Returns whether `lane` is one this progress keeps (`false`: nothing
+    /// was done).
+    pub fn detach(&self, lane: &LaneKey) -> bool {
+        let mut registry = lock(&self.registry);
+        let Some(registered) = registry.lanes.get_mut(lane) else {
+            return false;
+        };
+        if !registered.detached {
+            self.detached.fetch_add(1, Ordering::AcqRel);
+        }
+        *registered = Registered {
+            detached: true,
+            attempt: registered.attempt,
+            ..Registered::default()
+        };
+        drop(registry);
+        self.registered();
+        true
+    }
+
+    /// Attach `lane` again for `attempt` (ADR 0012 stage 10, R8), under the
+    /// registry lock: a detached lane, for an attempt above the one it last
+    /// attached for, counts in the minimum from here on, answering through
+    /// the newest position routed in this process (H7) until something is
+    /// registered on it. Called with nothing of its index granted and
+    /// unpublished (the builder's quiesce). The lane stays unannounced
+    /// until its `Attached` is published ([`announced`](Self::announced)).
+    ///
+    /// The one writer of a lane's `newest` outside registration: an attached
+    /// lane answers through every change routed in this process, which it
+    /// never got. Sound only with what follows the attach covering them, a
+    /// rebuild's backfill, or with the gap accepted (`reattach`, O16), and
+    /// with the fence not vouching inside it (ADR 0012 stage 10, S3).
+    pub fn attach(&self, lane: &LaneKey, attempt: u64) -> Attach {
+        let mut registry = lock(&self.registry);
+        let routed_ever = registry.routed_ever;
+        let Some(registered) = registry.lanes.get_mut(lane) else {
+            return Attach::Stale;
+        };
+        let newer = registered.attempt.is_none_or(|last| attempt > last);
+        let answer = match (registered.detached, newer) {
+            (true, true) => {
+                *registered = Registered {
+                    attempt: Some(attempt),
+                    newest: routed_ever,
+                    unannounced: true,
+                    ..Registered::default()
+                };
+                self.detached.fetch_sub(1, Ordering::AcqRel);
+                Attach::Attached
+            }
+            (false, _) if registered.attempt == Some(attempt) => Attach::Again,
+            _ => Attach::Stale,
+        };
+        drop(registry);
+        if answer == Attach::Attached {
+            self.registered();
+        }
+        answer
+    }
+
+    /// Each of `lanes` attached and whose `Attached` is not published yet,
+    /// with its attempt: a run that died between the attach and `Attached`
+    /// left it so, and the next run's builder publishes it before any grant.
+    pub fn unannounced<'a>(
+        &self,
+        lanes: impl IntoIterator<Item = &'a LaneKey>,
+    ) -> Vec<(LaneKey, u64)> {
+        let registry = lock(&self.registry);
+        lanes
+            .into_iter()
+            .filter_map(|lane| {
+                let registered = registry.lanes.get(lane)?;
+                (registered.unannounced && !registered.detached)
+                    .then_some((lane.clone(), registered.attempt?))
+            })
+            .collect()
+    }
+
+    /// `lane`'s `Attached` of `attempt` is published.
+    pub fn announced(&self, lane: &LaneKey, attempt: u64) {
+        if let Some(registered) = lock(&self.registry).lanes.get_mut(lane)
+            && registered.attempt == Some(attempt)
+        {
+            registered.unannounced = false;
+        }
+    }
+
+    /// Whether some lane is detached: one atomic load, so the paths every
+    /// batch takes look up nothing while none is.
+    pub fn any_detached(&self) -> bool {
+        self.detached.load(Ordering::Acquire) > 0
+    }
+
+    /// Whether `lane` is detached from the minimum.
+    pub fn is_detached(&self, lane: &LaneKey) -> bool {
+        lock(&self.registry)
+            .lanes
+            .get(lane)
+            .is_some_and(|registered| registered.detached)
     }
 
     /// Fail unless every lane in `lanes` is one this progress keeps: an engine
@@ -459,6 +616,7 @@ impl Progress {
             .is_none_or(|pending| lock(pending).all_taken_through(last, token));
         if let (Some(registered), Some(marks)) =
             (registry.lanes.get_mut(lane), self.marks.get(lane))
+            && !registered.detached
         {
             if let Some(step) = step {
                 registered.committed(marks);
@@ -522,8 +680,27 @@ impl Progress {
     /// What every lane has landed: what the source may confirm. The lane
     /// that covers least decides.
     pub fn landed(&self) -> Landed {
+        if self.unread_detached() {
+            return Landed::Idle;
+        }
         self.over(self.marks.keys(), Level::Applied)
             .unwrap_or(Landed::Idle)
+    }
+
+    /// Some detached lane's records are unread under the current stream:
+    /// confirmation holds ([`hold_while_unread`](Self::hold_while_unread)).
+    /// One atomic load while no lane is detached.
+    fn unread_detached(&self) -> bool {
+        let Some(rereads) = self.rereads.get().filter(|_| self.any_detached()) else {
+            return false;
+        };
+        let detached: Vec<LaneKey> = lock(&self.registry)
+            .lanes
+            .iter()
+            .filter(|(_, registered)| registered.detached)
+            .map(|(lane, _)| lane.clone())
+            .collect();
+        detached.iter().any(|lane| !rereads.current(lane))
     }
 
     /// What decides [`landed`](Self::landed) while it holds something back
@@ -539,8 +716,8 @@ impl Progress {
         }
     }
 
-    /// What `lane` has reached at `level`; `None` for a lane this progress
-    /// doesn't know.
+    /// What `lane` has reached at `level`: `Free` while it is detached;
+    /// `None` for a lane this progress doesn't know.
     pub fn lane(&self, lane: &LaneKey, level: Level) -> Option<Landed> {
         self.over([lane], level)
     }
@@ -579,9 +756,14 @@ impl Progress {
         let mut registry = lock(&self.registry);
         let routed = registry.routed;
         let mut least: Option<(&'a LaneKey, Landed, bool)> = None;
+        let mut detached: Option<&'a LaneKey> = None;
         for lane in lanes {
             let marks = self.marks.get(lane)?;
             let registered = registry.lanes.get_mut(lane)?;
+            if registered.detached {
+                detached = detached.or(Some(lane));
+                continue;
+            }
             let (sent, backlog) = self
                 .pending
                 .get(&lane.index)
@@ -616,7 +798,7 @@ impl Progress {
                 _ => (lane, answer, from_backlog),
             });
         }
-        least
+        least.or_else(|| detached.map(|lane| (lane, Landed::Free, false)))
     }
 
     /// The oldest of what `lane` itself holds back: its items not yet landed
@@ -627,10 +809,11 @@ impl Progress {
     pub fn own_oldest(&self, lane: &LaneKey) -> Option<Position> {
         let marks = self.marks.get(lane)?;
         let mut registry = lock(&self.registry);
-        let own = registry
-            .lanes
-            .get_mut(lane)?
-            .outstanding(marks, Level::Applied);
+        let registered = registry.lanes.get_mut(lane)?;
+        if registered.detached {
+            return None;
+        }
+        let own = registered.outstanding(marks, Level::Applied);
         let sent = self
             .pending
             .get(&lane.index)
@@ -694,6 +877,12 @@ impl Progress {
                 .is_none_or(|routed| routed.seq < position.seq)
             {
                 registry.routed = Some(position);
+            }
+            if registry
+                .routed_ever
+                .is_none_or(|routed| routed.seq < position.seq)
+            {
+                registry.routed_ever = Some(position);
             }
         }
         self.registered();
@@ -1003,6 +1192,9 @@ impl Progress {
             let Some(registered) = registry.lanes.get_mut(lane) else {
                 continue;
             };
+            if registered.detached {
+                continue;
+            }
             let landed = registered.committed(marks).map_or(0, |step| step.read);
             // With nothing unlanded, every read below the index's oldest
             // unbuilt one (a document waiting, a build not yet released) is
@@ -1180,6 +1372,7 @@ fn bound(landed: Landed) -> (u64, u8) {
         Landed::Before(oldest) => (oldest.seq, 0),
         Landed::Through(last) => (last.seq.saturating_add(1), 1),
         Landed::Idle => (0, 0),
+        Landed::Free => (u64::MAX, 2),
     }
 }
 

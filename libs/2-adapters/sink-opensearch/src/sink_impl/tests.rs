@@ -174,3 +174,27 @@ async fn the_narrower_second_attempt_of_a_seed_is_retire_blocked_too() {
         "the marker is not written: {seen:?}"
     );
 }
+
+/// The review of round 11, S-4: a sink names its cluster by the
+/// `cluster_uuid` `GET /` answers, so two URLs reaching one cluster (two
+/// nodes, a hostname and its IP) name the same one; an answer without it,
+/// or a refused request, is an error, never a guess.
+#[tokio::test]
+async fn a_sink_names_its_cluster_by_the_uuid_get_root_answers() {
+    let (url, seen) = stub(|line, _| match line {
+        "GET /" => (
+            200,
+            json!({ "name": "node-1", "cluster_name": "search", "cluster_uuid": "c1u2" })
+                .to_string(),
+        ),
+        _ => (404, "{}".to_owned()),
+    })
+    .await;
+    assert_eq!(sink(&url).cluster_uuid().await.unwrap(), "c1u2");
+    assert_eq!(*seen.lock().unwrap(), ["GET /"]);
+
+    let (url, _) = stub(|_, _| (200, json!({ "name": "node-1" }).to_string())).await;
+    assert!(sink(&url).cluster_uuid().await.is_err());
+    let (url, _) = stub(|_, _| (503, "{}".to_owned())).await;
+    assert!(sink(&url).cluster_uuid().await.is_err());
+}

@@ -127,6 +127,9 @@ struct Exemption {
 /// The ingest engine over one source, one document builder, and one stream.
 #[derive(Debug)]
 pub struct IngestEngine {
+    /// Told each time the live stream opens, before anything is published
+    /// (ADR 0012 stage 10, O29).
+    rereads: Arc<crate::Rereads>,
     source: Arc<dyn ChangeCapture>,
     documents: Arc<dyn DocumentBuilder>,
     /// Resolves live changes; `documents` when none was given.
@@ -234,6 +237,7 @@ impl IngestEngine {
                 .collect(),
             build_numbers: AtomicU64::new(1),
             stop: Stop::new(),
+            rereads: Arc::new(crate::Rereads::default()),
             has_prepared: AtomicBool::new(false),
             advances: AtomicU64::new(0),
             furthest: Mutex::new(Furthest::default()),
@@ -247,6 +251,15 @@ impl IngestEngine {
     /// (see [`Stop`]).
     pub fn with_stop(mut self, stop: Stop) -> Self {
         self.stop = stop;
+        self
+    }
+
+    /// Tell `rereads` each time the live stream opens, before anything is
+    /// published: the sink engines read their detach records again before
+    /// writing anything after it (ADR 0012 stage 10, O29).
+    pub fn with_rereads(mut self, rereads: Arc<crate::Rereads>) -> Self {
+        rereads.will_open();
+        self.rereads = rereads;
         self
     }
 
@@ -420,7 +433,14 @@ impl IngestEngine {
         let scopes: HashSet<IndexName> = self.documents.backfill_indexes().into_iter().collect();
 
         let started = Instant::now();
-        let live: LiveStream = self.source.live().await?;
+        // O29: every sink counts as unread from before the new stream can
+        // answer (`Rereads::open` alone orders it), and the slot counts as
+        // held until this run's stream ends.
+        let live: LiveStream = self.rereads.open(self.source.live()).await?;
+        let mut held = Held {
+            rereads: &self.rereads,
+            clean: false,
+        };
         self.observer
             .on_startup_step(StartupStep::OpenLive, None, started.elapsed());
         tracing::info!("following live changes");
@@ -457,6 +477,8 @@ impl IngestEngine {
             for builds in &mut builds {
                 builds.abandon().await;
             }
+        } else {
+            held.clean = true;
         }
         ended
     }
@@ -552,12 +574,14 @@ impl IngestEngine {
             .of_queue(slot);
             let (inbox, delivered) = tokio::sync::mpsc::unbounded_channel();
             let (rebuilds, rebuild_requests) = tokio::sync::mpsc::unbounded_channel();
+            let (attaches, attach_requests) = tokio::sync::mpsc::unbounded_channel();
             let (done, result) = tokio::sync::oneshot::channel();
             futures.push(self.build(
                 Building {
                     runs,
                     inbox: delivered,
                     rebuilds: rebuild_requests,
+                    attaches: attach_requests,
                     signals,
                     reports: &reports,
                     several,
@@ -577,6 +601,7 @@ impl IngestEngine {
                 route: dispatcher::Route {
                     requests: inbox,
                     rebuilds,
+                    attaches,
                 },
                 signals,
                 result,
@@ -748,5 +773,33 @@ pub fn document_id(id: &DocumentId) -> String {
 impl From<SourceError> for EngineError {
     fn from(error: SourceError) -> Self {
         EngineError::Source(error)
+    }
+}
+
+/// While alive, this run's live stream holds the slot; dropped, by any end
+/// of the run, it says so ([`Rereads::closed`](crate::Rereads::closed)). A
+/// clean end also says the run finished
+/// ([`Rereads::finished`](crate::Rereads::finished)): the deployment ends
+/// after the lanes drain, with no restart another process could precede.
+///
+/// A clean end is `Ended::Stopped` or `Ended::LiveEnded`. The second is
+/// sound only because a source's live stream ends `Ok` only when the
+/// deployment is over: the Postgres stream does so only through a stop's
+/// `close_live`, once the final position is confirmed. A source whose
+/// stream could end `Ok` and be opened again, with another process holding
+/// the slot in between, would let what the lanes still hold seed over that
+/// process's records. `LiveEnded` stays clean because the daemon's tests
+/// end their mock sources so, with no stop.
+struct Held<'a> {
+    rereads: &'a crate::Rereads,
+    clean: bool,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.rereads.closed();
+        if self.clean {
+            self.rereads.finished();
+        }
     }
 }

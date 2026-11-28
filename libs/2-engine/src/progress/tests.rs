@@ -5,6 +5,8 @@ use std::thread;
 use super::*;
 use source::document::DocumentId;
 
+mod detach;
+
 fn sink(name: &str) -> LaneKey {
     LaneKey::new(
         kernel::IndexName::try_new("users").unwrap(),
@@ -308,6 +310,7 @@ fn reach(landed: Landed) -> u64 {
         Landed::Before(oldest) => oldest.seq,
         Landed::Through(last) => last.seq + 1,
         Landed::Idle => 0,
+        Landed::Free => u64::MAX,
     }
 }
 

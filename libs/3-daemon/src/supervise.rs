@@ -38,7 +38,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine::{IngestEngine, SinkControl, SinkEngine, Stop, drain_lanes};
-use futures::future::{self, FutureExt};
+use futures::future;
 use kernel::{IndexName, SinkName};
 use source::cdc::{ChangeCapture, Continuity};
 use stream::Stream;
@@ -57,6 +57,8 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone)]
 pub struct DaemonControl {
     senders: Arc<BTreeMap<SinkName, mpsc::Sender<SinkControl>>>,
+    /// The sinks with `backfill = false`: the only ones a reattach is for.
+    live_only: Arc<std::collections::BTreeSet<SinkName>>,
     stop: Stop,
 }
 
@@ -70,6 +72,12 @@ pub enum ControlError {
     /// No sink of that name is configured.
     #[error("unknown sink `{0}`")]
     UnknownSink(String),
+    /// The sink can rebuild the index: a reindex does, with nothing missing.
+    /// A reattach is only for a sink with `backfill = false` (O16).
+    #[error(
+        "sink `{0}` can rebuild the index (backfill = true), with nothing missing: reindex it instead (flusso reindex <index> --sink {0})"
+    )]
+    CanRebuild(String),
     /// The sink's engine ended for good, so nothing would act on the operation.
     #[error("sink `{0}` is not accepting operations (its engine has stopped for good)")]
     Closed(String),
@@ -95,10 +103,58 @@ impl DaemonControl {
         (
             Self {
                 senders: Arc::new(senders),
+                live_only: Arc::default(),
                 stop,
             },
             receivers,
         )
+    }
+
+    /// The sinks with `backfill = false`, the ones a reattach is for.
+    pub fn with_live_only(mut self, sinks: impl IntoIterator<Item = SinkName>) -> Self {
+        self.live_only = Arc::new(sinks.into_iter().collect());
+        self
+    }
+
+    /// Whether the deployment is stopping: every operation is refused.
+    pub fn is_stopping(&self) -> bool {
+        self.stop.is_requested()
+    }
+
+    /// Whether `sink` has `backfill = false`: it can't rebuild an index, so
+    /// a detached one is reattached, not reindexed.
+    pub fn is_live_only(&self, sink: &SinkName) -> bool {
+        self.live_only.contains(sink)
+    }
+
+    /// Reattach `index`'s detached lane on `sink`, accepting the changes it
+    /// missed while detached (ADR 0012 stage 10, O16): only on a sink that
+    /// can't rebuild. The engine checks the records between two batches and
+    /// answers its verdict on the returned receiver; dropped unanswered, the
+    /// engine's run ended first and nothing changed.
+    pub fn reattach(
+        &self,
+        index: IndexName,
+        sink: &SinkName,
+    ) -> Result<tokio::sync::oneshot::Receiver<engine::ReattachVerdict>, ControlError> {
+        if self.stop.is_requested() {
+            return Err(ControlError::Stopping);
+        }
+        let sender = self
+            .senders
+            .get(sink)
+            .ok_or_else(|| ControlError::UnknownSink(sink.to_string()))?;
+        if !self.live_only.contains(sink) {
+            return Err(ControlError::CanRebuild(sink.to_string()));
+        }
+        let (reply, verdict) = engine::Reply::new();
+        sender
+            .try_send(SinkControl::Reattach { index, reply })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => ControlError::Busy(sink.to_string()),
+                mpsc::error::TrySendError::Closed(_) => ControlError::Closed(sink.to_string()),
+            })?;
+        Ok(verdict)
     }
 
     /// A control over `sinks` with no deployment behind it: each operation
@@ -172,7 +228,7 @@ pub(crate) async fn run_all(
     let staged = future::join_all(
         sink_engines
             .iter()
-            .map(|engine| stage_until_ok(engine, continuity, schedule).map(|()| ())),
+            .map(|engine| stage_until_ok(engine, continuity, schedule)),
     );
     tokio::select! {
         biased;
@@ -180,7 +236,11 @@ pub(crate) async fn run_all(
             tracing::info!("stop requested while staging; nothing was captured");
             return Ok(());
         }
-        _ = staged => {}
+        staged = staged => {
+            if let Some(stopped) = staged.into_iter().find_map(std::result::Result::err) {
+                return Err(stopped);
+            }
+        }
     }
     if stop.is_requested() {
         tracing::info!("stop requested as staging ended; nothing was captured");
@@ -197,12 +257,17 @@ pub(crate) async fn run_all(
             let mut first = true;
             loop {
                 if !first {
-                    stage_until_ok(&engine, Continuity::Resumed, schedule).await;
+                    stage_until_ok(&engine, Continuity::Resumed, schedule).await?;
                 }
                 first = false;
                 let acknowledged = engine.advanced();
                 match engine.run(&mut receiver).await {
                     Ok(()) => return Ok::<(), anyhow::Error>(()),
+                    // Another process changed the records: the deployment
+                    // stops, no restart (the cut of 2026-11-27).
+                    Err(error) if error.stops_the_deployment() => {
+                        return Err(anyhow::Error::new(error));
+                    }
                     Err(_) => {
                         if engine.advanced() > acknowledged {
                             backoff.reset();
@@ -292,11 +357,21 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-async fn stage_until_ok(engine: &SinkEngine, continuity: Continuity, schedule: engine::Backoff) {
+/// Stage `engine` until it succeeds; a staging that found another process's
+/// change to the records stops the deployment instead.
+async fn stage_until_ok(
+    engine: &SinkEngine,
+    continuity: Continuity,
+    schedule: engine::Backoff,
+) -> anyhow::Result<()> {
     let mut backoff = Backoff::new(schedule);
     loop {
         match engine.stage(continuity).await {
-            Ok(()) => return,
+            Ok(()) => return Ok(()),
+            Err(error) if error.stops_the_deployment() => {
+                tracing::error!(sink = %engine.name(), %error, "stopping the deployment");
+                return Err(anyhow::Error::new(error));
+            }
             Err(error) => {
                 tracing::error!(sink = %engine.name(), %error, "staging failed; retrying");
                 backoff.wait().await;

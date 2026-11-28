@@ -21,6 +21,9 @@ workspace = true
 # Exposes the document → bulk-body rendering to the in-process `render` bench.
 # Off by default; not part of the stable API.
 bench = []
+# The in-memory meta index (`meta::memory`) the engine's and the daemon's
+# tests build their stand-in sinks on. Not part of the stable API.
+testing = []
 
 [dependencies]
 sink.workspace = true
@@ -30,6 +33,8 @@ schemars.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+# The detach record's `since`, in UTC.
+chrono = { workspace = true, features = ["clock"] }
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 webpki-root-certs.workspace = true

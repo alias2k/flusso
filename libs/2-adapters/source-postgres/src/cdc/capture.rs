@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -100,6 +100,8 @@ pub struct WalChangeCapture {
     /// Set by [`prepare`](ChangeCapture::prepare) once it has ensured coverage,
     /// taken by the next [`live`](ChangeCapture::live) so it doesn't repeat it.
     coverage_ensured: Arc<AtomicBool>,
+    /// Every call of `live`, counted first (O29's fail-safe).
+    streams_opened: Arc<AtomicU64>,
     /// How many changes a stream reads ahead while a transaction is held; set
     /// via [`with_read_ahead`](Self::with_read_ahead).
     read_ahead: usize,
@@ -182,6 +184,7 @@ impl WalChangeCapture {
             positions: Arc::new(Mutex::new(None)),
             listeners: Arc::new(Listeners::default()),
             coverage_ensured: Arc::new(AtomicBool::new(false)),
+            streams_opened: Arc::new(AtomicU64::new(0)),
             read_ahead: READ_AHEAD,
             hold_clock: Arc::default(),
             visibility_pool: Arc::new(OnceCell::new()),
@@ -508,6 +511,7 @@ impl ChangeCapture for WalChangeCapture {
     /// [`prepare`](ChangeCapture::prepare).
     #[tracing::instrument(name = "wal.live", skip_all, err)]
     async fn live(&self) -> Result<BoxStream<'static, Result<LiveChange>>> {
+        self.streams_opened.fetch_add(1, Ordering::SeqCst);
         if !self.coverage_ensured.swap(false, Ordering::SeqCst) {
             self.ensure_coverage(&self.required_tables, self.manage_publication)
                 .await?;
@@ -589,6 +593,10 @@ impl ChangeCapture for WalChangeCapture {
 
     fn readable_wait(&self) -> Option<Duration> {
         stream::held_for(&self.hold_clock)
+    }
+
+    fn streams_opened(&self) -> Option<u64> {
+        Some(self.streams_opened.load(Ordering::SeqCst))
     }
 
     fn confirm(&self, landed: Landed) {

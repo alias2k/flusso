@@ -34,6 +34,11 @@ pub enum LaneItem {
         #[serde(default)]
         ticket: Ticket,
     },
+    /// The lane counts in the slot's minimum again from here (ADR 0012 stage
+    /// 10, R8): everything before this on the lane was built while it was
+    /// detached, everything after it is built for it. Published once the
+    /// attach of `attempt` is recorded in the engine's progress.
+    Attached { attempt: u64 },
 }
 
 /// Which lane: one index, as one sink receives it. Ordered by index, then
@@ -234,7 +239,7 @@ impl LaneItem {
     pub fn position(&self) -> Option<Position> {
         match self {
             LaneItem::Batch(batch) => batch.position,
-            LaneItem::SnapshotComplete { .. } => None,
+            LaneItem::SnapshotComplete { .. } | LaneItem::Attached { .. } => None,
         }
     }
 
@@ -242,7 +247,7 @@ impl LaneItem {
     pub fn key(&self) -> Option<ItemKey> {
         match self {
             LaneItem::Batch(batch) => batch.key,
-            LaneItem::SnapshotComplete { .. } => None,
+            LaneItem::SnapshotComplete { .. } | LaneItem::Attached { .. } => None,
         }
     }
 }
@@ -276,20 +281,33 @@ pub enum Request {
         keys: Vec<RowKey>,
         ticket: Ticket,
     },
+    /// Attach `sink`'s detached lane of `index` again, for `attempt` (ADR
+    /// 0012 stage 10, R8): the index's builder stops granting, lets what it
+    /// granted publish, attaches the lane, publishes
+    /// [`LaneItem::Attached`] on it, then acknowledges this and resumes.
+    Attach {
+        index: IndexName,
+        sink: SinkName,
+        attempt: u64,
+    },
 }
 
 impl Request {
     /// The index the request is for.
     pub fn index(&self) -> &IndexName {
         match self {
-            Request::Backfill { index, .. } | Request::Rebuild { index, .. } => index,
+            Request::Backfill { index, .. }
+            | Request::Rebuild { index, .. }
+            | Request::Attach { index, .. } => index,
         }
     }
 
     /// The sink that asked.
     pub fn sink(&self) -> &SinkName {
         match self {
-            Request::Backfill { sink, .. } | Request::Rebuild { sink, .. } => sink,
+            Request::Backfill { sink, .. }
+            | Request::Rebuild { sink, .. }
+            | Request::Attach { sink, .. } => sink,
         }
     }
 }

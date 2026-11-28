@@ -374,6 +374,7 @@ mod tests {
                 Landed::Before(oldest) => Some(SourcePosition(oldest.seq * 100)),
                 Landed::Through(last) => Some(SourcePosition(last.seq * 100 + 100)),
                 Landed::Idle => None,
+                Landed::Free => Some(SourcePosition(u64::MAX)),
             }
         }
     }

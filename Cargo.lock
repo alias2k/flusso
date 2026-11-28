@@ -1232,6 +1232,7 @@ dependencies = [
  "flusso-stream-channel",
  "flusso-test-postgres",
  "futures",
+ "proptest",
  "reqwest",
  "serde",
  "serde_json",

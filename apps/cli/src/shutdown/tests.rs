@@ -313,6 +313,9 @@ fn a_parked_lane_is_named_in_the_deadline_message() {
         parked_since: Some("2026-11-19T12:03:11Z".to_owned()),
         next_probe: Some("2026-11-19T12:04:11Z".to_owned()),
         reason: Some("refused: id 42 (mapper_parsing_exception)".to_owned()),
+        rebuilding: None,
+        attaching: false,
+        gaps: Vec::new(),
     };
     assert_eq!(
         super::lane_note("users", &lane(daemon::LaneHealthState::Refused)).as_deref(),

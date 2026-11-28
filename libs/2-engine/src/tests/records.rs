@@ -1,5 +1,5 @@
 //! Reading the detach records at staging (ADR 0012 stage 10, slice 1): the
-//! sink's [`Sink::detachment`] is read at the top of every staging step,
+//! sink's [`Records::detachment`](sink::Records::detachment) is read at the top of every staging step,
 //! before anything else touches the index. A record found is logged and kept
 //! for its lane, and the index is staged as before (O24). A read that fails
 //! fails that index's step alone under `Resumed` (#471) and the staging under
@@ -109,19 +109,6 @@ struct Kept {
 
 #[async_trait]
 impl Sink for Kept {
-    async fn detachment(&self, mapping: &IndexMapping) -> sink::Result<Detachment> {
-        let index = mapping.index.as_ref();
-        self.plain.calls.push("detachment", index);
-        let read = self.reads.lock().unwrap().get(index).cloned();
-        match read {
-            None => Ok(Detachment::default()),
-            Some(Read::Kept(kept)) => Ok(kept.clone()),
-            Some(Read::Fails) => Err(SinkError::Write(format!(
-                "{index}: the meta index answered 503"
-            ))),
-        }
-    }
-
     async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
         self.plain.ensure_index(mapping).await
     }
@@ -136,6 +123,79 @@ impl Sink for Kept {
 
     async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
         self.plain.reindex(mapping).await
+    }
+
+    fn records(&self) -> Option<&dyn sink::Records> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl sink::Records for Kept {
+    async fn ensure_index_as(
+        &self,
+        mapping: &IndexMapping,
+        _: &sink::Stamp,
+    ) -> sink::Result<sink::Ensured> {
+        sink::Sink::ensure_index(self, mapping).await
+    }
+
+    async fn detachment(
+        &self,
+        mapping: &IndexMapping,
+        _: &sink::Stamp,
+    ) -> sink::Result<Detachment> {
+        let index = mapping.index.as_ref();
+        self.plain.calls.push("detachment", index);
+        let read = self.reads.lock().unwrap().get(index).cloned();
+        match read {
+            None => Ok(Detachment::default()),
+            Some(Read::Kept(kept)) => Ok(kept.clone()),
+            Some(Read::Fails) => Err(SinkError::Write(format!(
+                "{index}: the meta index answered 503"
+            ))),
+        }
+    }
+
+    async fn detach(&self, _: &IndexMapping, _: &sink::Detach) -> sink::Result<sink::Recorded> {
+        Ok(sink::Recorded::NotKept)
+    }
+
+    async fn forget_detachment(
+        &self,
+        _: &IndexMapping,
+        _: &sink::RecordVersion,
+        _: &sink::Stamp,
+    ) -> sink::Result<()> {
+        Ok(())
+    }
+
+    async fn record_gaps(
+        &self,
+        _: &IndexMapping,
+        _: &sink::DecideGaps<'_>,
+        _: &sink::Stamp,
+    ) -> sink::Result<Vec<sink::Gap>> {
+        Ok(Vec::new())
+    }
+
+    async fn begin_rebuild(&self, mapping: &IndexMapping, _: &sink::Stamp) -> sink::Result<u64> {
+        Err(sink::SinkError::Write(format!(
+            "{}: no records to rebuild from",
+            mapping.index
+        )))
+    }
+
+    async fn demote(&self, _: &IndexMapping, _: bool, _: &sink::Stamp) -> sink::Result<()> {
+        Ok(())
+    }
+
+    async fn mark_seeded_as(&self, index: &IndexName, _: &sink::Stamp) -> sink::Result<()> {
+        sink::Sink::mark_seeded(self, index).await
+    }
+
+    async fn reindex_as(&self, mapping: &IndexMapping, _: &sink::Stamp) -> sink::Result<()> {
+        sink::Sink::reindex(self, mapping).await
     }
 }
 
@@ -305,17 +365,23 @@ async fn a_failed_read_fails_a_fresh_staging() {
     assert!(error.to_string().contains("answered 503"), "{error}");
 }
 
-/// A record left by a newer flusso, or one this version can't read, is kept
-/// for its lane and the index is staged as before (O24): ensured, asked
-/// whether seeded, its backfill asked for when unseeded.
+/// A record this version doesn't act on yet (`rebuilding`, until slice 2's
+/// step 4), or one it can't read beside a marker moved to a newer unseeded
+/// generation (O30), is kept for its lane and the index is staged as before
+/// (O24): ensured, asked whether seeded, its backfill asked for when
+/// unseeded. A `detached` record is kept too, and its index staged detached:
+/// neither ensured nor asked for (slice 2, step 2; every pair is in
+/// `detach.rs`).
 #[tokio::test(start_paused = true)]
-async fn a_record_found_is_kept_for_its_lane_and_staged_as_before() {
+async fn a_record_found_is_kept_for_its_lane_and_acted_on_or_staged_as_before() {
     let mut rebuilding = Detachment::default();
     rebuilding.record = Some(DetachRecord::Rebuilding { live_only: false });
     let mut unreadable = Detachment::default();
     unreadable.record = Some(DetachRecord::Unreadable {
         reason: "state `frozen`".to_owned(),
     });
+    // A rebuild under way, its marker moved first: staged as before (O30).
+    unreadable.marker = Some(sink::MarkerAt::Newer { seeded: false });
     let reads: BTreeMap<String, Read> = [
         (name(0), Read::Kept(detached(false))),
         (name(1), Read::Kept(detached(true))),
@@ -333,7 +399,16 @@ async fn a_record_found_is_kept_for_its_lane_and_staged_as_before() {
     let (engine, stream) = engine(Arc::clone(&sink) as Arc<dyn Sink>, 5);
     engine.stage(Continuity::Resumed).await.unwrap();
 
-    for i in 0..5 {
+    for i in 0..2 {
+        assert_eq!(
+            sink.plain.calls.of(&name(i)),
+            ["detachment"],
+            "{} is staged detached",
+            name(i)
+        );
+        assert_eq!(engine.lane_health(&lane(i)).kind(), "detached");
+    }
+    for i in 2..5 {
         assert_eq!(
             sink.plain.calls.of(&name(i)),
             ["detachment", "ensure", "seeded?"],
@@ -349,13 +424,8 @@ async fn a_record_found_is_kept_for_its_lane_and_staged_as_before() {
     assert_eq!(engine.detachment(&index(4)), None, "nothing kept");
     assert_eq!(
         requests(&stream).await,
-        [
-            (name(0), None),
-            (name(2), None),
-            (name(3), None),
-            (name(4), None)
-        ],
-        "every unseeded index is asked for, the seeded one is not"
+        [(name(2), None), (name(3), None), (name(4), None)],
+        "every unseeded index staged as before is asked for; a detached one is not"
     );
 }
 
@@ -371,9 +441,11 @@ async fn each_staging_keeps_what_it_read_last() {
     engine.stage(Continuity::Resumed).await.unwrap();
     assert_eq!(engine.detachment(&index(0)), Some(detached(false)));
 
-    sink.reads.lock().unwrap().clear();
+    // Another record now: what the next staging read is what is kept. (A
+    // lane held detached whose records vanished is recorded again, B-1.)
+    *sink.reads.lock().unwrap() = [(name(0), Read::Kept(detached(true)))].into();
     engine.stage(Continuity::Resumed).await.unwrap();
-    assert_eq!(engine.detachment(&index(0)), None);
+    assert_eq!(engine.detachment(&index(0)), Some(detached(true)));
 }
 
 /// With nothing kept, staging calls the sink exactly as a sink keeping no

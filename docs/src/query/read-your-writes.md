@@ -86,7 +86,7 @@ A fence never falls back to a stale read. The read fails, and OpenSearch isn't a
 | `Error::FenceTimeout { reached }` | flusso was waiting on the position when the timeout passed. `reached` is how far the sink got. flusso is behind, or a sink is stalled. |
 | `Error::FenceUnavailable { cause, reason }` | flusso couldn't be asked when the timeout passed. The fence retried the whole time; `cause` and `reason` are the last answer's. |
 | `Error::FenceMisconfigured(reason)` | The client can't talk to flusso as configured: no `.flusso(url)`, a certificate it refuses, a redirect loop. Fails at once. |
-| `Error::FenceRefused { status, reason }` | flusso rejected the wait: a malformed position, or a sink it doesn't have. Never retried. |
+| `Error::FenceRefused { status, reason }` | flusso rejected the wait: a malformed position, a sink it doesn't have, or (`409`) a position inside a [gap](../operate/detached-index.md#what-a-gap-means) a reattach accepted on an index the read covers, which no wait closes. Never retried. |
 
 `cause` is an `UnavailableCause`, to branch on without parsing text:
 
@@ -98,7 +98,7 @@ A fence never falls back to a stale read. The read fails, and OpenSearch isn't a
 | `Backfilling` | A sink is seeding an index the read covers for the first time: reads see it filling. |
 | `Unreachable` | Refused, reset or dropped connection, no answer in time, or a gateway's `502`/`503`/`504`. |
 | `Throttled` | A `429` from something in front of flusso. |
-| `Unusable` | A `503` with a reason this client doesn't know. |
+| `Unusable` | A `503` with a reason this client doesn't know, such as `detached`: an index the read covers is [detached](../operate/detached-index.md) and froze before the position. Retried like any `503`, though a detached index doesn't move, so the read fails at its timeout. |
 
 ```rust
 match User::get(&client.after(&position), id).await {

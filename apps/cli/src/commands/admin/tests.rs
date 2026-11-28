@@ -62,8 +62,11 @@ fn a_ca_file_without_a_certificate_is_refused() {
 /// no index name is refused before any request.
 #[test]
 fn a_reindex_posts_to_the_index_path() {
-    assert_eq!(reindex_path("users").unwrap(), "/indexes/users/reindex");
-    assert!(reindex_path("no such/index").is_err());
+    assert_eq!(
+        index_path("users", "reindex").unwrap(),
+        "/indexes/users/reindex"
+    );
+    assert!(index_path("no such/index", "reindex").is_err());
 }
 
 /// What `flusso reindex` prints for the server's `202` body.
@@ -77,5 +80,56 @@ fn a_queued_reindex_is_printed_from_its_json() {
         queued_message(r#"{"index":"users","sink":null,"queued":true}"#),
         "reindex of users on every sink queued"
     );
+    assert_eq!(
+        queued_message(
+            r#"{"index":"users","sink":null,"queued":true,"queued_on":["audit","primary"]}"#
+        ),
+        "reindex of users queued on audit, primary"
+    );
+    // The docs pass of the closing round: the sinks left out are named, each
+    // with its reason.
+    assert_eq!(
+        queued_message(
+            r#"{"index":"users","sink":null,"queued":true,"queued_on":["primary"],
+                "skipped":[{"sink":"audit","reason":"this sink can't rebuild the index"}]}"#
+        ),
+        "reindex of users queued on primary\n\
+         skipped on audit: this sink can't rebuild the index"
+    );
     assert_eq!(queued_message("plain text\n"), "plain text");
+}
+
+/// `flusso reattach` posts to the index's own path, and without
+/// `--accept-gap` refuses before any request is made (O16).
+#[tokio::test]
+async fn a_reattach_without_accept_gap_is_refused_before_any_request() {
+    assert_eq!(
+        index_path("users", "reattach").unwrap(),
+        "/indexes/users/reattach"
+    );
+    let error = reattach(ReattachArgs {
+        index: "users".to_owned(),
+        sink: "audit".to_owned(),
+        accept_gap: false,
+        connect: connect("127.0.0.1:1"),
+    })
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("--accept-gap"), "{error}");
+}
+
+/// Review of step 4, m5: `reattach --sink` is given on the command line
+/// only; `FLUSSO_SINK` never picks the lane a reattach drops changes on.
+#[test]
+fn reattach_reads_its_sink_from_the_command_line_only() {
+    use clap::CommandFactory;
+    let cli = crate::Cli::command();
+    let reattach = cli.find_subcommand("reattach").unwrap();
+    let sink = reattach
+        .get_arguments()
+        .find(|arg| arg.get_id() == "sink")
+        .unwrap();
+    assert!(sink.get_env().is_none());
+    assert!(sink.is_required_set());
 }

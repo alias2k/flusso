@@ -976,6 +976,9 @@ impl Sink for Recorder {
 #[derive(Debug)]
 struct Spy {
     inner: Arc<ChannelStream>,
+    kinds: Kinds,
+    /// The engine's progress, read as each `Attached` is forwarded.
+    progress: Option<Arc<crate::Progress>>,
     published: Published,
     failing: FailingLanes,
     items: ItemLog,
@@ -1012,9 +1015,15 @@ type Published = Arc<Mutex<BTreeMap<stream::LaneKey, Vec<u64>>>>;
 /// Where an engine run ended and the next began, in [`Published`].
 const RESTART: u64 = u64::MAX;
 
+/// Every item published, per lane, in lane order, by kind: `"item"`,
+/// `"complete"`, or `"attached <attempt>"` (ADR 0012 stage 10).
+type Kinds = Arc<Mutex<BTreeMap<stream::LaneKey, Vec<String>>>>;
+
 #[derive(Debug)]
 struct SpyProducer {
     inner: Box<dyn stream::Producer<stream::LaneItem>>,
+    kinds: Kinds,
+    progress: Option<Arc<crate::Progress>>,
     lane: stream::LaneKey,
     published: Published,
     failing: FailingLanes,
@@ -1027,6 +1036,23 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
         // The engine awaits each item's send before the next one's: logged
         // after the send, the log is lane order.
         let position = item.position();
+        let kind = match &item {
+            stream::LaneItem::Batch(_) => "item".to_owned(),
+            stream::LaneItem::SnapshotComplete { .. } => "complete".to_owned(),
+            // An `Attached` sent while the progress still skips the lane is
+            // R8's order reversed: marked, so no test reads it as the boundary.
+            stream::LaneItem::Attached { attempt } => {
+                if self
+                    .progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.is_detached(&self.lane))
+                {
+                    format!("attached {attempt} early")
+                } else {
+                    format!("attached {attempt}")
+                }
+            }
+        };
         if let stream::LaneItem::Batch(batch) = &item {
             self.items.lock().unwrap().push((
                 batch.ids.as_ref().map_or_else(Vec::new, |ids| {
@@ -1049,6 +1075,12 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
             return Err(stream::QueueError::Publish("the lane failed".to_owned()));
         }
         self.inner.publish(item).await?;
+        self.kinds
+            .lock()
+            .unwrap()
+            .entry(self.lane.clone())
+            .or_default()
+            .push(kind);
         if let Some(position) = position {
             self.published
                 .lock()
@@ -1067,6 +1099,8 @@ impl Stream for Spy {
         Ok(stream::Lane {
             producer: Box::new(SpyProducer {
                 inner: lane.producer,
+                kinds: Arc::clone(&self.kinds),
+                progress: self.progress.clone(),
                 lane: key.clone(),
                 published: Arc::clone(&self.published),
                 failing: Arc::clone(&self.failing),
@@ -1105,6 +1139,8 @@ struct Deployment {
     stream: Arc<ChannelStream>,
     /// Every position published, per lane, in lane order.
     published: Published,
+    /// Every item published, per lane, in lane order, by kind.
+    kinds: Kinds,
     /// Lanes to fail on their next publish.
     failing: FailingLanes,
     /// Every batch published, in order.
@@ -1147,8 +1183,12 @@ impl Deployment {
         let failing: FailingLanes = Arc::default();
         let items: ItemLog = Arc::default();
         let substituted: Arc<AtomicUsize> = Arc::default();
+        let kinds: Kinds = Arc::default();
+        let progress = Arc::new(crate::Progress::of(indexes.clone(), [sink_name()]));
         let spy = Arc::new(Spy {
             inner: Arc::clone(&stream),
+            kinds: Arc::clone(&kinds),
+            progress: Some(Arc::clone(&progress)),
             published: Arc::clone(&published),
             failing: Arc::clone(&failing),
             items: Arc::clone(&items),
@@ -1159,7 +1199,7 @@ impl Deployment {
             Arc::clone(&builder) as Arc<dyn DocumentBuilder>,
             spy as Arc<dyn Stream>,
             vec![sink_name()],
-            Arc::new(crate::Progress::of(indexes.clone(), [sink_name()])),
+            progress,
         );
         let sink = SinkEngine::new(
             sink_name(),
@@ -1174,6 +1214,7 @@ impl Deployment {
         Self {
             stream,
             published,
+            kinds,
             items,
             substituted,
             failing,
@@ -1381,6 +1422,7 @@ impl Deployment {
     }
 }
 
+mod attach;
 mod builders;
 mod exemption;
 mod reading;

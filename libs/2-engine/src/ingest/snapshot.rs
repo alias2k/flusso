@@ -101,7 +101,11 @@ impl IngestEngine {
                 handles.push((request, handle));
                 continue;
             };
-            if scopes.contains(&index) {
+            let lane = LaneKey::new(index.clone(), sink.clone());
+            if self.progress.any_detached() && self.progress.is_detached(&lane) {
+                // R7: acknowledged with the snapshot's requests, not served.
+                tracing::info!(%lane, "a backfill asked for a detached lane; acknowledged, not served");
+            } else if scopes.contains(&index) {
                 let answered = requested
                     .entry(sink.clone())
                     .or_default()
@@ -182,20 +186,24 @@ impl IngestEngine {
         snapshot: &mut Snapshot,
         lanes: &Lanes,
     ) -> Result<()> {
+        let detached = self.progress.any_detached();
         let markers = snapshot.requested.iter().flat_map(|(sink, indexes)| {
-            indexes.iter().filter_map(|(index, ticket)| {
-                lanes
-                    .get_key_value(&LaneKey::new(index.clone(), sink.clone()))
-                    .map(|(lane, producer)| {
-                        self.publish_to(
-                            lane,
-                            producer.as_ref(),
-                            LaneItem::SnapshotComplete {
-                                index: index.clone(),
-                                ticket: *ticket,
-                            },
-                        )
-                    })
+            indexes.iter().filter_map(move |(index, ticket)| {
+                let lane = LaneKey::new(index.clone(), sink.clone());
+                // R7: a detached lane's request is answered unserved.
+                if detached && self.progress.is_detached(&lane) {
+                    return None;
+                }
+                lanes.get_key_value(&lane).map(|(lane, producer)| {
+                    self.publish_to(
+                        lane,
+                        producer.as_ref(),
+                        LaneItem::SnapshotComplete {
+                            index: index.clone(),
+                            ticket: *ticket,
+                        },
+                    )
+                })
             })
         });
         try_join_all(markers).await?;

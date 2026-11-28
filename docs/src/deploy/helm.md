@@ -56,7 +56,7 @@ You run Kubernetes and Postgres and OpenSearch already exist; the chart deploys 
      --namespace flusso --create-namespace -f my-values.yaml
    ```
 
-   The chart renders a Deployment with `replicas: 1`, the `Recreate` strategy, a read-only root filesystem, and a non-root user.
+   The chart renders a Deployment with `replicas: 1`, the `Recreate` strategy, a read-only root filesystem, and a non-root user: one process per replication slot, never two during a rollout ([why](../operate/one-process-per-slot.md)).
 
 4. **Verify.** The notes print the in-cluster URL. Port-forward and read the status:
 

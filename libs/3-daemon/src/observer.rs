@@ -42,6 +42,8 @@ impl Observer for StatusObserver {
 
     fn on_index_seeded(&self, sink: &SinkName, index: &IndexName) {
         self.status.mark_seeded(sink, index);
+        self.status
+            .set_lane_gaps(&stream::LaneKey::new(index.clone(), sink.clone()), &[]);
     }
 
     fn on_walk_recorded(&self, lane: &stream::LaneKey) {
@@ -77,6 +79,19 @@ impl Observer for StatusObserver {
 
     fn on_lane_health(&self, lane: &stream::LaneKey, health: &engine::LaneHealth) {
         self.status.set_lane_health(lane, health);
+    }
+
+    fn on_lane_gaps(&self, lane: &stream::LaneKey, gaps: &[sink::Gap]) {
+        self.status.set_lane_gaps(lane, gaps);
+    }
+
+    fn on_lane_rebuild(
+        &self,
+        lane: &stream::LaneKey,
+        rebuilding: Option<u64>,
+        attaching: Option<u64>,
+    ) {
+        self.status.set_lane_rebuild(lane, rebuilding, attaching);
     }
 
     fn on_engine_error(&self, engine: &EngineId, error: &str) {
