@@ -550,6 +550,10 @@ mod tests {
         meta.ensure("users", &stamp());
         meta.seed("users", &stamp(), true).unwrap();
         let serving = meta.read_by("users").unwrap();
+        // A reindex under way (generation 2 created), then a detach: the
+        // demotion below puts the marker back on 1 with no uuid (F).
+        meta.reindex("users", &stamp());
+        meta.ensure("users", &stamp());
         meta.detach("users", &sink::Detach::new("blocked").stamp(stamp()), "now")
             .unwrap();
         let other = Stamp::new("another process", 1);
