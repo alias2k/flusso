@@ -101,6 +101,15 @@ PARTS = (
         group="opensearch",
         cargo=False,
     ),
+    # ADR 0012 stage 10's live spikes and checklist: real flusso processes against containers,
+    # minutes each.
+    Part(
+        "opensearch-detach",
+        "OpenSearch e2e: detach",
+        ("flusso-sink-opensearch::detach_spikes",),
+        group="opensearch",
+        cargo=False,
+    ),
     # Compiles thousands of cases with cargo: alone, so it has the runner's cores.
     Part("boundary", "derive boundary", ("flusso-query-derive::boundary",)),
     Part("rest", "unit, integration, Postgres e2e, ui", rest=True),
